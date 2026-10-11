@@ -68,6 +68,8 @@ jobs:
 
 The action runs the scenescout npm package of the same version as its ref, so `@v3.10.0` runs `scenescout@3.10.0`. At a commit between releases (a branch, or a SHA that no tag points at), the action installs the last published version instead, which can be older than the action; if that version has no `check` command, or does not accept one of the inputs, the step stops with an annotation that says so. The `version` input overrides the version in every case.
 
+The release's dependencies are installed exactly as that release was tested with them: the action builds a lockfile from the repository's own `package-lock.json` at its ref (production entries only, integrity hashes included) and runs `npm ci --ignore-scripts`, with SceneScout's own tarball checked against the registry's integrity hash for that version, so a dependency published since the release never runs in your job, beside your model key or your token. This holds when `version` is empty (or names the ref's own release) and the ref is a release. A `version` other than that release, or a ref between releases whose dependencies have moved on since the release it installs, installs as `npm install scenescout@<version>` would, with no lockfile, and the step leaves a warning annotation saying the dependencies are not pinned. Why: [ADR 23](adr/0023-the-actions-install-the-releases-locked-dependency-tree.md).
+
 ### Inputs
 
 Every option of `scenescout check` is an input with the same name. `scenescout check --help` describes them.
@@ -104,7 +106,7 @@ And the action's own:
 | Input | Default | |
 |---|---|---|
 | `working-directory` | `.` | Where the check runs; relative paths above are resolved from here |
-| `version` | the ref's release | The scenescout npm version to run |
+| `version` | the ref's release | The scenescout npm version to run. Empty, or the ref's own release, installs that release's locked dependency tree; a version other than that release installs as npm would, with a warning |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo`. Set `false` on a runner or container that has them |
 | `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and on a recorded check `replay.html` with its `replay-frames/` and `replay-videos/` folders |
@@ -693,7 +695,7 @@ The action lives in the repository's `ci` folder. Its inputs are the command's o
           max-minutes: "20"
 ```
 
-Put it after the steps that start the app and wait for it, as in the check's workflow above, and give the job a `timeout-minutes` of at least `max-minutes` plus 5, plus what the steps before it take (checkout, install, starting the app, and the browser download on a cold cache), so the job's timeout never stops the step before its files are written. The action installs Node when needed, SceneScout and the browser (cached), runs the command, puts the summary on the job summary and keeps the output folder as an artifact. Its step fails only on exit 2.
+Put it after the steps that start the app and wait for it, as in the check's workflow above, and give the job a `timeout-minutes` of at least `max-minutes` plus 5, plus what the steps before it take (checkout, install, starting the app, and the browser download on a cold cache), so the job's timeout never stops the step before its files are written. The action installs Node when needed, SceneScout (the release's locked dependency tree, as the check action does: see [Which ref to use](#which-ref-to-use)) and the browser (cached), runs the command, puts the summary on the job summary and keeps the output folder as an artifact. Its step fails only on exit 2.
 
 Its own inputs are the check action's: `working-directory`, `version`, `cli`, `node-version`, `install-deps`, `upload-artifact`, `artifact-name` (default `scenescout-ci-<job id>`) and `upload-sarif` (to code scanning under the category `scenescout-ci`), and `cache` (default `true`; `false` keeps the browser out of the actions cache, for a job that checks out a ref chosen by an input). Its outputs are `exit-code`, `stop`, `high`, `medium`, `low`, `worth-a-look`, `turns`, `tokens`, `estimated-cost`, and the paths `report`, `summary`, `json` and `sarif`.
 

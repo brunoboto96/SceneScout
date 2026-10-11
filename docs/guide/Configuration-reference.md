@@ -332,7 +332,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `video` | empty | As `--video` (`on` or `off`); empty means off. The journey videos go in the artifact |
 | `template` | empty | As `--template`, relative to `working-directory`; needs `record: on`. The test report goes in the artifact |
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
-| `version` | empty | The scenescout npm version to run; empty means the version of the action's ref |
+| `version` | empty | The scenescout npm version to run; empty means the version of the action's ref, installed with `npm ci` from that release's lockfile. A version other than that release installs with its dependencies resolved at run time, with a warning |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
@@ -376,7 +376,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `project` | empty | As `--project`; empty means `working-directory` |
 | `out` | empty | As `--out` |
 | `working-directory` | `.` | Where the run happens |
-| `version` | empty | The scenescout npm version to run |
+| `version` | empty | The scenescout npm version to run; empty means the version of the action's ref, installed with `npm ci` from that release's lockfile. A version other than that release installs with its dependencies resolved at run time, with a warning |
 | `cli` | empty | A built `dist/cli.js` to run instead, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |

@@ -120,7 +120,7 @@ inputs:
     required: false
     default: .
   version:
-    description: The scenescout npm version to run. Empty means the version this action's ref was released as.
+    description: The scenescout npm version to run. Empty means the version this action's ref was released as, installed with npm ci from that release's own lockfile. A version other than that release installs with its dependencies resolved at run time, and the step warns that they are not pinned.
     required: false
     default: ""
   cli:
