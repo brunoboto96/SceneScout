@@ -35,7 +35,6 @@ import {
   ProviderError,
   runCi,
   toolHost,
-  type JudgeCalls,
   type ModelClient,
   type ToolHost,
 } from "../src/ci-run.ts";
@@ -126,6 +125,7 @@ import {
   wallLeftMs,
   type Caps,
   type CiResult,
+  type JudgeCalls,
   type StopReason,
   type Spend,
   type ToolSpec,
