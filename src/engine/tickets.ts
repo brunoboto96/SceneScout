@@ -144,7 +144,7 @@ export function ticketFileFor(file: string, projectDir: string, env: NodeJS.Proc
     if (within(full, real)) return { file: full };
   }
   return {
-    refused: `Not read: ${full} is outside the project folder. Paste it as \`text\`, or name its folder in ${TICKET_DIRS_ENV} where the server is configured.`,
+    refused: `Not read: ${full} is outside the project folder. Paste it as \`text\`, or add ${path.dirname(full)} to ${TICKET_DIRS_ENV} where the server is configured and restart it.`,
   };
 }
 
