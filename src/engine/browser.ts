@@ -133,6 +133,7 @@ import {
   type SeenRequest,
 } from "./flow.js";
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
+import { writeOwnerOnly } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
 import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
 import { crawledRoute, crawlLine, isFileMediaType, isNonPageResource, mainStateFlag, mediaTypeOf } from "./crawl.js";
@@ -1116,7 +1117,7 @@ export class BrowserEngine {
     const rel = framePath(this.sessionKey, this.framesKept + 1, action);
     try {
       await fs.promises.mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
-      await fs.promises.writeFile(path.join(dir, rel), jpeg);
+      await writeOwnerOnly(path.join(dir, rel), jpeg);
     } catch (err) {
       // A frame that cannot be written must not fail the action, but a run
       // that keeps NOTHING — a read-only checkout, a full disk — would

@@ -151,7 +151,8 @@ import {
 } from "./engine/limits.js";
 import { MAX_READ_POSTS, READ_POSTS_ENV } from "./engine/policy.js";
 import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "./engine/project-folder.js";
-import { ProjectDirs, RECORD_MAX_FRAMES, resolveFrame, splitProjectFrame } from "./engine/replay.js";
+import { writeOwnerOnlySync } from "./engine/owner-file.js";
+import { frameOnDisk, ProjectDirs, RECORD_MAX_FRAMES, splitProjectFrame } from "./engine/replay.js";
 import { describePace, normalizePace } from "./engine/settle.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { formElicitationSupported, INTAKE_FORM_MESSAGE, INTAKE_TOOL, intakeFormSchema, intakeFromForm, intakeReplyText, type FormOutcome } from "./intake.js";
@@ -371,7 +372,8 @@ const liveProvider: LiveProvider = {
       dir = engines.get(named)?.memory?.dir ?? engines.values().next().value?.memory?.dir ?? lastRun?.dir;
     }
     if (!dir) return null;
-    const file = resolveFrame(path.join(dir, "recordings"), relPath);
+    // Links are followed before the file is named, so a link out of the recordings folder serves nothing, as `scenescout export` uploads nothing.
+    const file = frameOnDisk(path.join(dir, "recordings"), relPath);
     if (!file) return null;
     try {
       return await fs.promises.readFile(file);
@@ -1549,7 +1551,7 @@ async function findingPicture(eng: BrowserEngine, filed: FiledFinding, ref: stri
     const rel = findingPicturePath(eng.sessionKey, finding.id);
     const file = path.join(dir, rel);
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, fitted.png);
+    writeOwnerOnlySync(file, fitted.png);
     const picture = {
       width: fitted.width,
       height: fitted.height,
@@ -2311,7 +2313,7 @@ server.registerTool(
       const shot = await eng.captureElement({ ref, key }, margin ?? CAPTURE_MARGIN);
       const file = path.join(dir, CAPTURES_DIRNAME, captureFileName(name));
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, shot.png);
+      writeOwnerOnlySync(file, shot.png);
       const size = { width: shot.png.readUInt32BE(16), height: shot.png.readUInt32BE(20) };
       return text(captureResultText({ file, key: shot.key, label: shot.label, url: shot.url, ...size }), session);
     } catch (err) {

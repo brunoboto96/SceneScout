@@ -61,6 +61,7 @@ import {
   NAME_RULE,
 } from "../src/engine/memory.ts";
 import { keyAliases, keyAliasSteps } from "../src/engine/fingerprint.ts";
+import { appendOwnerOnlySync, writeOwnerOnly, writeOwnerOnlySync } from "../src/engine/owner-file.ts";
 import { analyzeDesign, type StyleRecord } from "../src/engine/design.ts";
 import {
   FORMS_READ_FAILED,
@@ -3190,4 +3191,123 @@ test("merging memory unions the run records and the notes, and doing it twice ch
   const none = mergeMemory({ version: 1, states: {}, findings: [] }, { version: 1, states: {}, findings: [] });
   assert.equal(none.runRecords, undefined);
   assert.equal(none.fromRuns, undefined);
+});
+
+// ---- writes into .scenescout/ never go through a link ------------------------
+
+/** A project with a file outside .scenescout/ that a link left at each of `names` points at. */
+function linkedProject(names: string[]): { projectDir: string; dir: string; victim: string } {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-links-"));
+  const dir = path.join(projectDir, ".scenescout");
+  fs.mkdirSync(dir, { recursive: true });
+  const victim = path.join(projectDir, "elsewhere.txt");
+  fs.writeFileSync(victim, "not the engine's");
+  for (const name of names) fs.symlinkSync(victim, path.join(dir, name));
+  return { projectDir, dir, victim };
+}
+
+function assertOwnFile(file: string): void {
+  const stat = fs.lstatSync(file);
+  assert.ok(stat.isFile(), `${path.basename(file)} is a file of its own, not a link`);
+  assert.equal(stat.mode & 0o777, 0o600, `${path.basename(file)} can be read by its owner only`);
+}
+
+test(
+  "owner-only writes replace a link or a readable file at the name, never write through it, and leave no temporary file",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { projectDir, dir, victim } = linkedProject(["a.json", "b.json"]);
+    try {
+      fs.writeFileSync(path.join(dir, "c.json"), "old", { mode: 0o644 });
+      fs.chmodSync(path.join(dir, "c.json"), 0o644);
+      writeOwnerOnlySync(path.join(dir, "a.json"), "sync");
+      await writeOwnerOnly(path.join(dir, "b.json"), "async");
+      writeOwnerOnlySync(path.join(dir, "c.json"), "replaced");
+      for (const [name, text] of [
+        ["a.json", "sync"],
+        ["b.json", "async"],
+        ["c.json", "replaced"],
+      ]) {
+        assertOwnFile(path.join(dir, name));
+        assert.equal(fs.readFileSync(path.join(dir, name), "utf8"), text);
+      }
+      assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's", "the file the links pointed at is untouched");
+      assert.deepEqual(fs.readdirSync(dir).sort(), ["a.json", "b.json", "c.json"], "no temporary file is left behind");
+      // A write that fails (a folder at the name) leaves no temporary file either.
+      fs.mkdirSync(path.join(dir, "d.json", "inside"), { recursive: true });
+      assert.throws(() => writeOwnerOnlySync(path.join(dir, "d.json"), "x"));
+      await assert.rejects(writeOwnerOnly(path.join(dir, "d.json"), "x"));
+      assert.deepEqual(fs.readdirSync(dir).sort(), ["a.json", "b.json", "c.json", "d.json"]);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("an owner-only append creates the file owner-only, adds to it, and refuses a link at its name", { skip: process.platform === "win32" }, () => {
+  const { projectDir, dir, victim } = linkedProject(["linked.jsonl"]);
+  try {
+    const log = path.join(dir, "own.jsonl");
+    appendOwnerOnlySync(log, "one\n");
+    appendOwnerOnlySync(log, "two\n");
+    assertOwnFile(log);
+    assert.equal(fs.readFileSync(log, "utf8"), "one\ntwo\n");
+    assert.throws(() => appendOwnerOnlySync(path.join(dir, "linked.jsonl"), "three\n"), /is a symbolic link; SceneScout does not write through one/);
+    assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's");
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test(
+  "memory's files, its notes, its .gitignore and the report are written owner-only, never through a link left at their names",
+  { skip: process.platform === "win32" },
+  () => {
+    const names = ["memory.json", "ASSUMPTIONS.md", "report.md", "report.html"];
+    const { projectDir, dir, victim } = linkedProject(names);
+    // A .gitignore that is there is left as it is; a link to nothing is replaced by the store's own.
+    fs.symlinkSync(path.join(projectDir, "nothing-here"), path.join(dir, ".gitignore"));
+    names.push(".gitignore");
+    try {
+      const store = new MemoryStore(projectDir);
+      store.addAssumption("app-model", "Orders belong to one customer.", "test");
+      store.addFinding({ severity: "low", category: "ux-confusing", title: "A finding", detail: "d", url: "http://app.test/", state: "/#0", evidence: "e" });
+      store.flush();
+      generateReport(store, [], undefined, { write: true });
+      for (const name of names) assertOwnFile(path.join(dir, name));
+      assert.equal(fs.existsSync(path.join(projectDir, "nothing-here")), false, "nothing was created where the dangling link pointed");
+      assert.match(fs.readFileSync(path.join(dir, "ASSUMPTIONS.md"), "utf8"), /Orders belong to one customer/);
+      assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's", "the file the links pointed at is untouched");
+
+      // The session log is appended to line by line: a link at its name is refused, not followed.
+      const log = (store as unknown as { sessionLogPath: string }).sessionLogPath;
+      fs.symlinkSync(victim, log);
+      assert.throws(() => store.logAction({ action: "click", url: "http://app.test/" }), /symbolic link/);
+      assert.equal(fs.readFileSync(victim, "utf8"), "not the engine's");
+      fs.rmSync(log);
+      store.logAction({ action: "click", url: "http://app.test/" });
+      assertOwnFile(log);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  },
+);
+
+test("a note from a run on disk replaces a link at memory.json rather than writing through it", { skip: process.platform === "win32" }, () => {
+  const { projectDir, dir, victim } = linkedProject([]);
+  try {
+    fs.writeFileSync(victim, JSON.stringify({ version: 1, states: {}, findings: [] }));
+    fs.symlinkSync(victim, path.join(dir, "memory.json"));
+    noteFromRunOnDisk(projectDir, {
+      at: "2026-10-11T00:00:00.000Z",
+      mode: "continue",
+      source: "prev/ci.json",
+      runId: "r1",
+      recordAt: "2026-10-07T09:00:00.000Z",
+    });
+    assertOwnFile(path.join(dir, "memory.json"));
+    assert.equal(fs.readFileSync(victim, "utf8"), JSON.stringify({ version: 1, states: {}, findings: [] }), "the file the link pointed at is untouched");
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
 });
