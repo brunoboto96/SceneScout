@@ -826,7 +826,7 @@ test("the report panel shows a recorded picture through the frame route and drop
   const drop = new Function(`return ${dropped[1]};`)() as RegExp;
   const m = show.exec("![What the page showed](recordings/s/0001-click.jpg)");
   assert.equal(m?.[2], "recordings/s/0001-click.jpg");
-  assert.match(script, /pic\.src = 'record\/' \+ m\[2\];/, "through the frame route");
+  assert.match(script, /pic\.src = reportFramePrefix \+ m\[2\];/, "through the frame route, under the report's project");
   for (const other of ["![x](findings/a.png)", "![x](https://evil.test/a.png)", "![x](recordings/a b.png)"]) {
     assert.equal(show.exec(other), null, other);
     assert.match(other, drop, `${other} is dropped, not printed as text`);
@@ -1204,13 +1204,14 @@ test("the report carries the frames each finding was found on, and the page hang
   ];
   const provider: LiveProvider = {
     ...fakeProvider(["clerk"]).provider,
-    report: () => ({ markdown: "## Findings\n", at: new Date(T0).toISOString(), evidence }),
+    report: () => ({ markdown: "## Findings\n", at: new Date(T0).toISOString(), evidence, framePrefix: "record/p-0123456789ab/" }),
   };
   const live = new LiveServer(provider);
   try {
     const { port, token } = await live.start();
-    const body = JSON.parse((await request(port, `/${token}/api/report`)).body.toString()) as { evidence: unknown };
+    const body = JSON.parse((await request(port, `/${token}/api/report`)).body.toString()) as { evidence: unknown; framePrefix: unknown };
     assert.deepEqual(body.evidence, evidence);
+    assert.equal(body.framePrefix, "record/p-0123456789ab/", "the report names the project its pictures belong to");
   } finally {
     await live.stop();
   }
@@ -1219,14 +1220,21 @@ test("the report carries the frames each finding was found on, and the page hang
   // each one is fetched from the run's own frame route.
   const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>"));
   assert.match(script, /reportEvidence = d\.evidence \|\| \[\];/);
+  assert.match(script, /reportFramePrefix = d\.framePrefix \|\| 'record\/';/, "an unkeyed report still reads from record/");
   const shots = script.slice(script.indexOf("function evidenceFor"), script.indexOf("function renderMarkdown"));
-  assert.match(shots, /img\.src = 'record\/' \+ f\.frame;/);
+  assert.match(shots, /img\.src = reportFramePrefix \+ f\.frame;/);
   assert.match(shots, /data-testid', 'live-report-evidence-'/);
   // Nothing is shown for a finding with no frames and no picture: an unrecorded run with pictures off reads as it always did.
   assert.match(shots, /if \(!found\) return null;/);
   assert.match(shots, /if \(!found\.frames\.length\) return picture;/);
   // A finding's picture is shown first, from the same route, and opens on its own.
-  assert.match(shots, /pic\.src = 'record\/' \+ found\.picture\.file;/);
+  assert.match(shots, /pic\.src = reportFramePrefix \+ found\.picture\.file;/);
+  assert.match(shots, /link\.href = reportFramePrefix \+ found\.picture\.file;/, "the picture opens from the report's project too");
+  assert.doesNotMatch(shots, /'record\/' \+/, "no report picture is addressed outside the report's project");
+  // A change of project re-renders the panel, so no picture keeps the old project's address.
+  assert.match(script, /var key = d\.markdown \+ '\\u0000' \+ JSON\.stringify\(reportEvidence\) \+ '\\u0000' \+ reportFramePrefix;/);
+  // The live feed's own frames belong to the session their path names, not to the report's project.
+  assert.match(script, /getElementById\('focus-img'\)\.src = 'record\/' \+ line\.frame;/);
   assert.match(shots, /data-testid', 'live-report-picture-' \+ id/);
   assert.match(shots, /data-testid', 'live-report-picture-open'/);
   assert.ok(script.includes("/^\\*\\*Id:\\*\\* `([^`]+)`/"), "the id line is what the frames hang from");

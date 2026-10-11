@@ -371,6 +371,61 @@ async function runPagePicturesAcrossProjectsCheck(): Promise<void> {
   }
 }
 
+/**
+ * The live board's report panel builds its picture addresses from `/api/report`,
+ * the way the board's page does: the report's own prefix, or the bare `record/`
+ * when it names none. A project folder can have several sessions, and two folders
+ * can be attached at once. When the session that filed a finding has closed
+ * while another session in its folder stays, the report still describes that
+ * folder, and its picture must load rather than be looked up in the other one.
+ */
+async function boardPicturesAcrossProjectsCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const first = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-board-a-"));
+  const second = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-board-b-"));
+  const env = Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_OPEN: "none", SCENESCOUT_EVIDENCE: "file" }).filter((e): e is [string, string] => typeof e[1] === "string"),
+  );
+  const client = new Client({ name: "ft-check-board-pictures", version: "0.0.1" });
+  await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  try {
+    // The other project attaches first, so it is the one an unkeyed address falls back to.
+    const attached = await call("scout_attach", {
+      url: fixture.baseUrl,
+      projectPath: second,
+      session: "other",
+      mode: "read-only",
+      objective: "another project",
+    });
+    const live = attached.match(LIVE_LINE)?.[1];
+    if (!live) fail(`no live view address on attach:\n${attached}`);
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: first, session: "filer", mode: "read-only", objective: "board pictures" });
+    await call("scout_finding", {
+      session: "filer",
+      severity: "low",
+      category: "ux-confusing",
+      title: "A heading repeats the page title",
+      detail: "Filed to give the board's report panel a picture.",
+      evidence: "board picture check",
+    });
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: first, session: "stayer", mode: "read-only", objective: "same project" });
+    await call("scout_close", { session: "filer" });
+    const report = (await (await fetch(`${live}api/report`)).json()) as { framePrefix?: string; evidence?: { picture?: { file: string } }[] };
+    const file = report.evidence?.find((e) => e.picture)?.picture?.file;
+    if (!file) fail(`the board's report carries no picture for the closed session's finding:\n${JSON.stringify(report.evidence)}`);
+    const src = `${report.framePrefix ?? "record/"}${file}`;
+    const res = await fetch(`${live}${src}`);
+    if (res.status !== 200) fail(`the board's report picture did not load once its session closed beside another project: ${res.status} for ${src}`);
+    console.log("✓ a board report's pictures load from the project the report describes");
+    await call("scout_close", { all: true });
+  } finally {
+    await client.close();
+    await fixture.close();
+    for (const dir of [first, second]) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 async function findingPictureCapCheck(): Promise<void> {
   const fixture = await startFixtureServer();
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-picture-cap-"));
@@ -1373,6 +1428,7 @@ async function main(): Promise<void> {
   await defaultFolderCheck();
   await findingPictureCapCheck();
   await runPagePicturesAcrossProjectsCheck();
+  await boardPicturesAcrossProjectsCheck();
   await openCheck();
   await intakeCheck();
   await abandonedCallCheck();
