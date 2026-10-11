@@ -1,6 +1,18 @@
 # Signing in
 
+> **Who this is for:** anyone testing an app that needs a sign-in, at a desk or in CI.
+>
+> **What you will be able to do:** save a login per role, know how long it lasts, keep parallel sessions signed in, and sign in from CI with a test user.
+
 Most apps worth testing are behind a sign-in. SceneScout never types your password: you sign in once yourself, in a real browser, and every session reuses that login. In CI, where nobody can type, a scripted sign-in does the same with a test user.
+
+```mermaid
+flowchart TD
+  Q{"Where does the run happen?"} -- "At your desk" --> T["scenescout login<br/>in a terminal"]
+  Q -- "In a chat" --> C["scout_login<br/>opens the same window"]
+  Q -- "Your project already has<br/>Playwright storage states" --> S["Attach with<br/>storageStatePath"]
+  Q -- "In CI" --> CI["A scripted sign-in, a test-only<br/>endpoint, or a saved session"]
+```
 
 ## Save a login per role
 
@@ -74,7 +86,27 @@ A session attached by role that loses its sign-in first re-attaches once from th
 
 Every session of one role starts from one saved login, so they share its refresh token. An app that rotates refresh tokens and treats a second use of a spent one as theft would revoke the whole token family, and sign every session out, the moment two sessions refreshed with the same token.
 
-The refresh broker prevents that for sessions attached by role. When a page is about to send a refresh token from the role's profile, the session takes a lock beside the profile (`.scenescout/auth/<role>.json.lock`, owner-only, taken over if its holder has not touched it in 30 seconds) and re-reads the profile. If another session already rotated the token, it loads that profile and sends the current token instead of the spent one. When the refresh is a page navigation, such as a native form post, it loads only the profile's cookies while it holds the navigation, and the rest of the profile at the next refresh a script sends; its write-back then saves the page's cookies and keeps the profile's storage. Once the page has stored the rotated token, the session writes its state back to the profile, keeping the profile's sessionStorage and IndexedDB, and releases the lock. Sessions in separate processes share the lock through the file.
+The refresh broker prevents that for sessions attached by role:
+
+1. A page is about to send a refresh token from the role's profile.
+2. The session takes a lock beside the profile (`.scenescout/auth/<role>.json.lock`, owner-only, taken over if its holder has not touched it in 30 seconds) and re-reads the profile.
+3. If another session already rotated the token, it loads that profile and sends the current token instead of the spent one.
+4. Once the page has stored the rotated token, the session writes its state back to the profile, keeping the profile's sessionStorage and IndexedDB, and releases the lock.
+
+```mermaid
+sequenceDiagram
+  participant A as Session A
+  participant F as Role profile and lock
+  participant B as Session B
+  A->>F: take the lock, re-read the profile
+  A->>A: send the refresh token, store the rotated one
+  A->>F: write back, release the lock
+  B->>F: take the lock, re-read the profile
+  F-->>B: the token A rotated
+  B->>B: send the current token, not the spent one
+```
+
+When the refresh is a page navigation, such as a native form post, it loads only the profile's cookies while it holds the navigation, and the rest of the profile at the next refresh a script sends; its write-back then saves the page's cookies and keeps the profile's storage. Sessions in separate processes share the lock through the file.
 
 The result of the action during which the broker acted says what it did, counted and without any token: `↻ token refreshed under the role's lock and stored in its profile`, `↻ another session had rotated the role's token; loaded its profile and sent the current one`, `↻ learned 1 endpoint that rotates the role's token; brokered from now on`, or `⚠ a refresh could not be brokered (see the action log)`. A write-back that finishes after its action has returned is reported in the next action's result.
 

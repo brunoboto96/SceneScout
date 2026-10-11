@@ -1,5 +1,9 @@
 # Ways to use it
 
+> **Who this is for:** anyone choosing how to run SceneScout: from an editor, in parallel, or in CI.
+>
+> **What you will be able to do:** pick the way that fits the job, run it, and file what it finds as issues.
+
 SceneScout has six ways in. They share one engine and one write policy, and all but the first share one project memory in `.scenescout/`, so what one finds, another can re-test.
 
 | Way | Who drives it | Model needed | Fails a build | Use it for |
@@ -10,6 +14,20 @@ SceneScout has six ways in. They share one engine and one write policy, and all 
 | [`scenescout check`](#scenescout-check-a-gate-in-ci) | Nobody: deterministic | None | Yes | A pull-request gate |
 | [`scenescout ci`](#scenescout-ci-an-unattended-exploratory-run) | A model through its API | An API key | No | Exploration on a schedule or on pushes |
 | [`/scenescout qa`](#scenescout-qa-on-a-pull-request) | A model, started by a PR comment | An API key | No | An on-demand review of a PR's preview deployment |
+
+```mermaid
+flowchart TD
+  Q0{"Nothing set up yet,<br/>just a look?"} -- Yes --> F["scenescout #lt;url#gt;"]
+  Q0 -- No --> Q1{"Is a person<br/>at the keyboard?"}
+  Q1 -- Yes --> Q2{"A large or<br/>multi-role app?"}
+  Q2 -- No --> I["An interactive run"]
+  Q2 -- Yes --> L["Parallel lanes"]
+  Q1 -- "No, in CI" --> Q3{"Must it pass or fail<br/>the build?"}
+  Q3 -- "Yes, with no model" --> C["scenescout check"]
+  Q3 -- "No, explore and report" --> Q4{"Started by a comment on<br/>a pull request's preview?"}
+  Q4 -- Yes --> QA["/scenescout qa"]
+  Q4 -- No --> CI["scenescout ci"]
+```
 
 After a run, `scenescout export` files its findings as GitHub or Jira issues, each once: those in the project's memory by default, or a `scenescout check` or `scenescout ci` result with `--from`. See [Filing findings as issues](#filing-findings-as-issues).
 
@@ -90,6 +108,21 @@ The method the agent follows:
 3. The planner passes each reply to `scout_lane_report {lane, reply}`, which checks it and folds it, and only then closes that lane's session with `scout_close`. `scout_close` refuses to close a lane whose report has not been accepted, because the lane's decisions are kept against its session.
 4. The planner writes the report. On a parallel run it adds how the run was paced and whether each lane's stated confidence matched what the project filed.
 
+```mermaid
+sequenceDiagram
+  participant P as Planner
+  participant E as SceneScout
+  participant L as Lane agents
+  P->>E: scout_attach, scout_crawl
+  P->>E: scout_lane_brief {lanes: 4}
+  E-->>P: a brief per lane: session, objective, routes
+  P->>L: start one agent per brief
+  L->>E: scout_attach, explore, scout_finding
+  L-->>P: one lane report each
+  P->>E: scout_lane_report {lane, reply}, then scout_close
+  P->>E: scout_report
+```
+
 Practical limits:
 
 - Run about as many lanes at once as your machine has cores, less two. Each one is a real browser.
@@ -131,15 +164,37 @@ npx -y scenescout check http://127.0.0.1:3000 --fail-on high
 
 It writes `report.md`, `check.json` and `check.sarif` to `.scenescout/check/` (or `--out`), and on GitHub Actions appends the report to the job summary.
 
-**What it measures.** HTTP and page errors, failed requests, a page that shows an empty list after a refused request or success after a refused save, layout geometry (covered, clipped, off-page and overlapping controls, blocking overlays, misplaced dialogs, and, as worth a look, controls held out of view in a sideways-scrolling container), broken images, unnamed controls, fields labelled only by a placeholder, contrast, focus indicators, small targets, sideways scrolling and dead ends. A route whose response is not HTML (a feed, plain text, XML, JSON, a PDF, an image, as its content type says, whatever its path) is not a page: it is listed under "Not pages" and as `resources` in `check.json`, is not measured by these rules and does not count towards `--max-routes`, and an answer of 4xx or 5xx is still reported as the route's error. Each rule has a severity; the [configuration reference](Configuration-reference.md#check-rules) lists them.
+```mermaid
+flowchart LR
+  P["Pages: the start URL,<br/>scanned routes, links"] --> M["Measure<br/>each page"]
+  M --> F["Replay<br/>saved flows"]
+  F --> R["Re-test open<br/>findings"]
+  R --> V{"Anything that<br/>fails the gate?"}
+  V -- No --> E0["exit 0"]
+  V -- Yes --> E1["exit 1"]
+```
 
-**The gate.** By default (`--fail-on high`) it fails only on facts that mean a page is broken: a page that did not load, an uncaught exception, a 5xx, a failure shown as success, a saved flow that broke. `--fail-on medium` or `low` is stricter; `never` reports without failing. `--ignore <rule>` drops a rule on every route. `--ignore-path /error` drops every rule on that path, and `--ignore-path route-server-error:/error` drops that rule on that path, matched exactly, so a page meant to answer HTTP 500 stays off the gate while a 500 on another path still fails `--fail-on high`.
+Visual baselines, when asked for, are compared too ([below](#visual-baselines)). A check that could not run, or not all of it, exits 2.
 
-**Worth a look.** Two rules measure something exactly that is a defect only under a convention the check cannot see: `off-grid-spacing` (a 4px spacing scale) and `indistinct-link` (links styled like body text). They are listed under "Worth a look", never counted and never fail the gate at any `--fail-on`, and appear in SARIF at level `note`.
+### What it measures
 
-**Needs sign-in.** With no `--storage-state`, a route that sends the browser to the sign-in page is doing what it should for a visitor who is not signed in, so it is not an `auth-redirect` issue. Those routes are listed once under "Needs sign-in" (and as `needsSignIn` in `check.json`): "N routes need sign-in; give a role to cover them". Pass `--storage-state` with a signed-in session, such as a profile saved by `scenescout login`, to measure them. `--ignore-path` takes a route off that list. Given a session, a route that still sends the browser to sign-in means the session was lost or expired, and is an `auth-redirect` issue.
+HTTP and page errors, failed requests, a page that shows an empty list after a refused request or success after a refused save, layout geometry (covered, clipped, off-page and overlapping controls, blocking overlays, misplaced dialogs, and, as worth a look, controls held out of view in a sideways-scrolling container), broken images, unnamed controls, fields labelled only by a placeholder, contrast, focus indicators, small targets, sideways scrolling and dead ends. A route whose response is not HTML (a feed, plain text, XML, JSON, a PDF, an image, as its content type says, whatever its path) is not a page: it is listed under "Not pages" and as `resources` in `check.json`, is not measured by these rules and does not count towards `--max-routes`, and an answer of 4xx or 5xx is still reported as the route's error. Each rule has a severity; the [configuration reference](Configuration-reference.md#check-rules) lists them.
 
-**Saved flows.** Every `.scenescout/flows/*.json` is replayed after the crawl with no model involved. A flow is the steps `scout_run_plan` takes, plus assertions:
+### The gate
+
+By default (`--fail-on high`) it fails only on facts that mean a page is broken: a page that did not load, an uncaught exception, a 5xx, a failure shown as success, a saved flow that broke. `--fail-on medium` or `low` is stricter; `never` reports without failing. `--ignore <rule>` drops a rule on every route. `--ignore-path /error` drops every rule on that path, and `--ignore-path route-server-error:/error` drops that rule on that path, matched exactly, so a page meant to answer HTTP 500 stays off the gate while a 500 on another path still fails `--fail-on high`.
+
+### Worth a look
+
+Two rules measure something exactly that is a defect only under a convention the check cannot see: `off-grid-spacing` (a 4px spacing scale) and `indistinct-link` (links styled like body text). They are listed under "Worth a look", never counted and never fail the gate at any `--fail-on`, and appear in SARIF at level `note`.
+
+### Needs sign-in
+
+With no `--storage-state`, a route that sends the browser to the sign-in page is doing what it should for a visitor who is not signed in, so it is not an `auth-redirect` issue. Those routes are listed once under "Needs sign-in" (and as `needsSignIn` in `check.json`): "N routes need sign-in; give a role to cover them". Pass `--storage-state` with a signed-in session, such as a profile saved by `scenescout login`, to measure them. `--ignore-path` takes a route off that list. Given a session, a route that still sends the browser to sign-in means the session was lost or expired, and is an `auth-redirect` issue.
+
+### Saved flows
+
+Every `.scenescout/flows/*.json` is replayed after the crawl with no model involved. A flow is the steps `scout_run_plan` takes, plus assertions:
 
 ```json
 {
@@ -155,9 +210,13 @@ It writes `report.md`, `check.json` and `check.sarif` to `.scenescout/check/` (o
 
 A step that breaks fails the gate (`flow-step-failed`, high) naming the flow and the step. By default flows replay under observe's rule, so they send no HTTP write whatever `--mode` says; `--flow-writes allow` lets them submit forms under `--mode`. `flows/*.json` is the one part of `.scenescout/` that git does not ignore, so flows are committed with the project. The [flow format](../ci.md#saved-flows) lists every step and target.
 
-**Re-tests.** Open findings in `.scenescout/memory.json` whose evidence is a failed `GET` are re-tested by loading their page, and reported as still reproducing, possibly fixed or not re-tested. By default a finding filed high that still reproduces fails the gate (`--gate-retests high`). The memory is ignored by git unless the project commits it, so re-tests happen where the memory lives.
+### Re-tests
 
-**SARIF.** `check.sarif` is SARIF 2.1.0. With the GitHub Action, `upload-sarif: true` sends it to code scanning; the job then needs `security-events: write`.
+Open findings in `.scenescout/memory.json` whose evidence is a failed `GET` are re-tested by loading their page, and reported as still reproducing, possibly fixed or not re-tested. By default a finding filed high that still reproduces fails the gate (`--gate-retests high`). The memory is ignored by git unless the project commits it, so re-tests happen where the memory lives.
+
+### SARIF
+
+`check.sarif` is SARIF 2.1.0. With the GitHub Action, `upload-sarif: true` sends it to code scanning; the job then needs `security-events: write`.
 
 ### Visual baselines
 
@@ -288,6 +347,21 @@ What it measured on the benchmark apps is in [the benchmark results](../benchmar
 
 An allowed account comments `/scenescout qa` on a pull request, and an unattended run explores that pull request's **deployed preview** and replies with the results. The job that holds the model's key checks out nothing and runs SceneScout from an exact release tag, so the pull request's code never runs beside the key. A project without preview deployments cannot use this; use `scenescout ci` on pushes instead.
 
+```mermaid
+sequenceDiagram
+  actor R as Reviewer
+  participant G as Gate job
+  participant Q as Job with the key
+  participant P as Deployed preview
+  participant T as Report job, no key
+  R->>G: comments /scenescout qa
+  G->>G: allowlist, fork refusal
+  G->>Q: allowed
+  Q->>P: SceneScout from an exact release tag,<br/>no checkout of the pull request
+  Q->>T: the results
+  T-->>R: a reply in the thread
+```
+
 ### Set it up
 
 1. Copy [examples/workflows/scenescout-qa.yml](../../examples/workflows/scenescout-qa.yml) to `.github/workflows/`. It is pinned to the release it shipped with; keep both `brunoboto96/SceneScout/qa` and `brunoboto96/SceneScout/ci` on the same exact tag, never `@v3` or a branch.
@@ -346,21 +420,33 @@ npx -y scenescout export --to jira --jira-url https://your-site.atlassian.net --
 npx -y scenescout export --to github --repo owner/app --from scenescout-check/check.json --yes
 ```
 
-- **From a check or ci result.** `--from` takes a `check.json` or a `ci.json`, and refuses any other file. A check's issues and its worth-a-look observations become findings whose id is `check-` and the issue's fingerprint, which a later check of the same defect gives again, so a later export of a later check's result finds the issue it filed. A `ci.json` finding keeps the id it has in the run's memory, so an export from memory and one from that run's `ci.json` file it once. Such an issue has the same body, marker and label as any other, says which pages it was seen on, and has no screenshots, since neither file names any. An export `--from` a file lists a Jira issue filed earlier and never updates it, since the file holds less than the memory that may have filed it. The findings a check re-tested from memory are not in `issues`; export them from memory. The record of filed issues is still kept in the project's `.scenescout/` folder (`--project`).
+### What it files
 
 - **A dry run unless `--yes`.** Without it, the export lists each finding as "would file", "already filed" or "over the cap", and sends the tracker nothing but reads. With no credentials set, a dry run still lists the findings, without checking which are already filed.
+- **What goes.** Open defects, worst first. `--min-severity` leaves out the less severe, `--only` names finding ids, and `--include-worth-a-look` adds the worth-a-look observations. One export files at most `--max-issues` (default 20); the next export files the rest.
+- **From a check or ci result.** `--from` takes a `check.json` or a `ci.json`, and refuses any other file. A check's issues and its worth-a-look observations become findings whose id is `check-` and the issue's fingerprint, which a later check of the same defect gives again, so a later export of a later check's result finds the issue it filed. A `ci.json` finding keeps the id it has in the run's memory, so an export from memory and one from that run's `ci.json` file it once. Such an issue has the same body, marker and label as any other, says which pages it was seen on, and has no screenshots, since neither file names any. An export `--from` a file lists a Jira issue filed earlier and never updates it, since the file holds less than the memory that may have filed it. The findings a check re-tested from memory are not in `issues`; export them from memory. The record of filed issues is still kept in the project's `.scenescout/` folder (`--project`).
+
+### Filing each finding once
+
 - **Each finding once.** Every issue carries the `scenescout` label and a marker holding the finding's id: an HTML comment in a GitHub issue's description, a last line in a Jira one. Before filing, the export reads the issues with that label, open or closed, and skips each finding whose marker is on one, naming the issue, so a second export of the same run files only what the first left over the cap. A closed issue counts, so a finding closed as won't-fix is not filed again on every export; `--refile-closed` files a finding again when its issue is closed, so that a defect that comes back after its fix gets a new issue. Keep the label and the marker on filed issues: they are how the next export finds them.
 - **The same finding in a later run.** The marker holds the finding's id, which the project's memory keeps from run to run, so a later run's export skips what an earlier one filed. On a CI runner the memory is gone after the job unless the workflow keeps the whole `.scenescout/` folder (for example with `actions/cache`), which holds both `memory.json` and the export's record `exported.json`; a fresh memory gives the same defect a new id whenever a run words it differently, and so a new issue.
 - **A listing can lag behind a create.** GitHub's label-filtered issue list and Jira's search can each take a while to show a new issue. So the export records each issue it files in `.scenescout/exported.json`, beside the memory, and an export straight after it on the same machine reads those issues back by number, which shows them at once, rather than file them again. On GitHub the export also reads the newest 100 issues and pull requests with no label filter, which shows a new issue at once, so a fresh machine or another CI job finds an issue filed moments earlier. Jira has no such list: on a fresh machine, leave a few minutes between two exports to the same Jira project. A create that may have been carried out before an error (a timeout, a 5xx, an answer cut off) is never sent again blindly: on GitHub the export looks for the issue's marker straight away and sends the create again only when no issue carries it; in Jira it stops, and for 15 minutes a later export on that machine holds that finding back, exiting 2, unless it finds the issue; a dry run lists it as held back and exits 0. Run one export at a time per project. A record that cannot be read ends the export before anything is filed; move it aside to start a new one.
-- **What goes.** Open defects, worst first. `--min-severity` leaves out the less severe, `--only` names finding ids, and `--include-worth-a-look` adds the worth-a-look observations. One export files at most `--max-issues` (default 20); the next export files the rest.
+
+### What an issue holds
+
 - **What an issue says.** The finding's title and description, its severity, category, page and address, the steps that led to it, its machine evidence, and when it was last found. All of that comes from the run, and some of it from the app's own pages, so it is made inert: an `@mention`, a link, a `#123` reference, HTML or Markdown in it is shown as text and does nothing.
-- **Updates in Jira.** A later export brings each open Jira issue it filed up to date rather than filing another: a new summary and description when the finding reads differently (found again, a new picture, a ticket it now fails), and the picture, frames and ticket links the issue lacks. The marker records a revision of the summary and description it wrote, so an issue someone has edited in Jira since (a word, a pasted picture, a mention, a link) keeps their edit, and gets only the files and links it lacks. Pictures and frames are attached under the time they were taken, so a retaken picture or a later run's frame is added beside the earlier one. Priority, labels and everything else set in triage are never changed, a closed issue is left alone, and nothing is removed. An issue filed by an earlier version has no revision and keeps its text. `--jira-update off` only lists filed issues. A rewrite is an edit, so Jira tells the issue's watchers as it does for any other.
-- **Linked to the ticket.** When a run answered tickets (`scout_tickets` and `scout_criterion`) and a finding is what fails a criterion, the issue lists that criterion, and in Jira it is linked to the ticket when the ticket's id is a Jira key such as `PROJ-12`: the issue "relates to" the ticket by default; `--jira-link-type Blocks` makes it block the ticket, and `none` links nothing. A ticket the site does not have is reported, and fails the export as an attachment that could not be made does. On GitHub the criterion is listed, with no link.
 - **Severity.** A label on GitHub (`severity: high`, `severity: medium`, `severity: low`) and a priority in Jira (`High`, `Medium`, `Low`). `--severity-map high=P1,medium=P2,low=P3` renames them, and `--severity-map none` sets none. `--labels` adds labels to every issue.
 - **Screenshots.** The picture `scout_finding` takes of each finding goes first: Jira attaches it and GitHub names it. A run recorded with `scout_attach {record: true}` also keeps a frame of each step. Jira gets as attachments the last three frames, from the session that filed the finding, in the ten minutes before it was last found. GitHub's API cannot upload a file to an issue, and SceneScout hosts nothing, so a GitHub issue names those frames in the run's `.scenescout/` folder instead. A frame that is missing, over 10 MB, outside the recordings folder, or rewritten since by a later run is left out, and so is a picture that is missing, over 10 MB or outside the recordings folder. `--screenshots off` leaves them all out.
+- **Linked to the ticket.** When a run answered tickets (`scout_tickets` and `scout_criterion`) and a finding is what fails a criterion, the issue lists that criterion, and in Jira it is linked to the ticket when the ticket's id is a Jira key such as `PROJ-12`: the issue "relates to" the ticket by default; `--jira-link-type Blocks` makes it block the ticket, and `none` links nothing. A ticket the site does not have is reported, and fails the export as an attachment that could not be made does. On GitHub the criterion is listed, with no link.
+- **Updates in Jira.** A later export brings each open Jira issue it filed up to date rather than filing another: a new summary and description when the finding reads differently (found again, a new picture, a ticket it now fails), and the picture, frames and ticket links the issue lacks. The marker records a revision of the summary and description it wrote, so an issue someone has edited in Jira since (a word, a pasted picture, a mention, a link) keeps their edit, and gets only the files and links it lacks. Pictures and frames are attached under the time they were taken, so a retaken picture or a later run's frame is added beside the earlier one. Priority, labels and everything else set in triage are never changed, a closed issue is left alone, and nothing is removed. An issue filed by an earlier version has no revision and keeps its text. `--jira-update off` only lists filed issues. A rewrite is an edit, so Jira tells the issue's watchers as it does for any other.
+
+### Credentials, requests and exit codes
+
 - **Credentials.** From the environment only, and never printed: `GH_TOKEN` or `GITHUB_TOKEN`, or `JIRA_EMAIL` and `JIRA_API_TOKEN` for Jira Cloud. A GitHub token's account must be able to set labels in the repository, since GitHub silently drops the labels of an issue created by an account that cannot; the export stops after such an issue rather than file more it could not find again.
 - **Requests.** Each may take 20 seconds. A rate limit is waited out when it asks for a minute or less, and ends the export when it asks for longer. A read that fails with a server error, a dropped connection or a timeout is retried with backoff. A redirect is refused, so the credentials never go to another address.
 - **Exit code.** 0 when the export filed what it set out to (findings over the cap wait for the next export) or, on a dry run, listed it. 2 when it could not finish, after saying what it filed and updated before it stopped, or when a screenshot could not be attached or a ticket could not be linked.
+
+### In GitHub Actions
 
 In a GitHub Actions job, run it as a step after `scenescout ci`, with the job's own token and `issues: write` in the job's `permissions`, and keep the memory between runs so later runs keep their findings' ids:
 
