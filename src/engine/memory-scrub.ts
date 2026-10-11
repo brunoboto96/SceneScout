@@ -3,9 +3,9 @@
  * secret field, a card number or an email address an older engine wrote down
  * in clear. When a newer engine first opens the store, the current redaction
  * runs over what it kept once (findings and the merges folded into them,
- * tickets and their verdicts, and every session log's lines), and the store
- * records which redaction it has been through, so the work is not repeated on
- * every load. A later change to the redaction raises REDACTION_VERSION, and
+ * tickets and their verdicts, lanes' stated decisions, and every session log's
+ * lines), and the store records which redaction it has been through, so the
+ * work is not repeated on every load. A later change to the redaction raises REDACTION_VERSION, and
  * the next load cleans again. An older engine still running beside a newer one
  * can write its own copy back in a later merge; the next version's scrub, or
  * the redaction applied wherever the text is read for a report or an export,
@@ -26,7 +26,7 @@ export const REDACTION_VERSION = 1;
 
 type Redact = (text: string) => string;
 
-/** The parts of memory.json that hold free text: a finding's words, steps and folded merges, a ticket's title and criteria, a verdict's reason. */
+/** The parts of memory.json that hold free text: a finding's words, steps and folded merges, a ticket's title and criteria, a verdict's reason, a lane's stated decision. */
 export interface ScrubbableMemory {
   findings: Array<{
     title: string;
@@ -40,6 +40,7 @@ export interface ScrubbableMemory {
   }>;
   tickets?: Array<{ title: string; criteria: Array<{ text: string }> }>;
   criterionVerdicts?: Array<{ reason: string }>;
+  laneDecisions?: Array<{ observation: string; evidence: string | null }>;
 }
 
 /** Redact every free-text field of the store in place; returns how many fields changed. */
@@ -68,6 +69,11 @@ export function scrubMemoryText(data: ScrubbableMemory, redact: Redact): number 
     for (const c of t.criteria ?? []) if (typeof c.text === "string") c.text = clean(c.text);
   }
   for (const v of data.criterionVerdicts ?? []) if (typeof v.reason === "string") v.reason = clean(v.reason);
+  // Stored as addLaneDecisions stores them now: redacted, then cut to 200 characters.
+  for (const d of data.laneDecisions ?? []) {
+    if (typeof d.observation === "string") d.observation = clean(d.observation).slice(0, 200);
+    if (typeof d.evidence === "string") d.evidence = clean(d.evidence).slice(0, 200);
+  }
   return changed;
 }
 

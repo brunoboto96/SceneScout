@@ -725,6 +725,19 @@ test("a store written by an older engine has the secrets it kept in clear cleane
       },
     ],
     criterionVerdicts: [{ ticket: "T-1", criterion: "c1", verdict: "fail", findings: ["f1"], confidence: 0.9, reason: `the receipt shows ${card}` }],
+    // A lane's stated decisions, which a model wrote while reading the app.
+    laneDecisions: [
+      {
+        lane: "checkout",
+        observation: `The receipt prints ${card}`,
+        verdict: "defect",
+        severity: "high",
+        category: "privacy",
+        confidence: 0.9,
+        evidence: `mailed to ${["ada.lovelace", "mail.org"].join("@")}`,
+        at: "2025-01-01T00:00:00.000Z",
+      },
+    ],
   };
   fs.writeFileSync(path.join(memDir, "memory.json"), JSON.stringify(old), { mode: 0o644 });
   const oldLog = path.join(memDir, "session-2025-01-01T00-00-00-000Z.jsonl");
