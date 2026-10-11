@@ -79,6 +79,7 @@ import {
   unseenWriteSource,
 } from "../src/engine/unload.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
+import { marksRouteExercised, pathnameOf, routedWriteVerdict } from "../src/engine/route-guard.ts";
 
 // ---------------------------------------------------------------------------
 // isDestructiveWire — argument order is load-bearing
@@ -1491,4 +1492,116 @@ test("refusedPostPage: a refused POST is charged to the page that sent it, not t
     "a query is more than the origin",
   );
   assert.equal(refusedPostPage(app, undefined, undefined), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// The route handler's decisions: route-guard.ts
+// ---------------------------------------------------------------------------
+
+test("the route handler judges a write in order: a foreign frame, then a page moved off the app, then sign-in, then a read POST", () => {
+  const base = {
+    rule: "safe-write",
+    method: "POST",
+    pathname: "/api/things",
+    destructiveWire: false,
+    foreign: null,
+    offApp: null,
+    readPost: false,
+  } as const;
+  assert.deepEqual(routedWriteVerdict(base), { kind: "by-ownership" });
+  // A foreign frame's write is refused before any other rule, a sign-in included.
+  assert.deepEqual(routedWriteVerdict({ ...base, pathname: "/api/auth/login", foreign: "https://chat.example.com" }), {
+    kind: "refuse",
+    why: "sent from a frame of https://chat.example.com",
+  });
+  // A page an embed moved off the app: refused, unless the write is a sign-in.
+  assert.deepEqual(routedWriteVerdict({ ...base, offApp: "https://idp.example.com" }), {
+    kind: "refuse",
+    why: "sent from a page of https://idp.example.com, outside the app",
+  });
+  assert.deepEqual(routedWriteVerdict({ ...base, pathname: "/api/auth/login", offApp: "https://idp.example.com" }), { kind: "auth" });
+  assert.deepEqual(routedWriteVerdict({ ...base, pathname: "/api/auth/login" }), { kind: "auth" });
+  // A destructive-looking sign-in is not exempt.
+  assert.deepEqual(routedWriteVerdict({ ...base, pathname: "/api/auth/login", destructiveWire: true }), { kind: "by-ownership" });
+  assert.deepEqual(routedWriteVerdict({ ...base, rule: "observe", readPost: true }), { kind: "read-post" });
+  // Sign-in is checked before the read POST: a read-named login is still let out as a login.
+  assert.deepEqual(routedWriteVerdict({ ...base, rule: "observe", pathname: "/api/auth/login", readPost: true }), { kind: "auth" });
+  assert.deepEqual(routedWriteVerdict({ ...base, rule: "observe", readPost: true, foreign: "https://chat.example.com" }).kind, "refuse");
+});
+
+test("the route handler and the browser-level interception reach the same verdict on every write", () => {
+  for (const rule of ["read-only", "observe", "safe-write"] as const)
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"])
+      for (const pathname of ["/api/auth/login", "/api/things/1", "/api/things/1/delete"])
+        for (const destructiveWire of [false, true])
+          for (const foreign of [null, "https://chat.example.com"])
+            for (const offApp of [null, "https://idp.example.com"])
+              for (const readPost of [false, true])
+                for (const owned of [false, true]) {
+                  const verdict = routedWriteVerdict({ rule, method, pathname, destructiveWire, foreign, offApp, readPost });
+                  const routed =
+                    verdict.kind === "refuse"
+                      ? { allow: false, why: verdict.why }
+                      : verdict.kind === "by-ownership"
+                        ? allowsWrite(rule, method, destructiveWire, owned)
+                          ? { allow: true }
+                          : { allow: false }
+                        : { allow: true };
+                  assert.deepEqual(
+                    routed,
+                    judgeUnseenWrite({ mode: rule, method, pathname, destructiveWire, foreign, offApp, owned, readPost }),
+                    `${rule} ${method} ${pathname} destructive=${destructiveWire} foreign=${foreign} offApp=${offApp} readPost=${readPost} owned=${owned}`,
+                  );
+                }
+});
+
+test("a write marks its page's forms exercised only when the route handler will let it out", () => {
+  const exercised = (
+    rule: (typeof WRITE_MODES)[number],
+    pathname: string,
+    body: string | null,
+    extra: { foreign?: string | null; offApp?: string | null } = {},
+  ): boolean =>
+    marksRouteExercised({
+      rule,
+      method: "POST",
+      pathname,
+      destructiveWire: isDestructiveWire(pathname, body),
+      foreign: () => extra.foreign ?? null,
+      offApp: () => extra.offApp ?? null,
+    });
+  // Observe: only a sign-in goes out.
+  assert.equal(exercised("observe", "/api/things", "{}"), false);
+  assert.equal(exercised("observe", "/api/auth/login", "{}"), true);
+  // Read-only: a plain POST goes out, a destructive one is refused (the contrastive pair).
+  assert.equal(exercised("read-only", "/api/things", '{"note":"draft"}'), true);
+  assert.equal(exercised("read-only", "/api/things", '{"action":"delete"}'), false);
+  assert.equal(exercised("safe-write", "/api/things", '{"action":"delete"}'), true, "safe-write leaves the destructive POST to ownership");
+  // A foreign frame's write is refused in every mode the route handler runs in; destructive has no route handler.
+  assert.equal(exercised("safe-write", "/api/things", "{}", { foreign: "https://chat.example.com" }), false);
+  assert.equal(exercised("destructive", "/api/things", "{}", { foreign: "https://chat.example.com" }), true);
+  // A page moved off the app: refused unless a sign-in.
+  assert.equal(exercised("read-only", "/api/things", "{}", { offApp: "https://idp.example.com" }), false);
+  assert.equal(exercised("read-only", "/api/auth/login", "{}", { offApp: "https://idp.example.com" }), true);
+  // The frame and page are read only when the rule needs them.
+  const asked: string[] = [];
+  const probe = (rule: (typeof WRITE_MODES)[number], pathname: string) =>
+    marksRouteExercised({
+      rule,
+      method: "POST",
+      pathname,
+      destructiveWire: false,
+      foreign: () => (asked.push("foreign"), null),
+      offApp: () => (asked.push("offApp"), null),
+    });
+  assert.equal(probe("destructive", "/api/things"), true);
+  assert.equal(probe("observe", "/api/things"), false);
+  assert.deepEqual(asked, [], "neither destructive nor a refused observe write asks");
+  assert.equal(probe("read-only", "/api/things"), true);
+  assert.deepEqual(asked, ["foreign", "offApp"]);
+});
+
+test("pathnameOf reads a request URL's path, and keeps what does not parse", () => {
+  assert.equal(pathnameOf("https://app.example.com/api/things/7?x=1"), "/api/things/7");
+  assert.equal(pathnameOf("not a url"), "not a url");
 });
