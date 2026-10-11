@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
+import { readFlagValue } from "./args.js";
 import { MAX_LANES } from "./brief.js";
 import type { CaptureOutcome } from "./capture.js";
 import { markdownCell } from "./check.js";
@@ -204,10 +205,10 @@ export function parseCiArgs(
       flags.set(name, "true");
       continue;
     }
-    const value = eq > 0 ? a.slice(eq + 1) : args[i + 1];
-    if (value === undefined || (eq < 0 && value.startsWith("--"))) return { ok: false, error: `--${name} needs a value` };
-    if (eq < 0) i += 1;
-    flags.set(name, value);
+    const read = readFlagValue(args, i);
+    if (!read.ok) return read;
+    i = read.last;
+    flags.set(name, read.value);
   }
   const known = new Set<string>(CI_OPTION_NAMES);
   for (const name of flags.keys()) {
