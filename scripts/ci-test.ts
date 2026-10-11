@@ -2315,7 +2315,7 @@ test("dependabot: every action's own pins are watched, not only the workflows' a
  */
 function unpinnedUses(text: string): string[] {
   const problems: string[] = [];
-  for (const line of text.split("\n")) {
+  for (const line of text.split(/\r?\n/)) {
     if (/^\s*#/.test(line) || !/\buses:/.test(line)) continue;
     const m = /^\s*(?:-\s+)?uses:\s*(\S+)(.*)$/.exec(line);
     // Any other shape (a flow mapping, a quoted value) is refused rather than read loosely.
@@ -2376,6 +2376,9 @@ test("actions: every remote action in a workflow or an action is pinned by commi
     ["a flow mapping", "      - { uses: actions/checkout@v7 }", 1],
     ["a commented-out line", "      # - uses: actions/checkout@v7", 0],
     ["a reusable workflow at a tag", "    uses: some-org/workflows/.github/workflows/x.yml@v1", 1],
+    // A checkout with Windows line endings (core.autocrlf) ends every line in a carriage return.
+    ["a commit with its release, CRLF", `      - uses: actions/checkout@${sha} # v7.0.1\r\n      - uses: ./ci\r\n`, 0],
+    ["a major tag, CRLF", "      - uses: actions/checkout@v7\r\n", 1],
   ];
   for (const [what, line, n] of cases) assert.equal(unpinnedUses(line).length, n, what);
 });
