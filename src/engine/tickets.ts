@@ -113,36 +113,122 @@ export function ticketDirsFrom(env: NodeJS.ProcessEnv): { dirs: string[] } | { e
   for (const raw of (env[TICKET_DIRS_ENV] ?? "").split(path.delimiter)) {
     const entry = raw.trim();
     if (!entry) continue;
+    if (entry === "~" || entry.startsWith("~/") || entry.startsWith("~\\"))
+      return { error: `${TICKET_DIRS_ENV} names "${entry}", but ~ is not expanded there: write the folder as an absolute path` };
     if (!path.isAbsolute(entry)) return { error: `${TICKET_DIRS_ENV} names "${entry}", which is not an absolute path` };
     dirs.push(path.resolve(entry));
   }
   return { dirs };
 }
 
+/**
+ * What to tell the person who set the configuration about folders it names that
+ * hold no ticket: one that is not there, or is not a folder. These are warned
+ * about rather than refused, since a folder can be on a drive not yet mounted;
+ * until it is there, a ticket in it is refused as outside the project.
+ */
+export function ticketDirWarnings(dirs: string[]): string[] {
+  return dirs.flatMap((dir) => {
+    let stat: fs.Stats | undefined;
+    try {
+      stat = fs.statSync(dir);
+    } catch {
+      return [`${TICKET_DIRS_ENV} names "${dir}", which is not there: no ticket is read from it until it is`];
+    }
+    return stat.isDirectory() ? [] : [`${TICKET_DIRS_ENV} names "${dir}", which is not a folder: no ticket is read from it`];
+  });
+}
+
 const within = (file: string, dir: string): boolean => file.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+
+/** How many links a path is followed through before it is taken as written, as the system's own limit does. */
+const MAX_LINKS = 40;
+
+/**
+ * Where a path really is, following every link on the way, one whose target is
+ * missing too: what exists is resolved, a dangling link is followed by what it
+ * says, and the rest is joined on as written. A path that is not there resolves
+ * as far as it can, without an error, so where a link leads never depends on
+ * whether the file at its end exists.
+ */
+function realAsFarAsItGoes(full: string, hops = { left: MAX_LINKS }): string {
+  try {
+    return fs.realpathSync.native(full);
+  } catch {
+    // Missing, or a dangling link on the way: resolved a part at a time below.
+  }
+  const up = path.dirname(full);
+  if (up === full) return full;
+  const joined = path.join(realAsFarAsItGoes(up, hops), path.basename(full));
+  let target: string | undefined;
+  try {
+    target = fs.lstatSync(joined).isSymbolicLink() ? fs.readlinkSync(joined) : undefined;
+  } catch {
+    target = undefined; // Not there, or not to be looked at: taken as written.
+  }
+  if (target === undefined || hops.left-- <= 0) return joined;
+  return realAsFarAsItGoes(path.resolve(path.dirname(joined), target), hops);
+}
 
 /**
  * The real file a `scout_tickets` path names, when it may be read: inside the
  * project folder, or inside a folder `SCENESCOUT_TICKET_DIRS` names. Links are
  * followed first, so a link in the project to a file elsewhere is outside it.
- * A path that does not exist throws, as reading it would.
+ *
+ * A path outside both is refused before anything is asked of the file itself,
+ * in words taken from the path as typed, so the refusal is the same whether the
+ * file or its folder exists, and a caller cannot use it to learn what is on the
+ * disk. A path inside them that does not exist throws, as reading it would; a
+ * link inside them is judged by where it points, whether or not that exists.
  */
 export function ticketFileFor(file: string, projectDir: string, env: NodeJS.ProcessEnv): { file: string } | { refused: string } {
   // .native: the case stored on disk, so a path typed in another case on a case-insensitive disk still compares equal.
   const project = fs.realpathSync.native(projectDir);
-  const full = fs.realpathSync.native(path.isAbsolute(file) ? file : path.resolve(project, file));
-  if (within(full, project)) return { file: full };
-  const configured = ticketDirsFrom(env);
-  if ("error" in configured) return { refused: `Not read: ${configured.error}.` };
-  for (const dir of configured.dirs) {
-    let real: string;
-    try {
-      real = fs.realpathSync.native(dir);
-    } catch {
-      continue; // A configured folder that is not there holds no ticket.
+  const typed = path.resolve(project, file);
+  // Worded from the path as typed, so not even whether its folder exists, or where a link in it leads, shows through.
+  // A folder added to the setting is resolved before it is compared, so the typed one is the one to add.
+  const outside = {
+    refused: `Not read: ${typed} is outside the project folder. Paste it as \`text\`, or add ${path.dirname(typed)} to ${TICKET_DIRS_ENV} where the server is configured and restart it.`,
+  };
+  // A network path on Windows is never inside the project, and resolving it would reach out to the host it names.
+  if (path.sep === "\\" && /^[\\/]{2}/.test(typed)) return outside;
+  let configured: string[] | undefined;
+  /** Whether a real path is in the project or a configured folder; the setting is read only when a path leaves the project. */
+  const allowed = (real: string): boolean | { refused: string } => {
+    if (within(real, project)) return true;
+    if (!configured) {
+      const dirs = ticketDirsFrom(env);
+      if ("error" in dirs) return { refused: `Not read: ${dirs.error}.` };
+      configured = dirs.dirs.flatMap((dir) => {
+        try {
+          return [fs.realpathSync.native(dir)];
+        } catch {
+          return []; // A configured folder that is not there holds no ticket.
+        }
+      });
     }
-    if (within(full, real)) return { file: full };
+    return configured.some((dir) => within(real, dir));
+  };
+  const named = path.join(realAsFarAsItGoes(path.dirname(typed)), path.basename(typed));
+  const first = allowed(named);
+  if (first !== true) return first === false ? outside : first;
+  // Inside: the file itself is resolved now, so a link out of the folders is refused where it leads. A link whose
+  // target is missing, through any number of links, is followed by what each says, so it is answered as one whose
+  // target is there would be; only a file that would be inside is reported as missing.
+  let full: string;
+  let missing: NodeJS.ErrnoException | undefined;
+  try {
+    full = fs.realpathSync.native(named);
+  } catch (err) {
+    full = realAsFarAsItGoes(named);
+    missing = err as NodeJS.ErrnoException;
   }
+  const second = allowed(full);
+  if (second === true) {
+    if (missing) throw missing;
+    return { file: full };
+  }
+  if (second !== false) return second;
   return {
     refused: `Not read: ${full} is outside the project folder. Paste it as \`text\`, or add ${path.dirname(full)} to ${TICKET_DIRS_ENV} where the server is configured and restart it.`,
   };

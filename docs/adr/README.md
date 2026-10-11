@@ -31,6 +31,7 @@ and which failure direction was chosen deliberately.
 | [0020](0020-an-unattended-run-may-split-into-lanes-that-share-its-caps.md) | `scenescout ci --lanes` splits the app between model loops that run at once: planned by a crawl and the split `scout_lane_brief` makes, sharing the run's caps rather than multiplying them, folded into one memory and one report; the default is set by measurement |
 | [0021](0021-update-the-docs-in-the-pull-request.md) | A pull request that changes what a user can do or see updates the README and `docs/` in that same pull request. A change with no user-facing surface does not |
 | [0022](0022-a-test-report-is-laid-out-by-a-template-and-signs-nothing.md) | `check --record --template` renders a recorded run as a test report whose layout and words come from the template; results come from assertions only, a failed step is a deviation, a manifest hashes the evidence, and the signature blocks are blank |
+| [0023](0023-the-actions-install-the-releases-locked-dependency-tree.md) | The check and ci actions install the release their ref names with `npm ci --ignore-scripts` from the repository's own lockfile, production entries only; another `version`, or a ref whose dependencies moved on, installs as npm would with a warning. npm, `npx` and plugin installs are unchanged |
 
 ## Writing a new one
 
