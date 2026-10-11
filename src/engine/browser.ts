@@ -190,6 +190,7 @@ import {
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import { DEFAULT_TIME_LIMITS, explainTimeout, firstLineOf, isTimeoutMessage, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
+import { bestEffort } from "./best-effort.js";
 import { boundedTeardown } from "./teardown.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
@@ -624,7 +625,7 @@ function describeSelect(node: Element): Array<{ value: string; label: string; se
  * read is not worth stalling the action for.
  */
 async function readSelectOptions(loc: Locator): Promise<Array<{ value: string; label: string; selected: boolean }> | null> {
-  return loc.evaluate(describeSelect, undefined, { timeout: 1000 }).catch(() => null);
+  return bestEffort(loc.evaluate(describeSelect, undefined, { timeout: 1000 }), null);
 }
 
 /**
@@ -1847,6 +1848,7 @@ export class BrowserEngine {
           this.logAction({ action: "write-policy:blocked", target: `navigation to ${req.url().slice(0, 140)} (${why})`, url: this.page?.url() ?? "" });
           this.refusedByPolicy.add(req);
           this.oracles.notePolicyBlock();
+          // Caught: a request the page has already cancelled rejects the abort, and an unhandled rejection ends the process.
           await route.abort("blockedbyclient").catch(() => {});
           return;
         }
@@ -1866,7 +1868,7 @@ export class BrowserEngine {
             await route.fulfill({ response: res, headers });
             return;
           } catch {
-            // Fail closed: a frame that cannot be sandboxed is not loaded.
+            // Fail closed: a frame that cannot be sandboxed is not loaded. A request already cancelled rejects the abort: nothing is left to refuse.
             await route.abort("blockedbyclient").catch(() => {});
             return;
           }
@@ -1891,6 +1893,7 @@ export class BrowserEngine {
           } catch {
             /* could not ask: load it as it would have loaded */
           }
+          // A request the page has already cancelled rejects this; nothing is left to send then.
           await route.fallback().catch(() => {});
           return;
         }
@@ -1969,6 +1972,7 @@ export class BrowserEngine {
             const task: Promise<unknown> = req
               .response()
               .then((res) => (res && res.ok() ? this.recordCreation(res) : undefined))
+              // A request that never got an answer created nothing to record.
               .catch(() => {})
               .finally(() => this.pendingCreations.delete(task));
             this.pendingCreations.add(task);
@@ -2018,6 +2022,7 @@ export class BrowserEngine {
             void this.leaveAndClose(newPage);
           }
         })
+        // A popup that closes, or does not load before the wait ends, is neither adopted nor closed by the fence.
         .catch(() => {});
     });
 
@@ -2190,7 +2195,7 @@ export class BrowserEngine {
 
   private async settle(): Promise<void> {
     const page = this.requirePage();
-    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    await bestEffort(page.waitForLoadState("domcontentloaded"));
     // Wait on what is actually in flight rather than a flat sleep. The rule is
     // in settle.ts so it can be table-tested; the reasoning for not using
     // networkidle is there too.
@@ -2203,7 +2208,7 @@ export class BrowserEngine {
         paceMs: this.paceMs,
       };
       if (!shouldKeepWaiting(state)) return;
-      await page.waitForTimeout(SETTLE_TICK_MS).catch(() => {});
+      await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
       if (this.page !== page) return;
     }
   }
@@ -2224,7 +2229,7 @@ export class BrowserEngine {
     let changedAt = started;
     for (;;) {
       if (!keepWatchingUrl({ sinceChangeMs: Date.now() - changedAt, elapsedMs: Date.now() - started })) return url;
-      await page.waitForTimeout(SETTLE_TICK_MS).catch(() => {});
+      await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
       if (this.page !== page || page.isClosed()) return url;
       const now = page.url();
       if (now !== url) {
@@ -2455,35 +2460,38 @@ export class BrowserEngine {
     const top = page.mainFrame();
     const frames = page.frames().filter((f) => f !== top && !f.isDetached());
     if (frames.length === 0) return [];
-    const pageScroll = ((await page.evaluate("({ x: window.scrollX, y: window.scrollY })").catch(() => null)) as { x: number; y: number } | null) ?? {
+    const pageScroll = ((await bestEffort(page.evaluate("({ x: window.scrollX, y: window.scrollY })"), null)) as { x: number; y: number } | null) ?? {
       x: 0,
       y: 0,
     };
     const read = async (frame: Frame): Promise<{ frame: Frame; tag: FrameTag; raws: unknown[] } | null> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const work = (async () => {
-        const el = await frame.frameElement();
-        const box = await el.boundingBox();
-        if (!box || box.width < 2 || box.height < 2) return null;
-        const title = ((await el.getAttribute("title")) || (await el.getAttribute("name")) || "").trim();
-        const got = (await frame.evaluate(`(() => ({ els: ${COLLECT_INTERACTABLES_SCRIPT}, sx: window.scrollX, sy: window.scrollY }))()`)) as {
-          els: Array<{ rect: Rect }>;
-          sx: number;
-          sy: number;
-        };
-        const raws = got.els
-          .filter((r) => !(r as { cut?: boolean }).cut)
-          .map((r) => ({ ...r, rect: frameToPageRect(r.rect, box, { x: got.sx, y: got.sy }, pageScroll) }));
-        let origin = "";
-        try {
-          const u = new URL(frame.url());
-          if (u.protocol === "http:" || u.protocol === "https:") origin = u.origin;
-        } catch {
-          /* no web address */
-        }
-        const foreignOrigin = this.foreignOriginOf(frame);
-        return { frame, tag: { url: frame.url(), origin: foreignOrigin ?? origin, title, foreign: foreignOrigin !== null }, raws };
-      })().catch(() => null);
+      const work = bestEffort(
+        (async () => {
+          const el = await frame.frameElement();
+          const box = await el.boundingBox();
+          if (!box || box.width < 2 || box.height < 2) return null;
+          const title = ((await el.getAttribute("title")) || (await el.getAttribute("name")) || "").trim();
+          const got = (await frame.evaluate(`(() => ({ els: ${COLLECT_INTERACTABLES_SCRIPT}, sx: window.scrollX, sy: window.scrollY }))()`)) as {
+            els: Array<{ rect: Rect }>;
+            sx: number;
+            sy: number;
+          };
+          const raws = got.els
+            .filter((r) => !(r as { cut?: boolean }).cut)
+            .map((r) => ({ ...r, rect: frameToPageRect(r.rect, box, { x: got.sx, y: got.sy }, pageScroll) }));
+          let origin = "";
+          try {
+            const u = new URL(frame.url());
+            if (u.protocol === "http:" || u.protocol === "https:") origin = u.origin;
+          } catch {
+            /* no web address */
+          }
+          const foreignOrigin = this.foreignOriginOf(frame);
+          return { frame, tag: { url: frame.url(), origin: foreignOrigin ?? origin, title, foreign: foreignOrigin !== null }, raws };
+        })(),
+        null,
+      );
       const limit = new Promise<null>((resolve) => {
         timer = setTimeout(() => resolve(null), FRAME_READ_MS);
       });
@@ -2529,7 +2537,7 @@ export class BrowserEngine {
     const limit = new Promise<null>((resolve) => {
       timer = setTimeout(() => resolve(null), FRAME_READ_MS);
     });
-    return Promise.race([work.catch(() => null), limit]).finally(() => clearTimeout(timer));
+    return Promise.race([bestEffort(work, null), limit]).finally(() => clearTimeout(timer));
   }
 
   /** Frames not directly under the page, less those whose controls were read anyway. */
@@ -2867,12 +2875,12 @@ export class BrowserEngine {
     // The element and the test id are passed as arguments: no value of the
     // page's is written into the code that runs there.
     const scope = this.scopeOf(el);
-    const handle = await scope.$(`xpath=${el.xpath}`).catch(() => null);
-    let live = handle ? await handle.evaluate(liveFactsOf).catch(() => null) : null;
-    await handle?.dispose().catch(() => undefined);
+    const handle = await bestEffort(scope.$(`xpath=${el.xpath}`), null);
+    let live = handle ? await bestEffort(handle.evaluate(liveFactsOf), null) : null;
+    await bestEffort(handle?.dispose());
     if (!live && el.testid) {
       // Found again only by a test id the page gives one element: two would leave it guessing.
-      const found = await scope.evaluate(uniqueByTestid, el.testid).catch(() => null);
+      const found = await bestEffort(scope.evaluate(uniqueByTestid, el.testid), null);
       if (found && found.live.name === el.name) {
         el = { ...el, xpath: found.xpath };
         this.refs.set(ref, el);
@@ -3021,7 +3029,7 @@ export class BrowserEngine {
       const policyAbortedNavigation = url.startsWith("chrome-error://") && this.blockedRequests.length > 0;
       this.logAction({ action, target, url });
       this.logAction({ action: policyAbortedNavigation ? "write-policy:navigation-blocked" : "origin-fence:bounced", target: url.slice(0, 200), url });
-      await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch(() => {});
+      await bestEffort(page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }));
       url = page.url();
       this.dropRefs("the page left the app's origin");
       const blocked = this.drainBlocked() + this.drainRefresh();
@@ -3124,9 +3132,8 @@ export class BrowserEngine {
     const read = async (frame: Frame): Promise<FrameInfo | null> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const box = await Promise.race([
-        frame
-          .frameElement()
-          .then((el) =>
+        bestEffort(
+          frame.frameElement().then((el) =>
             el.evaluate((node: Element) => {
               const r = node.getBoundingClientRect();
               return {
@@ -3135,8 +3142,9 @@ export class BrowserEngine {
                 height: Math.round(r.height),
               };
             }),
-          )
-          .catch(() => null),
+          ),
+          null,
+        ),
         new Promise<null>((resolve) => {
           timer = setTimeout(() => resolve(null), FRAME_READ_MS);
         }),
@@ -3460,7 +3468,7 @@ export class BrowserEngine {
       // What is on top at the click point, read before the forced click can
       // change it (a toast the click dismisses). Only a name for the note: a
       // read that fails leaves the note unnamed, never the click undone.
-      const cover = await locator.evaluate(readCoverAt, undefined, { timeout: FORCED_CLICK_TIMEOUT_MS }).catch(() => null);
+      const cover = await bestEffort(locator.evaluate(readCoverAt, undefined, { timeout: FORCED_CLICK_TIMEOUT_MS }), null);
       // A block the forced click itself causes comes after the cover was there, so it cannot explain it.
       const coverReadAt = Date.now();
       // A shorter budget here: the forced click skips the wait that
@@ -3536,7 +3544,7 @@ export class BrowserEngine {
     reused: boolean,
   ): Promise<{ fp: string; elements: SnapshotElement[]; url: string } | null> {
     if (state && (!reused || formIdentity(probe.attrs) || submitControlIn(state.elements, probe))) return state;
-    return (await this.captureCoverageState().catch(() => null)) ?? state;
+    return (await bestEffort(this.captureCoverageState(), null)) ?? state;
   }
 
   /** Whether this probe describes a submit of a tracked form, so the submit is worth recording. */
@@ -3832,14 +3840,15 @@ export class BrowserEngine {
       // Enter inside a form submits it — check the form's submit target, or
       // pressEnter becomes a read-only bypass for destructive submits.
       if (this.readOnly) {
-        const submitLabel = (await this.scopeOf(el)
-          .evaluate(
+        const submitLabel = (await bestEffort(
+          this.scopeOf(el).evaluate(
             `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return ''; ` +
               `const f = node.form || node.closest('form'); if (!f) return ''; ` +
               `const s = f.querySelector('[type="submit"], button:not([type="button"]):not([type="reset"])'); ` +
               `return s ? (s.getAttribute('aria-label') || s.innerText || s.getAttribute('data-testid') || '').trim().slice(0, 120) : ''; })()`,
-          )
-          .catch(() => "")) as string;
+          ),
+          "",
+        )) as string;
         if (isDestructive(submitLabel)) {
           this.logAction({ action: "type:enter-refused", target: submitLabel, url: page.url() });
           return `Filled ${el.role} "${el.name}" but did NOT press Enter. ` + destructiveRefusal(submitLabel, this.mode);
@@ -3923,9 +3932,10 @@ export class BrowserEngine {
     if ("refused" in target) return refuse(target.refused);
     const { input, chooser, how } = target;
 
-    const meta: FileInputMeta = await (
-      input ? input.evaluate(describeFileInput, undefined, { timeout: this.limits.actionMs }) : chooser!.element().evaluate(describeFileInput)
-    ).catch(() => ({ accept: null, multiple: false, label: "", disabled: false, probed: false }));
+    const meta: FileInputMeta = await bestEffort(
+      input ? input.evaluate(describeFileInput, undefined, { timeout: this.limits.actionMs }) : chooser!.element().evaluate(describeFileInput),
+      { accept: null, multiple: false, label: "", disabled: false, probed: false },
+    );
     // setInputFiles never checks `disabled` — it would report success on a
     // control no user can operate.
     if (meta.disabled) {
@@ -3943,11 +3953,12 @@ export class BrowserEngine {
     // The set call succeeding means the browser took the payload — not that
     // the app kept it. Read the input back: an app that rejects client-side
     // clears it, and then nothing would ever be sent on submit.
-    const kept = await (
+    const kept = await bestEffort(
       input
         ? input.evaluate((node) => (node as HTMLInputElement).files?.length ?? 0, undefined, { timeout: this.limits.actionMs })
-        : chooser!.element().evaluate((node) => (node as HTMLInputElement).files?.length ?? 0)
-    ).catch(() => -1);
+        : chooser!.element().evaluate((node) => (node as HTMLInputElement).files?.length ?? 0),
+      -1,
+    );
 
     const inputDesc = [
       meta.label ? `"${meta.label}"` : null,
@@ -3980,15 +3991,17 @@ export class BrowserEngine {
       if (n > 1) return { refused: `${n} file inputs on this page (${await listAll()}) — pass the ref of the one you mean, or of the control that opens it.` };
       return { input: fileInputs.first(), chooser: null, how: "set on the page's only file input" };
     }
-    const isFileInput = await locator
-      .evaluate((node) => node instanceof HTMLInputElement && node.type === "file", undefined, { timeout: this.limits.actionMs })
-      .catch(() => false);
+    const isFileInput = await bestEffort(
+      locator.evaluate((node) => node instanceof HTMLInputElement && node.type === "file", undefined, { timeout: this.limits.actionMs }),
+      false,
+    );
     if (isFileInput) return { input: locator, chooser: null, how: "set directly on the file input" };
     // A styled control: click it and answer the chooser it opens. The listener
     // is armed BEFORE the click (the event fires during it) with a budget that
     // outlasts the click's own — forced retry included — plus a grace period
     // after it, for apps that fetch an upload URL before opening the picker. A
     // wait shorter than the click reported such controls as "uploads nothing".
+    // Null when no chooser opened within the budget: the control opens none, which the caller reports.
     const opened = page.waitForEvent("filechooser", { timeout: this.limits.actionMs + FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
     await this.resilientClick(locator, this.limits.actionMs);
     const chooser = await Promise.race([opened, page.waitForTimeout(CHOOSER_GRACE_MS).then(() => null)]);
@@ -4029,7 +4042,7 @@ export class BrowserEngine {
     const geometry = [...byDocument.values()].flatMap((group) => geometryIssues(group, viewport));
     geometry.push(...(await probeOverlays(page)));
     const brokenImages = brokenImageIssues(
-      ((await page.evaluate(BROKEN_IMAGES_SCRIPT).catch(() => null)) as BrokenImageScan | null) ?? { images: [], total: 0 },
+      ((await bestEffort(page.evaluate(BROKEN_IMAGES_SCRIPT), null)) as BrokenImageScan | null) ?? { images: [], total: 0 },
       url,
     );
     return { geometry, brokenImages };
@@ -4042,14 +4055,15 @@ export class BrowserEngine {
    */
   private async collectOverlayTexts(): Promise<string[] | null> {
     const page = this.requirePage();
-    return (await page
-      .evaluate(
+    return (await bestEffort(
+      page.evaluate(
         `(() => Array.from(document.querySelectorAll(${JSON.stringify(BrowserEngine.OVERLAY_SELECTOR)}))
           .filter((el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
           .map((el) => (el.innerText || el.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 300))
           .filter(Boolean))()`,
-      )
-      .catch(() => null)) as string[] | null;
+      ),
+      null,
+    )) as string[] | null;
   }
 
   /**
@@ -4081,7 +4095,7 @@ export class BrowserEngine {
       await page.waitForTimeout(HOVER_REVEAL_WINDOW_MS);
     }
     if (bodyBefore === null || churning) return { revealed: [], fallbackUsed: false };
-    const bodyAfter = (await page.evaluate(`document.body ? document.body.innerText : ""`).catch(() => null)) as string | null;
+    const bodyAfter = (await bestEffort(page.evaluate(`document.body ? document.body.innerText : ""`), null)) as string | null;
     if (bodyAfter === null) return { revealed: [], fallbackUsed: false };
     revealed = revealedLines(bodyBefore, bodyAfter);
     return { revealed, fallbackUsed: revealed.length > 0 };
@@ -4091,9 +4105,9 @@ export class BrowserEngine {
   private async hoverBaselines(): Promise<{ before: string[] | null; bodyBefore: string | null; churning: boolean }> {
     const page = this.requirePage();
     const before = await this.collectOverlayTexts();
-    const body1 = (await page.evaluate(`document.body ? document.body.innerText : ""`).catch(() => null)) as string | null;
+    const body1 = (await bestEffort(page.evaluate(`document.body ? document.body.innerText : ""`), null)) as string | null;
     await page.waitForTimeout(300);
-    const body2 = (await page.evaluate(`document.body ? document.body.innerText : ""`).catch(() => null)) as string | null;
+    const body2 = (await bestEffort(page.evaluate(`document.body ? document.body.innerText : ""`), null)) as string | null;
     return { before, bodyBefore: body2, churning: body1 === null || body2 === null || body1 !== body2 };
   }
 
@@ -4118,21 +4132,22 @@ export class BrowserEngine {
     await locator.hover({ timeout: this.limits.actionMs });
     // Wiggle inside the element: pointer-tracking libraries distinguish real
     // movement from a single synthetic hover event.
-    const box = await locator.boundingBox().catch(() => null);
+    const box = await bestEffort(locator.boundingBox(), null);
     if (box) {
       await page.mouse.move(box.x + box.width / 2 + 2, box.y + box.height / 2 + 1);
       await page.mouse.move(box.x + box.width / 2 - 2, box.y + box.height / 2 - 1);
     }
     const { revealed, fallbackUsed } = await this.detectHoverReveal(before, bodyBefore, churning);
-    const attrTexts = (await this.scopeOf(el)
-      .evaluate(
+    const attrTexts = (await bestEffort(
+      this.scopeOf(el).evaluate(
         `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return []; const out = []; ` +
           `const t = node.getAttribute('title'); if (t) out.push('title: ' + t.slice(0, 300)); ` +
           `const d = node.getAttribute('aria-describedby'); if (d) { for (const id of d.split(/\\s+/)) { ` +
           `const refEl = document.getElementById(id); const txt = refEl ? (refEl.innerText || refEl.textContent || '').trim() : ''; ` +
           `if (txt) out.push(txt.replace(/\\s+/g, ' ').slice(0, 300)); } } return out; })()`,
-      )
-      .catch(() => [])) as string[];
+      ),
+      [],
+    )) as string[];
     const result = await this.afterAction("hover", `${el.role} "${el.name}"`);
     const notes = [...new Set([...revealed, ...attrTexts])];
     const caveat = fallbackUsed ? "\n  (from page-text diff — may include unrelated page activity)" : "";
@@ -4151,13 +4166,14 @@ export class BrowserEngine {
    */
   private static async chosenOptionLabel(loc: import("playwright").Locator, value: string | undefined): Promise<string | null> {
     if (value === undefined) return "";
-    return loc
-      .evaluate((node, v) => {
+    return bestEffort(
+      loc.evaluate((node, v) => {
         const opts = Array.from((node as HTMLSelectElement).options ?? []);
         const o = opts.find((x) => x.value === v || x.label === v || (x.textContent || "").trim() === v);
         return o ? (o.label || o.textContent || "").trim().slice(0, 120) : "";
-      }, value)
-      .catch(() => null);
+      }, value),
+      null,
+    );
   }
 
   /**
@@ -4172,7 +4188,7 @@ export class BrowserEngine {
     loc: import("playwright").Locator,
     value: string,
   ): Promise<{ refused: string } | { arg: string | { index: number }; label: string | null; option: SelectOption | null }> {
-    const options = await loc.evaluate(listSelectOptions, undefined, { timeout: 1000 }).catch(() => null);
+    const options = await bestEffort(loc.evaluate(listSelectOptions, undefined, { timeout: 1000 }), null);
     if (!options) return { arg: value, label: await BrowserEngine.chosenOptionLabel(loc, value), option: null };
     const match = matchOption(options, value);
     if ("refused" in match) return match;
@@ -4252,12 +4268,13 @@ export class BrowserEngine {
     const page = this.requirePage();
     // Focus inside a frame reads, from the page, as the <iframe> itself: follow it down.
     const focused = await this.focusedFrame(page);
-    const focusedLabel = await focused
-      .evaluate(
+    const focusedLabel = await bestEffort(
+      focused.evaluate(
         `(() => { const el = document.activeElement; if (!el) return ""; ` +
           `return (el.getAttribute("aria-label") || el.getAttribute("data-testid") || el.innerText || el.textContent || "").trim().slice(0, 120); })()`,
-      )
-      .catch(() => "");
+      ),
+      "",
+    );
     if (typeof focusedLabel === "string" && isDestructive(focusedLabel)) {
       this.logAction({ action: "press:refused", target: focusedLabel, url: page.url() });
       return destructiveRefusal(focusedLabel, this.mode);
@@ -4327,8 +4344,8 @@ export class BrowserEngine {
   private async focusedInteractable(): Promise<string | null> {
     if (this.refs.size === 0) return null;
     const known = [...this.refs.values()].map((el) => el.xpath);
-    const idx = (await this.requirePage()
-      .evaluate(
+    const idx = (await bestEffort(
+      this.requirePage().evaluate(
         `((paths) => { const el = document.activeElement;` +
           ` if (!el || el === document.body) return -1;` +
           ` for (let i = 0; i < paths.length; i++) {` +
@@ -4337,8 +4354,9 @@ export class BrowserEngine {
           ` }` +
           ` return -1; })`,
         known,
-      )
-      .catch(() => -1)) as number;
+      ),
+      -1,
+    )) as number;
     if (typeof idx !== "number" || idx < 0) return null;
     return [...this.refs.values()][idx]?.key ?? null;
   }
@@ -4828,7 +4846,7 @@ export class BrowserEngine {
       let now: unknown = undefined;
       // The jar takes the Set-Cookie as the response arrives; a short wait covers a browser that is a moment behind.
       for (let waited = 0; stillSpent && waited <= 1000; waited += 50) {
-        const state = await this.context?.storageState().catch(() => undefined);
+        const state = await bestEffort(this.context?.storageState());
         if (state && rotated.every((r) => rotationStored(state, r))) {
           now = await this.withPageIndexedDB(state, (full) => rotated.every((r) => rotationStored(full, r)));
           break;
@@ -4890,7 +4908,7 @@ export class BrowserEngine {
       // A cookie is in the browser's jar by the time the response is; a token the page stores itself can take longer.
       const patienceMs = presented.cookie !== undefined ? 1000 : 5000;
       for (let waited = 0; waited <= patienceMs; waited += 50) {
-        const now = await this.context?.storageState().catch(() => null);
+        const now = await bestEffort(this.context?.storageState(), null);
         if (now && rotationStored(now, presented)) {
           const full = await this.withPageIndexedDB(now, (read) => rotationStored(read, presented));
           const onDisk = this.readRoleProfile();
@@ -4900,8 +4918,8 @@ export class BrowserEngine {
         await new Promise((r) => setTimeout(r, 50));
       }
       if (!state) {
-        const body = await res.text().catch(() => "");
-        const rotated = rotatedFromResponse(body, await res.setCookies().catch(() => []));
+        const body = await bestEffort(res.text(), "");
+        const rotated = rotatedFromResponse(body, await bestEffort(res.setCookies(), []));
         const read = this.readRoleProfile();
         if (rotated && read.ok) state = swapProfileToken(read.state, presented.value, rotated);
       }
@@ -4948,7 +4966,7 @@ export class BrowserEngine {
    * profile's own IndexedDB, so nothing is dropped either way.
    */
   private async withPageIndexedDB(plain: unknown, holds: (state: unknown) => boolean): Promise<unknown> {
-    const full = await this.context?.storageState({ indexedDB: true }).catch(() => null);
+    const full = await bestEffort(this.context?.storageState({ indexedDB: true }), null);
     return full && holds(full) ? full : plain;
   }
 
@@ -5412,9 +5430,9 @@ export class BrowserEngine {
     let lastCapture: { fp: string; elements: SnapshotElement[]; url: string } | null = null;
     const liveLabel = async (loc: ReturnType<typeof locatePlanTarget>): Promise<string> => {
       const [aria, testid, txt] = await Promise.all([
-        loc.getAttribute("aria-label").catch(() => null),
-        loc.getAttribute("data-testid").catch(() => null),
-        loc.textContent({ timeout: 1000 }).catch(() => null),
+        bestEffort(loc.getAttribute("aria-label"), null),
+        bestEffort(loc.getAttribute("data-testid"), null),
+        bestEffort(loc.textContent({ timeout: 1000 }), null),
       ]);
       return (aria ?? txt ?? testid ?? "").trim().slice(0, 120);
     };
@@ -5492,13 +5510,18 @@ export class BrowserEngine {
             // not moved since: collect() waits for two stable probes, so a
             // fresh one per step would add seconds per step against the plan's
             // watchdog for a result identical to the one just taken.
-            preState = lastCapture?.url === page.url() ? lastCapture : await this.captureCoverageState().catch(() => null);
+            preState = lastCapture?.url === page.url() ? lastCapture : await bestEffort(this.captureCoverageState(), null);
           }
-          preTestid = await loc.getAttribute("data-testid").catch(() => null);
+          preTestid = await bestEffort(loc.getAttribute("data-testid"), null);
           const label = await liveLabel(loc);
           preLabel = label;
           // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
-          const isSelect = step.action === "select" && (await loc.evaluate((n) => n.tagName.toLowerCase() === "select").catch(() => false));
+          const isSelect =
+            step.action === "select" &&
+            (await bestEffort(
+              loc.evaluate((n) => n.tagName.toLowerCase() === "select"),
+              false,
+            ));
           // The option a select step means, settled before anything is picked: one naming none fails the step at once.
           const pick = step.action === "select" ? await BrowserEngine.resolveSelectPick(loc, step.value ?? "") : null;
           if (pick && "refused" in pick) {
@@ -5535,7 +5558,7 @@ export class BrowserEngine {
             if (step.pressEnter) {
               if (this.readOnly) {
                 const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
-                const submitLabel = (await submit.textContent({ timeout: 1000 }).catch(() => "")) ?? "";
+                const submitLabel = (await bestEffort(submit.textContent({ timeout: 1000 }), "")) ?? "";
                 if (isDestructive(submitLabel)) {
                   transcript.push(`${desc} → filled, Enter withheld: ${destructiveRefusal(submitLabel.trim(), this.mode)}`);
                   break;
@@ -5703,16 +5726,13 @@ export class BrowserEngine {
   private async waitUntilActionable(loc: import("playwright").Locator, action: "click" | "type" | "select"): Promise<string | null> {
     const read = async () =>
       notActionable(action, {
-        enabled: await loc.isEnabled({ timeout: 1000 }).catch(() => true),
-        editable: action === "type" ? await loc.isEditable({ timeout: 1000 }).catch(() => null) : null,
+        enabled: await bestEffort(loc.isEnabled({ timeout: 1000 }), true),
+        editable: action === "type" ? await bestEffort(loc.isEditable({ timeout: 1000 }), null) : null,
       });
     const until = Date.now() + this.limits.actionMs;
     let reason = await read();
     while (reason && Date.now() < until) {
-      await loc
-        .page()
-        .waitForTimeout(100)
-        .catch(() => {});
+      await bestEffort(loc.page().waitForTimeout(100));
       reason = await read();
     }
     return reason;
@@ -5725,14 +5745,14 @@ export class BrowserEngine {
    * The verdict is flow.ts's elementStateMatches, so the rules stay testable.
    */
   private static async elementFacts(matches: import("playwright").Locator): Promise<ElementFacts | null> {
-    const total = await matches.count().catch(() => 0);
+    const total = await bestEffort(matches.count(), 0);
     if (total === 0) return null;
     const visible = matches.filter({ visible: true });
-    const anyVisible = (await visible.count().catch(() => 0)) > 0;
+    const anyVisible = (await bestEffort(visible.count(), 0)) > 0;
     const el = anyVisible ? visible.first() : matches.first();
-    const enabled = await el.isEnabled({ timeout: 1000 }).catch(() => null);
+    const enabled = await bestEffort(el.isEnabled({ timeout: 1000 }), null);
     // isChecked throws for an element that is not a checkbox, radio or [role=checkbox]: it has no checked state.
-    const checked = await el.isChecked({ timeout: 1000 }).catch(() => null);
+    const checked = await bestEffort(el.isChecked({ timeout: 1000 }), null);
     return { visible: anyVisible, enabled, checked };
   }
 
@@ -5805,7 +5825,7 @@ export class BrowserEngine {
       for (;;) {
         if (done()) return true;
         if (Date.now() >= until) return false;
-        await (this.page ?? page).waitForTimeout(100).catch(() => {});
+        await bestEffort((this.page ?? page).waitForTimeout(100));
       }
     };
     /**
@@ -5861,13 +5881,18 @@ export class BrowserEngine {
             failure = `${step.target} ${blocked} after ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
           } else {
             const label = (
-              (await loc.getAttribute("aria-label").catch(() => null)) ??
-              (await loc.textContent({ timeout: 1000 }).catch(() => null)) ??
+              (await bestEffort(loc.getAttribute("aria-label"), null)) ??
+              (await bestEffort(loc.textContent({ timeout: 1000 }), null)) ??
               ""
             ).trim();
             // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
-            const isSelect = step.action === "select" && (await loc.evaluate((n) => n.tagName.toLowerCase() === "select").catch(() => false));
-            const testid = await loc.getAttribute("data-testid").catch(() => null);
+            const isSelect =
+              step.action === "select" &&
+              (await bestEffort(
+                loc.evaluate((n) => n.tagName.toLowerCase() === "select"),
+                false,
+              ));
+            const testid = await bestEffort(loc.getAttribute("data-testid"), null);
             if (
               this.readOnly &&
               step.action !== "type" &&
@@ -5885,7 +5910,7 @@ export class BrowserEngine {
               await this.fillOrAppend(loc, step.value, step.replace ?? false);
               if (step.pressEnter) {
                 const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
-                const submitLabel = ((await submit.textContent({ timeout: 1000 }).catch(() => "")) ?? "").trim();
+                const submitLabel = ((await bestEffort(submit.textContent({ timeout: 1000 }), "")) ?? "").trim();
                 if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
                 else await loc.press("Enter", { timeout: actionMs });
               }
@@ -5904,7 +5929,7 @@ export class BrowserEngine {
           const until = Date.now() + actionMs;
           let verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
           while (!verdict.ok && Date.now() < until) {
-            await current.waitForTimeout(100).catch(() => {});
+            await bestEffort(current.waitForTimeout(100));
             verdict = elementStateMatches(step.state, await BrowserEngine.elementFacts(matches));
           }
           if (!verdict.ok) failure = `${step.target} ${verdict.actual}, expected ${step.state}, after ${actionMs / 1000}s`;
@@ -5919,8 +5944,8 @@ export class BrowserEngine {
       } catch (err) {
         failure = firstLineOf(explainTimeout(err, "action", actionMs));
       }
-      await this.scanForInjections().catch(() => {});
-      await this.scanForContradictions().catch(() => {});
+      await bestEffort(this.scanForInjections());
+      await bestEffort(this.scanForContradictions());
       // What the write policy refused of the app's own requests while this step ran is the step's, whatever caused it.
       const blocked = ownRefusals();
       if (!refusal && blocked.length > 0) refusal = `the ${this.writeRule.at()} write policy refused ${blocked.join(", ")}`;
@@ -5959,12 +5984,12 @@ export class BrowserEngine {
       // A write the last step set off can land after its checks ran (a debounced save): wait a moment, settle, look
       // again; then leave the page while the flow's rule still holds, so nothing it sends on the way out goes under
       // the crawl's rule, and look once more.
-      await (this.page ?? page).waitForTimeout(FLOW_AFTER_LAST_STEP_MS).catch(() => {});
-      await this.settle().catch(() => {});
+      await bestEffort((this.page ?? page).waitForTimeout(FLOW_AFTER_LAST_STEP_MS));
+      await bestEffort(this.settle());
       const late = ownRefusals();
       collect();
-      await (this.page ?? page).goto("about:blank").catch(() => {});
-      await this.settle().catch(() => {});
+      await bestEffort((this.page ?? page).goto("about:blank"));
+      await bestEffort(this.settle());
       late.push(...ownRefusals());
       const last = steps[steps.length - 1];
       if (late.length > 0 && last) {
@@ -5987,7 +6012,7 @@ export class BrowserEngine {
       this.oracles.drain(false);
       this.setMode(crawlMode);
       // Pages the session no longer drives are closed only now, at about:blank and under the held rule, and each only
-      // once what it sent as it was left has been judged (leftSettled).
+      // once what it sent as it was left has been judged (leftSettled). A page already closed rejects close(): it is closed either way.
       await BrowserEngine.settleWithin(
         Promise.allSettled(context.pages().map(async (p) => (p === this.page ? undefined : (await this.leftSettled(p), await p.close().catch(() => {}))))),
         5000,
@@ -6295,7 +6320,7 @@ export class BrowserEngine {
     // The driver's own timeout covers a slow capture; the race covers a
     // renderer that never answers the protocol at all.
     return Promise.race([
-      page.screenshot({ type: "jpeg", quality: 55, fullPage: false, timeout: timeoutMs }).catch(() => null),
+      bestEffort(page.screenshot({ type: "jpeg", quality: 55, fullPage: false, timeout: timeoutMs }), null),
       new Promise<null>((resolve) => {
         timer = setTimeout(() => resolve(null), timeoutMs + 500);
       }),
@@ -6323,14 +6348,15 @@ export class BrowserEngine {
         try {
           cdp.on("Page.screencastFrame", (frame: { data: string; sessionId: number }) => {
             if (!stopped) onFrame(Buffer.from(frame.data, "base64"));
-            void cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId }).catch(() => {});
+            void bestEffort(cdp.send("Page.screencastFrameAck", { sessionId: frame.sessionId }));
           });
           await cdp.send("Page.startScreencast", { format: "jpeg", quality: 55, maxWidth: 1280, maxHeight: 900, everyNthFrame: 2 });
         } catch (err) {
-          // Not bound: the timer tries this page again on its next tick.
+          // Not bound: the timer tries this page again on its next tick. A session whose page has closed is already detached.
           await cdp.detach().catch(() => {});
           throw err;
         }
+        // A session whose page has closed has already stopped and detached: nothing is left to release.
         release = async () => {
           await cdp.send("Page.stopScreencast").catch(() => {});
           await cdp.detach().catch(() => {});
@@ -6349,7 +6375,7 @@ export class BrowserEngine {
       await current?.();
     };
 
-    await bind(this.page).catch(() => {});
+    await bestEffort(bind(this.page));
     // One timer does both jobs: it notices a replaced tab, and where the
     // browser cannot push frames it is also what takes them.
     const timer = setInterval(() => {
@@ -6366,7 +6392,7 @@ export class BrowserEngine {
         release = null;
         void (async () => {
           await previous?.();
-          if (!stopped) await bind(page).catch(() => {});
+          if (!stopped) await bestEffort(bind(page));
         })();
         return;
       }
@@ -6453,7 +6479,7 @@ export class BrowserEngine {
    */
   private static async leave(page: Page): Promise<void> {
     if (page.isClosed() || page.url() === "about:blank") return;
-    await page.goto("about:blank", { timeout: 3000 }).catch(() => {});
+    await bestEffort(page.goto("about:blank", { timeout: 3000 }));
   }
 
   /** Run the route handler's judgement of one request, recorded against the page that sent it until it is answered. */
@@ -6488,10 +6514,7 @@ export class BrowserEngine {
    */
   private async leftSettled(page: Page): Promise<void> {
     if (page.isClosed() || !closeWaitsForLeavingWrites(this.engineName)) return;
-    await BrowserEngine.settleWithin(
-      page.evaluate(() => 0).catch(() => {}),
-      2000,
-    );
+    await BrowserEngine.settleWithin(bestEffort(page.evaluate(() => 0)), 2000);
     await BrowserEngine.settleWithin(Promise.allSettled([...(this.routesInFlight.get(page) ?? [])]), 2000);
   }
 
@@ -6499,6 +6522,7 @@ export class BrowserEngine {
   private async leaveAndClose(page: Page): Promise<void> {
     await BrowserEngine.leave(page);
     await this.leftSettled(page);
+    // A page the app or the user closed first rejects this; it is closed either way.
     await page.close().catch(() => {});
   }
 
