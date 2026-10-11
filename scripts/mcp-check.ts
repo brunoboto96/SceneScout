@@ -1179,7 +1179,14 @@ function ticketDirsStartupCheck(): void {
   const good = start([os.tmpdir(), ""].join(path.delimiter));
   if (good.status !== 0 || good.stderr.includes("SCENESCOUT_TICKET_DIRS"))
     fail(`a server with an absolute SCENESCOUT_TICKET_DIRS and an empty entry did not start cleanly (exit ${good.status}):\n${good.stderr}`);
-  console.log("✓ a relative or ~ entry in SCENESCOUT_TICKET_DIRS stops the server at startup, naming it; an absolute one and an empty one do not");
+  // A folder that is not there is warned about by name, and the server still starts: it may be on a drive not yet mounted.
+  const absent = path.join(os.tmpdir(), "scenescout-no-such-ticket-folder");
+  const warned = start(absent);
+  if (warned.status !== 0 || !warned.stderr.includes(`SCENESCOUT_TICKET_DIRS names "${absent}", which is not there`))
+    fail(`a server with SCENESCOUT_TICKET_DIRS naming a missing folder did not start with a warning naming it (exit ${warned.status}):\n${warned.stderr}`);
+  console.log(
+    "✓ a relative or ~ entry in SCENESCOUT_TICKET_DIRS stops the server at startup, naming it; an absolute one and an empty one do not; a missing one is warned about by name",
+  );
 }
 
 async function main(): Promise<void> {

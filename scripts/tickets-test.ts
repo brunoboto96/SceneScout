@@ -33,6 +33,7 @@ import {
   parseTickets,
   tally,
   ticketDirsFrom,
+  ticketDirWarnings,
   ticketFileFor,
   TICKET_DIRS_ENV,
   ticketSummaryLine,
@@ -701,6 +702,25 @@ test("the folders outside the project a ticket may be read from are only those c
   assert.deepEqual(ticketDirsFrom({ [TICKET_DIRS_ENV]: tilde }), { dirs: [tilde] });
 });
 
+test("a configured ticket folder that is not there, or is not a folder, is warned about at startup by name; one that is, is not", () => {
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ss-ticket-dirs-")));
+  try {
+    const there = path.join(root, "specs");
+    const missing = path.join(root, "no-such-folder");
+    const file = path.join(root, "a-file.md");
+    fs.mkdirSync(there);
+    fs.writeFileSync(file, "");
+    assert.deepEqual(ticketDirWarnings([there]), []);
+    assert.deepEqual(ticketDirWarnings([]), []);
+    const warned = ticketDirWarnings([there, missing, file]);
+    assert.equal(warned.length, 2, JSON.stringify(warned));
+    assert.ok(warned[0].includes(`${TICKET_DIRS_ENV} names "${missing}", which is not there`), warned[0]);
+    assert.ok(warned[1].includes(`${TICKET_DIRS_ENV} names "${file}", which is not a folder`), warned[1]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("outside the project, a ticket path is refused with the same words whether or not the file is there", () => {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ss-ticket-probe-")));
   try {
@@ -796,6 +816,43 @@ test("a ticket file is read from inside the project, or from a folder configurat
       // ...and one whose missing target would be inside the project is missing, as the file would be.
       fs.symlinkSync(path.join(project, "gone.md"), path.join(project, "dangling-in.md"));
       assert.throws(() => read("dangling-in.md"), { code: "ENOENT" });
+      // A link to a link is followed to its end, whether or not the end is there: a chain through the project to a
+      // missing file outside is refused like one to a file that is there, and both name the file the chain ends at.
+      fs.symlinkSync(path.join(elsewhere, "e.md"), path.join(project, "hop-live"));
+      fs.symlinkSync(path.join(project, "hop-live"), path.join(project, "chain-live.md"));
+      fs.symlinkSync(path.join(elsewhere, "gone.md"), path.join(project, "hop-gone"));
+      fs.symlinkSync(path.join(project, "hop-gone"), path.join(project, "chain-gone.md"));
+      fs.symlinkSync(path.join(elsewhere, "e.md"), path.join(elsewhere, "hop-out-live"));
+      fs.symlinkSync(path.join(elsewhere, "hop-out-live"), path.join(project, "out-live.md"));
+      fs.symlinkSync(path.join(elsewhere, "gone.md"), path.join(elsewhere, "hop-out-gone"));
+      fs.symlinkSync(path.join(elsewhere, "hop-out-gone"), path.join(project, "out-gone.md"));
+      for (const [there, gone] of [
+        ["chain-live.md", "chain-gone.md"],
+        ["out-live.md", "out-gone.md"],
+      ]) {
+        const [a, b] = [there, gone].map((f) => {
+          try {
+            return read(f);
+          } catch (err) {
+            return { threw: (err as NodeJS.ErrnoException).code };
+          }
+        });
+        assert.ok("refused" in a && "refused" in b, `${there} / ${gone}: ${JSON.stringify({ a, b })}`);
+        assert.equal(b.refused.replace("gone.md", "<name>"), a.refused.replace("e.md", "<name>"), `${there} / ${gone}`);
+      }
+      // A link to a folder is followed whether or not the folder is there, so a file under it is refused either way.
+      fs.mkdirSync(path.join(elsewhere, "dir"));
+      fs.symlinkSync(path.join(elsewhere, "dir"), path.join(project, "dir-live"));
+      fs.symlinkSync(path.join(elsewhere, "no-dir"), path.join(project, "dir-gone"));
+      for (const f of ["dir-live/t.md", "dir-gone/t.md"]) {
+        let r: ReturnType<typeof read> | { threw?: string };
+        try {
+          r = read(f);
+        } catch (err) {
+          r = { threw: (err as NodeJS.ErrnoException).code };
+        }
+        assert.ok("refused" in r && /outside the project folder/.test(r.refused), `${f}: ${JSON.stringify(r)}`);
+      }
     }
     // A network path on Windows is refused before anything is asked of the network.
     if (process.platform === "win32") {

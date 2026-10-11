@@ -121,26 +121,53 @@ export function ticketDirsFrom(env: NodeJS.ProcessEnv): { dirs: string[] } | { e
   return { dirs };
 }
 
+/**
+ * What to tell the person who set the configuration about folders it names that
+ * hold no ticket: one that is not there, or is not a folder. These are warned
+ * about rather than refused, since a folder can be on a drive not yet mounted;
+ * until it is there, a ticket in it is refused as outside the project.
+ */
+export function ticketDirWarnings(dirs: string[]): string[] {
+  return dirs.flatMap((dir) => {
+    let stat: fs.Stats | undefined;
+    try {
+      stat = fs.statSync(dir);
+    } catch {
+      return [`${TICKET_DIRS_ENV} names "${dir}", which is not there: no ticket is read from it until it is`];
+    }
+    return stat.isDirectory() ? [] : [`${TICKET_DIRS_ENV} names "${dir}", which is not a folder: no ticket is read from it`];
+  });
+}
+
 const within = (file: string, dir: string): boolean => file.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
 
+/** How many links a path is followed through before it is taken as written, as the system's own limit does. */
+const MAX_LINKS = 40;
+
 /**
- * Where a path really is, following links in whatever part of it exists: the
- * deepest folder on the way that can be resolved is, and the rest is joined on
- * as written. A path that is not there resolves as far as it can, without an error.
+ * Where a path really is, following every link on the way, one whose target is
+ * missing too: what exists is resolved, a dangling link is followed by what it
+ * says, and the rest is joined on as written. A path that is not there resolves
+ * as far as it can, without an error, so where a link leads never depends on
+ * whether the file at its end exists.
  */
-function realAsFarAsItGoes(full: string): string {
-  const rest: string[] = [];
-  let at = full;
-  for (;;) {
-    try {
-      return path.join(fs.realpathSync.native(at), ...rest);
-    } catch {
-      const up = path.dirname(at);
-      if (up === at) return full;
-      rest.unshift(path.basename(at));
-      at = up;
-    }
+function realAsFarAsItGoes(full: string, hops = { left: MAX_LINKS }): string {
+  try {
+    return fs.realpathSync.native(full);
+  } catch {
+    // Missing, or a dangling link on the way: resolved a part at a time below.
   }
+  const up = path.dirname(full);
+  if (up === full) return full;
+  const joined = path.join(realAsFarAsItGoes(up, hops), path.basename(full));
+  let target: string | undefined;
+  try {
+    target = fs.lstatSync(joined).isSymbolicLink() ? fs.readlinkSync(joined) : undefined;
+  } catch {
+    target = undefined; // Not there, or not to be looked at: taken as written.
+  }
+  if (target === undefined || hops.left-- <= 0) return joined;
+  return realAsFarAsItGoes(path.resolve(path.dirname(joined), target), hops);
 }
 
 /**
@@ -186,15 +213,14 @@ export function ticketFileFor(file: string, projectDir: string, env: NodeJS.Proc
   const first = allowed(named);
   if (first !== true) return first === false ? outside : first;
   // Inside: the file itself is resolved now, so a link out of the folders is refused where it leads. A link whose
-  // target is missing is followed by what it says, so it is answered as one whose target is there would be.
+  // target is missing, through any number of links, is followed by what each says, so it is answered as one whose
+  // target is there would be; only a file that would be inside is reported as missing.
   let full: string;
   let missing: NodeJS.ErrnoException | undefined;
   try {
     full = fs.realpathSync.native(named);
   } catch (err) {
-    if (!fs.lstatSync(named, { throwIfNoEntry: false })?.isSymbolicLink()) throw err;
-    const target = path.resolve(path.dirname(named), fs.readlinkSync(named));
-    full = path.join(realAsFarAsItGoes(path.dirname(target)), path.basename(target));
+    full = realAsFarAsItGoes(named);
     missing = err as NodeJS.ErrnoException;
   }
   const second = allowed(full);

@@ -37,7 +37,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
-import { ticketDirsFrom } from "./engine/tickets.js";
+import { ticketDirsFrom, ticketDirWarnings } from "./engine/tickets.js";
 import { LIVE_TOKEN_FILE, liveEngines, liveTokenFileName, pidAlive, statusFileName } from "./engine/live.js";
 import { engines, server, live, liveDirs, liveTokenWrites, pendingLogins } from "./server-context.js";
 import { registerGuideTools } from "./tools/guide.js";
@@ -62,6 +62,7 @@ async function main(): Promise<void> {
     console.error(`SceneScout MCP server not started: ${ticketDirs.error}. Fix it where the server is configured and start it again.`);
     process.exit(1);
   }
+  for (const warning of ticketDirWarnings(ticketDirs.dirs)) console.error(`[scenescout] ${warning}.`);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // A client that exits by closing the pipe sends no signal. Without this the
