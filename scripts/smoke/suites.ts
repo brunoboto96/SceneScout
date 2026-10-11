@@ -35,6 +35,7 @@ import * as targets from "./targets.ts";
 import * as fromRunPath from "./from-run-path.ts";
 import * as settleAfterLeaving from "./settle.ts";
 import * as actionResults from "./action-results.ts";
+import * as maskedTyping from "./masked-typing.ts";
 
 export const shards = [
   // ~8 minutes
@@ -53,6 +54,7 @@ export const shards = [
     fromRunPath,
     settleAfterLeaving,
     actionResults,
+    maskedTyping,
     unload,
     timeLimits,
     firstRun,

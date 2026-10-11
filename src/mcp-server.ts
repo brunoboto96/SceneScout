@@ -1918,7 +1918,7 @@ server.registerTool(
   "scout_type",
   {
     description:
-      "Type into a text input/textarea/composer by ref, the way a real user does: if the field already holds content (e.g. an @-mention chip a menu click inserted), the text is APPENDED at the end — preserving that content — and the result reports what was already there (a separating space is added only at a word-to-word boundary). Pass replace=true to clear the field first (correcting a previous entry); an empty textValue always clears. Appending fires input events but not keydown, so keydown-driven triggers (slash/mention menus) will not react to appended text. Use for both valid values and boundary/fuzz values (empty, very long, unicode, script tags).",
+      "Type into a text input/textarea/composer by ref, the way a real user does: if the field already holds content (e.g. an @-mention chip a menu click inserted), the text is APPENDED at the end — preserving that content — and the result reports what was already there (a separating space is added only at a word-to-word boundary). Pass replace=true to clear the field first (correcting a previous entry); an empty textValue always clears. Appending fires input events but not keydown, so keydown-driven triggers (slash/mention menus) will not react to appended text. Use for both valid values and boundary/fuzz values (empty, very long, unicode, script tags). A value typed into a secret field (a password, a one-time code, a card number, a field labelled secret or token) is masked in the result and the log, as is what the field held.",
     inputSchema: {
       ref: z.string().describe("Element ref, e.g. e12"),
       textValue: z.string().optional().describe("Text to type"),

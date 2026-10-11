@@ -42,6 +42,7 @@ import {
   type KeyAliasSteps,
 } from "./memory.js";
 import type { SessionDescription } from "./live.js";
+import { maskedValue, secretFieldKind, type SecretKind } from "./sensitive.js";
 import { normalizeTask } from "./task.js";
 import {
   ACTED_CONTROL_SRC,
@@ -581,6 +582,15 @@ const FORM_READ_MS = 1000;
 
 /** A form a collect found: its identity key, and whether the page itself refuses its empty submit. */
 type SeenForm = { key: string; guarded: boolean };
+/** What fillOrAppend reads about a field for sensitive.ts: its attributes and whatever labels it. */
+type FieldFactsRead = {
+  type: string | null;
+  autocomplete: string | null;
+  name: string | null;
+  id: string | null;
+  placeholder: string | null;
+  labels: string[];
+};
 
 /** In-page XPath lookup fragment for string-expression evaluates. */
 function xpathLookup(xpath: string): string {
@@ -3661,53 +3671,79 @@ export class BrowserEngine {
    * testing), and reading the existing content is load-bearing: if it fails,
    * the action aborts rather than risk a silent content-destroying replace.
    */
-  private async fillOrAppend(locator: import("playwright").Locator, text: string, replace: boolean): Promise<string> {
-    let state: { existing: string; caretAppendable: boolean; type: string };
+  private async fillOrAppend(
+    locator: import("playwright").Locator,
+    text: string,
+    replace: boolean,
+    label = "",
+  ): Promise<{ note: string; secret: SecretKind | null }> {
+    let state: { existing: string; caretAppendable: boolean; type: string; facts: FieldFactsRead };
     try {
       state = (await locator.evaluate(
         (node) => {
           const n = node as HTMLInputElement & HTMLElement;
           const type = n.tagName === "INPUT" ? n.type.toLowerCase() : "";
-          if (n.isContentEditable) return { existing: (n.innerText || n.textContent || "").trim(), caretAppendable: true, type };
+          // What the page says about the field, for sensitive.ts to decide whether its value is a secret.
+          const byIds = (ids: string | null) =>
+            (ids ?? "")
+              .split(/\s+/)
+              .map((id) => (id ? (document.getElementById(id)?.textContent ?? "") : ""))
+              .join(" ");
+          const facts = {
+            type: n.getAttribute("type"),
+            autocomplete: n.getAttribute("autocomplete"),
+            name: n.getAttribute("name"),
+            id: n.id || null,
+            placeholder: n.getAttribute("placeholder"),
+            labels: [
+              n.getAttribute("aria-label") ?? "",
+              byIds(n.getAttribute("aria-labelledby")),
+              ...Array.from((n as HTMLInputElement).labels ?? []).map((l) => l.textContent ?? ""),
+            ].filter((t) => t.trim() !== ""),
+          };
+          if (n.isContentEditable) return { existing: (n.innerText || n.textContent || "").trim(), caretAppendable: true, type, facts };
           if (typeof n.value === "string") {
             // selectionStart is null on number/date/email-style inputs — caret
             // placement is unsupported there, so append must go via fill().
-            return { existing: n.value, caretAppendable: typeof n.selectionStart === "number", type };
+            return { existing: n.value, caretAppendable: typeof n.selectionStart === "number", type, facts };
           }
-          return { existing: "", caretAppendable: false, type };
+          return { existing: "", caretAppendable: false, type, facts };
         },
         undefined,
         { timeout: this.limits.actionMs },
-      )) as { existing: string; caretAppendable: boolean; type: string };
+      )) as { existing: string; caretAppendable: boolean; type: string; facts: FieldFactsRead };
     } catch (err) {
       throw new Error(
         `Could not read the field's existing content before typing — aborting rather than risk overwriting it (${err instanceof Error ? err.message.split("\n")[0] : err}). Take a new scout_snapshot and retry.`,
       );
     }
-    const { existing, caretAppendable, type } = state;
+    const { existing, caretAppendable, type, facts } = state;
+    // A secret field's value, and what it held before, are never quoted: the note goes to the log, the report and exported issues.
+    const secret = secretFieldKind({ ...facts, label: [label, ...facts.labels] });
+    const quoted = (value: string): string => (secret ? `(masked: ${secret} field)` : JSON.stringify(value.slice(0, 60)));
     if (APP_FILLED_TYPES.has(type)) {
       // A date or time field holds one value in one format: anything else is
       // refused by the browser as a bare "Malformed value", and appending to
       // what it holds can only produce that. So the value is put in the
       // field's format, or refused naming it, and always replaces.
       const date = normaliseDateValue(type, text);
-      if ("refused" in date) throw new Error(`Not typed: ${date.refused}`);
+      if ("refused" in date) throw new Error(`Not typed: ${secret ? date.refused.replace(JSON.stringify(text), "the value") : date.refused}`);
       await locator.fill(date.value, { timeout: this.limits.actionMs });
-      return (
-        (date.note ? ` (${date.note})` : "") +
-        (existing && existing !== date.value ? ` (replaced existing content ${JSON.stringify(existing.slice(0, 60))}: a ${type} field holds one value)` : "")
-      );
+      const note =
+        (date.note && !secret ? ` (${date.note})` : "") +
+        (existing && existing !== date.value ? ` (replaced existing content ${quoted(existing)}: a ${type} field holds one value)` : "");
+      return { note, secret };
     }
     if (replace || !existing || text === "") {
       await locator.fill(text, { timeout: this.limits.actionMs });
-      return existing && (replace || text === "") ? ` (replaced existing content ${JSON.stringify(existing.slice(0, 60))})` : "";
+      return { note: existing && (replace || text === "") ? ` (replaced existing content ${quoted(existing)})` : "", secret };
     }
-    const appendNote = ` (APPENDED after existing content ${JSON.stringify(existing.slice(0, 60))} — pass replace=true to overwrite instead)`;
+    const appendNote = ` (APPENDED after existing content ${quoted(existing)} — pass replace=true to overwrite instead)`;
     if (!caretAppendable) {
       // Data-typed inputs (number, email, date): concatenate without a
       // separator — an injected space would invalidate the value.
       await locator.fill(existing + text, { timeout: this.limits.actionMs });
-      return appendNote;
+      return { note: appendNote, secret };
     }
     // Native append: focus, move the caret to the end, insert via the
     // keyboard — preserves rich composer content that fill() would clear.
@@ -3735,7 +3771,7 @@ export class BrowserEngine {
     // "user@" + "x" must not become "user@ x".
     const separator = /\w$/.test(existing) && /^\w/.test(text) ? " " : "";
     await this.requirePage().keyboard.insertText(separator + text);
-    return appendNote;
+    return { note: appendNote, secret };
   }
 
   async type(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {
@@ -3767,7 +3803,8 @@ export class BrowserEngine {
     // Before the fill: a page that reflects input as it is typed already holds
     // the element afterwards. Never for another site's frame: no probe is placed there.
     if (!embed) await this.noteProbe(text, `${el.role} "${el.name}"`);
-    let fillNote = await this.fillOrAppend(locator, text, replace);
+    const filled = await this.fillOrAppend(locator, text, replace, el.name);
+    let fillNote = filled.note;
     // What another site's field already held is its business, not the report's.
     if (embed) fillNote = fillNote.replace(/existing content "(?:[^"\\]|\\.)*"/g, "existing content (masked: another site's frame)");
     if (pressEnter) {
@@ -3794,7 +3831,9 @@ export class BrowserEngine {
       this.noteFormSubmit(formState, "enter", form);
     }
     this.memory!.markExercised(this.currentFingerprint, el.key, "type");
-    return this.afterAction("type", `${el.role} "${el.name}" ← ${JSON.stringify(text.slice(0, 60))}${pressEnter ? " + Enter" : ""}${fillNote}`);
+    // A secret field's value is never written down, not even its length; clearing one ("") reveals nothing.
+    const shown = filled.secret && text !== "" ? maskedValue(filled.secret) : JSON.stringify(text.slice(0, 60));
+    return this.afterAction("type", `${el.role} "${el.name}" ← ${shown}${pressEnter ? " + Enter" : ""}${fillNote}`);
   }
 
   /**
@@ -5363,7 +5402,8 @@ export class BrowserEngine {
       this.actionStartedAt = Date.now();
       // A navigation or a scroll is not input: navigate() moves the action mark itself, and what a scroll loads is the page's own doing.
       if (step.action !== "navigate" && step.action !== "scroll") await this.beginInput();
-      const desc = `${i + 1}. ${step.action} ${step.target ?? step.value ?? ""}`;
+      // A type step is described by its target, never its value: the value may be a password.
+      const desc = `${i + 1}. ${step.action} ${step.target ?? (step.action === "type" ? "(no target)" : (step.value ?? ""))}`;
       // Identity captured BEFORE the action — buttons that relabel themselves
       // (Add to Cart → View Cart) are unmatchable in the post-action DOM.
       let preTestid: string | null = null;
@@ -5470,8 +5510,7 @@ export class BrowserEngine {
             );
           } else if (step.action === "type") {
             await this.noteProbe(step.value ?? "", step.target ?? "the field");
-            const fillNote = await this.fillOrAppend(loc, step.value ?? "", step.replace ?? false);
-            note = fillNote;
+            note = (await this.fillOrAppend(loc, step.value ?? "", step.replace ?? false, label)).note;
             if (step.pressEnter) {
               if (this.readOnly) {
                 const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
@@ -5507,7 +5546,12 @@ export class BrowserEngine {
         // steps are where most of a recorded run actually happens. Leaving
         // them unframed reproduced, inside run_plan, the same hole that crawl
         // had: a form filled and submitted with no picture of any of it.
-        this.logAction({ action: `plan:${step.action}`, target: step.target ?? step.value, url: page.url(), ...(await this.frameFor(`plan-${step.action}`)) });
+        this.logAction({
+          action: `plan:${step.action}`,
+          target: step.target ?? (step.action === "type" ? undefined : step.value),
+          url: page.url(),
+          ...(await this.frameFor(`plan-${step.action}`)),
+        });
         // Plans must feed coverage like ref-based actions do: record the
         // state and mark the acted-on element class as exercised.
         // Hover is deliberately excluded: a hover is a look, not an

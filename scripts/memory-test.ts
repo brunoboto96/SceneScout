@@ -83,6 +83,7 @@ import {
   type FormProbe,
 } from "../src/engine/forms.ts";
 import { coverageView, generateReport, runRecordOf } from "../src/engine/report.ts";
+import { maskedValue, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
 import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
 
 /** One styled element for a design audit; override only what a case is about. */
@@ -1352,6 +1353,152 @@ test("typed text and URLs are redacted at the log, not just on findings", () => 
   const line = fs.readFileSync(store.sessionLogPath, "utf8");
   assert.ok(!line.includes("AAAABBBBCCCCDDDD"), "the typed secret never reaches the log");
   assert.ok(!line.includes("abcdef123456789012"), "nor does a token in the URL");
+});
+
+// ---------------------------------------------------------------------------
+// Secret fields and personal data (sensitive.ts)
+// ---------------------------------------------------------------------------
+
+test("a field is secret by its type, its autocomplete token, or a name, id, label or placeholder that says so", () => {
+  const secret: Array<[SecretFieldFacts, string]> = [
+    [{ type: "password" }, "password"],
+    [{ type: "PASSWORD", label: "Anything" }, "password"],
+    [{ autocomplete: "current-password" }, "password"],
+    [{ autocomplete: "section-login new-password" }, "password"],
+    [{ autocomplete: "one-time-code" }, "one-time code"],
+    [{ autocomplete: "cc-number" }, "card"],
+    [{ autocomplete: "billing cc-csc" }, "card"],
+    [{ autocomplete: "cc-exp" }, "card"],
+    [{ autocomplete: "cc-exp-month" }, "card"],
+    [{ name: "user_password" }, "password"],
+    [{ name: "newPassword" }, "password"],
+    [{ name: "userpassword" }, "password"],
+    [{ name: "password2" }, "password"],
+    [{ id: "loginPwd" }, "password"],
+    [{ label: "Passphrase" }, "password"],
+    [{ label: "Passcode" }, "one-time code"],
+    [{ label: "Enter your PIN" }, "one-time code"],
+    [{ name: "otpCode" }, "one-time code"],
+    [{ placeholder: "One-time code" }, "one-time code"],
+    [{ label: "Verification code" }, "one-time code"],
+    [{ label: "CVC" }, "card"],
+    [{ name: "cvv2" }, "card"],
+    [{ label: "Security code" }, "card"],
+    [{ label: "Card number" }, "card"],
+    [{ name: "cardNumber" }, "card"],
+    [{ label: "Client secret" }, "secret"],
+    [{ label: "API token" }, "secret"],
+    [{ name: "api_key" }, "secret"],
+    [{ name: "otpcode" }, "one-time code"],
+    [{ name: "pass_code" }, "one-time code"],
+    [{ name: "userpasscode" }, "one-time code"],
+    [{ name: "cc-num" }, "card"],
+    [{ label: "CCV" }, "card"],
+    [{ label: "Card no." }, "card"],
+  ];
+  for (const [facts, kind] of secret) assert.equal(secretFieldKind(facts), kind, JSON.stringify(facts));
+  const ordinary: SecretFieldFacts[] = [
+    {},
+    { type: "text", label: "Search" },
+    { type: "email", autocomplete: "email", label: "Email" },
+    { autocomplete: "cc-name", label: "Name on card" },
+    { autocomplete: "off", label: "Comment" },
+    { label: "Spinner speed" },
+    { label: "Tokenizer docs" },
+    { label: "Max tokens" },
+    { label: "Pinned note" },
+    { name: "shipping" },
+    { label: "Secretary's name" },
+    { label: "Passwordless sign-in email" },
+    { label: "Options" },
+    { label: "Order number" },
+    { placeholder: "Card holder" },
+    // Near misses of the words above.
+    { name: "otpout" },
+    { label: "Pass count" },
+    { label: "Codepass level" },
+    { name: "ccnumbers" },
+    { label: "CCVs saved" },
+    { label: "Card notes" },
+    { label: "Card nominee" },
+  ];
+  for (const facts of ordinary) assert.equal(secretFieldKind(facts), null, JSON.stringify(facts));
+});
+
+test("a secret field's typed value is shown as a fixed mask that says why, never its length", () => {
+  assert.equal(maskedValue("password"), "•••• (masked: password field)");
+  assert.equal(maskedValue("card"), "•••• (masked: card field)");
+});
+
+test("redactSecrets masks what was typed into a field whose label names a secret, whatever its length or shape", () => {
+  const masked: Array<[string, string]> = [
+    ['textbox "Password" ← "Sup3rSecretPass"', "Sup3rSecretPass"],
+    ['textbox "Password" ← "hunter2"', "hunter2"],
+    ['textbox "Passphrase" ← "correct horse battery staple"', "correct horse battery staple"],
+    ['textbox "One-time code" ← "123456" + Enter', "123456"],
+    ['textbox "Card number" ← "4242 4242 4242 4242"', "4242"],
+    ['textbox "Confirm password" ← "abc" (replaced existing content "old-pass-1")', "old-pass-1"],
+    ['textbox "PIN" ← "1234" (APPENDED after existing content "98" — pass replace=true to overwrite instead)', '"98"'],
+  ];
+  for (const [text, secret] of masked) {
+    const out = redactSecrets(text);
+    assert.ok(!out.includes(secret), `${secret} must not survive: ${out}`);
+    assert.match(out, /← •••• \(masked: [a-z -]+ field\)/, out);
+    assert.match(out, /\[\d+ secrets? redacted\]$/, `the edit is disclosed: ${out}`);
+  }
+  // An ordinary field keeps what was typed: the repro needs it.
+  for (const kept of [
+    'textbox "Search" ← "hunter2"',
+    'textbox "Max tokens" ← "500"',
+    'textbox "Spinner speed" ← "3" (replaced existing content "2")',
+    'textbox "Note" ← "my password is long"',
+    "Password requirements are not enforced on signup",
+  ]) {
+    assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
+  }
+  // Already masked by the browser: left as it is, and not counted again.
+  const already = 'textbox "Password" ← •••• (masked: password field)';
+  assert.equal(redactSecrets(already), already);
+});
+
+test("redactSecrets redacts email addresses and card numbers; reserved example addresses, image names, ids and timestamps stay", () => {
+  // Built at run time: a real-looking address written out in full would be flagged by the hygiene suite.
+  const person = ["jo.sample", "contoso-mail.net"].join("@");
+  const redacted: Array<[string, string]> = [
+    [`Welcome back, ${person}`, "Welcome back, [email redacted]"],
+    [`/account?email=${["jo.sample", "contoso-mail.net"].join("%40")}`, "/account?email=[email redacted]"],
+    ["Paid with 4111 1111 1111 1111", "Paid with [card number redacted]"],
+    ["card 4111-1111-1111-1111 declined", "card [card number redacted] declined"],
+    ["paid 2026-10-11 4111 1111 1111 1111", "paid 2026-10-11 [card number redacted]"],
+    ["Amex 3782 822463 10005 on file", "Amex [card number redacted] on file"],
+    ["card 4111111111111111", "card [card number redacted]"],
+    ["Visa 4222 2222 2222 2", "Visa [card number redacted]"],
+  ];
+  for (const [text, want] of redacted) {
+    assert.equal(redactPersonal(text), want, text);
+    assert.equal(redactSecrets(text), want, `redactSecrets applies it too: ${text}`);
+  }
+  for (const kept of [
+    "Contact qa@example.com about order 1234567890123",
+    `/static/${["logo", "2x.png"].join("@")}`,
+    "/feed?_=1696000000004",
+    "npm i widget@18.3.1",
+    "order 4111111111111112",
+    // Lists of small numbers whose digits, run together, happen to pass the Luhn check.
+    "widths 320 375 414 768 1024 1280 1440",
+    "sizes 8 16 24 32 40 48 56 64",
+  ]) {
+    assert.equal(redactPersonal(kept), kept, kept);
+    assert.equal(redactSecrets(kept), kept, kept);
+  }
+});
+
+test("a password typed into a labelled field never reaches the session log, even when it is short", () => {
+  const store = freshStore();
+  store.logAction({ action: "type", target: 'textbox "Password" ← "hunter2"', url: "http://x/login" });
+  const line = fs.readFileSync(store.sessionLogPath, "utf8");
+  assert.ok(!line.includes("hunter2"), line);
+  assert.ok(line.includes("masked: password field"), line);
 });
 
 // ---------------------------------------------------------------------------
