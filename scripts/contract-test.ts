@@ -1406,3 +1406,12 @@ test("report.html: the plain view first, a picture shown, the technical detail o
     /<nav><a href="#report" data-testid="report-top-link">Report<\/a><a href="#steps"/,
   );
 });
+
+test("saved-page policy check: a script or handler it cannot see would pass a page that runs code its policy does not name", () => {
+  const page = (body: string) =>
+    `<!doctype html><html><head><meta charset="utf-8">\n${cspMeta(savedPageCsp())}\n<title>t</title><style></style></head><body>${body}</body></html>`;
+  assertSavedPagePolicy(page("<p>nothing runs</p>"), "a page with no code");
+  for (const body of ['<script type="module">a()</script>', "<SCRIPT>a()</SCRIPT>", "<script>a()</script >", '<img ONERROR="a()" src="x.png">']) {
+    assert.throws(() => assertSavedPagePolicy(page(body), body), /a page with no scripts runs none|exactly the page's own inline code/, body);
+  }
+});

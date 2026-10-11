@@ -46,8 +46,9 @@ export function assertSavedPagePolicy(html: string, label: string): void {
   const scriptSrc = policy.get("script-src") ?? [];
   assert.ok(!scriptSrc.includes("'unsafe-inline'") && !scriptSrc.some((s) => /[*:]/.test(s)), `${label}: no blanket script source: ${scriptSrc.join(" ")}`);
 
-  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
-  const handlers = [...html.matchAll(/\son[a-z]+="([^"]*)"/g)].map((m) => decode(m[1]));
+  // Any case, any attributes, and a closing tag with space before its ">", as the HTML parser reads them.
+  const scripts = [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\b[^>]*>/gi)].map((m) => m[1]);
+  const handlers = [...html.matchAll(/\son[a-z]+="([^"]*)"/gi)].map((m) => decode(m[1]));
   const needed = new Set([...scripts, ...handlers].map(hashOf));
   if (needed.size === 0) {
     assert.deepEqual(scriptSrc, ["'none'"], `${label}: a page with no scripts runs none`);
