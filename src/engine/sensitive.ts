@@ -371,8 +371,51 @@ function redactCardsInRun(run: string): string {
 }
 
 /**
+ * Words that say the number after them is a phone number, in the languages the
+ * secret-field labels are read in. Whole words only: "hotel", "Intel" and
+ * "telemetry" are not "tel".
+ */
+const PHONE_WORDS = [
+  // Not "cell" (a table's) or "gsm" (a radio band): both are followed by lists of numbers more often than by a phone number.
+  ...["phone", "telephone", "tel", "tél", "mobile", "cellphone"],
+  ...["telefon", "telefone", "teléfono", "telefono", "téléphone", "telefoon", "telefonu", "móvil", "movil", "celular", "cellulare", "mobil"],
+];
+/** What may stand between the word and the number: punctuation, the quotes and arrow of a typed value, and a word for "number". */
+const PHONE_GAP = String.raw`[\s:.#\-"'←„“”«»]*`;
+const NUMBER_WORD = String.raw`(?:(?:number|no|nr|num|numero|número|numéro|nummer|numer)\.?${PHONE_GAP})?`;
+/**
+ * A phone number written right after a word for one: international (a leading
+ * +, then its groups, or one run) or national with separators (`(555)
+ * 123-4567`, `030 123 45 67`). Group 1 is the number. Without the word nothing
+ * is taken: a signed amount (`+1 234 567`) or a grouped count reads exactly
+ * like an international number, and a fuzz of the shapes a run's text holds
+ * (ids, dates, times, versions, prices, card-like numbers, lists) found the
+ * word to be what keeps them apart.
+ */
+const PHONE_RE = new RegExp(
+  String.raw`(?<!\p{L})(?:${PHONE_WORDS.join("|")})(?!\p{L})${PHONE_GAP}${NUMBER_WORD}(\+[1-9]\d{0,2}(?:[ .\-]?\(?\d{1,5}\)?){1,5}|\(?\d{2,5}\)?(?:[ .\-]\d{2,8}){1,4})(?![\w.]?\d)`,
+  "giu",
+);
+/** A date after the word ("Phone: 2026-10-11") is not a number to hide. */
+const DATE_SHAPED = /^(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[-./]\d{1,2}[-./]\d{2,4})$/;
+
+function redactPhone(match: string, number: string): string {
+  const digits = number.replace(/\D/g, "").length;
+  if (digits < 7 || digits > 15 || DATE_SHAPED.test(number)) return match;
+  // Dots group a French or an international number, which starts with 0 or +; a version or a dotted id does not.
+  if (number.includes(".") && !/^(?:\+|\(?0)/.test(number)) return match;
+  // Without a leading +, 0 or bracket, it is laid out as 555 123 4567 is: at most three groups, the last of four digits or more.
+  // A list of numbers (`Mobile 100 200 300 400`) is not.
+  if (!/^(?:\+|\(|0)/.test(number)) {
+    const groups = number.split(/[ .-]/);
+    if (groups.length > 3 || groups[groups.length - 1].length < 4) return match;
+  }
+  return `${match.slice(0, match.length - number.length)}[phone redacted]`;
+}
+
+/**
  * Personal data a page, a flow or a typed value can put in text the tool
- * keeps: an email address, its @ written out or percent-encoded (a reserved
+ * keeps: a phone number right after a word for one (PHONE_RE), an email address, its @ written out or percent-encoded (a reserved
  * example address and an image's `@2x` name excepted), and a card number
  * (digits that start as a card network's do, at a length it issues, and pass
  * the Luhn check, so an order number, a list of years or a timestamp stays).
@@ -381,5 +424,6 @@ function redactCardsInRun(run: string): string {
 export function redactPersonal(text: string): string {
   return text
     .replace(EMAIL_RE, (m, domain: string) => (RESERVED_DOMAIN_RE.test(domain) || DENSITY_DOMAIN_RE.test(domain) ? m : "[email redacted]"))
+    .replace(PHONE_RE, redactPhone)
     .replace(DIGIT_RUN_RE, redactCardsInRun);
 }

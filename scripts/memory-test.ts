@@ -687,6 +687,113 @@ test("dedup tier 3: paraphrased titles merge when neither carries evidence", () 
   assert.equal(new2, false);
 });
 
+test("a store written by an older engine has the secrets it kept in clear cleaned the first time it is opened, once, owner-only", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+  dirs.push(dir);
+  const memDir = path.join(dir, MEMORY_DIRNAME);
+  fs.mkdirSync(memDir, { recursive: true });
+  // As an engine before the typed-value masking wrote them: the password and a card number in clear.
+  const typed = 'type textbox "Password" ← "hunter2"';
+  const card = "4111 1111 1111 1111";
+  const old = {
+    version: 1,
+    states: {},
+    findings: [
+      {
+        id: "f1",
+        severity: "high",
+        category: "http-error",
+        title: `Checkout refused card ${card}`,
+        detail: `Typed ${card}, then ${typed}; mailed ${["ada.lovelace", "mail.org"].join("@")}`,
+        evidence: "POST /api/things 500",
+        url: "http://localhost:3000/login?password=hunter2",
+        state: "/login#1234567890123456",
+        repro: [typed, 'type textbox "Name" ← "Ada"'],
+        foundAt: "2025-01-01T00:00:00.000Z",
+        runs: 1,
+        verifyNote: `still shows ${card}`,
+        judgedMerges: [{ title: `Refused ${card}`, category: "http-error", severity: "high", pSame: 0.9, at: "2025-01-01T00:00:00.000Z" }],
+      },
+    ],
+    tickets: [
+      {
+        id: "T-1",
+        title: `Pay with ${card}`,
+        criteria: [{ id: "c1", text: `Given card ${card}` }],
+        source: "pasted text",
+        loadedAt: "2025-01-01T00:00:00.000Z",
+      },
+    ],
+    criterionVerdicts: [{ ticket: "T-1", criterion: "c1", verdict: "fail", findings: ["f1"], confidence: 0.9, reason: `the receipt shows ${card}` }],
+  };
+  fs.writeFileSync(path.join(memDir, "memory.json"), JSON.stringify(old), { mode: 0o644 });
+  const oldLog = path.join(memDir, "session-2025-01-01T00-00-00-000Z.jsonl");
+  const lines = [
+    { at: "2025-01-01T00:00:01.000Z", action: "type", target: 'textbox "Password"', result: typed, url: "http://localhost:3000/login" },
+    {
+      at: "2025-01-01T00:00:02.000Z",
+      action: "type",
+      target: 'textbox "Name"',
+      result: 'type textbox "Name" ← "Ada"',
+      url: "http://localhost:3000/pay?card=1",
+    },
+  ];
+  fs.writeFileSync(oldLog, lines.map((l) => JSON.stringify(l)).join("\n") + "\n{not json\n", { mode: 0o644 });
+
+  const store = openStore(dir);
+  store.flush();
+  const onDisk = fs.readFileSync(path.join(memDir, "memory.json"), "utf8");
+  const log = fs.readFileSync(oldLog, "utf8");
+  for (const text of [onDisk, log]) {
+    assert.ok(!text.includes("hunter2"), text);
+    assert.ok(!text.includes(card), text);
+    assert.ok(!text.includes("ada.lovelace"), text);
+  }
+  // What is not a secret stays, and so does what identifies a finding.
+  const f = (JSON.parse(onDisk) as { findings: Finding[] }).findings[0];
+  assert.equal(f.state, "/login#1234567890123456");
+  assert.equal(f.evidence, "POST /api/things 500");
+  assert.ok(f.repro[1].includes('"Ada"'), f.repro[1]);
+  assert.ok(log.includes('\\"Ada\\"') && log.includes("{not json"), log);
+  if (process.platform !== "win32") assert.equal(fs.statSync(oldLog).mode & 0o777, 0o600);
+
+  // Once cleaned, the store says so, and the next open leaves the logs alone.
+  assert.equal((JSON.parse(onDisk) as { redactedWith?: number }).redactedWith, 1);
+  const before = fs.statSync(oldLog).mtimeMs;
+  fs.writeFileSync(oldLog, fs.readFileSync(oldLog, "utf8") + JSON.stringify({ ...lines[0], at: "2025-01-02T00:00:00.000Z" }) + "\n");
+  openStore(dir).flush();
+  assert.ok(fs.readFileSync(oldLog, "utf8").includes("hunter2"), "a store already cleaned does not read its logs again");
+  assert.ok(fs.statSync(oldLog).mtimeMs >= before);
+});
+
+test("opening a store it cannot clean leaves it as it was: a memory.json of an unknown version, a folder it may not write", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+  dirs.push(dir);
+  const memDir = path.join(dir, MEMORY_DIRNAME);
+  fs.mkdirSync(memDir, { recursive: true });
+  const future = JSON.stringify({ version: 2, findings: [{ id: "keep-me", title: "card 4111 1111 1111 1111" }] });
+  fs.writeFileSync(path.join(memDir, "memory.json"), future);
+  openStore(dir);
+  assert.equal(fs.readFileSync(path.join(memDir, "memory.json"), "utf8"), future, "a version this engine cannot read is not replaced on open");
+
+  if (process.platform === "win32" || process.getuid?.() === 0) return;
+  const ro = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+  dirs.push(ro);
+  const roMem = path.join(ro, MEMORY_DIRNAME);
+  fs.mkdirSync(roMem, { recursive: true });
+  const older = JSON.stringify({ version: 1, states: {}, findings: [] });
+  fs.writeFileSync(path.join(roMem, "memory.json"), older);
+  fs.writeFileSync(path.join(roMem, ".gitignore"), "*\n");
+  fs.chmodSync(roMem, 0o555);
+  try {
+    const store = new MemoryStore(ro);
+    assert.match(store.lastSaveError ?? "", /could not be rewritten/);
+    assert.equal(fs.readFileSync(path.join(roMem, "memory.json"), "utf8"), older);
+  } finally {
+    fs.chmodSync(roMem, 0o755);
+  }
+});
+
 test("retroMerge: duplicates stored by an older build collapse on load", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
   dirs.push(dir);
@@ -1678,6 +1785,61 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
   ]) {
     assert.equal(redactPersonal(kept), kept, kept);
     assert.equal(redactSecrets(kept), kept, kept);
+  }
+});
+
+test("a phone number right after a word for phone is redacted; numbers that only sit near one, or have no such word, stay", () => {
+  const redacted: Array<[string, string]> = [
+    ["Phone: +44 20 7946 0958", "Phone: [phone redacted]"],
+    ["Phone: (555) 123-4567", "Phone: [phone redacted]"],
+    ["Tel. 030 123 45 67", "Tel. [phone redacted]"],
+    ["Tél. 01.23.45.67.89", "Tél. [phone redacted]"],
+    ["Telefon 0301 2345678", "Telefon [phone redacted]"],
+    ["mobile 07700-900123", "mobile [phone redacted]"],
+    ["Mobile number: +49 151 2345 6789", "Mobile number: [phone redacted]"],
+    ["Teléfono +34 612 345 678", "Teléfono [phone redacted]"],
+    ["Telefone: +55 11 91234-5678", "Telefone: [phone redacted]"],
+    ["cellulare 333 123 4567", "cellulare [phone redacted]"],
+    ["Tel +4930123456789", "Tel [phone redacted]"],
+    // As the action log writes a value typed into a field labelled for a phone.
+    ['type textbox "Phone" ← "+44 20 7946 0958"', 'type textbox "Phone" ← "[phone redacted]"'],
+    ['type textbox "Mobile number" ← "07700 900123"', 'type textbox "Mobile number" ← "[phone redacted]"'],
+  ];
+  for (const [text, want] of redacted) {
+    assert.equal(redactPersonal(text), want, text);
+    assert.equal(redactSecrets(text), want, `redactSecrets applies it too: ${text}`);
+  }
+  for (const kept of [
+    // Contrastive with the numbers above: the same digits with no word for phone before them.
+    "+44 20 7946 0958",
+    "call 030 123 45 67",
+    // Signed amounts and counts, which a phone rule without the word would take.
+    "+1 234 567 €",
+    "+12.345.678",
+    "+120-4500 items",
+    "Mobile revenue +12 345 678",
+    // After the word, but a date, a time range, a version, a model, a price or a list.
+    "Phone: 2026-10-11",
+    "Mobile app released 12.3.2026",
+    "Tel. 9:00-17:00",
+    "Mobile 12.34.567.8901",
+    "Mobile build 4.12.345",
+    "Phone 15 Pro, 256 GB",
+    "Phone plan 12.99 per month",
+    "Phones: 120 340 560",
+    "Telephone 120 345,67 EUR",
+    "tel lines: 4",
+    // Words that contain a word for phone.
+    "hotel 030 123 45 67",
+    "Intel 2024 1234 5678",
+    "telemetry 030 123 4567",
+    // Lists of numbers after a word that is often a phone's and often not.
+    "cell 12 34 56 78 in table",
+    "GSM 900 1800 1900 bands",
+    "Mobile 100 200 300 400 500",
+    "Mobile 375 667",
+  ]) {
+    assert.equal(redactPersonal(kept), kept, kept);
   }
 });
 
