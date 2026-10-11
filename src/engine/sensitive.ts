@@ -194,8 +194,16 @@ const RESERVED_DOMAIN_RE = /^(?:[\p{L}\p{N}-]+\.)*(?:example\.(?:com|org|net)|ex
 const DENSITY_DOMAIN_RE = /^\d+(?:\.\d+)?x\./i;
 /** An address in any script, its @ written out or percent-encoded (`%40`), as a query string carries it. Group 1 is the domain. */
 const EMAIL_RE = /[\p{L}\p{N}._%+-]+(?:@|%40)([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:\p{L}{2,}|xn--[a-z0-9-]+))/giu;
-/** A run of digit groups split by single spaces or hyphens; a card number is some of its groups. */
-const DIGIT_RUN_RE = /(?<![\d.])\d+(?:[ -]\d+)*/g;
+/**
+ * A run of digit groups split by single separators: a space, a non-breaking,
+ * narrow non-breaking, thin or figure space (a formatted number, a French
+ * locale, typeset text), a hyphen or a dot. A card number is some of its
+ * groups; cardShaped keeps an address, a version, a date or a decimal from
+ * reading as one. A run never starts at a decimal's fraction (`0.4111…`), but
+ * does after a word's dot (`no.4111…`).
+ */
+const DIGIT_SEPARATOR = "[ \\u00a0\\u2007\\u2009\\u202f.-]";
+const DIGIT_RUN_RE = new RegExp(String.raw`(?<!\d)(?<!\d\.)\d+(?:${DIGIT_SEPARATOR}\d+)*`, "g");
 /** A card number's first digit: the networks issue from 2 to 6 and 8, so a millisecond timestamp (a leading 1) is never one. */
 const CARD_FIRST_DIGIT_RE = /^[2-68]/;
 
@@ -220,10 +228,13 @@ function isCardNumber(digits: string): boolean {
  * Whether groups[i..j] are laid out as a card number is written: one run of
  * digits, or groups of at least four (4-4-4-4, 4-6-5) with a shorter last one
  * allowed. A list of small numbers (`320 375 414 768`) is not, whatever its
- * digits add up to.
+ * digits add up to. Across a dot every group is at most six digits, as a
+ * card's groups are, so a decimal with a long whole part (`4111111111.111111`)
+ * is not one either. `seps[k]` is the separator before groups[k + 1].
  */
-function cardShaped(groups: readonly string[], i: number, j: number): boolean {
+function cardShaped(groups: readonly string[], seps: readonly string[], i: number, j: number): boolean {
   for (let k = i; k < j; k++) if (groups[k].length < 4) return false;
+  if (seps.slice(i, j).includes(".")) for (let k = i; k <= j; k++) if (groups[k].length > 6) return false;
   return true;
 }
 
@@ -233,16 +244,19 @@ function cardShaped(groups: readonly string[], i: number, j: number): boolean {
  * not hide it. A group is never split: digits inside a longer id stay.
  */
 function redactCardsInRun(run: string): string {
-  const parts = run.split(/([ -])/);
+  const parts = run.split(new RegExp(`(${DIGIT_SEPARATOR})`));
   const groups = parts.filter((_, i) => i % 2 === 0);
+  const seps = parts.filter((_, i) => i % 2 === 1);
   let out = "";
   let i = 0;
   while (i < groups.length) {
     let end = -1;
     let digits = "";
-    for (let j = i; j < groups.length && digits.length + groups[j].length <= 19; j++) {
+    // A group after a dot is a decimal's fraction or a version's part, never the start of a card number.
+    const afterDot = i > 0 && parts[2 * i - 1] === ".";
+    for (let j = i; !afterDot && j < groups.length && digits.length + groups[j].length <= 19; j++) {
       digits += groups[j];
-      if (cardShaped(groups, i, j) && isCardNumber(digits)) end = j;
+      if (cardShaped(groups, seps, i, j) && isCardNumber(digits)) end = j;
     }
     if (i > 0) out += parts[2 * i - 1];
     if (end === -1) {

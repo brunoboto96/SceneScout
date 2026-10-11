@@ -1491,6 +1491,17 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     ["Amex 3782 822463 10005 on file", "Amex [card number redacted] on file"],
     ["card 4111111111111111", "card [card number redacted]"],
     ["Visa 4222 2222 2222 2", "Visa [card number redacted]"],
+    // Grouped with dots, or with the non-breaking spaces a formatted number or a French locale uses.
+    ["card 4111.1111.1111.1111 declined", "card [card number redacted] declined"],
+    ["card 4111\u00a01111\u00a01111\u00a01111 declined", "card [card number redacted] declined"],
+    ["card 4111\u202f1111\u202f1111\u202f1111 declined", "card [card number redacted] declined"],
+    ["paid 11.10.2026 4111.1111.1111.1111", "paid 11.10.2026 [card number redacted]"],
+    // Grouped with a thin space or a figure space, as typeset numbers are.
+    ["card 4111\u20091111\u20091111\u20091111 declined", "card [card number redacted] declined"],
+    ["card 4111\u20071111\u20071111\u20071111 declined", "card [card number redacted] declined"],
+    // A dot after a word ends an abbreviation, not a number: the card after it is still one.
+    ["Card no.4111 1111 1111 1111", "Card no.[card number redacted]"],
+    ["Ref.4111111111111111 declined", "Ref.[card number redacted] declined"],
   ];
   for (const [text, want] of redacted) {
     assert.equal(redactPersonal(text), want, text);
@@ -1505,6 +1516,18 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     // Lists of small numbers whose digits, run together, happen to pass the Luhn check.
     "widths 320 375 414 768 1024 1280 1440",
     "sizes 8 16 24 32 40 48 56 64",
+    // The same digits as a card number but failing the Luhn check, dotted: as kept as when spaced.
+    "build 4111.1111.1111.1112",
+    // Dotted numbers that are not laid out as a card is: an address, a version, a date, an amount.
+    "host 10.20.30.40 and 10.200.30.104",
+    "version 3.23.4 and 2026.10.11",
+    "total 4111.11 and 1\u00a0234\u00a0567,89",
+    // A decimal's fraction is never a card number on its own, however long and whatever its digits.
+    "took 747.4293391307649 ms",
+    "at 1696000000.4111111111111111",
+    "at 0.4111111111111111",
+    // A decimal whose digits, dot left out, pass the card check: a card's groups are at most six digits.
+    "total 4111111111.111111 and 411111111111.1111",
   ]) {
     assert.equal(redactPersonal(kept), kept, kept);
     assert.equal(redactSecrets(kept), kept, kept);
