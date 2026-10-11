@@ -38,6 +38,35 @@ export const LIVE_TOKEN_FILE = "live-token";
 export function liveTokenFileName(pid: number): string {
   return `${LIVE_TOKEN_FILE}.${pid}`;
 }
+/**
+ * Hand the live view's token to `scenescout watch`: this engine's own file,
+ * then the shared name. Each is born owner-only under a fresh temporary name
+ * and renamed into place. Writing to the name itself would keep the bits of a
+ * file already there (`mode` applies only on creation) and would follow a link
+ * left at it, sending the token into whatever file the link points at; a
+ * rename replaces the entry, link or file, and never writes through it.
+ */
+export async function writeLiveToken(dir: string, pid: number, token: string): Promise<void> {
+  for (const name of [liveTokenFileName(pid), LIVE_TOKEN_FILE]) {
+    const file = path.join(dir, name);
+    const temp = `${file}.${pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+    // "wx": created here and now, so the mode given is the one it is born with, and never a link's target.
+    const handle = await fs.promises.open(temp, "wx", 0o600);
+    try {
+      try {
+        await handle.writeFile(token);
+      } finally {
+        await handle.close();
+      }
+      await fs.promises.rename(temp, file);
+    } catch (err) {
+      // The temporary file holds the token too: nothing that failed may leave it behind.
+      await fs.promises.rm(temp, { force: true }).catch(() => {});
+      throw err;
+    }
+  }
+}
+
 /** `SCENESCOUT_LIVE=off` keeps the engine from opening the live view's port at all. */
 export const LIVE_ENV = "SCENESCOUT_LIVE";
 
