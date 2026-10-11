@@ -2113,14 +2113,25 @@ test("benchmark workflow: a commit id runs only when it is on main or in a relea
     const unmerged = commit("unmerged");
     const notARelease = commit("tagged, not released");
     git(upstream, "tag", "nightly");
+    const preview = commit("tagged like a release, not one");
+    git(upstream, "tag", "v2-preview");
     git(upstream, "switch", "-q", "main");
     const clone = path.join(dir, "clone");
     git(dir, "clone", "-q", "--no-local", upstream, clone);
 
     const accepts = (ref: string) => spawnSync("bash", ["-eo", "pipefail", "-c", steps[origin].run!], { cwd: clone, env: { ...env, REF: ref } }).status === 0;
     for (const ref of [onMain, mainTip, released, releaseParent, "", "main", "v1.2.3"]) assert.ok(accepts(ref), `refuses ${ref || "(empty)"}`);
-    // The near misses: a commit beside a release but in no release's history, one tagged by a tag that is not vX.Y.Z, and one this repository lacks.
-    for (const ref of [unmerged, notARelease, "0123456789abcdef0123456789abcdef01234567"]) assert.ok(!accepts(ref), `accepts ${ref}`);
+    // The near misses: a commit beside a release but in no release's history, ones tagged by a tag that is not vX.Y.Z (one of
+    // them starting like a release), and one this repository lacks.
+    for (const ref of [unmerged, notARelease, preview, "0123456789abcdef0123456789abcdef01234567"]) assert.ok(!accepts(ref), `accepts ${ref}`);
+
+    // A shallow clone cannot see a commit's history, so the step refuses rather than guesses: fetch-depth 0 is what makes it work.
+    const shallow = path.join(dir, "shallow");
+    git(dir, "clone", "-q", "--depth", "1", "--no-single-branch", pathToFileURL(upstream).href, shallow);
+    const acceptsShallow = (ref: string) =>
+      spawnSync("bash", ["-eo", "pipefail", "-c", steps[origin].run!], { cwd: shallow, env: { ...env, REF: ref } }).status === 0;
+    assert.ok(acceptsShallow(mainTip), "the tip of main is there");
+    assert.ok(!acceptsShallow(onMain), "an older commit on main is refused in a shallow clone");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
