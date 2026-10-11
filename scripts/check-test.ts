@@ -125,6 +125,7 @@ import {
   journeyVideoPath,
   replayVideos,
   journeySteps,
+  redactPersonal,
   redactReplay,
   replayFramePath,
   replayFrames,
@@ -3480,6 +3481,28 @@ test("replay: an email address or a card number the page or a flow names is reda
   assert.ok(html.includes("1234567890123"), "a number that is not a card number stays");
   assert.match(html, /\[email redacted\]/);
   assert.match(html, /\[card number redacted\]/);
+});
+
+test("replay: an address with its @ percent-encoded or in another script, and a card number after a date, are redacted; an image's @2x name and a timestamp are not", () => {
+  // Built at run time, as above, so the hygiene suite does not flag a real-looking address.
+  const at = (local: string, domain: string, sep = "@") => [local, domain].join(sep);
+  const redacted: Array<[string, string]> = [
+    [`/account?email=${at("jo.sample", "contoso-mail.net", "%40")}`, "/account?email=[email redacted]"],
+    [`/account?email=${at("jo%2Btag", "contoso-mail.net", "%40")}`, "/account?email=[email redacted]"],
+    [`no account for ${at("jöe", "contoso-mail.net")}`, "no account for [email redacted]"],
+    [`no account for ${at("jo", "bücher-mail.de")}`, "no account for [email redacted]"],
+    ["paid 2026-10-11 4111 1111 1111 1111", "paid 2026-10-11 [card number redacted]"],
+    ["Visa 4222222222222", "Visa [card number redacted]"],
+  ];
+  for (const [text, want] of redacted) assert.equal(redactPersonal(text), want, text);
+  const kept = [
+    `/static/${at("logo", "2x.png")}`,
+    `/img/${at("icon", "1.5x.webp")}`,
+    "/feed?_=1696000000004",
+    "npm i widget@18.3.1",
+    at("qa", "sub.example.com"),
+  ];
+  for (const text of kept) assert.equal(redactPersonal(text), text, text);
 });
 
 test("replay page: run metadata, a badge per journey, the first failing step highlighted and linked, and app text escaped", () => {
