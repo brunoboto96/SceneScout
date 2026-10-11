@@ -128,7 +128,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+          fetch-depth: 0
           persist-credentials: false
+      # A commit id must be on main or in a release tag's history: GitHub
+      # serves a fork's commits under this repository's name too, and nothing
+      # from a fork or an unmerged branch runs beside the key. The checkout
+      # fetches all history and tags for this; nothing has run yet.
+      - name: A commit id is on main or in a release
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            if git merge-base --is-ancestor "$REF" origin/main 2>/dev/null; then exit 0; fi
+            # A release is a tag shaped exactly vX.Y.Z, as the step before this one reads it; not v2-preview.
+            tags="$(git tag --list 'v[0-9]*' --contains "$REF" 2>/dev/null || true)"
+            if printf '%s\n' "$tags" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then exit 0; fi
+            echo "::error::$REF is neither on main nor in a release tag's history, so it does not run beside the model's key"; exit 1
+          fi
       - id: commit
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -234,7 +250,7 @@ jobs:
 
       # The project directory itself, so the artifact unpacks to the layout bench reads: <dir>/.scenescout/memory.json.
       - name: Keep the run
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: scenescout-ci-benchmark-${{ inputs.app }}
           path: ${{ steps.app.outputs.project }}

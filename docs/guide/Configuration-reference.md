@@ -1,5 +1,18 @@
 # Configuration reference
 
+> **Who this is for:** anyone who needs the exact name or default of a setting.
+>
+> **What you will be able to do:** look up any command, option, environment variable, action input or MCP setting, with its default.
+
+| Section | What is in it |
+|---|---|
+| [Commands](#commands) | Every `scenescout` command and its options, and the check's rules |
+| [Environment variables](#environment-variables) | What the server and each command read from the environment |
+| [GitHub Action inputs](#github-action-inputs) | The inputs and outputs of the check, ci and qa actions |
+| [Repository variables and secrets](#repository-variables-and-secrets-for-scenescout-qa) | What the `/scenescout qa` workflows read |
+| [`scout_login`](#scout_login-options) and [`scout_attach`](#scout_attach-options) options | What an agent can pass when it signs in or attaches |
+| [MCP prompts](#mcp-prompts) and [mod settings](#claude-code-mod-settings) | The prompts a client lists, and the optional Claude Code mod's settings |
+
 Every command-line option, environment variable, GitHub Action input, `/scenescout qa` repository setting, `scout_attach` option and MCP prompt, with its default. A test (`guide-test`, and `mcp-check` for `scout_attach`, `scout_login` and the MCP prompts) compares these tables with the code, so an option added or removed in one place and not the other fails the build. `scenescout --help` prints the same options in short.
 
 An option takes its value after a space or an equals sign: `--fail-on high` or `--fail-on=high`. Relative paths are resolved from the directory the command runs in.
@@ -168,6 +181,8 @@ Every issue carries the `scenescout` label, which a later export lists issues by
 | Option | Default | |
 |---|---|---|
 | `--no-open` | off | Print the live view's address without opening a browser |
+
+The address is always printed. A browser is not opened in CI, over SSH or where no display server is running; the command says why, and the address can be opened by hand.
 
 `scenescout scan`, `scenescout status` and `scenescout serve` take no options.
 

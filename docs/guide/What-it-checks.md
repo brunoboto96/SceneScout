@@ -1,5 +1,9 @@
 # What it checks
 
+> **Who this is for:** anyone who wants to know what a run can and cannot find.
+>
+> **What you will be able to do:** read a finding's category, ask the agent for the right tool, and know what is checked without being asked.
+
 What SceneScout looks for on every page, and the tools an agent uses to look. The agent picks the tools; you rarely call them by hand.
 
 ## Checks that run after every action

@@ -57,7 +57,7 @@ jobs:
       check-workflow: ${{ steps.gate.outputs.check-workflow }}
     steps:
       - id: gate
-        uses: brunoboto96/SceneScout/qa@v3.21.0
+        uses: brunoboto96/SceneScout/qa@v3.23.4
         with:
           stage: gate
           allowed: ${{ vars.SCENESCOUT_QA_ALLOWED }}
@@ -87,7 +87,7 @@ jobs:
       group: scenescout-qa-${{ github.repository }}-${{ needs.gate.outputs.pr }}
       cancel-in-progress: true
     steps:
-      - uses: brunoboto96/SceneScout/ci@v3.21.0
+      - uses: brunoboto96/SceneScout/ci@v3.23.4
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         with:
@@ -118,7 +118,7 @@ jobs:
       pushed: ${{ steps.shots.outputs.pushed }}
     steps:
       - id: shots
-        uses: brunoboto96/SceneScout/qa@v3.21.0
+        uses: brunoboto96/SceneScout/qa@v3.23.4
         with:
           stage: shots
           artifact-name: scenescout-qa-${{ needs.gate.outputs.pr }}
@@ -133,7 +133,7 @@ jobs:
       pull-requests: write # post the reply
       actions: read # link the run's artifact, and look for a newer run on the same pull request
     steps:
-      - uses: brunoboto96/SceneScout/qa@v3.21.0
+      - uses: brunoboto96/SceneScout/qa@v3.23.4
         with:
           stage: report
           result: ${{ needs.qa.result }}
@@ -158,7 +158,7 @@ jobs:
       actions: write # dispatch the project's workflow; also read its run and download its artifact
       pull-requests: write # post the verdict
     steps:
-      - uses: brunoboto96/SceneScout/qa@v3.21.0
+      - uses: brunoboto96/SceneScout/qa@v3.23.4
         with:
           stage: check
           check-workflow: ${{ needs.gate.outputs.check-workflow }}
