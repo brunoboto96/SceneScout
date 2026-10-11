@@ -384,7 +384,7 @@ const COMMANDS = sorted([...SUBCOMMANDS]);
 
 test("the reference lists every command the CLI dispatches, and the first run an address starts", () => {
   const rows = tableIn(REFERENCE, "## Commands").map((r) => r[0]);
-  const firstRun = rows.filter((r) => r === "`scenescout <url>`");
+  const firstRun: string[] = rows.filter((r) => r === "`scenescout <url>`");
   assert.equal(firstRun.length, 1, "the commands table has one row for `scenescout <url>`");
   assert.ok(looksLikeUrl("http://localhost:3000"), "the CLI takes an address as a first run");
   const listed = sorted(rows.filter((r) => !firstRun.includes(r)).map((r) => r.match(/^`scenescout ([a-z]+)/)?.[1] ?? ""));

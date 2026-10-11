@@ -80,6 +80,7 @@ import {
   rebaseUrl,
   recordChoice,
   returnsInline,
+  type FindingPicture,
 } from "../src/engine/capture.ts";
 import { decodePng, diffImages, encodePng, encodePngCompact, fitPicture, FIT_MIN_SIDE, isPng, shrinkImage, type RgbaImage } from "../src/engine/png.ts";
 import {
@@ -2001,7 +2002,7 @@ test("the same place matches with either separator and, on Windows, either case"
   assert.equal(samePlace("posix", "/work/app", "/work/other"), false);
 });
 
-type WorkflowStep = { uses?: string; run?: string; env?: Record<string, string>; with?: Record<string, string> };
+type WorkflowStep = { uses?: string; run?: string; if?: string; env?: Record<string, string>; with?: Record<string, string> };
 type WorkflowJob = {
   permissions?: Record<string, string>;
   needs?: string | string[];
@@ -3552,7 +3553,8 @@ test("evidence: a picture's path is under the session's recordings, and nothing 
   assert.deepEqual(readFindingPicture({ ...ok, pictureShot: { ...shot, frame: "page" } }), { file: ok.picture });
   assert.deepEqual(readFindingPicture({ ...ok, pictureShot: { ...shot, width: "300" } }), { file: ok.picture });
   assert.equal(describePicture(readFindingPicture(ok)!), '300×120, "Save" and around it');
-  assert.equal(describePicture({ file: ok.picture }), "what the page showed");
+  const pathOnly: FindingPicture = { file: ok.picture };
+  assert.equal(describePicture(pathOnly), "what the page showed");
   assert.equal(describePicture({ ...shot, frame: "viewport", label: undefined }), "300×120, the page as it was");
 });
 

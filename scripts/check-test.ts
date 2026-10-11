@@ -59,6 +59,7 @@ import {
   statusMatches,
   urlMatches,
   type FlowRun,
+  type FlowStep,
 } from "../src/engine/flow.ts";
 import { writeSelfIgnore, type Finding } from "../src/engine/memory.ts";
 import {

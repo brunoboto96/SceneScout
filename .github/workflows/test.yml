@@ -73,6 +73,10 @@ jobs:
       - name: Install browser
         run: npx playwright install --with-deps chromium
       - run: npm run build
+      # The test scripts are run by tsx, which strips types without checking them; this checks them against the built engine.
+      - name: Type check of the test scripts
+        if: matrix.shard == 2
+        run: npm run typecheck:scripts
       - name: Unit suites
         if: matrix.shard == 2
         run: npm run test:unit

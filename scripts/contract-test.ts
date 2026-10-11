@@ -16,7 +16,7 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
 import { crawledRoute, crawlLine, mainStateFlag } from "../src/engine/crawl.ts";
-import { MemoryStore, reachedRoutes } from "../src/engine/memory.ts";
+import { MemoryStore, reachedRoutes, type ActionLogEntry } from "../src/engine/memory.ts";
 import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
   classifyFilledStates,
@@ -740,15 +740,18 @@ test("the report's summary names the one-page version only when it is really the
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+/** An action logged at a time the test names: the store dates an entry itself only when the entry carries no time. */
+const logAt = (store: MemoryStore, entry: ActionLogEntry): void => store.logAction(entry);
+
 test("replay: a finding's evidence comes from the session that filed it, not from whoever acted last", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-ev-"));
   const store = new MemoryStore(dir);
   // Two browsers working at once: their steps interleave in one log.
   const at = (n: number): string => new Date(Date.parse("2026-09-20T14:00:00.000Z") + n * 1000).toISOString();
-  store.logAction({ at: at(1), session: "clerk", action: "click", target: "Save", url: "http://app.test/orders", frame: "recordings/clerk/0001-click.jpg" });
-  store.logAction({ at: at(2), session: "admin", action: "click", target: "Approve", url: "http://app.test/admin", frame: "recordings/admin/0001-click.jpg" });
-  store.logAction({ at: at(3), session: "clerk", action: "navigate", target: "", url: "http://app.test/orders", frame: "recordings/clerk/0002-navigate.jpg" });
-  store.logAction({ at: at(4), session: "admin", action: "navigate", target: "", url: "http://app.test/admin", frame: "recordings/admin/0002-navigate.jpg" });
+  logAt(store, { at: at(1), session: "clerk", action: "click", target: "Save", url: "http://app.test/orders", frame: "recordings/clerk/0001-click.jpg" });
+  logAt(store, { at: at(2), session: "admin", action: "click", target: "Approve", url: "http://app.test/admin", frame: "recordings/admin/0001-click.jpg" });
+  logAt(store, { at: at(3), session: "clerk", action: "navigate", target: "", url: "http://app.test/orders", frame: "recordings/clerk/0002-navigate.jpg" });
+  logAt(store, { at: at(4), session: "admin", action: "navigate", target: "", url: "http://app.test/admin", frame: "recordings/admin/0002-navigate.jpg" });
   const [finding] = store.addFinding({
     severity: "high",
     category: "http-error",
@@ -772,7 +775,7 @@ test("replay: a finding's evidence comes from the session that filed it, not fro
 test("replay: a finding from before sessions were recorded still gets the frames around it", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-ev-old-"));
   const store = new MemoryStore(dir);
-  store.logAction({
+  logAt(store, {
     at: "2026-09-20T14:00:01.000Z",
     session: "clerk",
     action: "click",
@@ -803,7 +806,7 @@ test("replay-redaction: a token in a step's URL never reaches the document that 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-redact-"));
   const store = new MemoryStore(dir);
   const secret = "http://app.test/reset?access_token=sk-live-abcdefghijklmnopqrstuvwxyz0123456789";
-  store.logAction({ at: "2026-09-20T14:00:01.000Z", session: "clerk", action: "navigate", target: "", url: secret });
+  logAt(store, { at: "2026-09-20T14:00:01.000Z", session: "clerk", action: "navigate", target: "", url: secret });
   // The log is redacted as it is written, so the trail is clean before any
   // document is built from it. This pins that end to end: the page is the one
   // artifact that leaves the machine, and nothing downstream filters again.

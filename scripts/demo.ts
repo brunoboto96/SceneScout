@@ -20,7 +20,6 @@ import { chromium } from "playwright";
 import { BrowserEngine } from "../dist/engine/browser.js";
 import { computeGaps, generateReport } from "../dist/engine/report.js";
 import { judgeCriterion, parseTickets, type CriterionInput } from "../dist/engine/tickets.js";
-// @ts-expect-error — plain .mjs, no types; it exports createDemoServer().
 import { createDemoServer } from "../demo-app/server.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));

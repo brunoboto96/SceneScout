@@ -136,6 +136,10 @@ export function writtenReplay(file) {
  * videos beside it, or empty: the folders are kept only with a page this run wrote, which the run
  * step removed beforehand, so frames an earlier run left are never kept as
  * this run's.
+ *
+ * @param {string} outDir
+ * @param {(file: string) => boolean} [exists]
+ * @param {(file: string) => boolean} [written]
  */
 export function replayOutputs(outDir, exists = fs.existsSync, written = writtenReplay) {
   const page = path.join(outDir, "replay.html");
@@ -202,6 +206,10 @@ export function failingText(failing, retestsFailing, failOn) {
   return r > 0 ? `${n} failing the gate (${n - r} issue(s) ${at}, ${r} re-tested finding(s) still reproducing)` : `${n} issue(s) ${at}`;
 }
 
+/**
+ * @param {{ exitCode: string | number, failing?: string, failOn?: string, url?: string, error?: string, passed?: string, couldNotRun?: string, retestsFailing?: string }} outcome
+ *   The check's step outputs, as the workflow passes them: strings, or a number when called directly.
+ */
 export function verdict({ exitCode, failing, failOn, url, error, passed, couldNotRun, retestsFailing }) {
   const code = Number(exitCode);
   if (code === 0) return { exit: 0, annotation: null };

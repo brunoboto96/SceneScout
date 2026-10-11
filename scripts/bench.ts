@@ -211,7 +211,9 @@ if (values.all) {
 const target = positionals[0];
 if (!target || positionals.length > 1) fail(USAGE);
 const archived = target.endsWith(".json") ? readArchive(target) : undefined;
-const source: Pick<RunArchive, "findings" | "decisions" | "laneRoutes"> = archived ?? readMemory(target);
+/** What is scored, from an archive or the project's memory: score() reads it and never changes it. */
+const source: Readonly<Pick<RunArchive, "laneRoutes">> & { findings: Parameters<typeof score>[1]; decisions: Parameters<typeof score>[2] } =
+  archived ?? readMemory(target);
 let key: AnswerKey;
 if (keyFile) {
   key = loadKey(keyFile);
