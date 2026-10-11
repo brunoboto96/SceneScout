@@ -20,7 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { escapeAnnotation, inputsFromEnv, setOutputs } from "./check-action.mjs";
-import { checkWorkflowId, COMMENT_MARKER, githubClient, inert } from "./qa-action.mjs";
+import { checkWorkflowId, COMMENT_MARKER, CONTROL_CHARS, githubClient, inert } from "./qa-action.mjs";
 import { fileReader, readZipEntry, zipEntries } from "./zip.mjs";
 
 export { checkWorkflowId };
@@ -83,12 +83,13 @@ const reply = (lines) => `${COMMENT_MARKER}\n${lines.join("\n")}\n`;
 /**
  * A name (a workflow, a branch, an artifact) as a code span. Inside one,
  * Markdown renders nothing, so it needs no backslash escapes (GitHub would
- * show them); only backticks and control characters are taken out, and it is
- * cut to `max` characters.
+ * show them); only backticks, control and bidirectional characters are taken
+ * out, and it is cut to `max` characters.
  */
 export function codeSpan(text, max = 100) {
   let s = String(text ?? "")
-    .replace(/[\u0000-\u001f\u007f`]+/g, " ")
+    .replace(CONTROL_CHARS, " ")
+    .replace(/`+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (s.length > max) s = `${s.slice(0, max - 1)}…`;
