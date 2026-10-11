@@ -687,10 +687,18 @@ export function jiraRevision(summary: unknown, description: unknown): string {
 
 // ── inert text ──────────────────────────────────────────────────────────────
 
+/**
+ * C0 and C1 controls and every bidirectional control (Unicode's Bidi_Control
+ * set: U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069): each run becomes
+ * a space, so nothing is invisible and nothing reorders the line. The same set
+ * as the qa reply's (action/qa-action.mjs), which export-test holds it to.
+ */
+export const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g;
+
 /** One line: control, bidirectional-override and line-break characters become spaces; runs of space collapse; at most `max`. */
 export function oneLine(text: unknown, max: number): string {
   let s = String(text ?? "")
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, " ")
+    .replace(CONTROL_CHARS, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (s.length > max) s = `${s.slice(0, max - 1)}…`;
@@ -700,8 +708,9 @@ export function oneLine(text: unknown, max: number): string {
 /**
  * Zero-width spaces where a tracker would otherwise act on text: after `@`
  * (a mention, an email autolink), inside `://` and `www.` (a link), between
- * `#` or `GH-` and a number (a cross-reference), and inside the marker's word
- * (so quoted text cannot claim to be another finding's issue).
+ * `#`, `GH-` or `issues/`, `pull/`, `discussions/` and a number (a
+ * cross-reference), and inside the marker's word (so quoted text cannot claim
+ * to be another finding's issue).
  */
 function breakTriggers(s: string): string {
   return s
@@ -710,16 +719,17 @@ function breakTriggers(s: string): string {
     .replace(/www\./gi, (m) => `${m.slice(0, 3)}\u200b.`)
     .replace(/#(?=\d)/g, "#\u200b")
     .replace(/\bgh-(?=\d)/gi, (m) => `${m.slice(0, 2)}\u200b-`)
+    .replace(/\/(issues|pulls?|discussions)\/(?=\d)/gi, "/$1/\u200b")
     .replace(/scenescout-finding/gi, (m) => `${m.slice(0, 10)}\u200b${m.slice(10)}`);
 }
 
 /**
  * Text for a GitHub Markdown body: one line, HTML-escaped, every Markdown
- * punctuation mark backslash-escaped, and every trigger broken. The escaping
- * of the `/scenescout qa` reply (action/qa-action.mjs `inert`), which
- * export-test holds it to, plus `$` (GitHub renders `$…$` as maths), the
- * cross-reference and marker breaks, and no bidirectional or C1 control
- * characters.
+ * punctuation mark backslash-escaped, and every trigger broken. A backslash
+ * does not stop GitHub rendering `$…$` as maths, so each `$` gets a
+ * zero-width space before it instead. This is the escaping of the
+ * `/scenescout qa` reply (action/qa-action.mjs `inert`) character for
+ * character, which export-test holds it to, plus the marker break.
  */
 export function inertMarkdown(text: unknown, max = 160): string {
   return breakTriggers(
@@ -727,7 +737,8 @@ export function inertMarkdown(text: unknown, max = 160): string {
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
-      .replace(/([\\`*_{}[\]()#+!|~$])/g, "\\$1"),
+      .replace(/([\\`*_{}[\]()#+!|~])/g, "\\$1")
+      .replace(/\$/g, "\u200b$"),
   );
 }
 
