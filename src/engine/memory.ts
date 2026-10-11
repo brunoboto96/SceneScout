@@ -6,6 +6,7 @@ import type { PictureShot } from "./capture.js";
 import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
+import { maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
 import type { InjectionProbe } from "./injection.js";
 import { readFromRunNotes, readRunRecords, recordFromJson, unionFromRunNotes, unionRecords, type FromRunNote, type RunRecord } from "./from-run.js";
 import { addReading, addVerdict, MAX_TICKETS_KEPT, mergeTicketData, type CriterionVerdict, type StoredTicket, type Ticket } from "./tickets.js";
@@ -437,20 +438,30 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
 ];
 
 /**
- * Strip anything that looks like a credential from text we are about to persist.
+ * Strip anything that looks like a credential from text we are about to
+ * persist: credential shapes, a value typed into a field whose label names a
+ * secret (`textbox "Password" ← "…"`, whatever its length), the value of a
+ * parameter named for one (`?password=…`), and personal data
+ * (email addresses and card numbers, sensitive.ts).
  *
  * Silent edits are their own hazard, so a redaction announces itself: a reader
  * who sees mangled-looking text needs to know the tool did it deliberately.
+ * Credentials and masked values are counted in a trailing note; personal data
+ * is replaced by a marker that names it (`[email redacted]`).
  */
 export function redactSecrets(text: string): string {
-  let out = text;
-  let hits = 0;
+  const masked = maskSecretFieldValues(text);
+  // A parameter named for a secret (`?pin=…` from a GET form) is masked whatever its value looks like.
+  const params = maskSecretParams(masked.text);
+  let out = params.text;
+  let hits = masked.hits + params.hits;
   for (const [re, replacement] of SECRET_PATTERNS) {
     out = out.replace(re, (...args) => {
       hits += 1;
       return replacement.replace(/\$(\d)/g, (_, n: string) => String(args[Number(n)] ?? ""));
     });
   }
+  out = redactPersonal(out);
   return hits > 0 ? `${out} [${hits} secret${hits === 1 ? "" : "s"} redacted]` : out;
 }
 
@@ -2275,11 +2286,17 @@ export class MemoryStore {
    * Append to the action log — the choke point where redaction belongs.
    *
    * Redacting only a finding's title/detail/evidence left the same secrets
-   * flowing by a parallel route: `repro` is built from these entries, and a
-   * `type` step logs the text that was typed (a password, during an auth-flow
-   * pass) while every entry carries a full URL that may hold `?token=…`. Both
-   * land in memory.json and are rendered into the report. One filter here
+   * flowing by a parallel route: `repro` is built from these entries, a `type`
+   * step logs the text that was typed, and every entry carries a full URL that
+   * may hold `?token=…`. All of it lands in memory.json and is rendered into
+   * the report, the live view's feed and exported issues. One filter here
    * covers the log, the repro traces and the JSONL trail at once.
+   *
+   * A value typed into a secret field (type=password, a credential or card
+   * autocomplete token, or a name or label that says so) is masked by the
+   * browser before it gets here (sensitive.ts secretFieldKind). redactSecrets
+   * masks it again where only the label is left to go on, and catches
+   * credential shapes, email addresses and card numbers in anything else.
    */
   logAction(entry: Omit<ActionLogEntry, "at">): void {
     const full: ActionLogEntry = {
