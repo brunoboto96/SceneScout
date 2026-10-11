@@ -60,12 +60,12 @@ export const HAND_PARSED: Readonly<Record<string, FlagSpec>> = {
 };
 
 /** True when the arguments ask for help. */
-export function wantsHelp(args: readonly string[]): boolean {
+function wantsHelp(args: readonly string[]): boolean {
   return args.includes("--help") || args.includes("-h");
 }
 
 /** The first argument `spec` does not accept, as an error sentence; null when every one is accepted. */
-export function unknownArgument(args: readonly string[], spec: FlagSpec): string | null {
+function unknownArgument(args: readonly string[], spec: FlagSpec): string | null {
   let positional = 0;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -87,10 +87,10 @@ export function unknownArgument(args: readonly string[], spec: FlagSpec): string
 }
 
 /** What to do with a command line before running anything. */
-export type Preflight = { kind: "help" } | { kind: "error"; message: string } | { kind: "run" };
+type Preflight = { kind: "help" } | { kind: "error"; message: string } | { kind: "run" };
 
 /** Whether `command` names a subcommand. */
-export function isSubcommand(command: string | undefined): command is Subcommand {
+function isSubcommand(command: string | undefined): command is Subcommand {
   return command !== undefined && Object.hasOwn(HANDLERS_OF, command);
 }
 
@@ -124,7 +124,7 @@ export function looksLikeUrl(arg: string | undefined): arg is string {
 }
 
 /** Settle help and flag errors for a subcommand before its handler is reached. */
-export function preflight(command: Subcommand, args: readonly string[]): Preflight {
+function preflight(command: Subcommand, args: readonly string[]): Preflight {
   if (wantsHelp(args)) return { kind: "help" };
   const spec = Object.hasOwn(HAND_PARSED, command) ? HAND_PARSED[command] : undefined;
   const problem = spec ? unknownArgument(args, spec) : null;

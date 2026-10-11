@@ -18,7 +18,7 @@
 export const SKILL_FLAGS = ["url", "role", "focus", "level", "observe", "read-only", "safe-write", "allow-destructive"] as const;
 export type SkillFlag = (typeof SKILL_FLAGS)[number];
 
-export type QuestionId = "address" | "sign-in" | "what-to-check" | "real-data";
+type QuestionId = "address" | "sign-in" | "what-to-check" | "real-data";
 
 export interface IntakeQuestion {
   id: QuestionId;
@@ -70,7 +70,7 @@ export function questionsToAsk(argumentText: string): IntakeQuestion[] {
 
 export type SignInAnswer = "none" | "sso" | "password" | "one-time-code";
 export type RealDataAnswer = "yes" | "no" | "unsure";
-export type WhatToCheck = { tickets: readonly string[] } | { description: string } | "everything";
+type WhatToCheck = { tickets: readonly string[] } | { description: string } | "everything";
 
 export interface IntakeAnswers {
   address: string;
@@ -180,7 +180,7 @@ export function formElicitationSupported(capabilities: { elicitation?: Elicitati
 export type CheckKind = "everything" | "description" | "tickets";
 
 /** The form's fields, as the client returns them on accept. */
-export interface IntakeFormContent {
+interface IntakeFormContent {
   address?: unknown;
   signIn?: unknown;
   whatToCheck?: unknown;

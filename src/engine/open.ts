@@ -50,7 +50,7 @@ export function openChoiceFromEnv(env: Record<string, string | undefined>): Open
  * browser would open on the remote machine if at all, or a Linux or other
  * Unix machine with no display server. macOS and Windows always have one.
  */
-export function noDisplay(env: Record<string, string | undefined>, platform: NodeJS.Platform): boolean {
+function noDisplay(env: Record<string, string | undefined>, platform: NodeJS.Platform): boolean {
   if (env.SSH_CONNECTION || env.SSH_TTY) return true;
   if (platform === "darwin" || platform === "win32") return false;
   return !env.DISPLAY && !env.WAYLAND_DISPLAY;

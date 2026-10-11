@@ -64,7 +64,7 @@ import { resolveFrame } from "./engine/replay.js";
  * the request before it failed (a create that timed out or got a 5xx), so
  * whether the issue exists has to be asked again rather than assumed.
  */
-export class ExportError extends Error {
+class ExportError extends Error {
   constructor(
     message: string,
     readonly uncertain = false,

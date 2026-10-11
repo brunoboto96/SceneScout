@@ -14,9 +14,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { MCP_NAME, type Runner } from "./installer.js";
 
-export const OTHER_CLIENTS = ["cursor", "vscode", "codex", "gemini", "copilot", "windsurf"] as const;
+const OTHER_CLIENTS = ["cursor", "vscode", "codex", "gemini", "copilot", "windsurf"] as const;
 export type OtherClient = (typeof OTHER_CLIENTS)[number];
-export const CLIENTS = ["claude-code", ...OTHER_CLIENTS] as const;
+const CLIENTS = ["claude-code", ...OTHER_CLIENTS] as const;
 export type Client = (typeof CLIENTS)[number];
 
 export const CLIENT_LABELS: Record<Client, string> = {
@@ -76,7 +76,7 @@ export type ClientRegistration =
 const quote = (s: string): string => (/^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
 
 /** The entry every `mcpServers`-style file takes. */
-export function serverEntry(launch: string[]): { command: string; args: string[] } {
+function serverEntry(launch: string[]): { command: string; args: string[] } {
   return { command: launch[0], args: launch.slice(1) };
 }
 

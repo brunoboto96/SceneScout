@@ -21,7 +21,7 @@ import {
   type InstallTarget,
 } from "./browsers.js";
 
-export const SKILL_NAME = "scenescout";
+const SKILL_NAME = "scenescout";
 export const MCP_NAME = "scenescout";
 /** Names this tool's skill and MCP server had before renames; cleaned up on install so the old slash command and a duplicate tool set do not linger. */
 const LEGACY_SKILL_NAMES = ["frontend-tester", "scenecraft"];
@@ -280,7 +280,7 @@ export function launchCommand(opts: { packageRoot: string; nodePath: string; ser
   return [fs.existsSync(npx) ? npx : "npx", ...NPX_SERVE_ARGS];
 }
 
-export function mcpAddArgs(launch: string[]): string[] {
+function mcpAddArgs(launch: string[]): string[] {
   return ["mcp", "add", "--scope", "user", MCP_NAME, "--", ...launch];
 }
 
@@ -382,7 +382,7 @@ function removeLegacyRegistrations(opts: { serverPath: string; run: Runner }): {
  * symlink, and on a case-insensitive filesystem through a differently-cased
  * path. Comparing strings reported both as "pointing elsewhere".
  */
-export function samePath(a: string, b: string): boolean {
+function samePath(a: string, b: string): boolean {
   const real = (p: string) => {
     try {
       return fs.realpathSync.native(p);
@@ -652,7 +652,7 @@ export function installerFailure(stderr: string): string | null {
 }
 
 /** How long a browser download may run before it is stopped and reported as failed. */
-export const BROWSER_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
+const BROWSER_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
 
 /**
  * The environment Playwright's installer runs in. A host that runs this server

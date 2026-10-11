@@ -34,7 +34,7 @@ import { httpErrorDetail, httpStatusOf, type OracleViolation } from "./oracles.j
 import type { CheckRetest } from "./verify.js";
 import type { CheckReplay } from "./check-replay.js";
 
-export const CHECK_SEVERITIES = ["high", "medium", "low"] as const;
+const CHECK_SEVERITIES = ["high", "medium", "low"] as const;
 export type CheckSeverity = (typeof CHECK_SEVERITIES)[number];
 export const FAIL_ON = [...CHECK_SEVERITIES, "never"] as const;
 export type FailOn = (typeof FAIL_ON)[number];
@@ -208,10 +208,10 @@ export const WORTH_A_LOOK_RULES = {
   },
 } as const satisfies Record<string, { title: string; help: string; convention: string }>;
 
-export type DefectRule = keyof typeof CHECK_RULES;
-export type WorthALookRule = keyof typeof WORTH_A_LOOK_RULES;
+type DefectRule = keyof typeof CHECK_RULES;
+type WorthALookRule = keyof typeof WORTH_A_LOOK_RULES;
 export type CheckRule = DefectRule | WorthALookRule;
-export const CHECK_RULE_IDS = [...Object.keys(CHECK_RULES), ...Object.keys(WORTH_A_LOOK_RULES)] as CheckRule[];
+const CHECK_RULE_IDS = [...Object.keys(CHECK_RULES), ...Object.keys(WORTH_A_LOOK_RULES)] as CheckRule[];
 
 /**
  * One `--ignore-path` entry. A path on its own drops every rule filed against
@@ -224,7 +224,7 @@ export interface IgnoredPath {
   rule?: CheckRule;
 }
 
-export function isWorthALookRule(rule: string): rule is WorthALookRule {
+function isWorthALookRule(rule: string): rule is WorthALookRule {
   return Object.prototype.hasOwnProperty.call(WORTH_A_LOOK_RULES, rule);
 }
 
@@ -468,7 +468,7 @@ export function issuesFromRoutes(
  * Fewest controls a start page must show for a check that measured nothing
  * else to count as having measured the app (unmeasuredReason).
  */
-export const START_PAGE_MIN_CONTROLS = 2;
+const START_PAGE_MIN_CONTROLS = 2;
 
 /**
  * Why a check has nothing to give a verdict on, or null when it measured the
@@ -577,11 +577,11 @@ export const EXIT = { pass: 0, gateFailed: 1, error: 2 } as const;
  * pages. Each default is the one that does the least harm on an unfamiliar
  * project: it never writes and never silently hides a result (ADR 12).
  */
-export const FLOW_WRITES = ["never", "allow"] as const;
-export type FlowWrites = (typeof FLOW_WRITES)[number];
-export const ON_REFUSED_STEP = ["report", "stop"] as const;
-export type OnRefusedStep = (typeof ON_REFUSED_STEP)[number];
-export const GATE_RETESTS = ["never", "high", "all"] as const;
+const FLOW_WRITES = ["never", "allow"] as const;
+type FlowWrites = (typeof FLOW_WRITES)[number];
+const ON_REFUSED_STEP = ["report", "stop"] as const;
+type OnRefusedStep = (typeof ON_REFUSED_STEP)[number];
+const GATE_RETESTS = ["never", "high", "all"] as const;
 export type GateRetests = (typeof GATE_RETESTS)[number];
 
 /** What a green check was allowed to do, written beside every verdict so a reviewer can see it. */
@@ -693,7 +693,7 @@ const SWITCH_OFF = ["off", "false", "0"];
 export const MAX_CHECK_ROUTES = 150;
 /** Link discovery rounds: each crawl reveals the routes its pages link to. Past a few, a site is paginating rather than revealing. */
 export const MAX_DISCOVERY_ROUNDS = 6;
-export const DEFAULT_CHECK_ROUTES = 50;
+const DEFAULT_CHECK_ROUTES = 50;
 
 /** A path given on the command line, resolved from the directory the command runs in; the same on every platform. */
 export function resolveArgPath(cwd: string, p: string): string {
@@ -1283,7 +1283,7 @@ export function needsSignInText(count: number, cover: string, noun = "route"): s
 }
 
 /** The routes that sent a check with no session to sign-in, as their own section; nothing when there were none. */
-export function needsSignInSection(result: Pick<CheckResult, "url" | "needsSignIn">): string[] {
+function needsSignInSection(result: Pick<CheckResult, "url" | "needsSignIn">): string[] {
   const routes = result.needsSignIn ?? [];
   if (routes.length === 0) return [];
   const cover = `pass ${code("--storage-state")} with a signed-in session, such as the profile ${code(`scenescout login ${result.url} --role <name>`)} saves`;

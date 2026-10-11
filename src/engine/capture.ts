@@ -89,7 +89,7 @@ export interface CaptureInfo {
   height: number;
 }
 
-export const CAPTURED_PREFIX = "CAPTURED ";
+const CAPTURED_PREFIX = "CAPTURED ";
 
 /** scout_capture's result: a line for whoever reads it, then the details as one line of JSON. */
 export function captureResultText(info: CaptureInfo): string {
@@ -198,9 +198,9 @@ export const EVIDENCE_MODES = ["inline", "file", "off"] as const;
 export type EvidenceMode = (typeof EVIDENCE_MODES)[number];
 
 export const EVIDENCE_ENV = "SCENESCOUT_EVIDENCE";
-export const EVIDENCE_MAX_PX_ENV = "SCENESCOUT_EVIDENCE_MAX_PX";
-export const EVIDENCE_MAX_KB_ENV = "SCENESCOUT_EVIDENCE_MAX_KB";
-export const EVIDENCE_INLINE_ENV = "SCENESCOUT_EVIDENCE_INLINE";
+const EVIDENCE_MAX_PX_ENV = "SCENESCOUT_EVIDENCE_MAX_PX";
+const EVIDENCE_MAX_KB_ENV = "SCENESCOUT_EVIDENCE_MAX_KB";
+const EVIDENCE_INLINE_ENV = "SCENESCOUT_EVIDENCE_INLINE";
 export const RECORD_ENV = "SCENESCOUT_RECORD";
 
 /**
@@ -215,7 +215,7 @@ export const EVIDENCE_LIMITS = {
   maxKb: { env: EVIDENCE_MAX_KB_ENV, min: 16, max: 2048, default: 200, unit: "kilobytes a picture may take" },
   inline: { env: EVIDENCE_INLINE_ENV, min: 0, max: 500, default: 10, unit: "pictures one session returns in its scout_finding results" },
 } as const;
-export type EvidenceLimit = keyof typeof EVIDENCE_LIMITS;
+type EvidenceLimit = keyof typeof EVIDENCE_LIMITS;
 
 /** CSS pixels kept around an element a finding names: more than scout_capture's, so what is next to it is in view. */
 export const EVIDENCE_MARGIN = 24;

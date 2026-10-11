@@ -147,7 +147,7 @@ export const APP_FILLED_TYPES: ReadonlySet<string> = new Set(["date", "datetime-
  * Input types in which Enter submits the form (the HTML standard's implicit
  * submission). Not checkboxes, radios or buttons: Enter does nothing there.
  */
-export const IMPLICIT_SUBMIT_TYPES: ReadonlySet<string> = new Set([...TEXT_ENTRY_TYPES, "search"]);
+const IMPLICIT_SUBMIT_TYPES: ReadonlySet<string> = new Set([...TEXT_ENTRY_TYPES, "search"]);
 
 /** What the page says about one field of a form. */
 export interface FieldFacts {

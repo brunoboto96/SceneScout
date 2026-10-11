@@ -125,6 +125,7 @@ import {
   journeyVideoPath,
   replayVideos,
   journeySteps,
+  redactPersonal,
   redactReplay,
   replayFramePath,
   replayFrames,
@@ -3438,6 +3439,70 @@ test("replay: secrets in paths, captions and reasons are redacted as in the repo
   const html = buildCheckReplayHtml(replay, replayMeta);
   assert.ok(!html.includes(token), "no secret reaches the page");
   assert.match(html, /redacted|\*\*\*|REDACTED/i);
+});
+
+test("replay: an email address or a card number the page or a flow names is redacted; a reserved example address and a plain number are not", () => {
+  // Built at run time: a real-looking address written out in full would be flagged by the hygiene suite.
+  const person = ["jo.sample", "contoso-mail.net"].join("@");
+  const journey = journeyOf(
+    {
+      ...replayFlow,
+      steps: [
+        { action: "navigate", target: `/account?email=${person}` },
+        { action: "expect-text", text: `Welcome back, ${person}` },
+        { action: "expect-text", text: "Paid with 4111 1111 1111 1111" },
+        { action: "expect-text", text: "Contact qa@example.com about order 1234567890123" },
+      ] as FlowStep[],
+    },
+    {
+      status: "failed",
+      step: 1,
+      did: "navigate",
+      reason: `no account for ${person} on card 4111-1111-1111-1111`,
+      path: `/account?email=${person}`,
+    },
+    [{ frame: "f1" }],
+  );
+  const replay = redactReplay({
+    startedAt: "t",
+    roles: [
+      {
+        role: "anonymous",
+        own: true,
+        visits: [visitOf({ path: `/u?mail=${person}`, status: 200, loginRedirect: false })],
+        journeys: [journey],
+      },
+    ],
+    framesLeftOut: 0,
+  });
+  const html = buildCheckReplayHtml(replay, replayMeta);
+  for (const leaked of ["jo.sample", "contoso-mail", "4111"]) assert.ok(!html.includes(leaked), `${leaked} must not reach the page`);
+  assert.ok(html.includes("qa@example.com"), "a reserved example address is documentation, not a person");
+  assert.ok(html.includes("1234567890123"), "a number that is not a card number stays");
+  assert.match(html, /\[email redacted\]/);
+  assert.match(html, /\[card number redacted\]/);
+});
+
+test("replay: an address with its @ percent-encoded or in another script, and a card number after a date, are redacted; an image's @2x name and a timestamp are not", () => {
+  // Built at run time, as above, so the hygiene suite does not flag a real-looking address.
+  const at = (local: string, domain: string, sep = "@") => [local, domain].join(sep);
+  const redacted: Array<[string, string]> = [
+    [`/account?email=${at("jo.sample", "contoso-mail.net", "%40")}`, "/account?email=[email redacted]"],
+    [`/account?email=${at("jo%2Btag", "contoso-mail.net", "%40")}`, "/account?email=[email redacted]"],
+    [`no account for ${at("jöe", "contoso-mail.net")}`, "no account for [email redacted]"],
+    [`no account for ${at("jo", "bücher-mail.de")}`, "no account for [email redacted]"],
+    ["paid 2026-10-11 4111 1111 1111 1111", "paid 2026-10-11 [card number redacted]"],
+    ["Visa 4222222222222", "Visa [card number redacted]"],
+  ];
+  for (const [text, want] of redacted) assert.equal(redactPersonal(text), want, text);
+  const kept = [
+    `/static/${at("logo", "2x.png")}`,
+    `/img/${at("icon", "1.5x.webp")}`,
+    "/feed?_=1696000000004",
+    "npm i widget@18.3.1",
+    at("qa", "sub.example.com"),
+  ];
+  for (const text of kept) assert.equal(redactPersonal(text), text, text);
 });
 
 test("replay page: run metadata, a badge per journey, the first failing step highlighted and linked, and app text escaped", () => {

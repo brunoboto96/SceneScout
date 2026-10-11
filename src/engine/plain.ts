@@ -222,7 +222,7 @@ function joinAnd(parts: string[]): string {
 }
 
 /** The short summary that opens the plain section. */
-export function plainSummary(input: PlainInput): string[] {
+function plainSummary(input: PlainInput): string[] {
   const lines: string[] = [];
   const { current } = input;
   const by = (s: Finding["severity"]): number => current.filter((f) => f.severity === s).length;

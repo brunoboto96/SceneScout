@@ -20,7 +20,7 @@ const SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 /** Channels a pixel has, by PNG colour type: grey, RGB, grey and alpha, RGBA. Palette images are not read. */
 const CHANNELS: Record<number, number> = { 0: 1, 2: 3, 4: 2, 6: 4 };
 /** The largest picture read or diffed, in pixels. An element's capture is far smaller; this bounds the memory a bad file can ask for. */
-export const MAX_PIXELS = 40_000_000;
+const MAX_PIXELS = 40_000_000;
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256);
@@ -155,7 +155,7 @@ export function encodePng(img: RgbaImage): Buffer {
  * match exactly; the allowance absorbs the odd colour rounded one step
  * differently, not a change anyone would see.
  */
-export const DIFF_THRESHOLD = 8;
+const DIFF_THRESHOLD = 8;
 
 /** The colour a changed pixel is painted in the diff picture. */
 export const DIFF_HIGHLIGHT = [255, 0, 80] as const;

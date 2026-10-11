@@ -2309,6 +2309,54 @@ test("dependabot: every action's own pins are watched, not only the workflows' a
   }
 });
 
+/**
+ * What a workflow does wrong with the job token or a model key: a checkout that leaves the token in .git/config
+ * in a job that never talks to the remote, or a job that can read a key and installs with dependencies' scripts.
+ */
+function tokenProblems(file: string, wf: Record<string, any>): string[] {
+  const problems: string[] = [];
+  // A key in the workflow's own env reaches every job.
+  const workflowKey = NAMES_A_KEY.test(JSON.stringify(wf.env ?? {}));
+  for (const [name, job] of Object.entries(wf.jobs as Record<string, WorkflowJob>)) {
+    const steps = job.steps ?? [];
+    // Only these push, fetch or open pull requests through git with the checkout's own token.
+    const usesRemote = steps.some((s) => /\bgit (push|fetch|pull|ls-remote)\b/.test(s.run ?? "") || /^changesets\/action@/.test(s.uses ?? ""));
+    for (const s of steps.filter((s) => /^actions\/checkout@/.test(s.uses ?? "")))
+      if (!usesRemote && String(s.with?.["persist-credentials"]) !== "false")
+        problems.push(`${file} ${name}: the checkout leaves the token in .git/config for every later step`);
+    // A key anywhere in the job means its install runs no dependency's script: it would share a runner with the key.
+    if (workflowKey || NAMES_A_KEY.test(JSON.stringify(job)))
+      for (const s of steps)
+        for (const line of (s.run ?? "").split("\n"))
+          if (/(^|[\s;&|(])npm (ci|install|i|it|install-test|install-ci-test)\b/.test(line) && !/--ignore-scripts\b/.test(line))
+            problems.push(`${file} ${name}: ${line.trim()}`);
+  }
+  return problems;
+}
+
+test("workflows: a checkout keeps no token unless its job talks to the remote, and no job holding a key runs install scripts", () => {
+  const dir = path.join(REPO, ".github", "workflows");
+  const files = fs.readdirSync(dir).filter((f) => /\.ya?ml$/.test(f));
+  assert.ok(files.length >= 8, "every workflow is read");
+  for (const file of files) assert.deepEqual(tokenProblems(file, readWorkflow(file)), [], file);
+
+  // The rule itself, on workflows made up for it: each flagged case beside the near miss that is allowed.
+  const key = { OPENAI_API_KEY: "${{ secrets.OPENAI_API_KEY }}" };
+  const checkout = (persist?: boolean) => ({ uses: "actions/checkout@v7", ...(persist === undefined ? {} : { with: { "persist-credentials": persist } }) });
+  const cases: Array<[string, Record<string, any>, number]> = [
+    ["a checkout with the default", { jobs: { a: { steps: [checkout()] } } }, 1],
+    ["a checkout that keeps no token", { jobs: { a: { steps: [checkout(false)] } } }, 0],
+    ["a job that pushes keeps it", { jobs: { a: { steps: [checkout(), { run: "git commit -qm x\ngit push" }] } } }, 0],
+    ["a key job's install on a later line", { jobs: { a: { steps: [checkout(false), { run: "echo start\nnpm ci", env: key }] } } }, 1],
+    ["a key job's install after &&", { jobs: { a: { steps: [checkout(false), { run: "cd app && npm install", env: key }] } } }, 1],
+    ["a key job's `npm i`", { jobs: { a: { steps: [checkout(false), { run: "npm i", env: key }] } } }, 1],
+    ["a key in the workflow's env", { env: key, jobs: { a: { steps: [checkout(false), { run: "npm ci" }] } } }, 1],
+    ["a key job that ignores scripts", { jobs: { a: { steps: [checkout(false), { run: "echo start\nnpm ci --ignore-scripts", env: key }] } } }, 0],
+    ["a job without a key", { jobs: { a: { steps: [checkout(false), { run: "npm ci" }] } } }, 0],
+  ];
+  for (const [what, wf, n] of cases) assert.equal(tokenProblems("made-up.yml", wf).length, n, what);
+});
+
 test("weekly benchmark: every check it dispatches on the results branch accepts that branch, and wave hold accepts no other", () => {
   const jobs = readWorkflow("bench-weekly.yml").jobs as Record<string, WorkflowJob>;
   const script = jobs["test-results-pr"].steps!.map((s) => s.run ?? "").join("\n");

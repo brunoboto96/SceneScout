@@ -177,7 +177,7 @@ export function looksLikeCredential(h: Pick<HeldValue, "name" | "value">): boole
 }
 
 /** The first value held now that was not held when the window opened, or held a different value, and looks like a session. */
-export function newCredential(watch: Pick<SignInWatch, "baseline">, held: readonly HeldValue[]): HeldValue | null {
+function newCredential(watch: Pick<SignInWatch, "baseline">, held: readonly HeldValue[]): HeldValue | null {
   for (const h of held) {
     if (watch.baseline.get(h.key) === h.value) continue;
     if (looksLikeCredential(h)) return h;
@@ -193,7 +193,7 @@ export function newCredential(watch: Pick<SignInWatch, "baseline">, held: readon
 const SIGN_IN_STEP_RE = /\/(log-in|mfa|2fa|otp|verify|challenge|select-account|choose-account|account-picker)(\/|$)/;
 
 /** The path is a sign-in route (/login, /signin, /auth/..., /mfa, /verify, an account picker). */
-export function signInRoute(url: string): boolean {
+function signInRoute(url: string): boolean {
   try {
     const path = new URL(url).pathname.toLowerCase();
     return LOGIN_ROUTE_RE.test(path) || SIGN_IN_STEP_RE.test(path);

@@ -28,8 +28,8 @@ export const SERVER_INSTRUCTIONS =
   `They are the same text, so never read both. ` +
   `Never choose mode="destructive" yourself: that needs the user's explicit opt-in.`;
 
-export const LEVELS = ["minimal", "medium", "extensive"] as const;
-export type Level = (typeof LEVELS)[number];
+const LEVELS = ["minimal", "medium", "extensive"] as const;
+type Level = (typeof LEVELS)[number];
 
 /** What the `explore` prompt accepts, as MCP lists it. Every argument is optional. */
 export const EXPLORE_PROMPT_ARGUMENTS = [
