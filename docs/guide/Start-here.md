@@ -280,7 +280,7 @@ On a desktop, the engine also opens the live view in your default browser as a s
 
 ### Recording a run
 
-To keep a copy of the whole run, ask for a recording (`Use SceneScout to test … and record the run`, or `scout_attach {record: true}`). The engine then keeps a frame after every action, and `.scenescout/report.html`, the self-contained page `scout_report` writes beside the report, shows the screenshots around each finding and each session's trail. Recording is off by default because frames are pictures of the app, which the engine's secret redaction cannot read. A team that wants every QA run recorded sets `SCENESCOUT_RECORD=on` in the server's environment once.
+To keep a copy of the whole run, ask for a recording (`Use SceneScout to test … and record the run`, or `scout_attach {record: true}`). The engine then keeps a frame after every action, and `.scenescout/report.html`, the self-contained page `scout_report` writes beside the report, shows the screenshots around each finding and each session's trail. Recording is off by default because frames are pictures of the app: secret fields are painted over in them, but the engine's text redaction cannot read anything else a frame shows ([what is masked in pictures](Safety-model.md#what-is-written-to-disk)). A team that wants every QA run recorded sets `SCENESCOUT_RECORD=on` in the server's environment once.
 
 ## Next
 

@@ -36,6 +36,7 @@ import * as fromRunPath from "./from-run-path.ts";
 import * as settleAfterLeaving from "./settle.ts";
 import * as actionResults from "./action-results.ts";
 import * as maskedTyping from "./masked-typing.ts";
+import * as maskedPictures from "./masked-pictures.ts";
 import type { SmokeContext } from "./harness.ts";
 
 /** What the runner needs of a suite's module: its title, and the run it awaits. */
@@ -62,6 +63,7 @@ export const shards: SmokeSuite[][] = [
     settleAfterLeaving,
     actionResults,
     maskedTyping,
+    maskedPictures,
     unload,
     timeLimits,
     firstRun,

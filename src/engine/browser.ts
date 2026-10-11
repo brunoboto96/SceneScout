@@ -61,6 +61,7 @@ import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, token
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
 import { AuthLossTracker } from "./authloss.js";
 import { captureClip, cutByViewport, type Box } from "./capture.js";
+import { maskedScreenshot } from "./secret-pixels.js";
 import { NEXT_FRAME_SCRIPT, NEXT_FRAME_WAIT_MS, STOP_ANIMATIONS_SCRIPT, steadyPicture, unsteadyNote, type PictureSettings } from "./baseline.js";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
@@ -6093,7 +6094,7 @@ export class BrowserEngine {
 
   async screenshot(): Promise<{ base64: string; mimeType: string }> {
     const page = this.requirePage();
-    const buf = await page.screenshot({ type: "jpeg", quality: 60, fullPage: false });
+    const buf = await maskedScreenshot(page, { type: "jpeg", quality: 60, fullPage: false }, this.limits.actionMs);
     this.logAction({ action: "screenshot", url: page.url() });
     return { base64: buf.toString("base64"), mimeType: "image/jpeg" };
   }
@@ -6132,7 +6133,7 @@ export class BrowserEngine {
     const viewport = page.viewportSize() ?? ((await page.evaluate("({ width: innerWidth, height: innerHeight })")) as { width: number; height: number });
     const clip = captureClip(box, margin, viewport);
     if (!clip) throw new Error(`${el.name || el.key} is outside the viewport, so it has no picture.`);
-    const png = await page.screenshot({ type: "png", clip, animations: "disabled" });
+    const png = await maskedScreenshot(page, { type: "png", clip, animations: "disabled" }, this.limits.actionMs);
     if (log) this.logAction({ action: "capture", target: el.key.slice(0, 200), url: page.url() });
     // Found by key, the refs were rebuilt without a snapshot: none of them may be acted on.
     if (target.key) this.dropRefs("an element was captured by its key");
@@ -6158,7 +6159,7 @@ export class BrowserEngine {
       }
     }
     const page = this.requirePage();
-    const png = await page.screenshot({ type: "png", animations: "disabled", scale: "css", timeout: this.limits.actionMs });
+    const png = await maskedScreenshot(page, { type: "png", animations: "disabled", scale: "css", timeout: this.limits.actionMs }, this.limits.actionMs);
     return { png, frame: "viewport", label: "", ...(note ? { note } : {}) };
   }
 
@@ -6261,7 +6262,7 @@ export class BrowserEngine {
     }
     // Two pictures in a row the same, a frame apart: the page has drawn the stop and stopped changing (steadyPicture).
     const { png, steady } = await steadyPicture(
-      () => action(page.screenshot(clip ? { ...settings, clip } : settings)),
+      () => action(maskedScreenshot(page, clip ? { ...settings, clip } : settings, this.limits.actionMs)),
       // Bounded here too, since a page whose main thread is stuck never runs the script's own fallback. A wait that
       // fails (the page navigated) is not the picture's error: the next take reports what is wrong with the page.
       () => BrowserEngine.settleWithin(page.evaluate(NEXT_FRAME_SCRIPT), NEXT_FRAME_WAIT_MS),
@@ -6320,7 +6321,8 @@ export class BrowserEngine {
     // The driver's own timeout covers a slow capture; the race covers a
     // renderer that never answers the protocol at all.
     return Promise.race([
-      bestEffort(page.screenshot({ type: "jpeg", quality: 55, fullPage: false, timeout: timeoutMs }), null),
+      // Reading the fields gets a third of the time, so a slow read still leaves the picture its own.
+      bestEffort(maskedScreenshot(page, { type: "jpeg", quality: 55, fullPage: false, timeout: timeoutMs }, Math.ceil(timeoutMs / 3)), null),
       new Promise<null>((resolve) => {
         timer = setTimeout(() => resolve(null), timeoutMs + 500);
       }),
