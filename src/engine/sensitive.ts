@@ -383,6 +383,8 @@ const PHONE_WORDS = [
 /** What may stand between the word and the number: punctuation, the quotes and arrow of a typed value, and a word for "number". */
 const PHONE_GAP = String.raw`[\s:.#\-"'←„“”«»]*`;
 const NUMBER_WORD = String.raw`(?:(?:number|no|nr|num|numero|número|numéro|nummer|numer)\.?${PHONE_GAP})?`;
+/** The same word written onto the word for phone, as "Telefonnummer" and "phonenumber" are. */
+const GLUED_NUMBER_WORD = "(?:number|nummer|nr|numero|número|numéro)?";
 /**
  * A phone number written right after a word for one: international (a leading
  * +, then its groups, or one run) or national with separators (`(555)
@@ -393,7 +395,7 @@ const NUMBER_WORD = String.raw`(?:(?:number|no|nr|num|numero|número|numéro|num
  * word to be what keeps them apart.
  */
 const PHONE_RE = new RegExp(
-  String.raw`(?<!\p{L})(?:${PHONE_WORDS.join("|")})(?!\p{L})${PHONE_GAP}${NUMBER_WORD}(\+[1-9]\d{0,2}(?:[ .\-]?\(?\d{1,5}\)?){1,5}|\(?\d{2,5}\)?(?:[ .\-]\d{2,8}){1,4})(?![\w.]?\d)`,
+  String.raw`(?<!\p{L})(?:${PHONE_WORDS.join("|")})${GLUED_NUMBER_WORD}(?!\p{L})${PHONE_GAP}${NUMBER_WORD}(\+[1-9]\d{0,2}(?:[ .\-]?\(?\d{1,5}\)?){1,5}|\(?\d{1,5}\)?(?:[ .\-]\d{2,8}){1,4})(?![\w.]?\d)`,
   "giu",
 );
 /** A date after the word ("Phone: 2026-10-11") is not a number to hide. */
@@ -404,11 +406,12 @@ function redactPhone(match: string, number: string): string {
   if (digits < 7 || digits > 15 || DATE_SHAPED.test(number)) return match;
   // Dots group a French or an international number, which starts with 0 or +; a version or a dotted id does not.
   if (number.includes(".") && !/^(?:\+|\(?0)/.test(number)) return match;
-  // Without a leading +, 0 or bracket, it is laid out as 555 123 4567 is: at most three groups, the last of four digits or more.
-  // A list of numbers (`Mobile 100 200 300 400`) is not.
-  if (!/^(?:\+|\(|0)/.test(number)) {
+  // Without a leading +, 0 or bracket, it is laid out as 555 123 4567 is: at most three groups, the first of three digits
+  // and the last of four or more; or as 1-800-555-0199 (a North American number with its country code) or 612 34 56 78
+  // (a Spanish one) are. A list of numbers (`Mobile 100 200 300 400`) or of years (`2024 2025 2026`) is not.
+  if (!/^(?:\+|\(|0)/.test(number) && !/^1[ .-]\d{3}[ .-]\d{3}[ .-]\d{4}$|^[6-9]\d{2}(?: \d{2}){3}$/.test(number)) {
     const groups = number.split(/[ .-]/);
-    if (groups.length > 3 || groups[groups.length - 1].length < 4) return match;
+    if (groups.length > 3 || groups[0].length !== 3 || groups[groups.length - 1].length < 4) return match;
   }
   return `${match.slice(0, match.length - number.length)}[phone redacted]`;
 }

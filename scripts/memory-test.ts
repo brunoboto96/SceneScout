@@ -1817,6 +1817,13 @@ test("a phone number right after a word for phone is redacted; numbers that only
     // As the action log writes a value typed into a field labelled for a phone.
     ['type textbox "Phone" ← "+44 20 7946 0958"', 'type textbox "Phone" ← "[phone redacted]"'],
     ['type textbox "Mobile number" ← "07700 900123"', 'type textbox "Mobile number" ← "[phone redacted]"'],
+    // The word and "number" written as one, as German and English labels often are.
+    ["Telefonnummer: 030 123 45 67", "Telefonnummer: [phone redacted]"],
+    ["Mobilnummer 0151 2345678", "Mobilnummer [phone redacted]"],
+    ['type textbox "phonenumber" ← "(555) 123-4567"', 'type textbox "phonenumber" ← "[phone redacted]"'],
+    // A North American number with its country code, and a Spanish mobile in pairs.
+    ["phone 1-800-555-0199", "phone [phone redacted]"],
+    ["Teléfono: 612 34 56 78", "Teléfono: [phone redacted]"],
   ];
   for (const [text, want] of redacted) {
     assert.equal(redactPersonal(text), want, text);
@@ -1851,6 +1858,10 @@ test("a phone number right after a word for phone is redacted; numbers that only
     "GSM 900 1800 1900 bands",
     "Mobile 100 200 300 400 500",
     "Mobile 375 667",
+    // Years after the word: no national number without a leading 0 starts with a group of four.
+    "phone 2024 2025 2026",
+    "Phone: 2024 2025",
+    "Telefonnummer des Hotels: Zimmer 214",
   ]) {
     assert.equal(redactPersonal(kept), kept, kept);
   }
