@@ -5,8 +5,9 @@ name: guide-wiki
 # The pages are written and reviewed in the repository; the wiki is a copy,
 # replaced on every publish, so an edit made in the wiki's web editor is lost
 # at the next one. Links between guide pages are rewritten for the wiki, and
-# links to the rest of the repository point at the published ref
-# (scripts/guide-wiki.mjs; guide-test covers both).
+# links and pictures from the rest of the repository point at the published
+# ref (scripts/guide-wiki.mjs; guide-test covers both). _Sidebar.md and
+# _Footer.md are published with the pages and frame every one of them.
 #
 # When it runs:
 #   - on a release being published. A release made by the release workflow
