@@ -1499,6 +1499,19 @@ test("a field labelled for a secret in another language is secret too; near miss
     ["Salasana", "password"],
     ["Engångskod", "one-time code"],
     ["Kortnummer", "card"],
+    // A card's security code, as each language names it.
+    ["Sicherheitscode", "card"],
+    ["Beveiligingscode", "card"],
+    ["Säkerhetskod", "card"],
+    ["Sikkerhetskode", "card"],
+    ["Sikkerhedskode", "card"],
+    // The same words typed without their accents, as a field's name or id usually is.
+    ["haslo", "password"],
+    ["contrasena", "password"],
+    ["losenord", "password"],
+    ["passwortBestaetigung", "password"],
+    ["bestaetigungscode", "one-time code"],
+    ["numero_de_tarjeta", "card"],
     // An accent written as a letter and a combining mark reads the same as one written as one letter.
     ["Contrasen\u0303a", "password"],
   ];
@@ -1588,6 +1601,15 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     ["UnionPay 6200 0000 0000 0005", "UnionPay [card number redacted]"],
     ["Maestro 6759 6498 2643 8453", "Maestro [card number redacted]"],
     ["Mir 2200 0000 0000 0004", "Mir [card number redacted]"],
+    // Networks with fewer cards in circulation, and lengths a network issues less often, are cards all the same.
+    ["Maestro 6703 1111 1111 1110", "Maestro [card number redacted]"],
+    ["Dankort 5019 1111 1111 1111", "Dankort [card number redacted]"],
+    ["Hipercard 6062 1111 1111 1115", "Hipercard [card number redacted]"],
+    ["RuPay 8171 1111 1111 1119", "RuPay [card number redacted]"],
+    ["Diners 3095 1111 1111 1113", "Diners [card number redacted]"],
+    ["Visa 4111 1111 1111 14", "Visa [card number redacted]"],
+    ["Visa 4111 1111 1111 1111 18", "Visa [card number redacted]"],
+    ["Mastercard 2223 1111 1111 1111 115", "Mastercard [card number redacted]"],
     ["Visa 4222 2222 2222 2", "Visa [card number redacted]"],
     // Grouped with dots, or with the non-breaking spaces a formatted number or a French locale uses.
     ["card 4111.1111.1111.1111 declined", "card [card number redacted] declined"],
@@ -1614,12 +1636,11 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     // Contrastive with the cards above: Luhn-valid and card-shaped, but no network issues from these prefixes or at this length.
     "id 2111 1111 1111 1115",
     "id 3111 1111 1111 1113",
-    "id 5611 1111 1111 1113",
-    "id 8111 1111 1111 1112",
+    "id 5911 1111 1111 1110",
+    "id 8311 1111 1111 1110",
     "ref ORD-2111-1111-1111-1115",
     "ref 3111.1111.1111.1113",
-    // A Visa prefix at a length Visa never issues (15 digits), and an Amex prefix at 16.
-    "id 4111 1111 1111 116",
+    // An American Express prefix at a length it never issues (16 digits).
     "id 3711 1111 1111 1117",
     // Lists of years and of five-digit numbers whose digits, run together, pass the Luhn check.
     "years 2026 1993 1995 2012",
@@ -1654,6 +1675,10 @@ test("redactSecrets masks a parameter named for a secret, whatever its value loo
     ["body user[password]=pw1&remember=1", "pw1", "body user[password]=[redacted]&remember=1"],
     ["/s?user%5Bpassword%5D=pw2", "pw2", "/s?user%5Bpassword%5D=[redacted]"],
     ["password=short&user=bob", "short", "password=[redacted]&user=bob"],
+    // A parameter named in another language, written out or percent-encoded.
+    ["http://x/login?usuario=bo&contraseña=clave1", "clave1", "http://x/login?usuario=bo&contraseña=[redacted]"],
+    ["http://x/login?has%C5%82o=tajne1", "tajne1", "http://x/login?has%C5%82o=[redacted]"],
+    ["http://x/entrar?senha=segredo1", "segredo1", "http://x/entrar?senha=[redacted]"],
   ];
   for (const [text, secret, want] of masked) {
     const out = redactSecrets(text);
@@ -1661,7 +1686,13 @@ test("redactSecrets masks a parameter named for a secret, whatever its value loo
     assert.equal(out.replace(/ \[\d+ secrets? redacted\]$/, ""), want, text);
     assert.match(out, /\[\d+ secrets? redacted\]$/, `the edit is disclosed: ${out}`);
   }
-  for (const kept of ["/search?q=password+reset&page=2", 'input type="password" name="login"', "/things?sort=pinned&max_tokens=500"]) {
+  for (const kept of [
+    "/search?q=password+reset&page=2",
+    'input type="password" name="login"',
+    "/things?sort=pinned&max_tokens=500",
+    "/buscar?categoría=libros&palavra=chave",
+    "/x?bad=%E0%A4%A",
+  ]) {
     assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
   }
   // Masked once, counted once.
