@@ -1496,6 +1496,12 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     ["card 4111\u00a01111\u00a01111\u00a01111 declined", "card [card number redacted] declined"],
     ["card 4111\u202f1111\u202f1111\u202f1111 declined", "card [card number redacted] declined"],
     ["paid 11.10.2026 4111.1111.1111.1111", "paid 11.10.2026 [card number redacted]"],
+    // Grouped with a thin space or a figure space, as typeset numbers are.
+    ["card 4111\u20091111\u20091111\u20091111 declined", "card [card number redacted] declined"],
+    ["card 4111\u20071111\u20071111\u20071111 declined", "card [card number redacted] declined"],
+    // A dot after a word ends an abbreviation, not a number: the card after it is still one.
+    ["Card no.4111 1111 1111 1111", "Card no.[card number redacted]"],
+    ["Ref.4111111111111111 declined", "Ref.[card number redacted] declined"],
   ];
   for (const [text, want] of redacted) {
     assert.equal(redactPersonal(text), want, text);
@@ -1519,6 +1525,9 @@ test("redactSecrets redacts email addresses and card numbers; reserved example a
     // A decimal's fraction is never a card number on its own, however long and whatever its digits.
     "took 747.4293391307649 ms",
     "at 1696000000.4111111111111111",
+    "at 0.4111111111111111",
+    // A decimal whose digits, dot left out, pass the card check: a card's groups are at most six digits.
+    "total 4111111111.111111 and 411111111111.1111",
   ]) {
     assert.equal(redactPersonal(kept), kept, kept);
     assert.equal(redactSecrets(kept), kept, kept);
