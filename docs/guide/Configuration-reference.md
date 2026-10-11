@@ -169,6 +169,8 @@ Every issue carries the `scenescout` label, which a later export lists issues by
 |---|---|---|
 | `--no-open` | off | Print the live view's address without opening a browser |
 
+The address is always printed. A browser is not opened in CI, over SSH or where no display server is running; the command says why, and the address can be opened by hand.
+
 `scenescout scan`, `scenescout status` and `scenescout serve` take no options.
 
 ### Check rules
