@@ -4,7 +4,9 @@
  * of picture the engine takes (scout_screenshot, scout_capture, a finding's
  * picture, a recorded frame, a baseline) the password field's pixels are the
  * mask colour and the text field's are not. A text field named only by
- * autocomplete=one-time-code is painted too.
+ * autocomplete=one-time-code is painted too. A second fixture holds fields no
+ * attribute names: a text field secret only by its label, and a password field
+ * inside an embedded frame, each beside an ordinary one.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -158,6 +160,25 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     );
     check("...and two baselines of the page are the same picture, so one still compares with the next", baseline.png.equals(again.png));
     await engine.endBaselineCaptures();
+
+    // Fields no attribute names, painted by their place: one secret only by its label, and a password field inside an
+    // embedded frame, each beside an ordinary field alike in all but the fact that makes it secret.
+    await engine.navigate(`${baseUrl}/secret-fields-framed.html`);
+    const signIn = page.frameLocator('[data-testid="sign-in-frame"]');
+    const centreOf = async (locator: ReturnType<Page["getByTestId"]>): Promise<{ x: number; y: number }> => {
+      const box = await locator.boundingBox();
+      if (!box) throw new Error("no box");
+      return centre(box);
+    };
+    const framed = decodePng((await engine.captureEvidence(undefined, 0)).png);
+    const at = async (locator: ReturnType<Page["getByTestId"]>): Promise<boolean> => {
+      const { x, y } = await centreOf(locator);
+      return isPaint(pngPixel(framed, x, y));
+    };
+    check("a text field secret only by its label is painted", await at(page.getByTestId("shown-secret")));
+    check("...and the text field beside it, labelled otherwise, is not", !(await at(page.getByTestId("nickname"))));
+    check("a password field inside an embedded frame is painted", await at(signIn.getByTestId("frame-secret")));
+    check("...and the ordinary field beside it in the frame is not", !(await at(signIn.getByTestId("frame-plain"))));
   } finally {
     await engine.close();
   }
