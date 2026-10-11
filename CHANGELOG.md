@@ -1,5 +1,12 @@
 # scenescout
 
+## 3.23.3
+
+### Patch Changes
+
+- 43012d7: The live board's report panel keeps showing a finding's pictures when sessions in two project folders are attached at once and the session that filed the finding has closed. The report now names the project it describes, and the board loads its pictures from that folder rather than from whichever project is attached first.
+- 1cda780: The live view's run page keeps showing its pictures after a session attaches to another project folder. Its picture addresses now name the project the page was written for, so a page already open in a browser loads them from that folder rather than from whichever project attached last.
+
 ## 3.23.2
 
 ### Patch Changes
