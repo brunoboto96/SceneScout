@@ -1,7 +1,8 @@
 /**
  * Table tests for the time limits in src/engine/limits.ts: how long an action
  * and a page load may take, where each is set (option > environment >
- * default), the bounds each is held to, and what a timeout says.
+ * default), the bounds each is held to, and what a timeout says (including a
+ * scroll of a named target that could not run).
  *
  *   npx tsx --test scripts/limits-test.ts
  */
@@ -22,6 +23,7 @@ import {
   resolveTimeLimits,
   watchdogFor,
 } from "../src/engine/limits.ts";
+import { scrollTargetRefusal } from "../src/engine/probes.ts";
 
 test("defaults: the values the engine has always used", () => {
   assert.deepEqual(resolveTimeLimits({}, {}), { actionMs: 5000, navMs: 20000, crawlNavMs: 15000, backNavMs: 10000 });
@@ -145,4 +147,27 @@ test("explicitLimits: only what was set, for a command that keeps defaults of it
   assert.deepEqual(explicitLimits({}, { [NAV_TIMEOUT_ENV]: "45000" }), { navMs: 45000 });
   assert.deepEqual(explicitLimits({ actionTimeoutMs: 8000 }, { [ACTION_TIMEOUT_ENV]: "9000" }), { actionMs: 8000 });
   assert.throws(() => explicitLimits({}, { [ACTION_TIMEOUT_ENV]: "0" }), { message: new RegExp(`^${ACTION_TIMEOUT_ENV} must be`) });
+});
+
+test("a scroll target that matches nothing is not found; any other failure says what it was", () => {
+  const timeout = new Error("locator.evaluate: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('[data-testid=\"side\"]')");
+  // Nothing matches: the target is missing, whatever the evaluate said.
+  assert.equal(scrollTargetRefusal("testid=side", 0, timeout, 5000), "Scroll target not found: testid=side");
+  // It matches, so the failure is something else, and is named rather than read as a missing target.
+  const closed = new Error("locator.evaluate: Target page, context or browser has been closed");
+  const said = scrollTargetRefusal("testid=side", 1, closed, 5000);
+  assert.ok(!said.includes("not found"), said);
+  assert.equal(said, "Could not scroll testid=side: Target page, context or browser has been closed");
+  // A count that itself failed (the page went away) is not proof the target is missing.
+  const unknown = scrollTargetRefusal(
+    "text=Filters",
+    null,
+    new Error("page.evaluate: Execution context was destroyed, most likely because of a navigation"),
+    5000,
+  );
+  assert.equal(unknown, "Could not scroll text=Filters: Execution context was destroyed, most likely because of a navigation");
+  // A target that is there but did not answer in time names the action limit, like any other timed-out action.
+  const slow = scrollTargetRefusal("label=Notes", 1, timeout, 5000);
+  assert.ok(slow.startsWith("Could not scroll label=Notes: Timeout 5000ms exceeded. — the action limit (5000 ms)"), slow);
+  assert.ok(!slow.includes("Call log"), "only the first line of the driver's error");
 });

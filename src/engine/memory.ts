@@ -6,6 +6,7 @@ import type { PictureShot } from "./capture.js";
 import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
+import { appendOwnerOnlySync, writeDocumentSync, writeOwnerOnlySync } from "./owner-file.js";
 import { maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
 import type { InjectionProbe } from "./injection.js";
 import { readFromRunNotes, readRunRecords, recordFromJson, unionFromRunNotes, unionRecords, type FromRunNote, type RunRecord } from "./from-run.js";
@@ -1334,7 +1335,7 @@ export function writeSelfIgnore(dir: string): string | null {
   try {
     const ignorePath = path.join(dir, ".gitignore");
     if (fs.existsSync(ignorePath)) return null;
-    fs.writeFileSync(
+    writeDocumentSync(
       ignorePath,
       "# SceneScout exploratory-test artifacts: memory, session logs, status, report.\n" +
         "# Self-ignoring so a `git add -A` in the tested project can never commit them.\n" +
@@ -1922,7 +1923,7 @@ export class MemoryStore {
     } else {
       content += `\n${heading}\n${bullet}\n`;
     }
-    fs.writeFileSync(this.assumptionsPath, content);
+    writeDocumentSync(this.assumptionsPath, content);
     return true;
   }
 
@@ -2194,7 +2195,7 @@ export class MemoryStore {
    * Write memory.json now (atomic: a crash mid-write must not truncate the
    * history file).
    *
-   * The temp file carries this process's pid and a counter. A fixed `.tmp`
+   * The temp file carries this process's pid and a random part (owner-file.ts). A fixed `.tmp`
    * path meant two SceneScout processes on one project interleaved their
    * writes into a single inode, and whichever rename landed second published
    * a half-and-half document that failed to parse on the next load — the
@@ -2219,23 +2220,11 @@ export class MemoryStore {
       const theirs = this.readForMerge();
       if (theirs) this.data = mergeMemory(this.data, theirs);
     }
-    const tmp = `${this.memoryPath}.${process.pid}.${this.tmpCounter++}.tmp`;
-    try {
-      fs.writeFileSync(tmp, JSON.stringify(this.data));
-      fs.renameSync(tmp, this.memoryPath);
-    } catch (err) {
-      try {
-        fs.rmSync(tmp, { force: true });
-      } catch {
-        /* the write already failed; a leftover temp file is the lesser problem */
-      }
-      throw err;
-    }
+    writeOwnerOnlySync(this.memoryPath, JSON.stringify(this.data));
     this.fileSig = this.currentSig();
     this.lastSaveError = null;
   }
 
-  private tmpCounter = 0;
   /** mtime+size of the file as WE last left it; a mismatch means someone else wrote. */
   private fileSig = "";
 
@@ -2307,7 +2296,7 @@ export class MemoryStore {
       ...(entry.result === undefined ? {} : { result: redactSecrets(entry.result) }),
     };
     this.actionLog.push(full);
-    fs.appendFileSync(this.sessionLogPath, JSON.stringify(full) + "\n");
+    appendOwnerOnlySync(this.sessionLogPath, JSON.stringify(full) + "\n");
   }
 
   /**
@@ -2810,14 +2799,7 @@ export function noteFromRunOnDisk(projectDir: string, note: FromRunNote): void {
   const doc = exists ? (JSON.parse(fs.readFileSync(file, "utf8")) as MemoryFile) : ({ version: 1, states: {}, findings: [] } as MemoryFile);
   if (!doc || doc.version !== 1) throw new Error(`${file} is not a memory file this version reads`);
   doc.fromRuns = unionFromRunNotes(readFromRunNotes(doc), [note]);
-  const tmp = `${file}.${process.pid}.from-run.tmp`;
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(doc));
-    fs.renameSync(tmp, file);
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
-  }
+  writeOwnerOnlySync(file, JSON.stringify(doc));
 }
 
 /** The records in a project's memory.json, read without opening a store. None when there is no memory yet. */

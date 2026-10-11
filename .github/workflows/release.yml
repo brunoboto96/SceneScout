@@ -66,14 +66,14 @@ jobs:
       published: ${{ steps.changesets.outputs.published }}
       tag: ${{ steps.major.outputs.tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Changesets reads history to work out what changed, and pushes a branch.
           fetch-depth: 0
       # No `registry-url` here on purpose: it makes setup-node write an .npmrc
       # that expects NODE_AUTH_TOKEN, and a configured-but-empty token stops
       # npm from taking the trusted-publishing path.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
@@ -189,11 +189,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.release.outputs.tag }}
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm

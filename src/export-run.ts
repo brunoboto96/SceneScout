@@ -57,7 +57,7 @@ import {
 } from "./engine/export.js";
 import { MEMORY_DIRNAME, type ActionLogEntry, type Finding } from "./engine/memory.js";
 import { backoffMs } from "./engine/provider.js";
-import { resolveFrame } from "./engine/replay.js";
+import { frameOnDisk } from "./engine/replay.js";
 
 /**
  * A failure that ends the export. `uncertain`: the tracker may have acted on
@@ -601,18 +601,14 @@ function framedSteps(memoryDir: string): { steps: Array<Pick<ActionLogEntry, "at
   return { steps, unreadable };
 }
 
-/** A frame's file, when it really is inside the recordings folder: links are followed first, so a link to elsewhere, or a linked folder, is not. */
+/** A frame's file, when it really is inside the recordings folder (replay.ts frameOnDisk, which the live view uses too). */
 function frameFile(root: string, rel: string): { file: string; stat: fs.Stats } | null {
-  const named = resolveFrame(root, rel);
-  if (!named) return null;
+  const file = frameOnDisk(root, rel);
+  if (!file) return null;
   try {
-    const realRoot = fs.realpathSync(root);
-    const file = fs.realpathSync(named);
-    if (!file.startsWith(realRoot + path.sep)) return null;
-    const stat = fs.statSync(file);
-    return stat.isFile() ? { file, stat } : null;
+    return { file, stat: fs.statSync(file) };
   } catch {
-    // Missing, or unreadable: this frame is left out and counted, like any other that cannot be attached.
+    // Gone since it was found: left out and counted, like any other frame that cannot be attached.
     return null;
   }
 }

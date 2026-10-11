@@ -11,6 +11,11 @@ import type { Page } from "playwright";
 import { ACCESSIBLE_NAME_SRC, DIALOG_LIKE_SEL } from "./collector.js";
 import { focusAdvanceKey, isBrowserEngine } from "../browsers.js";
 import { focusedControl, type FocusSample } from "./design.js";
+import { bestEffort } from "./best-effort.js";
+import { explainTimeout, firstLineOf } from "./limits.js";
+
+/** How long counting a scroll target's matches may take once the scroll failed; unanswered, the count is unknown. */
+const SCROLL_COUNT_MS = 1000;
 
 /**
  * Scroll ONE named region rather than the page. The page-level heuristic
@@ -62,20 +67,48 @@ export async function scrollContainer(
       { edge: to ?? null, delta: amount },
       { timeout: timeoutMs },
     )
-    .catch(() => undefined);
-  if (outcome === undefined) return { refused: `Scroll target not found: ${target}`, note: "" };
+    .then(
+      (found) => ({ found }),
+      (err: unknown) => ({ err }),
+    );
+  if ("err" in outcome) {
+    // Counted after the failure: the evaluate waits for the target, so one that never appeared is missing. A count
+    // that cannot be read either (the page went away) proves nothing, and the error is reported as it is.
+    // Bounded: a page whose main thread is stuck (the case where a present target timed out) would stall the count too.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const matched = await Promise.race([
+      bestEffort(locator.count(), null),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), SCROLL_COUNT_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
+    return { refused: scrollTargetRefusal(target, matched, outcome.err, timeoutMs), note: "" };
+  }
+  const scrolled = outcome.found;
 
-  if (!outcome) {
+  if (!scrolled) {
     return {
       note: `\nNothing to scroll: ${target} has no scrollable ancestor — its content is not clipped by a scroll port, so everything it holds is already laid out on the page.`,
     };
   }
-  const pct = outcome.max > 0 ? Math.round((outcome.y / outcome.max) * 100) : 100;
-  const edge = outcome.y >= outcome.max - 4 ? " — at its bottom" : outcome.y <= 4 ? " — at its top" : "";
-  const moved = Math.abs(outcome.y - outcome.before) > 4;
+  const pct = scrolled.max > 0 ? Math.round((scrolled.y / scrolled.max) * 100) : 100;
+  const edge = scrolled.y >= scrolled.max - 4 ? " — at its bottom" : scrolled.y <= 4 ? " — at its top" : "";
+  const moved = Math.abs(scrolled.y - scrolled.before) > 4;
   return {
-    note: `\nScrolled ${outcome.name}: ${outcome.y}px of ${outcome.max}px (${pct}%)${edge}.` + (moved ? "" : ` It did not move — already at that position.`),
+    note: `\nScrolled ${scrolled.name}: ${scrolled.y}px of ${scrolled.max}px (${pct}%)${edge}.` + (moved ? "" : ` It did not move — already at that position.`),
   };
+}
+
+/**
+ * What a scroll of a named target says when it could not run. Only a target
+ * that matches nothing is "not found": anything else (the page navigated or
+ * closed, a target that was there but did not answer in time) is named, since
+ * reading it as a missing target sends the caller looking for the wrong fault.
+ * `matched` is null when the count could not be read either.
+ */
+export function scrollTargetRefusal(target: string, matched: number | null, err: unknown, timeoutMs: number): string {
+  if (matched === 0) return `Scroll target not found: ${target}`;
+  return `Could not scroll ${target}: ${firstLineOf(explainTimeout(err, "action", timeoutMs))}`;
 }
 
 /**

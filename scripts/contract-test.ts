@@ -39,6 +39,7 @@ import {
   buildReplayHtml,
   escapeHtml,
   evidenceFor,
+  frameOnDisk,
   framePath,
   ProjectDirs,
   projectKey,
@@ -827,6 +828,45 @@ test("replay: a frame request can only name a file inside the run's own recordin
   // A sibling directory whose name merely starts the same way is not inside it.
   assert.equal(resolveFrame(path.join(path.sep, "p", "rec"), "../recordings-evil/x.jpg"), null);
 });
+
+test(
+  "replay: a frame read from disk is a file really inside the recordings folder; a link out of it, or a linked folder, is not",
+  { skip: process.platform === "win32" },
+  () => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "ss-frame-links-"));
+    try {
+      const root = path.join(project, ".scenescout", "recordings");
+      fs.mkdirSync(path.join(root, "clerk"), { recursive: true });
+      fs.writeFileSync(path.join(root, "clerk", "0001-click.jpg"), "a frame");
+      const outside = path.join(project, "elsewhere");
+      fs.mkdirSync(outside);
+      fs.writeFileSync(path.join(outside, "secret.jpg"), "not a frame");
+      fs.symlinkSync(path.join(outside, "secret.jpg"), path.join(root, "clerk", "0002-click.jpg"));
+      fs.symlinkSync(outside, path.join(root, "linked"), "dir");
+      // A link that stays inside the folder names a frame that is there, as the export reads it.
+      fs.symlinkSync(path.join(root, "clerk", "0001-click.jpg"), path.join(root, "clerk", "0003-again.jpg"));
+      assert.equal(frameOnDisk(root, "recordings/clerk/0001-click.jpg"), fs.realpathSync(path.join(root, "clerk", "0001-click.jpg")));
+      assert.equal(frameOnDisk(root, "recordings/clerk/0003-again.jpg"), fs.realpathSync(path.join(root, "clerk", "0001-click.jpg")));
+      assert.equal(frameOnDisk(root, "recordings/clerk/0002-click.jpg"), null, "a link to a file outside");
+      assert.equal(frameOnDisk(root, "recordings/linked/secret.jpg"), null, "a file under a linked folder");
+      assert.equal(frameOnDisk(root, "recordings/clerk/missing.jpg"), null, "a frame that is not there");
+      assert.equal(frameOnDisk(root, "recordings/clerk"), null, "a folder is not a frame");
+      assert.equal(frameOnDisk(root, "../elsewhere/secret.jpg"), null);
+      // A project reached through a linked path (as /tmp is on macOS) still has its frames: both sides are followed.
+      const viaLink = `${project}-via-link`;
+      fs.symlinkSync(project, viaLink, "dir");
+      try {
+        const linkedRoot = path.join(viaLink, ".scenescout", "recordings");
+        assert.equal(frameOnDisk(linkedRoot, "recordings/clerk/0001-click.jpg"), fs.realpathSync(path.join(root, "clerk", "0001-click.jpg")));
+        assert.equal(frameOnDisk(linkedRoot, "recordings/clerk/0002-click.jpg"), null);
+      } finally {
+        fs.unlinkSync(viaLink);
+      }
+    } finally {
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  },
+);
 
 test("replay: a run page's frame address names its project, and only a folder a page was rendered from can be named (#457)", () => {
   const a = projectKey("/work/project-a");

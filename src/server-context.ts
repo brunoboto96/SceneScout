@@ -34,7 +34,7 @@ import { LOGIN_WINDOW_MAX_MS, type PendingLogin } from "./login-run.js";
 import { LoginWindows } from "./engine/signed-in.js";
 import { generateReport, replayDocument, reportEvidence, type ReportExtras } from "./engine/report.js";
 import { watchdogFor } from "./engine/limits.js";
-import { ProjectDirs, resolveFrame, splitProjectFrame } from "./engine/replay.js";
+import { frameOnDisk, ProjectDirs, splitProjectFrame } from "./engine/replay.js";
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { SERVER_INSTRUCTIONS } from "./playbook.js";
 import { type EvidenceSettings } from "./engine/capture.js";
@@ -243,7 +243,8 @@ const liveProvider: LiveProvider = {
       dir = engines.get(named)?.memory?.dir ?? engines.values().next().value?.memory?.dir ?? lastRun?.dir;
     }
     if (!dir) return null;
-    const file = resolveFrame(path.join(dir, "recordings"), relPath);
+    // Links are followed before the file is named, so a link out of the recordings folder serves nothing, as `scenescout export` uploads nothing.
+    const file = frameOnDisk(path.join(dir, "recordings"), relPath);
     if (!file) return null;
     try {
       return await fs.promises.readFile(file);
