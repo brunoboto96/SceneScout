@@ -1144,7 +1144,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     // A plan's first step captures the page itself; the form's submit lies
     // past the element cap, so it is not in that capture — which is no reason
     // to capture the same page a second time.
-    const engineInternals = engine as unknown as { collect: (...args: unknown[]) => Promise<unknown> };
+    const engineInternals = (engine as unknown as { snapshots: { collect: (...args: unknown[]) => Promise<unknown> } }).snapshots;
     const realCollect = engineInternals.collect;
     let collects = 0;
     engineInternals.collect = function (this: unknown, ...args: unknown[]) {
