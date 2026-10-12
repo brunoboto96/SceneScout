@@ -499,15 +499,26 @@ test("whether a route answered as a page is decided by its content type, not its
   assert.equal(mediaTypeOf(undefined), undefined);
 });
 
-test("a crawl waits for the error page a failed navigation leaves, and not after a download", () => {
-  const cases: Array<[string, boolean, string]> = [
-    ["page.goto: Download is starting", false, "a feed taken as a download: the page stays where it was"],
-    ["page.goto: NS_ERROR_NET_ERROR_RESPONSE", true, "a missing feed in Firefox: its error page commits after goto threw"],
-    ["page.goto: net::ERR_ABORTED at http://127.0.0.1/feed", true, "an aborted load"],
-    ["page.goto: Timeout 10000ms exceeded.", true, "a timeout"],
-    ["", true, "no message: waited for, since the wait only times out"],
+test("a failed navigation waits for the error page it may leave, and not after a file that downloaded", () => {
+  // As each browser reports them: [message, the main document's status, waits, what it is].
+  const cases: Array<[string, number | null, boolean, string]> = [
+    ["page.goto: Download is starting", 200, false, "a feed or file taken as a download (all three browsers): the page stays where it was"],
+    ["page.goto: Download is starting", 304, false, "a cached download: nothing follows either"],
+    ["page.goto: Download is starting", 404, true, "a missing PDF or CSV in Chromium: it commits chrome-error after the download is refused"],
+    ["page.goto: Download is starting", 500, true, "a file the server failed to make, in Chromium"],
+    ["page.goto: Download is starting", null, true, "a download whose response was not seen: waited for, since the status is unknown"],
+    ["page.goto: NS_ERROR_NET_ERROR_RESPONSE", 404, true, "a missing feed in Firefox: its error page commits after goto threw"],
+    ["page.goto: NS_ERROR_NET_ERROR_RESPONSE", 503, true, "a feed the server could not serve, in Firefox"],
+    ["page.goto: net::ERR_ABORTED at http://127.0.0.1/feed", null, true, "an aborted load"],
+    ["page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1/", null, true, "a refused connection: Chromium shows its error page"],
+    ["page.goto: NS_ERROR_CONNECTION_REFUSED", null, true, "a refused connection in Firefox"],
+    ["page.goto: Could not connect to server", null, true, "a refused connection in WebKit"],
+    ["page.goto: Timeout 10000ms exceeded.", null, true, "a timeout with no response"],
+    ["page.goto: Timeout 10000ms exceeded.", 404, true, "a timeout after an error status (Firefox, a missing image)"],
+    ['page.goto: Navigation to "/a" is interrupted by another navigation to "/b"', 200, true, "an interrupted load: the other navigation is waited for"],
+    ["", null, true, "no message: waited for, since the wait only times out"],
   ];
-  for (const [message, expected, what] of cases) assert.equal(failedNavigationLeavesErrorPage(message), expected, what);
+  for (const [message, status, expected, what] of cases) assert.equal(failedNavigationLeavesErrorPage(message, status), expected, what);
 });
 
 test("a feed or a text file with no controls is not a dead end; the same route served as HTML is", () => {

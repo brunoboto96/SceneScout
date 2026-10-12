@@ -117,15 +117,23 @@ export function isFileMediaType(contentType: string | null | undefined): boolean
 }
 
 /**
- * Whether a navigation that failed leaves the browser about to show an error
- * page for it. A download leaves the page where it was, so nothing follows. Any
- * other failure can still commit a page for the failed URL a moment after the
- * navigation was reported failed: Firefox fails a 4xx or 5xx response it would
- * otherwise download (a missing feed) with NS_ERROR_NET_ERROR_RESPONSE, then
- * commits its error page for that URL. A crawl that goes on to the next route
- * before that commit has its next navigation interrupted by it, and would
- * report a healthy page as failing to load; so it waits for this page first.
+ * Whether a navigation that failed may leave the browser about to show an
+ * error page for it, so the next navigation must wait for that page first.
+ * `status` is the main document's response status, or null when none came.
+ *
+ * The page can commit for the failed URL a few milliseconds after goto threw,
+ * and a navigation started before that commit is interrupted by it, charging
+ * the failure to the next page. Measured on all three browsers:
+ * - a file answered 4xx or 5xx: Firefox throws NS_ERROR_NET_ERROR_RESPONSE,
+ *   Chromium "Download is starting", and both then commit an error page;
+ * - a file answered 2xx or 3xx that became a download: the page stays where it
+ *   was on every browser, so nothing follows and nothing is waited for;
+ * - no response at all (refused, aborted, timed out): the browser may show its
+ *   own error page, so it is waited for.
+ * The wait ends at the commit or at its limit, so a wrong yes costs the limit
+ * once (a missing download on WebKit, which shows no error page) and a wrong
+ * no lets the next page's load fail.
  */
-export function failedNavigationLeavesErrorPage(message: string): boolean {
-  return !/\bDownload is starting\b/.test(message);
+export function failedNavigationLeavesErrorPage(message: string, status: number | null): boolean {
+  return !(status !== null && status < 400 && /\bDownload is starting\b/.test(message));
 }
