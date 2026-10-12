@@ -8,6 +8,7 @@ import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fin
 import { isFormBookkeeping } from "./forms.js";
 import { appendOwnerOnlySync, writeDocumentSync, writeOwnerOnlySync } from "./owner-file.js";
 import { maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
+import { REDACTION_VERSION, scrubMemoryText, scrubSessionLogs } from "./memory-scrub.js";
 import type { InjectionProbe } from "./injection.js";
 import { readFromRunNotes, readRunRecords, recordFromJson, unionFromRunNotes, unionRecords, type FromRunNote, type RunRecord } from "./from-run.js";
 import { addReading, addVerdict, MAX_TICKETS_KEPT, mergeTicketData, type CriterionVerdict, type StoredTicket, type Ticket } from "./tickets.js";
@@ -603,6 +604,8 @@ export interface MemoryFile {
   runRecords?: RunRecord[];
   /** Runs that started from an earlier run's record: how, and which (from-run.ts FromRunNote), for the report. */
   fromRuns?: FromRunNote[];
+  /** The redaction (memory-scrub.ts REDACTION_VERSION) the text this store kept has been cleaned with; absent before any. */
+  redactedWith?: number;
 }
 
 /** One endpoint observe refused on a page; `cleared` once it went out (named as a read, or sent in a looser mode). */
@@ -959,6 +962,30 @@ export class MemoryStore {
     this.fileSig = this.currentSig();
     this.retroMerge();
     this.reclassifyLegacyAuthLoss();
+    this.scrubOldText();
+  }
+
+  /**
+   * Clean what an older engine kept in clear (memory-scrub.ts): findings,
+   * verdicts and the earlier sessions' logs go through today's redaction once,
+   * and the store records that they have. A log still being written by another
+   * process is left for the next open.
+   */
+  private scrubOldText(): void {
+    // A file that could not be read (an unknown version, corrupt) is left exactly as it is: there is nothing loaded to clean.
+    if (this.loadWarning || (this.data.redactedWith ?? 0) >= REDACTION_VERSION) return;
+    scrubMemoryText(this.data, redactSecrets);
+    const logs = scrubSessionLogs(this.dir, this.sessionLogPath, redactSecrets);
+    if (logs.complete) this.data.redactedWith = REDACTION_VERSION;
+    // A new store has nothing to clean: the mark is written with its first save.
+    if (!fs.existsSync(this.memoryPath)) return;
+    try {
+      this.flush();
+    } catch (err) {
+      // A store that cannot be written (a read-only checkout) still opens; it is cleaned at an open that can write.
+      delete this.data.redactedWith;
+      this.lastSaveError = `memory.json could not be rewritten with old text cleaned: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   /**
