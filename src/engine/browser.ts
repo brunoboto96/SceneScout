@@ -136,7 +136,20 @@ import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
 import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
-import { crawledRoute, crawlLine, failedNavigationLeavesErrorPage, isFileMediaType, isNonPageResource, mainStateFlag, mediaTypeOf } from "./crawl.js";
+import {
+  AnsweredNavigationError,
+  answeredNavigationFailure,
+  answeredStatus,
+  awaitsLateAnswer,
+  crawledRoute,
+  crawlLine,
+  failedNavigationLeavesErrorPage,
+  isFileMediaType,
+  isNonPageResource,
+  mainStateFlag,
+  mediaTypeOf,
+  type MainDocumentAnswer,
+} from "./crawl.js";
 import {
   authToRemember,
   BODY_FETCH_MAX,
@@ -464,6 +477,25 @@ const FORCED_CLICK_TIMEOUT_MS = 1500;
 const CHOOSER_GRACE_MS = 2000;
 /** How long a hover waits for delay-gated tooltips (component libraries warm up for as long as ~1500ms). */
 const HOVER_REVEAL_WINDOW_MS = 2500;
+
+/**
+ * How long a navigation that threw for a download waits for its document's response (crawl.ts awaitsLateAnswer).
+ * WebKit reports it within milliseconds of the throw; the limit is spent only when it never comes.
+ */
+const LATE_ANSWER_MS = 1000;
+
+/** A navigation's main document, watched while it loads (BrowserEngine.watchMainDocument). */
+interface MainDocumentWatch {
+  /** The response seen so far, or null. */
+  last: () => MainDocumentAnswer | null;
+  /** Whether the browser started a download while it was watched. */
+  downloaded: () => boolean;
+  /** Settles when a download starts; never, if none does. */
+  download: Promise<void>;
+  /** After goto threw: the response, waited for briefly when the browser reports it only after the throw. */
+  afterThrow: (err: unknown) => Promise<MainDocumentAnswer | null>;
+  stop: () => void;
+}
 
 /** What a click's result needs to judge a page error the click raised (rankRouteCancellations). */
 interface ClickContext {
@@ -4163,14 +4195,11 @@ export class BrowserEngine {
       this.onLeaveRefused = null;
     }
     if (outcome === "stayed") {
-      // The cancelled load settles on its own; its error is the cancellation this result reports.
-      going.catch((err: unknown) => {
-        this.logAction({
-          action: "navigate:cancelled",
-          target: err instanceof Error ? err.message.split("\n")[0].slice(0, 160) : String(err),
-          url: page.url(),
-        });
-      });
+      // Logged now, when the answer was given: the cancelled load can take its error-page wait to settle, and logged
+      // then it landed after the session's next action in the trace a finding's repro is built from.
+      this.logAction({ action: "navigate:cancelled", target: url, url: page.url() });
+      // The cancelled load settles on its own; its error is the cancellation this result reports and was just logged.
+      going.catch(() => undefined);
       // Not a navigation outcome: the session stayed by its own answer, so nothing is recorded for the auth-loss tracker.
       const result = await this.afterAction("navigate", url);
       return result.replace(/^OK: navigate /, "NOT NAVIGATED: ");
@@ -4956,15 +4985,17 @@ export class BrowserEngine {
       const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
       status = resp?.status() ?? "no-response";
       const contentType = mediaTypeOf(resp?.headers()["content-type"]);
-      if (resp && isNonPageResource({ status: resp.status(), contentType })) resource = { url: page.url(), status: resp.status(), contentType: contentType! };
+      // Whatever its status: a feed that answers 404 is shown by some browsers and refused by others, and is the same
+      // route's 404 either way, not a page with no controls.
+      if (resp && isFileMediaType(contentType)) resource = { url: page.url(), status: resp.status(), contentType: contentType! };
     } catch (err) {
       // A browser that took the answer as a download failed the navigation, but the route did answer, with its status:
       // a feed that is missing is the route's 404, not a page that did not load.
-      const seen = answered.last();
+      const seen = await answered.afterThrow(err);
       if (seen && isFileMediaType(seen.contentType)) {
         resource = { url: seen.url, status: seen.status, contentType: seen.contentType! };
         // Unless it downloaded, the browser may still commit an error page for it, which would interrupt the next route's load.
-        await this.afterFailedNavigation(page, err, seen.status);
+        await this.afterFailedNavigation(page, err, answered);
       } else {
         const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
         const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
@@ -5683,13 +5714,17 @@ export class BrowserEngine {
         const resolved = resolveTarget(this.baseUrl, step.target);
         if (!("url" in resolved)) throw new Error(resolved.problem);
         const url = resolved.url;
-        const resp = await this.gotoSettlingFailure(current, url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs }).catch((err: unknown) =>
-          Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)),
-        );
+        const resp = await this.gotoSettlingFailure(current, url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs }).catch((err: unknown) => {
+          // A missing file or feed the browser refused to show is the step's failure by its status, as a page's is.
+          if (err instanceof AnsweredNavigationError && err.answer.status >= 400) {
+            collect(redactSecrets(httpErrorDetail("GET", err.answer.url.replace(/#.*$/, ""), err.answer.status)));
+          }
+          return Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs));
+        });
         await this.settle();
         const status = resp?.status() ?? null;
         if (status !== null && status >= 400) {
-          failure = `the page answered HTTP ${status}`;
+          failure = answeredStatus({ status, contentType: mediaTypeOf(resp?.headers()["content-type"]) });
           // The page's own status is this step's failure; the oracle's record of the same response is not a second issue.
           // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
           collect(redactSecrets(httpErrorDetail("GET", current.url().replace(/#.*$/, ""), status)));
@@ -5951,39 +5986,47 @@ export class BrowserEngine {
   }
 
   /**
-   * After a navigation threw, with the main document's status if one came: wait for the error page the browser may
-   * still commit for it, unless the failure was a file that downloaded, which leaves the page where it was
-   * (crawl.ts failedNavigationLeavesErrorPage).
+   * After a navigation threw, with what its main document did: wait for the error page the browser may still commit
+   * for it, unless the failure was a file that downloaded, which leaves the page where it was
+   * (crawl.ts failedNavigationLeavesErrorPage). A download that starts during the wait ends it.
    */
-  private async afterFailedNavigation(page: Page, err: unknown, status: number | null): Promise<void> {
-    if (failedNavigationLeavesErrorPage(err instanceof Error ? err.message : String(err), status)) await this.errorPageCommitted(page);
+  private async afterFailedNavigation(page: Page, err: unknown, answered: MainDocumentWatch): Promise<void> {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!failedNavigationLeavesErrorPage(message, answered.last()?.status ?? null, answered.downloaded())) return;
+    await Promise.race([this.errorPageCommitted(page), answered.download]);
   }
 
   /**
    * page.goto for a navigation the session goes on from: when it throws, the error page its failure may still commit
    * is waited for before the error is passed on, so the session's next navigation is not interrupted by that page.
+   * A failure whose document did answer is passed on as that answer's HTTP status (crawl.ts answeredNavigationFailure).
    */
   private async gotoSettlingFailure(page: Page, url: string, options: Parameters<Page["goto"]>[1]): Promise<Response | null> {
     const answered = BrowserEngine.watchMainDocument(page, url);
     try {
       return await page.goto(url, options);
     } catch (err) {
-      await this.afterFailedNavigation(page, err, answered.last()?.status ?? null);
-      throw err;
+      const answer = await answered.afterThrow(err);
+      await this.afterFailedNavigation(page, err, answered);
+      const reason = answeredNavigationFailure(err instanceof Error ? err.message : String(err), answer);
+      throw reason && answer ? new AnsweredNavigationError(reason, answer, { cause: err }) : err;
     } finally {
       answered.stop();
     }
   }
 
   /**
-   * The main document's response to a navigation to `url`, as the browser received it, until stop() is called. A late
-   * response from the page before is not this navigation's: its redirect chain must start at the URL asked for.
+   * The main document's response to a navigation to `url`, as the browser received it, and whether a download
+   * started, until stop() is called. A late response from the page before is not this navigation's: its redirect
+   * chain must start at the URL asked for.
    */
-  private static watchMainDocument(
-    page: Page,
-    url: string,
-  ): { last: () => { url: string; status: number; contentType: string | undefined } | null; stop: () => void } {
-    let last: { url: string; status: number; contentType: string | undefined } | null = null;
+  private static watchMainDocument(page: Page, url: string): MainDocumentWatch {
+    let last: MainDocumentAnswer | null = null;
+    let downloaded = false;
+    let answeredNow: () => void = () => undefined;
+    const answer = new Promise<void>((resolve) => (answeredNow = resolve));
+    let downloadedNow: () => void = () => undefined;
+    const download = new Promise<void>((resolve) => (downloadedNow = resolve));
     const asked = new URL(url).href;
     const onResponse = (r: Response): void => {
       if (r.frame() !== page.mainFrame() || !r.request().isNavigationRequest()) return;
@@ -5991,9 +6034,34 @@ export class BrowserEngine {
       for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
       if (first.url() !== asked) return;
       last = { url: r.url(), status: r.status(), contentType: mediaTypeOf(r.headers()["content-type"]) };
+      answeredNow();
+    };
+    // A download the page starts while this navigation is under way is taken as this navigation's. A wrong match ends
+    // the error-page wait early, so the next navigation could be interrupted; that is accepted because a script
+    // starting a download at the same moment is far less likely than the file asked for.
+    const onDownload = (): void => {
+      downloaded = true;
+      downloadedNow();
     };
     page.on("response", onResponse);
-    return { last: () => last, stop: () => void page.off("response", onResponse) };
+    page.on("download", onDownload);
+    return {
+      last: () => last,
+      downloaded: () => downloaded,
+      download,
+      afterThrow: async (err) => {
+        if (awaitsLateAnswer(err instanceof Error ? err.message : String(err), last !== null)) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([answer, new Promise<void>((resolve) => (timer = setTimeout(resolve, LATE_ANSWER_MS)))]);
+          clearTimeout(timer);
+        }
+        return last;
+      },
+      stop: () => {
+        page.off("response", onResponse);
+        page.off("download", onDownload);
+      },
+    };
   }
 
   /** The browser this session drives. */

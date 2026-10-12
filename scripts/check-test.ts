@@ -42,7 +42,15 @@ import {
 } from "../action/check-action.mjs";
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engine/design.ts";
-import { failedNavigationLeavesErrorPage, isFileMediaType, isNonPageResource, mediaTypeOf } from "../src/engine/crawl.ts";
+import {
+  answeredNavigationFailure,
+  answeredStatus,
+  awaitsLateAnswer,
+  failedNavigationLeavesErrorPage,
+  isFileMediaType,
+  isNonPageResource,
+  mediaTypeOf,
+} from "../src/engine/crawl.ts";
 import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
   describeStep,
@@ -519,6 +527,56 @@ test("a failed navigation waits for the error page it may leave, and not after a
     ["", null, true, "no message: waited for, since the wait only times out"],
   ];
   for (const [message, status, expected, what] of cases) assert.equal(failedNavigationLeavesErrorPage(message, status), expected, what);
+  // A download that started leaves the page where it was, whatever its status: WebKit downloads a missing PDF and shows
+  // no error page, so waiting for one cost the whole limit.
+  assert.equal(failedNavigationLeavesErrorPage("page.goto: Download is starting", 404, true), false, "a missing file WebKit downloaded");
+  assert.equal(failedNavigationLeavesErrorPage("page.goto: Download is starting", null, true), false, "a download whose response was not seen");
+  assert.equal(failedNavigationLeavesErrorPage("page.goto: Download is starting", 404, false), true, "the same missing file in Chromium, not downloaded");
+});
+
+test("a download's failed load waits for its response only when none was seen", () => {
+  // As each browser reports a PDF that answered: [message, response seen yet, waits, what it is].
+  const cases: Array<[string, boolean, boolean, string]> = [
+    ["page.goto: Download is starting", false, true, "WebKit: goto throws before the response event arrives"],
+    ["page.goto: Download is starting", true, false, "Chromium and Firefox: the response came first, so nothing is waited for"],
+    ["page.goto: NS_ERROR_NET_ERROR_RESPONSE", false, false, "not a download: no response is coming"],
+    ["page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1/", false, false, "a refused connection has no response"],
+    ["page.goto: Timeout 10000ms exceeded.", false, false, "a timeout"],
+  ];
+  for (const [message, seen, expected, what] of cases) assert.equal(awaitsLateAnswer(message, seen), expected, what);
+});
+
+test("a navigation that threw after its document answered is reported by its HTTP status, not the browser's words", () => {
+  const pdf = (status: number) => ({ status, contentType: "application/pdf" });
+  // [message, the main document's answer, reported as, what it is].
+  const cases: Array<[string, { status: number; contentType: string | undefined } | null, string | null, string]> = [
+    ["page.goto: Download is starting", pdf(404), "the file answered HTTP 404 (application/pdf)", "a missing PDF in Chromium or WebKit"],
+    ["page.goto: NS_ERROR_NET_ERROR_RESPONSE", pdf(404), "the file answered HTTP 404 (application/pdf)", "a missing PDF in Firefox"],
+    [
+      "page.goto: NS_ERROR_NET_ERROR_RESPONSE",
+      { status: 404, contentType: "application/rss+xml" },
+      "the file answered HTTP 404 (application/rss+xml)",
+      "a missing feed in Firefox",
+    ],
+    ["page.goto: Download is starting", pdf(503), "the file answered HTTP 503 (application/pdf)", "a file the server could not make"],
+    ["page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE", { status: 500, contentType: "text/html" }, "the page answered HTTP 500", "a page with an error status"],
+    ["page.goto: NS_ERROR_NET_ERROR_RESPONSE", { status: 404, contentType: undefined }, "the page answered HTTP 404", "no content type: read as a page"],
+    [
+      "page.goto: Download is starting",
+      pdf(200),
+      "the file answered HTTP 200 (application/pdf), which the browser downloaded instead of opening a page",
+      "a PDF that answered: named, with why no page opened",
+    ],
+    ["page.goto: Download is starting", null, null, "nothing answered: the browser's message stands"],
+    ["page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1/", null, null, "a refused connection"],
+    ["page.goto: Timeout 10000ms exceeded.", pdf(404), null, "a timeout explains itself (limits.ts)"],
+    ['page.goto: Navigation to "/a" is interrupted by another navigation to "/b"', pdf(404), null, "an interrupted load"],
+    ["page.goto: net::ERR_ABORTED", { status: 200, contentType: "text/html" }, null, "a page that answered and was aborted for another reason"],
+  ];
+  for (const [message, answer, expected, what] of cases) assert.equal(answeredNavigationFailure(message, answer), expected, what);
+  // A feed a browser shows with its 404 is named as the same file a browser that refuses it names.
+  assert.equal(answeredStatus({ status: 404, contentType: "application/rss+xml" }), "the file answered HTTP 404 (application/rss+xml)");
+  assert.equal(answeredStatus({ status: 404, contentType: "text/html" }), "the page answered HTTP 404");
 });
 
 test("a feed or a text file with no controls is not a dead end; the same route served as HTML is", () => {

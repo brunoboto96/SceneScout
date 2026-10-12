@@ -1356,6 +1356,7 @@ async function labelsAndLeaving({ baseUrl, projectDir, stats }: SmokeContext): P
       return m[1];
     };
     await engine.type(refIn(snapG, "guard-title"), "unsent title");
+    const logBeforeStay = engine.memory!.actionLog.length;
     const stayed = await engine.navigate("/page2.html");
     check(
       "a navigation the page asks to confirm is reported by name, not as ERR_ABORTED",
@@ -1366,6 +1367,14 @@ async function labelsAndLeaving({ baseUrl, projectDir, stats }: SmokeContext): P
     snapG = await engine.snapshot(true);
     const cancel = await engine.click(refIn(snapG, "guard-cancel"));
     check("a Cancel that goes back across documents says the page asked to confirm leaving", cancel.includes("LEAVE CONFIRMATION"), cancel);
+    // The trace a finding's repro is built from: the cancelled navigation is logged when the answer is given, so it
+    // comes before the next action, not after it once the cancelled load has settled.
+    const afterStay = engine.memory!.actionLog.slice(logBeforeStay).map((e) => e.action);
+    check(
+      "...and the cancelled navigation is in the trace before the click that followed it",
+      afterStay.includes("navigate:cancelled") && afterStay.indexOf("navigate:cancelled") < afterStay.lastIndexOf("click"),
+      afterStay.join(", "),
+    );
 
     console.log("observe: discarding unsent changes in the app's own confirm");
     snapG = await engine.snapshot(true);
