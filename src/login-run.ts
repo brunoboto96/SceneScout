@@ -15,7 +15,7 @@
  * are in engine/profiles.ts; this file only drives the browser and the terminal.
  */
 import readline from "node:readline";
-import { chromium, firefox, webkit, type Browser, type BrowserContext, type BrowserType, type Page } from "playwright";
+import { chromium, firefox, webkit, type Browser, type BrowserContext, type BrowserType, type Locator, type Page } from "playwright";
 import { defaultEngine, type BrowserEngineName } from "./browsers.js";
 import { explainLaunchFailure } from "./engine/launch.js";
 import { explicitLimits, isTimeoutMessage, LIMIT_NAMES, type LimitKind } from "./engine/limits.js";
@@ -45,6 +45,7 @@ import {
   type ScriptedLogin,
   type Selectors,
   type StepOptions,
+  type Step,
   type SubmittedBy,
   unansweredSubmit,
 } from "./engine/scripted-login.js";
@@ -609,80 +610,8 @@ export async function runScriptedLogin(
       say("No --success-url or --success-selector: signed in will mean no sign-in field is left on the page. Set one to be sure.");
     }
     const progress: Progress = { submitted: new Map(), submits: 0 };
-    const pageKey = (): string => {
-      const u = new URL(page.url());
-      return `${u.origin}${u.pathname}`;
-    };
-    /** A read the page's own navigation interrupted: nothing is known about the page yet, so the caller polls again. */
-    const midNavigation = (err: Error): boolean => /context was destroyed|navigat|detached/i.test(err.message);
-    const successMatched = async (): Promise<boolean> => {
-      if (!config.success.url && !config.success.selector) return false;
-      if (config.success.url && !urlMatches(page.url(), config.success.url)) return false;
-      if (config.success.selector) {
-        const visible = await page
-          .locator(config.success.selector)
-          .first()
-          .isVisible()
-          .catch((err: Error) => {
-            if (midNavigation(err)) return false;
-            throw fail(`the success selector could not be used: ${err.message.split("\n")[0]}`);
-          });
-        if (!visible) return false;
-      }
-      return true;
-    };
-    const read = async (): Promise<FieldInfo[] | null> => {
-      const got = await page.evaluate(collectFields, { selectors: config.selectors, tag: true }).catch((err: Error) => {
-        if (midNavigation(err)) return null;
-        throw fail(err.message);
-      });
-      if (got === null) return null;
-      if (!Array.isArray(got)) throw fail(`the ${got.badSelector} selector is not a valid CSS selector`);
-      return got;
-    };
-    /** The page's URL for a message, with any token in it redacted. */
-    const where = (): string => redactRoute(page.url());
-    const signature = (fields: FieldInfo[]): string => {
-      const chosen = chooseFields(fields);
-      return `${pageKey()}|${(Object.keys(chosen) as FieldKind[]).sort().join(",")}`;
-    };
-    const stepOpts = (successMatchedNow: boolean, fields: readonly FieldInfo[]): StepOptions => {
-      const checking = unansweredSubmit(fields, progress.submitted);
-      return {
-        hasPassword: config.password !== undefined,
-        ...(config.code ? { code: config.code.kind } : {}),
-        successConfigured: Boolean(config.success.url || config.success.selector),
-        successMatched: successMatchedNow,
-        ...(checking ? { checking } : {}),
-      };
-    };
-    /** The code to type now: the fixed one, or the TOTP code, waiting for the next one when this one is about to expire. */
-    const currentCode = async (source: CodeSource): Promise<string> => {
-      if (source.kind === "fixed") return source.code;
-      const params = source.params;
-      if (secondsLeft(params, now()) < TOTP_MIN_SECONDS_LEFT) await page.waitForTimeout(secondsLeft(params, now()) * 1000 + 200);
-      const code = totpCode(params, now());
-      redactor.add(code);
-      return code;
-    };
-    const at = (f: FieldInfo) => page.locator(`[${TAG}="${f.index}"]`);
-    /** Mark the element about to be typed into: see TYPED. */
-    const markTyped = (f: FieldInfo): Promise<void> => at(f).evaluate((el, attr) => el.setAttribute(attr, ""), TYPED, { timeout: limits.actionMs });
-    /** A failed action as this run's error: the time limit explained, redacted like everything else it throws. */
-    const actionError = (err: unknown): Error => {
-      const explained = loginTimeout(err, "action", limits.actionMs);
-      return fail(explained instanceof Error ? explained.message : String(explained));
-    };
-    const actionFailed = (err: unknown): Promise<never> => Promise.reject(actionError(err));
-    /** What the page says, fit to quote. */
-    const pageSays = async (): Promise<string> => quotable(await alertText(page), redact, 200);
-    /** A button's text fit to quote, redacted before it is shortened. */
-    const buttonText = (f: FieldInfo): string => quotable(f.text || f.label || "the submit button", redact, 40);
-    /** The run's deadline passed: say what it was waiting for, and what the page says, if anything. */
-    const timedOut = async (waitingFor: string): Promise<Error> => {
-      const says = await pageSays();
-      return fail(`timed out after ${config.timeoutMs / 1000}s waiting for ${waitingFor} (at ${where()})${says ? `. The page says: "${says}"` : ""}`);
-    };
+    const t = loginTools(page, config, redactor, now, limits, progress, fail, redact);
+    const { pageKey, midNavigation, successMatched, read, where, signature, stepOpts, pageSays, timedOut } = t;
     const submitOpts = { passwordless: config.password === undefined };
     let lastWait = "the sign-in form to appear";
     for (;;) {
@@ -734,102 +663,273 @@ export async function runScriptedLogin(
         continue;
       }
       if (progress.submits >= MAX_SUBMITS) throw fail(`gave up after ${MAX_SUBMITS} submits without reaching the signed-in page`);
-      let boxOpts: { codeBoxes?: number } = {};
-      // What this step typed, recorded as submitted only once the step is: a step the page holds back (fill-more) is typed again.
-      const typedIds = new Map<FieldKind, string>();
-      for (const kind of step.fill) {
-        const field = chosen[kind]!;
-        const boxes = kind === "otp" ? otpBoxes(fields, field) : null;
-        if (boxes) {
-          const split = splitCode(await currentCode(config.code!), boxes.length, config.code!.kind);
-          if (!split.ok) throw fail(`sign-in stuck: ${split.error}.`);
-          for (const [i, box] of boxes.entries()) {
-            try {
-              // A box is often enabled only once the one before it is filled.
-              await page.waitForFunction(
-                ([attr, index]) => {
-                  const el = document.querySelector(`[${attr}="${index}"]`) as HTMLInputElement | null;
-                  return el !== null && !el.disabled;
-                },
-                [TAG, String(box.index)] as const,
-                { timeout: limits.actionMs, polling: 50 },
-              );
-              // Cleared only when it holds something: clearing sends Delete, which some boxes take as a step back to the box before.
-              if ((await at(box).inputValue({ timeout: limits.actionMs })) !== "") await at(box).fill("", { timeout: limits.actionMs });
-              await markTyped(box);
-              // Typed as keys: a box that moves on to the next by itself, or reads keys rather than its value, still gets its character.
-              await at(box).pressSequentially(split.chars[i], { timeout: limits.actionMs });
-            } catch (err) {
-              // The first line only: the call log after it names the character being typed, which no redaction of the whole code catches.
-              const explained = loginTimeout(err, "action", limits.actionMs);
-              const first = (explained instanceof Error ? explained.message : String(explained)).split("\n")[0];
-              throw fail(`could not type into box ${i + 1} of ${boxes.length} of the one-time code: ${first}`);
-            }
-          }
-          boxOpts = { codeBoxes: boxes.length };
-        } else {
-          const value = kind === "otp" ? await currentCode(config.code!) : kind === "username" ? config.username : config.password!;
-          await markTyped(field).catch(actionFailed);
-          await at(field).fill(value, { timeout: limits.actionMs }).catch(actionFailed);
-        }
-        typedIds.set(kind, fieldIdentity(field));
-      }
+      const { boxOpts, typedIds } = await typeStep(page, step, chosen, fields, t, config, limits, fail);
       const before = signature(fields);
       const shownBefore = new Set(Object.keys(chosen) as FieldKind[]);
       const readNow = async (): Promise<AfterTyping> => {
         const now = await read();
         return afterTyping(step.fill, { left: now === null || pageKey() !== keyAtRead, fields: now ?? [] }, shownBefore, submitOpts);
       };
-      let next: AfterTyping;
-      for (;;) {
-        await page.waitForTimeout(POLL_MS);
-        next = await readNow();
-        if (next.kind !== "wait") break;
-        if (Date.now() > deadline) {
-          const control = next.button ? `the "${buttonText(next.button)}" button` : "the field just filled";
-          throw await timedOut(`${control} to be enabled, or the page to move on, after filling ${filledNames(step.fill, boxOpts)}`);
-        }
-      }
+      const next = await waitForControl(page, deadline, t, readNow, step, boxOpts);
       if (next.kind === "fill-more") {
         say(describeStep(step.fill, "more", boxOpts));
         continue;
       }
-      let by: SubmittedBy = "page";
-      if (next.kind === "click" || next.kind === "enter") {
-        try {
-          if (next.kind === "click") await at(next.button).click({ timeout: limits.actionMs });
-          else await at(next.field).press("Enter", { timeout: limits.actionMs });
-        } catch (err) {
-          // The page moved on while the click waited (it took the step itself, or the click went through as it left): the step is
-          // done. Otherwise the click's own error is the one to report, also when reading the page to tell fails.
-          const moved = await readNow().then(
-            (after) => after.kind === "moved",
-            () => false,
-          );
-          if (!moved) throw actionError(err);
-        }
-        by = next.kind === "click" ? { button: buttonText(next.button) } : "enter";
-      }
+      const by = await submitStep(next, t, limits, readNow);
       for (const [kind, identity] of typedIds) progress.submitted.set(kind, identity);
       progress.submits += 1;
       const did = describeStep(step.fill, by, boxOpts);
       say(did);
       lastWait = `the page to move on after that step (${did})`;
       // Wait for the form to move on: another page, or other fields on this one.
-      while (Date.now() <= deadline) {
-        await page.waitForTimeout(POLL_MS);
-        const after = await read();
-        if (after === null) continue;
-        if (signature(after) !== before || (await successMatched())) break;
-        const again = chooseFields(after);
-        // The same fields, emptied: a refused submit re-rendered in place.
-        if (step.fill.some((k) => again[k] && !again[k]!.filled)) break;
-      }
+      await waitToMoveOn(page, deadline, t, before, step);
     }
     say(`Signed in: now at ${where()}.`);
     return await saveLogin(context, options);
   } finally {
     // The result (a saved profile or the error being thrown) is already decided; a browser that fails to close changes neither.
     await browser.close().catch(() => {});
+  }
+}
+
+type FillStep = Extract<Step, { kind: "fill" }>;
+
+/** How long one page load and one action may take while signing in. */
+type LoginLimits = { navMs: number; actionMs: number };
+
+/** A scripted sign-in's tools on its page: reading the fields, the locators and marks for typing, and its errors, redacted. */
+interface LoginTools {
+  pageKey: () => string;
+  midNavigation: (err: Error) => boolean;
+  successMatched: () => Promise<boolean>;
+  read: () => Promise<FieldInfo[] | null>;
+  where: () => string;
+  signature: (fields: FieldInfo[]) => string;
+  stepOpts: (successMatchedNow: boolean, fields: readonly FieldInfo[]) => StepOptions;
+  currentCode: (source: CodeSource) => Promise<string>;
+  at: (f: FieldInfo) => Locator;
+  markTyped: (f: FieldInfo) => Promise<void>;
+  actionError: (err: unknown) => Error;
+  actionFailed: (err: unknown) => Promise<never>;
+  pageSays: () => Promise<string>;
+  buttonText: (f: FieldInfo) => string;
+  timedOut: (waitingFor: string) => Promise<Error>;
+}
+
+/** The tools for one scripted sign-in, closed over its page, configuration, redactor, clock, limits and progress. */
+function loginTools(
+  page: Page,
+  config: ScriptedLogin,
+  redactor: Redactor,
+  now: () => number,
+  limits: LoginLimits,
+  progress: Progress,
+  fail: (message: string) => Error,
+  redact: (text: string) => string,
+): LoginTools {
+  const pageKey = (): string => {
+    const u = new URL(page.url());
+    return `${u.origin}${u.pathname}`;
+  };
+  /** A read the page's own navigation interrupted: nothing is known about the page yet, so the caller polls again. */
+  const midNavigation = (err: Error): boolean => /context was destroyed|navigat|detached/i.test(err.message);
+  const successMatched = async (): Promise<boolean> => {
+    if (!config.success.url && !config.success.selector) return false;
+    if (config.success.url && !urlMatches(page.url(), config.success.url)) return false;
+    if (config.success.selector) {
+      const visible = await page
+        .locator(config.success.selector)
+        .first()
+        .isVisible()
+        .catch((err: Error) => {
+          if (midNavigation(err)) return false;
+          throw fail(`the success selector could not be used: ${err.message.split("\n")[0]}`);
+        });
+      if (!visible) return false;
+    }
+    return true;
+  };
+  const read = async (): Promise<FieldInfo[] | null> => {
+    const got = await page.evaluate(collectFields, { selectors: config.selectors, tag: true }).catch((err: Error) => {
+      if (midNavigation(err)) return null;
+      throw fail(err.message);
+    });
+    if (got === null) return null;
+    if (!Array.isArray(got)) throw fail(`the ${got.badSelector} selector is not a valid CSS selector`);
+    return got;
+  };
+  /** The page's URL for a message, with any token in it redacted. */
+  const where = (): string => redactRoute(page.url());
+  const signature = (fields: FieldInfo[]): string => {
+    const chosen = chooseFields(fields);
+    return `${pageKey()}|${(Object.keys(chosen) as FieldKind[]).sort().join(",")}`;
+  };
+  const stepOpts = (successMatchedNow: boolean, fields: readonly FieldInfo[]): StepOptions => {
+    const checking = unansweredSubmit(fields, progress.submitted);
+    return {
+      hasPassword: config.password !== undefined,
+      ...(config.code ? { code: config.code.kind } : {}),
+      successConfigured: Boolean(config.success.url || config.success.selector),
+      successMatched: successMatchedNow,
+      ...(checking ? { checking } : {}),
+    };
+  };
+  /** The code to type now: the fixed one, or the TOTP code, waiting for the next one when this one is about to expire. */
+  const currentCode = async (source: CodeSource): Promise<string> => {
+    if (source.kind === "fixed") return source.code;
+    const params = source.params;
+    if (secondsLeft(params, now()) < TOTP_MIN_SECONDS_LEFT) await page.waitForTimeout(secondsLeft(params, now()) * 1000 + 200);
+    const code = totpCode(params, now());
+    redactor.add(code);
+    return code;
+  };
+  const at = (f: FieldInfo) => page.locator(`[${TAG}="${f.index}"]`);
+  /** Mark the element about to be typed into: see TYPED. */
+  const markTyped = (f: FieldInfo): Promise<void> => at(f).evaluate((el, attr) => el.setAttribute(attr, ""), TYPED, { timeout: limits.actionMs });
+  /** A failed action as this run's error: the time limit explained, redacted like everything else it throws. */
+  const actionError = (err: unknown): Error => {
+    const explained = loginTimeout(err, "action", limits.actionMs);
+    return fail(explained instanceof Error ? explained.message : String(explained));
+  };
+  const actionFailed = (err: unknown): Promise<never> => Promise.reject(actionError(err));
+  /** What the page says, fit to quote. */
+  const pageSays = async (): Promise<string> => quotable(await alertText(page), redact, 200);
+  /** A button's text fit to quote, redacted before it is shortened. */
+  const buttonText = (f: FieldInfo): string => quotable(f.text || f.label || "the submit button", redact, 40);
+  /** The run's deadline passed: say what it was waiting for, and what the page says, if anything. */
+  const timedOut = async (waitingFor: string): Promise<Error> => {
+    const says = await pageSays();
+    return fail(`timed out after ${config.timeoutMs / 1000}s waiting for ${waitingFor} (at ${where()})${says ? `. The page says: "${says}"` : ""}`);
+  };
+  return {
+    pageKey,
+    midNavigation,
+    successMatched,
+    read,
+    where,
+    signature,
+    stepOpts,
+    currentCode,
+    at,
+    markTyped,
+    actionError,
+    actionFailed,
+    pageSays,
+    buttonText,
+    timedOut,
+  };
+}
+
+/** Type what a step fills: the username, the password or the one-time code, one character a box where the code has boxes. */
+async function typeStep(
+  page: Page,
+  step: FillStep,
+  chosen: Partial<Record<FieldKind, FieldInfo>>,
+  fields: FieldInfo[],
+  t: LoginTools,
+  config: ScriptedLogin,
+  limits: LoginLimits,
+  fail: (message: string) => Error,
+): Promise<{ boxOpts: { codeBoxes?: number }; typedIds: Map<FieldKind, string> }> {
+  const { currentCode, at, markTyped, actionFailed } = t;
+  let boxOpts: { codeBoxes?: number } = {};
+  // What this step typed, recorded as submitted only once the step is: a step the page holds back (fill-more) is typed again.
+  const typedIds = new Map<FieldKind, string>();
+  for (const kind of step.fill) {
+    const field = chosen[kind]!;
+    const boxes = kind === "otp" ? otpBoxes(fields, field) : null;
+    if (boxes) {
+      const split = splitCode(await currentCode(config.code!), boxes.length, config.code!.kind);
+      if (!split.ok) throw fail(`sign-in stuck: ${split.error}.`);
+      for (const [i, box] of boxes.entries()) {
+        try {
+          // A box is often enabled only once the one before it is filled.
+          await page.waitForFunction(
+            ([attr, index]) => {
+              const el = document.querySelector(`[${attr}="${index}"]`) as HTMLInputElement | null;
+              return el !== null && !el.disabled;
+            },
+            [TAG, String(box.index)] as const,
+            { timeout: limits.actionMs, polling: 50 },
+          );
+          // Cleared only when it holds something: clearing sends Delete, which some boxes take as a step back to the box before.
+          if ((await at(box).inputValue({ timeout: limits.actionMs })) !== "") await at(box).fill("", { timeout: limits.actionMs });
+          await markTyped(box);
+          // Typed as keys: a box that moves on to the next by itself, or reads keys rather than its value, still gets its character.
+          await at(box).pressSequentially(split.chars[i], { timeout: limits.actionMs });
+        } catch (err) {
+          // The first line only: the call log after it names the character being typed, which no redaction of the whole code catches.
+          const explained = loginTimeout(err, "action", limits.actionMs);
+          const first = (explained instanceof Error ? explained.message : String(explained)).split("\n")[0];
+          throw fail(`could not type into box ${i + 1} of ${boxes.length} of the one-time code: ${first}`);
+        }
+      }
+      boxOpts = { codeBoxes: boxes.length };
+    } else {
+      const value = kind === "otp" ? await currentCode(config.code!) : kind === "username" ? config.username : config.password!;
+      await markTyped(field).catch(actionFailed);
+      await at(field).fill(value, { timeout: limits.actionMs }).catch(actionFailed);
+    }
+    typedIds.set(kind, fieldIdentity(field));
+  }
+  return { boxOpts, typedIds };
+}
+
+/** Read the page after typing until it is clear how the step is submitted, or the deadline passes. */
+async function waitForControl(
+  page: Page,
+  deadline: number,
+  t: LoginTools,
+  readNow: () => Promise<AfterTyping>,
+  step: FillStep,
+  boxOpts: { codeBoxes?: number },
+): Promise<AfterTyping> {
+  const { buttonText, timedOut } = t;
+  let next: AfterTyping;
+  for (;;) {
+    await page.waitForTimeout(POLL_MS);
+    next = await readNow();
+    if (next.kind !== "wait") break;
+    if (Date.now() > deadline) {
+      const control = next.button ? `the "${buttonText(next.button)}" button` : "the field just filled";
+      throw await timedOut(`${control} to be enabled, or the page to move on, after filling ${filledNames(step.fill, boxOpts)}`);
+    }
+  }
+  return next;
+}
+
+/** Submit the step by its button or Enter, unless the page took it by itself, and return how it was submitted. */
+async function submitStep(next: AfterTyping, t: LoginTools, limits: LoginLimits, readNow: () => Promise<AfterTyping>): Promise<SubmittedBy> {
+  const { at, actionError, buttonText } = t;
+  let by: SubmittedBy = "page";
+  if (next.kind === "click" || next.kind === "enter") {
+    try {
+      if (next.kind === "click") await at(next.button).click({ timeout: limits.actionMs });
+      else await at(next.field).press("Enter", { timeout: limits.actionMs });
+    } catch (err) {
+      // The page moved on while the click waited (it took the step itself, or the click went through as it left): the step is
+      // done. Otherwise the click's own error is the one to report, also when reading the page to tell fails.
+      const moved = await readNow().then(
+        (after) => after.kind === "moved",
+        () => false,
+      );
+      if (!moved) throw actionError(err);
+    }
+    by = next.kind === "click" ? { button: buttonText(next.button) } : "enter";
+  }
+  return by;
+}
+
+/** Wait for the form to move on after a submit, until the deadline. */
+async function waitToMoveOn(page: Page, deadline: number, t: LoginTools, before: string, step: FillStep): Promise<void> {
+  const { read, signature, successMatched } = t;
+  while (Date.now() <= deadline) {
+    await page.waitForTimeout(POLL_MS);
+    const after = await read();
+    if (after === null) continue;
+    if (signature(after) !== before || (await successMatched())) break;
+    const again = chooseFields(after);
+    // The same fields, emptied: a refused submit re-rendered in place.
+    if (step.fill.some((k) => again[k] && !again[k]!.filled)) break;
   }
 }
