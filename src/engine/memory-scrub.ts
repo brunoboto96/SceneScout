@@ -14,7 +14,7 @@
  * Only text a person or the agent wrote, or the page put in an action, is
  * read: ids, routes' identities and state fingerprints are left alone, since a
  * digit run in a hash could read as a card number. The redaction itself is
- * passed in (memory.ts redactSecrets), so this file holds the walk and memory-
+ * passed in (redact.ts redactSecrets), so this file holds the walk and memory-
  * test holds it to a fixture written the way an older engine wrote one.
  */
 import fs from "node:fs";

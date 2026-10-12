@@ -298,6 +298,31 @@ test("scenescout login takes one URL and a valid role, and nothing that would le
   refused(["http://127.0.0.1:3000", "--role", "admin", "--script", "--save", "enter"], /--save applies to the window/);
 });
 
+test("scenescout login reads a valued option the way check, ci and export do", () => {
+  const error = (args: string[]) => {
+    const r = parseLoginArgs(args, "/work");
+    assert.equal(r.ok, false, args.join(" "));
+    return r.ok ? "" : r.error;
+  };
+  const U = "http://127.0.0.1:3000";
+  // The next option is not a value, and neither is the end of the line.
+  assert.equal(error([U, "--role", "--project", "sub"]), "--role needs a value");
+  assert.equal(error([U, "--role", "admin", "--project"]), "--project needs a value");
+  // An unknown option is still read as valued, so a missing value is reported first.
+  assert.equal(error([U, "--role", "admin", "--bogus"]), "--bogus needs a value");
+  // `--name=` is an empty value, not a missing one: the role's own rule refuses it.
+  assert.equal(error([U, "--role="]), "give a role name, e.g. --role admin");
+  // --script is a switch: given a value it is a different, unknown option.
+  assert.equal(error([U, "--role", "admin", "--script=1"]), "unknown option --script");
+  // A single dash is not an option, so it and its word are two more URLs.
+  assert.match(error([U, "--role", "admin", "-p", "sub"]), /exactly one URL/);
+  // Only the first "=" splits; the value keeps the rest, and the last of a repeated option wins.
+  const kept = parseLoginArgs([U, "--project=a=b", "--role", "admin", "--role=qa"], "/work");
+  assert.ok(kept.ok);
+  assert.equal(kept.options.projectDir, path.resolve("/work/a=b"));
+  assert.equal(kept.options.role, "qa");
+});
+
 test("the window saves by itself unless --save enter asks for Enter alone, and reads --success-url without --script", () => {
   const plain = parseLoginArgs(["http://127.0.0.1:3000", "--role", "admin"], "/work");
   assert.ok(plain.ok && plain.options.save === undefined, "no --save leaves the default, auto, to the runner");

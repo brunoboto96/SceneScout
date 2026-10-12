@@ -20,6 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
+import { readFlagValue } from "./args.js";
 import { MEMORY_DIRNAME, writeSelfIgnore } from "./memory.js";
 import { SCRIPT_FLAGS } from "./scripted-login.js";
 import { SAVE_MODES, type SaveMode } from "./signed-in.js";
@@ -429,12 +430,10 @@ export function parseLoginArgs(args: readonly string[], cwd: string): { ok: true
       script = true;
       continue;
     }
-    const eq = a.indexOf("=");
-    const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
-    const value = eq > 0 ? a.slice(eq + 1) : args[i + 1];
-    if (value === undefined || (eq < 0 && value.startsWith("--"))) return { ok: false, error: `--${name} needs a value` };
-    if (eq < 0) i += 1;
-    flags.set(name, value);
+    const read = readFlagValue(args, i);
+    if (!read.ok) return read;
+    i = read.last;
+    flags.set(read.name, read.value);
   }
   const known = new Set<string>(LOGIN_OPTION_NAMES);
   const scriptOnly = new Set<string>(SCRIPT_FLAGS);

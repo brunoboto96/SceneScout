@@ -1,6 +1,6 @@
 /**
  * The one rule for a valued command-line option, shared by the parsers of
- * `check`, `ci` and `export`: `--name value` or `--name=value`, and a value
+ * `check`, `ci`, `export` and `login`: `--name value` or `--name=value`, and a value
  * that is missing or looks like the next option is a mistake, not a value.
  * Each parser keeps its own rules for which names exist and which are switches.
  */
