@@ -42,14 +42,15 @@ a writing mode.
   | May create test data | `safe-write` | Always, with a code the person types |
   | *(not offered)* | `destructive` | Not reachable from a guided surface |
 
-- **The words say what a form can do.** `read-only` lets an ordinary form
-  submission (a plain `POST`) through, and many apps save an edit to an
-  existing record (a profile, a setting) with one. So "May submit forms" says
-  a form it sends can create a record or change one that was there, and that
-  deletes, and changes sent any other way, are blocked; "May create test data"
-  says the same of forms and limits deletes and other changes to what it
-  created. No care level's words promise that what was there is untouched.
-  The write policy itself is unchanged (ADR 2).
+- **The words say what a sent form or button can do.** `read-only` lets an
+  ordinary `POST` through, and many apps save an edit to an existing record
+  (a profile, a setting) with one. The policy judges the request, not what
+  sent it, so a button's script is let through exactly as a form is. So "May
+  submit forms" says that what it sends can create a record or change one
+  that was there, and that deletes are blocked; "May create test data" says
+  the same and that it deletes only what it created. No care level's words
+  promise that what was there is untouched, or that only a form can change
+  it. The write policy itself is unchanged (ADR 2).
 - **This is a rule change.** A plain choice may now reach `safe-write`. The
   old rule's intent is kept: `safe-write` is reached only by choosing it under
   its own name, whose description says it creates records and is for a test

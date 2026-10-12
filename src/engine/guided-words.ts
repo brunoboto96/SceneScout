@@ -21,28 +21,26 @@ export const CARE_LABEL: Record<Care, string> = {
 export const CARE_EXPLAIN: Record<Care, string> = {
   "look-only": "Only opens pages. Nothing is sent to your site except signing in. Safe on a live site.",
   "may-submit-forms":
-    "Fills in and sends forms, such as a contact form, a sign-up or a settings page. A form it sends can create a record, and can change one that was there, as that form would for anyone. Deletes, and changes sent any other way than a form, are blocked.",
+    "Fills in and sends forms, and presses buttons that send something, such as a contact form, a sign-up or a settings page. What it sends can create a record, and can change one that was there, as it would for anyone. Deletes are blocked.",
   "may-create-test-data":
-    "Creates records it needs, such as an account or an order. Forms it sends can also change records that were there. Deletes, and changes sent any other way than a form, are allowed only on what it created. Use only on a test copy.",
+    "Creates records it needs, such as an account or an order. What it sends can also change records that were there, but it deletes only what it created. Use only on a test copy.",
 };
 
 /** Said where the care levels are listed: the level that deletes is not one of them. */
-export const DESTRUCTIVE_NOT_OFFERED =
-  "Deleting anything, or changing it other than through a form, on data that was already there needs a developer to ask for it by name.";
+export const DESTRUCTIVE_NOT_OFFERED = "Deleting data that was already there needs a developer to ask for it by name.";
 
 /** What a care level may and may not do, as the confirmation's preview lists it: + may, ~ may with a limit, - never. */
 export const CARE_PREVIEW: Record<Care, readonly string[]> = {
   "look-only": ["+ open pages and sign in", "- never send a form", "- never create, change or delete anything"],
   "may-submit-forms": [
-    "+ fill in and send forms, such as a contact form or a sign-up",
-    "~ a form it sends can create a record, or change one that was there",
+    "+ fill in and send forms, and press buttons that send something",
+    "~ what it sends can create a record, or change one that was there",
     "- never delete anything",
-    "- never change anything other than through a form",
   ],
   "may-create-test-data": [
     "+ create accounts, orders or other records it needs",
-    "~ a form it sends can also change a record that was there",
-    "~ delete, or change other than through a form, only the records it created",
+    "~ what it sends can also change a record that was there",
+    "~ delete only the records it created",
     "- never delete anything outside its own records",
   ],
 };
@@ -82,15 +80,14 @@ export const HELD_BACK: Record<CheckArea, Partial<Record<Care, string>>> = {
   phone: {},
   journey: {
     "look-only": "The journey stops at the first step that would send something to your site, and says so.",
-    "may-submit-forms": "The journey stops at the first step that would delete something, or change it other than through a form, and says so.",
-    "may-create-test-data":
-      "The journey stops at the first step that would delete something it did not create, or change it other than through a form, and says so.",
+    "may-submit-forms": "The journey stops at the first step this care level blocks, such as a delete, and says so.",
+    "may-create-test-data": "The journey stops at the first step this care level blocks, such as deleting something it did not create, and says so.",
   },
   tickets: {
     "look-only": "A criterion that needs something sent to your site is marked not tested, and says why.",
-    "may-submit-forms": "A criterion that needs something deleted, or changed other than through a form, is marked not tested, and says why.",
+    "may-submit-forms": "A criterion that needs a step this care level blocks, such as a delete, is marked not tested, and says why.",
     "may-create-test-data":
-      "A criterion that needs something it did not create deleted, or changed other than through a form, is marked not tested, and says why.",
+      "A criterion that needs a step this care level blocks, such as deleting something it did not create, is marked not tested, and says why.",
   },
 };
 
@@ -114,8 +111,8 @@ export function signInSentence(hint: string): string {
 /** The sentence the person accepts before a care level that writes starts on an address. */
 export function confirmSentence(reason: "creates-data" | "forms-on-remote-site", address: string): string {
   return reason === "creates-data"
-    ? `You chose "${CARE_LABEL["may-create-test-data"]}" for ${address}. It may create accounts, orders or other records it needs, and forms it sends can change records that were there. Deletes, and changes sent any other way than a form, are allowed only on the records it created. Use this only on a test copy, never on a live site.`
-    : `You chose "${CARE_LABEL["may-submit-forms"]}" for ${address}, which is not on this computer. A form it sends there can create a real record, such as a sign-up or a message, and can change a record that was there, such as a saved profile. Deletes, and changes sent any other way than a form, are blocked.`;
+    ? `You chose "${CARE_LABEL["may-create-test-data"]}" for ${address}. It may create accounts, orders or other records it needs, and what it sends can change records that were there. It deletes only the records it created. Use this only on a test copy, never on a live site.`
+    : `You chose "${CARE_LABEL["may-submit-forms"]}" for ${address}, which is not on this computer. What it sends there can create a real record, such as a sign-up or a message, and can change a record that was there, such as a saved profile. Deletes are blocked.`;
 }
 
 /** What the person is told about the confirmation before it is asked for. */
@@ -133,10 +130,10 @@ export const CONFIRM_UNAVAILABLE = `This app cannot show the confirmation form, 
 /** The answer to "Is it safe to run on my live site?", word for word on every surface. */
 export const SAFETY_EXPLAINER: readonly string[] = [
   `${CARE_LABEL["look-only"]}, the default, only opens pages: nothing is sent to your site except signing in, so it is safe on a live site.`,
-  `${CARE_LABEL["may-submit-forms"]} sends forms. A form can create a record, or change one that was there, as it would for anyone who sent it; nothing is deleted, and nothing is changed any other way. On a site that is not on this computer, it asks you first.`,
-  `${CARE_LABEL["may-create-test-data"]} creates the records it needs. Forms it sends can also change records that were there, but it deletes, or changes any other way, only what it created. It always asks you first, and is for a test copy only.`,
-  "Deleting data that was already there, or changing it other than through a form, is never offered here.",
-  "These limits are checked on every request your browser sends, not left to the AI's judgement. A request a care level does not allow never reaches your site. A form is the one thing to look out for: it does on your site whatever it does for anyone who sends it.",
+  `${CARE_LABEL["may-submit-forms"]} sends forms, and presses buttons that send something. What it sends can create a record, or change one that was there, as it would for anyone who sent it; deletes are blocked. On a site that is not on this computer, it asks you first.`,
+  `${CARE_LABEL["may-create-test-data"]} creates the records it needs. What it sends can also change records that were there, but it deletes only what it created. It always asks you first, and is for a test copy only.`,
+  "Deleting data that was already there is never offered here.",
+  "These limits are checked on every request your browser sends, not left to the AI's judgement. A request a care level does not allow never reaches your site. What a care level does allow, a form or a button, does on your site whatever it does for anyone who uses it.",
   "It never asks for your password. When your site needs one, a browser window opens for you to sign in as you normally would.",
 ];
 

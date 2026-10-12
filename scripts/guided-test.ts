@@ -41,6 +41,7 @@ import {
   THOROUGHNESS_LABEL,
 } from "../src/engine/guided-words.ts";
 import { settingsFromAnswers } from "../src/intake.ts";
+import { allowsWrite } from "../src/engine/policy.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import { IMPACT, PLAIN_WORDING, plainCard, plainFinding, plainSteps } from "../src/engine/plain.ts";
 
@@ -115,7 +116,7 @@ test("choices: a refusal never repeats what was typed, not even a field's name o
 
 test("choices: the level that deletes is never offered, whatever it is called", () => {
   for (const care of ["destructive"])
-    assert.match(refused({ address: LOCAL, areas: ["forms"], care }), /not offered here\. Deleting anything, or changing it other than through a form/);
+    assert.match(refused({ address: LOCAL, areas: ["forms"], care }), /not offered here\. Deleting data that was already there needs a developer/);
   assert.ok(!(CARES as readonly string[]).includes("destructive"));
   assert.deepEqual(new Set(Object.values(CARE_MODE)), new Set(["observe", "read-only", "safe-write"]));
 });
@@ -183,6 +184,49 @@ test("credentials: the near misses are ordinary sentences and pass", () => {
   );
 });
 
+test("credentials: a value after a colon or in quotes, other languages' words, a sign-in code and a signed address are refused", () => {
+  for (const text of [
+    "Password: letmein",
+    "password = 'letmein'",
+    "Sign in (user: admin, password: admin) and open the orders",
+    "pass: Tr0ub4dor&3",
+    "credentials: admin / qwerty",
+    "creds admin:admin123",
+    "Connecte-toi avec le mot de passe Soleil2024!",
+    "Inicia sesión con la contraseña Verano2024!",
+    "Войдите, пароль Лето2024!",
+    "Enter the two-factor code 123456",
+    "Enter the 2FA code 654321",
+    "Use the code 482913 to sign in",
+  ])
+    assert.equal(holdsCredential(text), true, text);
+  for (const address of [
+    "https://x.example.com/callback?code=4/0AX4XfWhabc",
+    "https://x.example.com/file?X-Amz-Signature=abcdef0123456789",
+    "https://x.example.com/?sig=abcdef0123456789abcdef",
+    "https://x.example.com/?key=AIzaSyA1234567890abcdefghij",
+    "https://x.example.com/?session=abcdef0123456789",
+    "https://x.example.com/?auth=abcdef0123456789",
+    "https://x.example.com/?pass=hunter2",
+  ])
+    assert.match(refused({ address, areas: ["forms"] }), /address holds what looks like/, address);
+});
+
+test("credentials: the near misses of those pass: a field's name before a colon, a link, a page number, a role", () => {
+  for (const text of [
+    "Check the error under Password: required",
+    "Check the Password: label is above the box",
+    "Sign in with SSO, then open https://app.example.com/reports/2024/q3",
+    "Sign in with role=editor and edit post #42",
+    "Sign in with your usual credentials and open the settings",
+    "Check that the error code 404 page has a link home",
+    "Check the mot de passe oublié link",
+  ])
+    assert.equal(holdsCredential(text), false, text);
+  for (const address of ["https://x.example.com/products?page=2&sort=name", "https://x.example.com/search?q=shoes&lang=en"])
+    assert.equal(ok({ address, areas: ["forms"] }).address, address);
+});
+
 // ---- The confirmation rule, each as a contrastive pair ----
 
 test("confirmation: may submit forms on this computer needs none; the same choice on another address needs one", () => {
@@ -229,6 +273,20 @@ test("confirmation: may create test data is always confirmed, with a typed code,
   // The pair: the same local address one care level down needs nothing.
   assert.equal(plan({ address: LOCAL, care: "may-submit-forms" }).confirm, null);
   assert.equal(CONFIRM_NEEDS_CODE["forms-on-remote-site"], false, "a form on another address needs the answer only");
+});
+
+test("plan: choices that were never checked cannot make a plan with no mode, which scout_attach would read as read-only", () => {
+  const good = ok({ address: REMOTE, areas: ["forms"] });
+  // A mode left undefined drops out of the attach's arguments, and scout_attach's default is read-only: a form-sending run nobody confirmed.
+  for (const bad of [
+    { ...good, care: "destructive" },
+    { ...good, care: "MAY-CREATE-TEST-DATA" },
+    { ...good, thoroughness: "forever" },
+    { ...good, areas: ["everything"] },
+    { ...good, signIn: "magic-link" },
+  ])
+    assert.throws(() => buildGuidedPlan(bad as unknown as GuidedChoices), /checkGuidedChoices/, JSON.stringify(bad));
+  assert.equal(buildGuidedPlan(good).mode, "observe");
 });
 
 test("confirmation: no plan is ever built already accepted", () => {
@@ -400,6 +458,30 @@ test("wording: May submit forms never claims that what was there is left untouch
   }
   for (const s of [CARE_EXPLAIN["may-submit-forms"], confirmSentence("forms-on-remote-site", REMOTE), CARE_EXPLAIN["may-create-test-data"]])
     assert.match(s, /change (?:one|a record|records) that (?:was|were) there/, s);
+});
+
+test("wording: no care level says a form is the only way something changes, because the write policy cannot tell a form from a button", () => {
+  // policy.ts judges the request, not what sent it: a plain POST a script sends
+  // ("Like", "Mark as read", a settings toggle) passes exactly as a form's does.
+  assert.equal(allowsWrite("read-only", "POST", false, false), true);
+  assert.equal(allowsWrite("safe-write", "POST", false, false), true);
+  const said = [
+    ...Object.values(CARE_EXPLAIN),
+    ...Object.values(CARE_PREVIEW).flat(),
+    ...Object.values(HELD_BACK).flatMap((h) => Object.values(h)),
+    ...SAFETY_EXPLAINER,
+    DESTRUCTIVE_NOT_OFFERED,
+    confirmSentence("creates-data", REMOTE),
+    confirmSentence("forms-on-remote-site", REMOTE),
+  ];
+  for (const s of said) assert.doesNotMatch(s, /(?:other|another) (?:way )?than (?:through )?a form|any other way|a form is the one/i, s);
+  // What does hold: deletes are blocked below safe-write, and limited to its own records in it.
+  assert.equal(allowsWrite("read-only", "DELETE", false, false), false);
+  assert.equal(allowsWrite("read-only", "POST", true, false), false);
+  assert.equal(allowsWrite("safe-write", "DELETE", false, false), false);
+  assert.equal(allowsWrite("safe-write", "DELETE", false, true), true);
+  assert.match(CARE_EXPLAIN["may-submit-forms"], /Deletes are blocked/);
+  assert.match(CARE_EXPLAIN["may-create-test-data"], /deletes only what it created/);
 });
 
 // ---- A finding as a card ----

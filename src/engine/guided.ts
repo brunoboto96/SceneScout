@@ -137,52 +137,127 @@ const CHOICE_FIELDS = new Set(["address", "areas", "journey", "tickets", "signIn
 const NO_CREDENTIALS =
   "never type a password, code or token into the choices: when your site needs one, a browser window opens for you to sign in as you normally would";
 
+/** Not part of a longer word, in any script: `\b` reads only ASCII letters as letters. */
+const EDGE_BEFORE = "(?<![\\p{L}\\p{N}_])";
+const EDGE_AFTER = "(?![\\p{L}\\p{N}_])";
+
 /**
  * A word that names a secret, as someone writes it in a sentence: "password",
- * "pw", "PIN", "login code", "token" and the like.
+ * "pw", "PIN", "login code", "token", "credentials" and the like, and the
+ * word for a password in the languages a journey is most often written in.
  */
-const SECRET_WORD =
-  /\b(?:password|passwort|passcode|pass code|pw|pwd|pin|one-time code|verification code|login code|sign-in code|security code|otp|token|api key|apikey|secret)\b/giu;
+const SECRET_WORD = new RegExp(
+  `${EDGE_BEFORE}(?:password|passwort|passphrase|passcode|pass code|pw|pwd|pin|one-time code|verification code|login code|sign-in code|security code|2fa code|two-factor code|mfa code|authenticator code|otp|token|api key|apikey|secret|credentials?|creds|mot de passe|contraseña|senha|wachtwoord|kennwort|passord|lösenord|hasło|пароль)${EDGE_AFTER}`,
+  "giu",
+);
+
+/** "pass" names a secret only when a value is set against it: "pass: hunter2", "pass=…". */
+const PASS_SET = new RegExp(`${EDGE_BEFORE}pass(?=\\s*[:=])`, "giu");
 
 /** "Sign in" or "log in", then "with" within a short phrase: what follows is how they sign in ("sign in as bob with hunter2"). */
 const SIGN_IN_WITH = /\b(?:sign|log)[\s-]?in\b[^.;\n]{0,60}?\bwith\b/giu;
 
+/** A code as a sign-in asks for one: six to eight digits after the word "code" ("use the code 482913"). */
+const DIGIT_CODE = new RegExp(`${EDGE_BEFORE}code\\s*(?:is\\s*|[:=]\\s*)?\\d{6,8}(?!\\d)`, "iu");
+
 /** How many words after a secret's name are read for its value ("the password for it is Summer2024!"). */
 const VALUE_WINDOW = 5;
+
+/** Words that, set after a field's name and a colon, name something about the field rather than its value ("Password: required"). */
+const FIELD_WORDS = new Set([
+  "label",
+  "field",
+  "box",
+  "input",
+  "placeholder",
+  "hint",
+  "required",
+  "optional",
+  "missing",
+  "empty",
+  "blank",
+  "wrong",
+  "invalid",
+  "hidden",
+  "masked",
+  "shown",
+  "visible",
+  "error",
+  "errors",
+  "message",
+  "too",
+  "must",
+  "should",
+]);
+
+/**
+ * Query keys whose value is a credential on an address, beyond the ones the
+ * report's redaction masks: a sign-in callback's code, a signed link's
+ * signature, a key, a session or an auth value, a password under a short name.
+ */
+const SECRET_PARAM = /^(?:code|sig|signature|xamzsignature|xgoogsignature|key|session|sessionid|sid|auth|authorization|pass|nonce|jwt)$/;
 
 /**
  * Whether a word reads as a credential's value rather than as English: at
  * least four characters with a digit in it, or with a symbol other than a
  * hyphen or an apostrophe. An email address is personal data, not a
- * credential, and does not count.
+ * credential, and does not count; nor do a link, a path on the site, a
+ * numbered item ("#42") or a setting written as name=value ("role=editor").
  */
 function looksLikeValue(raw: string): boolean {
   const word = raw.replace(/^["'“‘(\[]+|["'”’)\],.;:?]+$/gu, "");
   if (word.length < 4 || /^[^@\s]+@[^@\s]+\.\p{L}{2,}$/u.test(word)) return false;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(word) || word.startsWith("/") || /^#\d+$/.test(word)) return false;
+  const setting = /^([\p{L}_-]+)=[\p{L}\p{N}_-]+$/u.exec(word);
+  if (setting && !new RegExp(SECRET_WORD.source, "iu").test(setting[1])) return false;
   return /\p{N}/u.test(word) || /[^\p{L}\p{N}'’-]/u.test(word);
 }
 
-/** Whether the words after position `end` hold a value: a quoted one straight after its name, or one of the next few words. */
+/**
+ * Whether the words after position `end` hold a value: one set against the
+ * name with a colon or an equals sign ("Password: letmein"), a quoted one
+ * straight after it, or one of the next few words that reads as a value.
+ */
 function valueFollows(text: string, end: number): boolean {
   const rest = text.slice(end, end + 120);
+  const set = /^\s*[:=]\s*["'“‘]?([^\s"'”’,;)/]{3,})["'”’]?\s*(?:$|[,;)/]|\.(?:\s|$))/u.exec(rest);
+  if (set && !FIELD_WORDS.has(set[1].toLowerCase())) return true;
   const quoted = /^\s*(?:is|was|[:=-])?\s*["'“‘]([^"'”’]{4,})["'”’]/u.exec(rest);
-  if (quoted && /[^\p{L}\s]/u.test(quoted[1])) return true;
+  if (quoted && (/[^\p{L}\s]/u.test(quoted[1]) || !/\s/u.test(quoted[1]))) return true;
   return rest.split(/\s+/).filter(Boolean).slice(0, VALUE_WINDOW).some(looksLikeValue);
+}
+
+/** Whether an address carries a credential under a query or fragment key the report's redaction does not know. */
+function addressHoldsSecretParam(text: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(text.trim());
+  } catch {
+    return false;
+  }
+  const keys = [...url.searchParams.keys(), ...new URLSearchParams(url.hash.slice(1)).keys()];
+  return keys.some((k) => SECRET_PARAM.test(k.toLowerCase().replace(/[^a-z]/g, "")));
 }
 
 /**
  * Whether text holds a credential: a shape the report's redaction would mask
  * (a key, a bearer token, `?password=…`, a value typed into a password field),
- * or one written out in words: a word that names a secret, or "sign in … with",
- * followed within a few words by a value with a digit or a symbol in it, such
- * as "password: Summer2024!", "the PIN is 4821" or "the password for it is
- * Summer2024!". Words of letters only ("the password is required", "the login
- * code screen loads") read as a sentence about the field. Email addresses are
- * not credentials here: a journey may name the address to sign up with.
+ * an address with a code, signature, key or session in its query, or one
+ * written out in words: a word that names a secret, or "sign in … with",
+ * followed by a value: one set against it with a colon ("Password:
+ * letmein"), a quoted one, or within a few words one with a digit or a symbol
+ * in it, such as "the PIN is 4821" or "the password for it is Summer2024!".
+ * Otherwise words of letters only ("the password is required", "the login
+ * code screen loads", "Password: required") read as a sentence about the
+ * field, so a letters-only password written as "the password is hunter" is
+ * not caught: that sentence cannot be told from "the password is required". Email
+ * addresses are not credentials here: a journey may name the address to sign
+ * up with.
  */
 export function holdsCredential(text: string): boolean {
   if (redactSecrets(text) !== redactPersonal(text)) return true;
-  for (const re of [SECRET_WORD, SIGN_IN_WITH]) for (const m of text.matchAll(re)) if (valueFollows(text, (m.index ?? 0) + m[0].length)) return true;
+  if (addressHoldsSecretParam(text) || DIGIT_CODE.test(text)) return true;
+  for (const re of [SECRET_WORD, PASS_SET, SIGN_IN_WITH]) for (const m of text.matchAll(re)) if (valueFollows(text, (m.index ?? 0) + m[0].length)) return true;
   return false;
 }
 
@@ -381,8 +456,15 @@ function guidedCalls(choices: GuidedChoices, mode: GuidedMode, objective: string
  * same choices always give the same plan apart from its id. A plan that needs
  * a confirmation starts unaccepted; only the server's form, answered by the
  * person, marks it accepted.
+ *
+ * The choices are checked again, and a plan is never built from ones
+ * checkGuidedChoices refuses: an unknown care level would leave the attach
+ * with no mode, and scout_attach reads a missing mode as read-only.
  */
-export function buildGuidedPlan(choices: GuidedChoices, planId: string = newPlanId()): GuidedPlan {
+export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId()): GuidedPlan {
+  const checked = checkGuidedChoices(given);
+  if (!checked.ok) throw new Error(`buildGuidedPlan was given choices checkGuidedChoices refuses: ${checked.error}`);
+  const choices = checked.choices;
   const mode = CARE_MODE[choices.care];
   const objective = guidedObjective(choices);
   const budget = { ...THOROUGHNESS_BUDGET[choices.thoroughness] };

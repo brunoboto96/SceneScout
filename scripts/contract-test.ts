@@ -1463,6 +1463,23 @@ function plainGoldenInput(audience: PlainInput["audience"]): PlainInput {
       state: "/#ghi",
       repro: [],
     },
+    {
+      // A picture whose path leaves the folder is never linked; a re-test's verdict and one other page change no words.
+      ...base,
+      id: "3d4e5f6071",
+      severity: "medium",
+      category: "http-error",
+      title: "The orders page fails to load its list",
+      detail: "The list stays empty.\r\nThe server answered 502.",
+      evidence: "GET /api/orders → HTTP 502",
+      url: "http://app.test/orders?page=2#top",
+      state: "/orders#jkl",
+      repro: ["navigate http://app.test/orders?page=2 @ http://app.test/orders?page=2", "scroll down @ http://app.test/orders?page=2"],
+      seenOn: ["/orders/archive"],
+      picture: "../outside.png",
+      verdict: "present",
+      runs: 4,
+    },
   ];
   return {
     current,

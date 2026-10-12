@@ -1,7 +1,7 @@
 <!-- audience: both -->
 ## In plain words
 
-This run found 3 problems: 1 blocks users, 1 is annoying and 1 is cosmetic. It went to 3 of the 5 pages it knew about.
+This run found 4 problems: 1 blocks users, 2 are annoying and 1 is cosmetic. It went to 3 of the 5 pages it knew about.
 
 2 problems found by earlier runs were not checked again this time. They are listed in the technical detail below.
 
@@ -81,11 +81,33 @@ The run left 2 things unchecked. The gap ledger below says which.
 
 </details>
 
+### 4. The orders page fails to load its list
+
+**Annoying** · The server refused or failed a request · on http://app.test/orders?page=2#top, and also seen on /orders/archive
+
+**What was done:**
+
+1. Go to http://app.test/orders?page=2
+2. Scroll down
+
+**What was expected:** The action completes, or the page says clearly why it could not.
+
+**What happened:** The list stays empty. The server answered 502.
+
+<details><summary>Technical detail</summary>
+
+- **Finding id:** `3d4e5f6071` · **Category:** http-error · **Severity:** medium
+- **Evidence:** `GET /api/orders → HTTP 502`
+- **Route:** `/orders#jkl`
+- The full entry, with the repro trace and a test skeleton, is under the same id in the technical detail below.
+
+</details>
+
 
 <!-- audience: qa -->
 ## In plain words
 
-This run found 3 problems: 1 blocks users, 1 is annoying and 1 is cosmetic. It went to 3 of the 5 pages it knew about.
+This run found 4 problems: 1 blocks users, 2 are annoying and 1 is cosmetic. It went to 3 of the 5 pages it knew about.
 
 2 problems found by earlier runs were not checked again this time.
 
@@ -162,6 +184,27 @@ The run left 2 things unchecked.
 
 - **Finding id:** `2c3d4e5f60` · **Category:** a-category-from-an-older-file · **Severity:** low
 - **Route:** `/#ghi`
+
+</details>
+
+### 4. The orders page fails to load its list
+
+**Annoying** · The server refused or failed a request · on http://app.test/orders?page=2#top, and also seen on /orders/archive
+
+**What was done:**
+
+1. Go to http://app.test/orders?page=2
+2. Scroll down
+
+**What was expected:** The action completes, or the page says clearly why it could not.
+
+**What happened:** The list stays empty. The server answered 502.
+
+<details><summary>Technical detail</summary>
+
+- **Finding id:** `3d4e5f6071` · **Category:** http-error · **Severity:** medium
+- **Evidence:** `GET /api/orders → HTTP 502`
+- **Route:** `/orders#jkl`
 
 </details>
 
