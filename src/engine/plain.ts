@@ -8,7 +8,9 @@
  * `report` setting chooses which parts a document carries. Everything here is
  * pure string work, so the wording and the step translation are table-tested.
  */
-import { seenOnOf, type Finding, type FindingCategory } from "./memory.js";
+import { describePicture, readFindingPicture } from "./capture.js";
+import type { CheckArea } from "./guided.js";
+import { isWorthALook, seenOnOf, type Finding, type FindingCategory } from "./memory.js";
 import type { OracleKind, OracleViolation } from "./oracles.js";
 
 /** Which parts a report carries: the plain view and the technical one ("both"), or one of them. */
@@ -69,7 +71,7 @@ export function plainWording(kind: string): PlainWording {
 }
 
 /** Severity as its effect on the people using the app. */
-export const IMPACT: Record<Finding["severity"], string> = { high: "Blocks users", medium: "Annoying", low: "Cosmetic" };
+export const IMPACT = { high: "Blocks users", medium: "Annoying", low: "Cosmetic" } as const satisfies Record<Finding["severity"], string>;
 
 /** What a control's role is called in a sentence. */
 const ROLE_WORD: Record<string, string> = {
@@ -271,32 +273,126 @@ function plainSummary(input: PlainInput): string[] {
   return lines;
 }
 
-/** One finding in plain words, with its technical detail folded beneath it. */
-export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, "lastFrames" | "audience">): string[] {
+/** How a finding's effect on people reads: its severity's words, or "Worth a look" for one that is a defect only under a project convention. */
+export type CardImpact = (typeof IMPACT)[Finding["severity"]] | "Worth a look";
+
+/**
+ * One finding as a person reads it, as data: what the guided surfaces draw
+ * and what the plain report prints, so the two cannot say different things.
+ */
+export interface PlainCard {
+  /** The finding id, for re-check, tickets and feedback. */
+  id: string;
+  impact: CardImpact;
+  severity: Finding["severity"];
+  title: string;
+  /** PLAIN_WORDING[category].problem. */
+  problem: string;
+  /** PLAIN_WORDING[category].expected. */
+  expected: string;
+  /** The finding's detail, as one paragraph. */
+  happened: string;
+  /** Where on the app: the path of the finding's address, e.g. "/cart", or the address as it is when it is not one. */
+  page: string;
+  /** Other pages the same problem was seen on. */
+  alsoOn: string[];
+  /** plainSteps(repro). */
+  steps: string[];
+  /** Which chosen area found it, when known. */
+  area?: CheckArea;
+  /**
+   * The picture, relative to .scenescout/. Width and height are 0 when they are
+   * not known (a recorded frame standing in, or a picture kept before its size was).
+   */
+  picture: null | { file: string; width: number; height: number; what: string };
+  status: "open" | "fixed" | "still-there" | "changed";
+  /** The person's label. */
+  feedback?: { verdict: "not-a-bug" | "confirmed"; reason?: string; at: string };
+  ticket?: { tracker: "github" | "jira"; ref: string; url: string };
+  technical: { category: string; evidence?: string; route: string };
+  /** ISO date. */
+  firstSeen: string;
+  /** Runs it was found in. */
+  timesSeen: number;
+}
+
+/** A finding's address as a path on the app; an address that does not parse is kept as it is. */
+function pageOfUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.pathname}${u.search}${u.hash}` || "/";
+  } catch {
+    return url;
+  }
+}
+
+/** Where a finding stands after the last re-test: its verdict, else whether it was resolved. */
+function cardStatus(f: Finding): PlainCard["status"] {
+  if (f.verdict === "gone") return "fixed";
+  if (f.verdict === "present") return "still-there";
+  if (f.verdict === "changed") return "changed";
+  return f.status === "resolved" ? "fixed" : "open";
+}
+
+/** The card's picture: the path pictureOf chooses, with the size and what it shows when the finding kept them for that same file. */
+function cardPicture(f: Finding, lastFrame: string | undefined): PlainCard["picture"] {
+  const file = pictureOf(f, lastFrame);
+  if (!file) return null;
+  const own = readFindingPicture(f);
+  if (own && own.file === file && own.width && own.height) return { file, width: own.width, height: own.height, what: describePicture(own) };
+  return { file, width: 0, height: 0, what: describePicture({}) };
+}
+
+/** One finding as a card. `lastFrame` is the last recorded frame before it was filed, on a recorded run. */
+export function plainCard(f: Finding, opts: { lastFrame?: string; area?: CheckArea } = {}): PlainCard {
   const words = plainWording(f.category);
-  // One cause in a shared part of the app is seen on every page that shows it.
-  const also = seenOnOf(f);
+  return {
+    id: f.id,
+    impact: isWorthALook(f) ? "Worth a look" : IMPACT[f.severity],
+    severity: f.severity,
+    title: f.title,
+    problem: words.problem,
+    expected: words.expected,
+    happened: f.detail.replace(/\r?\n+/g, " "),
+    page: pageOfUrl(f.url),
+    // One cause in a shared part of the app is seen on every page that shows it.
+    alsoOn: seenOnOf(f),
+    steps: plainSteps(f.repro),
+    ...(opts.area ? { area: opts.area } : {}),
+    picture: cardPicture(f, opts.lastFrame),
+    status: cardStatus(f),
+    technical: { category: f.category, ...(f.evidence ? { evidence: f.evidence } : {}), route: f.state },
+    firstSeen: f.foundAt,
+    timesSeen: f.runs,
+  };
+}
+
+/**
+ * One finding in plain words, with its technical detail folded beneath it.
+ * Every word comes from its card; only the location is the finding's whole
+ * address, as the report has always printed it.
+ */
+export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, "lastFrames" | "audience">): string[] {
+  const card = plainCard(f, { lastFrame: input.lastFrames?.get(f.id) });
   const lines = [
-    `### ${index}. ${f.title}`,
+    `### ${index}. ${card.title}`,
     ``,
-    `**${IMPACT[f.severity]}** · ${words.problem} · on ${f.url}${also.length > 0 ? `, and also seen on ${also.join(", ")}` : ""}`,
+    `**${card.impact}** · ${card.problem} · on ${f.url}${card.alsoOn.length > 0 ? `, and also seen on ${card.alsoOn.join(", ")}` : ""}`,
     ``,
   ];
-  const picture = pictureOf(f, input.lastFrames?.get(f.id));
-  if (picture) lines.push(`![What the page showed](${picture})`, ``);
-  const steps = plainSteps(f.repro);
-  if (steps.length > 0) {
+  if (card.picture) lines.push(`![What the page showed](${card.picture.file})`, ``);
+  if (card.steps.length > 0) {
     lines.push(`**What was done:**`, ``);
-    steps.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
+    card.steps.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
     lines.push(``);
   }
-  lines.push(`**What was expected:** ${words.expected}`, ``, `**What happened:** ${f.detail.replace(/\r?\n+/g, " ")}`, ``);
+  lines.push(`**What was expected:** ${card.expected}`, ``, `**What happened:** ${card.happened}`, ``);
   lines.push(`<details><summary>Technical detail</summary>`, ``);
   // "Finding id", not "Id": the HTML and the live view hang a finding's recorded
   // frames under the list that names its "Id", and that is the full entry's.
-  lines.push(`- **Finding id:** \`${f.id}\` · **Category:** ${f.category} · **Severity:** ${f.severity}`);
-  if (f.evidence) lines.push(`- **Evidence:** \`${f.evidence}\``);
-  lines.push(`- **Route:** \`${f.state}\``);
+  lines.push(`- **Finding id:** \`${card.id}\` · **Category:** ${card.technical.category} · **Severity:** ${card.severity}`);
+  if (card.technical.evidence) lines.push(`- **Evidence:** \`${card.technical.evidence}\``);
+  lines.push(`- **Route:** \`${card.technical.route}\``);
   if (input.audience !== "qa") lines.push(`- The full entry, with the repro trace and a test skeleton, is under the same id in the technical detail below.`);
   lines.push(``, `</details>`, ``);
   return lines;

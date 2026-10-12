@@ -213,7 +213,7 @@ The budget-guard, burn-meter and context-lens mods show what a session is spendi
 |                                                           |
 | How careful should I be?                                  |
 |  (o) Look only - nothing is sent but page loads           |
-|  ( ) May submit forms - nothing existing is changed       |
+|  ( ) May submit forms - forms are sent, nothing deleted   |
 |  ( ) May create test data - only on a test copy           |
 |      [ What does this mean? ]                             |
 |                                                           |
@@ -236,9 +236,10 @@ The radio list is drawn as a `Select` or as three `Button`s with one marked; the
 |                                                          |
 | What this check may do there:                            |
 |   + create accounts, orders or other records it needs    |
-|   ~ change or delete only the records it created         |
-|   - never change or delete anything that was there       |
-|   - never delete anything at all outside its own records |
+|   ~ what it sends can also change a record that was    |
+|     there                                                |
+|   ~ delete only the records it created                   |
+|   - never delete anything outside its own records        |
 | Use this only on a test copy, never on a live site.      |
 |                                                          |
 | Next, a short form asks you to type a code to go on.     |
@@ -609,9 +610,11 @@ None takes a password, token or code (the existing prompt rule in `src/prompts.t
 | The person sees | Under it, in small text | Mode | Default? | Confirmation |
 |---|---|---|---|---|
 | **Look only** | Only opens pages. Nothing is sent to your site except signing in. Safe on a live site. | `observe` | Yes, always | None |
-| **May submit forms** | Fills in and sends forms, such as a contact form or a sign-up. Nothing that already exists is changed or deleted. A form it sends can create a record. | `read-only` | No | When the address is not on this machine (not `localhost`, `127.0.0.1` or `::1`) |
-| **May create test data** | Creates records it needs, such as an account or an order, and may change or delete only what it created. Use only on a test copy. | `safe-write` | No | Always |
-| *(not offered)* | Deleting or changing existing data needs a developer to ask for it by name. | `destructive` | Never | Not reachable from either guided surface |
+| **May submit forms** | Fills in and sends forms, and presses buttons that send something, such as a contact form, a sign-up or a settings page. What it sends can create a record, and can change one that was there, as it would for anyone. Deletes are blocked. | `read-only` | No | When the address is not on this machine (not `localhost`, `127.0.0.1` or `::1`) |
+| **May create test data** | Creates records it needs, such as an account or an order. What it sends can also change records that were there, but it deletes only what it created. Use only on a test copy. | `safe-write` | No | Always |
+| *(not offered)* | Deleting data that was already there needs a developer to ask for it by name. | `destructive` | Never | Not reachable from either guided surface |
+
+Below `safe-write`, an existing record can still change: `read-only` lets an ordinary `POST` through, because that is how validation bugs are found, and many apps save an edit (a profile, a setting, a "Like") with one. The write policy judges the request, not what sent it, so a `POST` a button's script sends passes exactly as a form's does, and the words do not promise that only a form can change anything. What they do promise is what the policy blocks: `PUT`, `PATCH`, `DELETE` and requests that look like a delete, in `read-only`; the same, except on records the run created, in `safe-write`. The write policy is unchanged. (Corrected while building PR 1: an earlier draft of this table said nothing existing is changed, and a later one that only a form could change it.)
 
 This is a change from today's rule ("plain answers never reach `safe-write`"). The design keeps that rule's intent — nobody reaches a writing mode by answering an unrelated question — by making `safe-write` a separately named choice with a confirmation the person gives, not Claude. It needs an ADR ([8, question 2](#8-open-questions)).
 
@@ -778,7 +781,7 @@ Beyond the four in the issue, in priority order. Effort is scope, not time: S to
 ### 6.2 Defaults
 
 - Care level: **Look only**. A saved check keeps the level it was saved with and confirms it again on each run where it needs one.
-- Thoroughness: **Normal**, with the time and page caps a first look uses today, so a guided run cannot run unbounded.
+- Thoroughness: **Normal**, at most 20 minutes and 60 pages, so a guided run cannot run unbounded. **Quick look** is at most 10 minutes and 20 pages, and **Thorough** at most 30 minutes and 120 pages (`THOROUGHNESS_BUDGET` in `src/engine/guided.ts`). The first look (`scenescout <url>`) keeps its own, smaller caps of 3 minutes and 20 pages.
 - Pictures: on, kept inside `.scenescout/`. A picture is not redacted (the guide already says so); the panel says once, on the first report, that pictures show what was on screen.
 - Recording a video: off, as today (ADR 8).
 - The live view: local only, as today (ADR 7).
