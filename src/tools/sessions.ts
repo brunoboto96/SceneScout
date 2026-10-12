@@ -34,7 +34,7 @@ import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "../en
 import { RECORD_MAX_FRAMES } from "../engine/replay.js";
 import { describePace, normalizePace } from "../engine/settle.js";
 import { formatScan, scanProject } from "../scan.js";
-import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, type CheckArea } from "../engine/guided.js";
+import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, holdGuidedPlan, type CheckArea } from "../engine/guided.js";
 import { AREA_LABEL } from "../engine/guided-words.js";
 import { EVIDENCE_ENV, EVIDENCE_MODES, evidenceSettings, RECORD_ENV, recordChoice, type EvidenceMode } from "../engine/capture.js";
 
@@ -338,7 +338,7 @@ export function registerSessionTools(): void {
           .optional()
           .describe(
             "The guided plan this attach carries out, as its scout_attach call lists it. Once any guided plan is built in this server, an attach above 'observe' without an accepted plan's id is refused, " +
-              "and so is one above the plan's mode or on another site than the plan's. Never leave it out to get round a plan's confirmation.",
+              "and so is one above the plan's mode or on another site than the plan's, and any attach passing readPosts or trustedEmbeds. A plan's confirmation covers one check: once no session carries the plan, it must be confirmed again. Never leave it out to get round a plan's confirmation.",
           ),
         open: z
           .enum(OPEN_CHOICES)
@@ -400,7 +400,7 @@ export function registerSessionTools(): void {
       }) => {
         try {
           // Before anything else: while a guided plan is open, nothing above observe starts without the person's confirmation (ADR 24).
-          const guided = guidedAttachVerdict(guidedPlans, { planId, mode: mode ?? "read-only", url });
+          const guided = guidedAttachVerdict(guidedPlans, { planId, mode: mode ?? "read-only", url, readPosts, trustedEmbeds });
           if (!guided.ok) return errorText(new Error(`scout_attach refused: ${guided.why}`));
           // Settled first: a refusal leaves the default session as it was.
           const folder = await projectFolderFor(url, projectPath);
@@ -510,7 +510,8 @@ export function registerSessionTools(): void {
             writeStatus(target, "idle", "scout_attach");
           }
           // Which plan this session carries out, for scout_session {area}; a new attach starts with no area.
-          guidedSessions.set(target, guided.plan ? { planId: guided.plan.planId } : {});
+          // A plan no session carries any more is spent, so the next check with it asks the person again.
+          holdGuidedPlan(guidedSessions, guidedPlans, target, guided.plan?.planId);
           // A new attach is a new count of pictures returned.
           evidenceFor.set(eng, { ...pictures, shown: 0 });
           openDecisions.set(target, opening);
@@ -796,7 +797,7 @@ export function registerCloseTool(): void {
           for (const e of closing) flushAfterClose(e);
           for (const store of stores) store.endRun();
           sessionQueue.clear();
-          guidedSessions.clear();
+          for (const name of [...guidedSessions.keys()]) holdGuidedPlan(guidedSessions, guidedPlans, name, null);
           board.clear();
           laneLedger.clear();
           setLastWriter(null);
@@ -823,7 +824,7 @@ export function registerCloseTool(): void {
         // The last session on this project ends its run.
         if (eng.memory && ![...engines.values()].some((e) => e.memory === eng.memory)) eng.memory.endRun();
         sessionQueue.forget(name);
-        guidedSessions.delete(name);
+        holdGuidedPlan(guidedSessions, guidedPlans, name, null);
         board.remove(name);
         laneLedger.forget(name);
         // The last session closing ends the run, and its lanes with it: a brief's

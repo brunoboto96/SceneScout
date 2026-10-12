@@ -574,6 +574,35 @@ export class GuidedPlans {
     if (plan.confirm) plan.confirm.accepted = true;
     return structuredClone(plan);
   }
+
+  /**
+   * Ends a kept plan's acceptance, so the next check with it asks the person
+   * again. Called when no session carries the plan any more (holdGuidedPlan):
+   * one yes is one check, as design section 6.2 asks of a re-run.
+   */
+  spend(planId: string): void {
+    const plan = this.plans.get(planId);
+    if (plan?.confirm) plan.confirm.accepted = false;
+  }
+}
+
+/**
+ * Records which plan a session now carries (`undefined` for none, `null` when
+ * the session closed), and spends the plan it carried before when no session
+ * carries that one any more. Re-attaching a session with the plan it already
+ * carries keeps it, so signing in again mid-check is not a new check.
+ */
+export function holdGuidedPlan(
+  sessions: Map<string, { planId?: string }>,
+  plans: Pick<GuidedPlans, "spend">,
+  session: string,
+  planId: string | undefined | null,
+): void {
+  const before = sessions.get(session)?.planId;
+  if (planId === null) sessions.delete(session);
+  else sessions.set(session, planId ? { planId } : {});
+  if (before === undefined || before === planId) return;
+  if (![...sessions.values()].some((s) => s.planId === before)) plans.spend(before);
 }
 
 /** The digits a confirmation for creating test data asks the person to type back. */
@@ -700,12 +729,24 @@ function originOf(address: string): string | null {
  *   `observe`.
  * - A mode above the plan's, or (above `observe`) an address on another site
  *   than the plan's: no.
+ * - readPosts or trustedEmbeds, once any plan has been built: no, in any mode.
+ *   Both loosen a mode, and no guided check takes them (design 6.1).
  */
 export function guidedAttachVerdict(
   plans: Pick<GuidedPlans, "open" | "get">,
-  input: { planId?: string; mode: AnyMode; url: string },
+  input: { planId?: string; mode: AnyMode; url: string; readPosts?: readonly string[]; trustedEmbeds?: readonly string[] },
 ): { ok: true; plan?: GuidedPlan } | { ok: false; why: string } {
   const above = input.mode !== "observe";
+  // Developer settings no guided check takes (design 6.1): readPosts lets named POSTs out of observe, and
+  // trustedEmbeds lets frames' writes out of safe-write, so either would loosen a care level the person chose.
+  if (plans.open) {
+    const named = [input.readPosts?.length ? "readPosts" : "", input.trustedEmbeds?.length ? "trustedEmbeds" : ""].filter(Boolean);
+    if (named.length > 0)
+      return {
+        ok: false,
+        why: `a guided plan is open in this server, and ${named.join(" and ")} ${named.length > 1 ? "are developer settings" : "is a developer setting"} no guided check takes: attach without ${named.length > 1 ? "them" : "it"}. A developer who needs ${named.length > 1 ? "them" : "it"} sets ${named.length > 1 ? "them" : "it"} in a server with no guided plan.`,
+      };
+  }
   if (input.planId === undefined) {
     if (above && plans.open)
       return {

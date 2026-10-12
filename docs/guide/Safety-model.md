@@ -38,7 +38,7 @@ Look only lets out what `observe` lets out: page loads, so a search form that on
 
 The confirmation is a form the server shows the person directly (MCP elicitation), started by `scout_guided_confirm`. The agent may call that tool but cannot answer the form, and nothing it passes accepts a plan. A plan is accepted only by the person's yes, and for May create test data only with the code typed back. A form that is declined, closed, fails, or that the client cannot show leaves the plan unaccepted, and the check is offered in Look only.
 
-The server holds this, not the prompt. Once any guided plan has been built, `scout_attach` above `observe` is refused unless it names an accepted plan's `planId`, in no mode above the plan's and on the plan's own site, so leaving the id out is not a way round the confirmation. Plans are held in the server process only and end with it.
+The server holds this, not the prompt. Once any guided plan has been built, `scout_attach` above `observe` is refused unless it names an accepted plan's `planId`, in no mode above the plan's and on the plan's own site, so leaving the id out is not a way round the confirmation. While a plan is open, an attach that passes `readPosts` or `trustedEmbeds` is refused in any mode, since both let out writes the care level holds back. A confirmation covers one check: once no session carries the plan (its sessions closed, or attached again without it), the plan must be confirmed again. Plans are held in the server process only and end with it.
 
 ## What a refusal looks like
 

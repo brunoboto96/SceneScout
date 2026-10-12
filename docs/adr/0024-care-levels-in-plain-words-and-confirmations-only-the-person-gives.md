@@ -103,7 +103,10 @@ a writing mode.
   server process only. Once any plan has been built there, `scout_attach`
   above `observe` is refused without an accepted plan's `planId`, above the
   plan's mode, or on another site than the plan's, so leaving the id out is
-  not a way round the confirmation. `policy-test` holds that gate, and
+  not a way round the confirmation. While a plan is open, `readPosts` and
+  `trustedEmbeds` are refused on any attach, as developer settings that let
+  out writes a care level holds back. A yes covers one check: once no session
+  carries the plan, it is unaccepted again. `policy-test` holds that gate, and
   `guided-test` holds that a wrong or missing code, or a declined, closed or
   failed form, accepts nothing.
 - A developer who builds a guided plan in a server and then wants a writing

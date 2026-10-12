@@ -117,6 +117,8 @@ export interface BriefOptions {
   goal?: string;
   /** The write mode every lane attaches in, so one lane cannot be laxer than the run was authorized for. */
   mode?: string;
+  /** The guided plan the planner's session attached with: once one is open, an attach above observe without it is refused (ADR 24). */
+  planId?: string;
   /** The role each lane runs as, when the planner has decided one. */
   role?: string;
   /** True when that role is a profile saved by `scenescout login`, so each lane can attach by name rather than by a file. */
@@ -216,7 +218,7 @@ export function formatBriefs(briefs: readonly LaneBrief[], opts: BriefOptions = 
       : []),
     ``,
     `Give each lane its own agent. Every lane attaches with its own session name, so the browsers run genuinely in parallel, and lands on its own first route rather than the home page:`,
-    `  scout_attach { session: "<lane>", url: "<origin><landing>", projectPath, mode: "${mode}"${signInArgument(opts)}, objective: "<objective>" }`,
+    `  scout_attach { session: "<lane>", url: "<origin><landing>", projectPath, mode: "${mode}"${opts.planId ? `, planId: "${opts.planId}"` : ""}${signInArgument(opts)}, objective: "<objective>" }`,
     ``,
     `Rules to pass on, which a hand-written brief tends to drop:`,
     ...LANE_RULES.map((rule) => `  · ${rule}`),

@@ -1250,6 +1250,13 @@ async function guidedCheck(): Promise<void> {
       await refusal({ url: REMOTE, mode: "destructive", planId: plan.planId }, /"safe-write" at most/, "above the plan's mode");
       await refusal({ url: "https://live.example.com", mode: "safe-write", planId: plan.planId }, /must be on that site/, "on another site");
       await refusal({ url: REMOTE, mode: "read-only" }, /must name it/, "without the id once a plan is accepted");
+      // Observe needs no plan, but readPosts would let named POSTs out of it, and trustedEmbeds frames' writes out of safe-write.
+      await refusal({ url: REMOTE, mode: "observe", readPosts: ["POST /api/things"] }, /readPosts/, "in observe with readPosts while a plan is open");
+      await refusal(
+        { url: REMOTE, mode: "safe-write", planId: plan.planId, trustedEmbeds: ["https://pay.example.com"] },
+        /trustedEmbeds/,
+        "with trustedEmbeds",
+      );
       // Nothing a caller passes accepts a plan: choices that arrive accepted are not a field.
       const sneaky = await call("scout_guided_plan", { choices: { address: REMOTE, areas: ["forms"], care: "may-create-test-data", accepted: true } });
       if (!sneaky.isError || !/do not take/.test(textOf(sneaky))) fail(`a choices field the plan does not take was not refused: ${textOf(sneaky)}`);
@@ -1272,7 +1279,7 @@ async function guidedCheck(): Promise<void> {
   if (unsupported.accepted !== false || unsupported.outcome !== "unsupported" || !/cannot show the confirmation form/.test(textOf(noForms.out)))
     fail(`a client with no forms did not leave the plan unaccepted with a plain sentence: ${JSON.stringify(noForms.out)}`);
   console.log(
-    "✓ scout_guided_plan and scout_guided_confirm are annotated and schema'd, scout_attach above observe is refused without an accepted plan, and only the person's yes with the code accepts one (going back, a wrong code, a decline, a close or no forms do not)",
+    "✓ scout_guided_plan and scout_guided_confirm are annotated and schema'd, scout_attach above observe is refused without an accepted plan (and readPosts or trustedEmbeds while one is open), and only the person's yes with the code accepts one (going back, a wrong code, a decline, a close or no forms do not)",
   );
 }
 

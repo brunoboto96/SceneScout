@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { confirmVerdict, GuidedPlans, guidedAttachVerdict, guidedPlan } from "../src/engine/guided.ts";
+import { confirmVerdict, GuidedPlans, guidedAttachVerdict, guidedPlan, holdGuidedPlan } from "../src/engine/guided.ts";
 import {
   allowsWrite,
   answersWithRefusal,
@@ -1800,4 +1800,65 @@ test("guided gate: a plan that needs no confirmation goes up to its own mode, an
   assert.equal(guidedAttachVerdict(plans, { planId: f.planId, mode: "safe-write", url: LOCAL }).ok, false);
   assert.equal(guidedAttachVerdict(plans, { planId: l.planId, mode: "read-only", url: LOCAL }).ok, false, "Look only is observe");
   assert.equal(guidedAttachVerdict(plans, { planId: l.planId, mode: "observe", url: LOCAL }).ok, true);
+});
+
+test("guided gate: while a guided plan is open, readPosts and trustedEmbeds are refused, so observe cannot be loosened into sending POSTs", () => {
+  const REMOTE = "https://staging.example.com";
+  const none = new GuidedPlans();
+  // With no plan built, the developer settings are taken as before.
+  assert.equal(guidedAttachVerdict(none, { mode: "observe", url: REMOTE, readPosts: ["POST /api/things"] }).ok, true);
+  const plans = new GuidedPlans();
+  const look = guidedPlan({ address: REMOTE, areas: ["forms"], care: "look-only" });
+  const make = guidedPlan({ address: REMOTE, areas: ["forms"], care: "may-create-test-data" });
+  assert.ok(look.ok && make.ok);
+  const l = plans.add(look.plan);
+  const m = plans.add(make.plan);
+  plans.accept(m.planId, confirmVerdict(m, { kind: "accepted", content: { answer: "yes", code: "1234" } }, "1234"));
+  for (const planId of [undefined, l.planId]) {
+    const r = guidedAttachVerdict(plans, { planId, mode: "observe", url: REMOTE, readPosts: ["POST /api/things"] });
+    assert.ok(!r.ok && /readPosts/.test(r.why), `observe with readPosts, plan ${planId}`);
+    // An empty list asks for nothing.
+    assert.equal(guidedAttachVerdict(plans, { planId, mode: "observe", url: REMOTE, readPosts: [] }).ok, true);
+  }
+  const t = guidedAttachVerdict(plans, { planId: m.planId, mode: "safe-write", url: REMOTE, trustedEmbeds: ["https://pay.example.com"] });
+  assert.ok(!t.ok && /trustedEmbeds/.test(t.why), "safe-write with trusted embeds under an accepted plan");
+});
+
+test("guided gate: an accepted plan is spent when no session carries it any more, so a later check asks again", () => {
+  const REMOTE = "https://staging.example.com";
+  const plans = new GuidedPlans();
+  const built = guidedPlan({ address: REMOTE, areas: ["forms"], care: "may-create-test-data" });
+  assert.ok(built.ok);
+  const p = plans.add(built.plan);
+  plans.accept(p.planId, confirmVerdict(p, { kind: "accepted", content: { answer: "yes", code: "1234" } }, "1234"));
+  const holds = new Map<string, { planId?: string }>();
+  // Two sessions carry it; one leaving keeps it, re-attaching the same session with it keeps it.
+  holdGuidedPlan(holds, plans, "default", p.planId);
+  holdGuidedPlan(holds, plans, "phone", p.planId);
+  holdGuidedPlan(holds, plans, "default", p.planId);
+  holdGuidedPlan(holds, plans, "phone", undefined);
+  assert.equal(guidedAttachVerdict(plans, { planId: p.planId, mode: "safe-write", url: REMOTE }).ok, true, "still carried by default");
+  // The last session carrying it re-attaches without it: spent.
+  holdGuidedPlan(holds, plans, "default", undefined);
+  const after = guidedAttachVerdict(plans, { planId: p.planId, mode: "safe-write", url: REMOTE });
+  assert.ok(!after.ok && /needs the person's confirmation/.test(after.why), "spent once nothing carries it");
+  assert.equal(plans.get(p.planId)!.confirm!.accepted, false);
+
+  // Closing the last session carrying it spends it too.
+  const builtQ = guidedPlan({ address: REMOTE, areas: ["forms"], care: "may-create-test-data" });
+  assert.ok(builtQ.ok);
+  const q = plans.add(builtQ.plan);
+  plans.accept(q.planId, confirmVerdict(q, { kind: "accepted", content: { answer: "yes", code: "1234" } }, "1234"));
+  holdGuidedPlan(holds, plans, "lane-a", q.planId);
+  holdGuidedPlan(holds, plans, "lane-a", null);
+  assert.equal(holds.has("lane-a"), false, "null forgets the session");
+  assert.equal(guidedAttachVerdict(plans, { planId: q.planId, mode: "read-only", url: REMOTE }).ok, false);
+  // A plan accepted but never attached with is not spent by an unrelated session closing.
+  const builtR = guidedPlan({ address: REMOTE, areas: ["forms"], care: "may-create-test-data" });
+  assert.ok(builtR.ok);
+  const r = plans.add(builtR.plan);
+  plans.accept(r.planId, confirmVerdict(r, { kind: "accepted", content: { answer: "yes", code: "1234" } }, "1234"));
+  holdGuidedPlan(holds, plans, "other", undefined);
+  holdGuidedPlan(holds, plans, "other", null);
+  assert.equal(guidedAttachVerdict(plans, { planId: r.planId, mode: "safe-write", url: REMOTE }).ok, true);
 });
