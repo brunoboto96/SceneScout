@@ -17,11 +17,28 @@ Only test apps you own or are authorised to test.
 | `safe-write` | `--safe-write` | Anything that creates. Changes and deletes only on records this run created, never on data that was there before |
 | `destructive` | `--allow-destructive` | Everything |
 
-`read-only` means nothing existing is changed or removed; it does not mean nothing is ever created. A contact form, a comment or a sign-up submitted in `read-only` reaches the server and can create a record. That is why the method picks `observe` for a remote URL with no source in front of it, where the data is more likely to be real, and moves to `read-only` only when you say form submissions are acceptable there.
+`read-only` blocks the requests that change or remove what is there by name (`PUT`, `PATCH`, `DELETE` and destructive-looking `POST`s); it does not mean nothing is ever created or changed. A contact form, a comment or a sign-up submitted in `read-only` reaches the server and can create a record, and an app that saves an edit with a plain `POST` (a profile, a setting) has that record changed. That is why the method picks `observe` for a remote URL with no source in front of it, where the data is more likely to be real, and moves to `read-only` only when you say form submissions are acceptable there.
 
 `destructive` is for a disposable, seeded environment. The agent never chooses it on its own; it needs you to say so. `scenescout ci` needs two options together (`--mode destructive --allow-destructive`) so that a mode value copied from another workflow cannot turn it on.
 
 `scenescout check` accepts only `observe` and `read-only`, and replays saved flows under observe's rule unless `--flow-writes allow` is given. A first look (`scenescout <url>`) is often pointed at a live app, so it runs in `observe` unless `--mode read-only` is given, and accepts no other mode.
+
+## Care levels in a guided check
+
+A guided check (the `scout_intake` form, or a panel building a plan with `scout_guided_plan`) never shows a mode's name. The person chooses a care level in plain words, and each is exactly one mode ([ADR 24](../adr/0024-care-levels-in-plain-words-and-confirmations-only-the-person-gives.md)):
+
+| The person chooses | Mode | Asked to confirm |
+|---|---|---|
+| Look only (the default) | `observe` | Never |
+| May submit forms | `read-only` | When the site is not on this computer (`localhost`, `127.0.0.1` or `::1`, however the browser reads those numbers) |
+| May create test data | `safe-write` | Always, with a four-digit code the form shows and the person types back |
+| *(not offered)* | `destructive` | Not reachable from a guided check |
+
+Look only lets out what `observe` lets out: page loads, so a search form that only opens a page of results still runs, and a link that changes something just by being opened (an unsubscribe link, say) is followed like any other.
+
+The confirmation is a form the server shows the person directly (MCP elicitation), started by `scout_guided_confirm`. The agent may call that tool but cannot answer the form, and nothing it passes accepts a plan. A plan is accepted only by the person's yes, and for May create test data only with the code typed back. A form that is declined, closed, fails, or that the client cannot show leaves the plan unaccepted, and the check is offered in Look only.
+
+The server holds this, not the prompt. Once any guided plan has been built, `scout_attach` above `observe` is refused unless it names an accepted plan's `planId`, in no mode above the plan's and on the plan's own site, so leaving the id out is not a way round the confirmation. Plans are held in the server process only and end with it.
 
 ## What a refusal looks like
 

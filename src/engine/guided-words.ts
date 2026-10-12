@@ -19,7 +19,8 @@ export const CARE_LABEL: Record<Care, string> = {
 
 /** What each care level does, in the small text under its name. */
 export const CARE_EXPLAIN: Record<Care, string> = {
-  "look-only": "Only opens pages. Nothing is sent to your site except signing in. Safe on a live site.",
+  "look-only":
+    "Opens pages and signs in. A form is sent only when all it does is open a page, such as a search; anything that would save something is held back. Links are opened like any page, so a link that changes something just by being opened, such as an unsubscribe link, is not stopped. The safest choice for a live site.",
   "may-submit-forms":
     "Fills in and sends forms, and presses buttons that send something, such as a contact form, a sign-up or a settings page. What it sends can create a record, and can change one that was there, as it would for anyone. Deletes are blocked.",
   "may-create-test-data":
@@ -31,7 +32,12 @@ export const DESTRUCTIVE_NOT_OFFERED = "Deleting data that was already there nee
 
 /** What a care level may and may not do, as the confirmation's preview lists it: + may, ~ may with a limit, - never. */
 export const CARE_PREVIEW: Record<Care, readonly string[]> = {
-  "look-only": ["+ open pages and sign in", "- never send a form", "- never create, change or delete anything"],
+  "look-only": [
+    "+ open pages, follow links and sign in",
+    "+ send a search, or another form that only opens a page",
+    "- hold back anything that would save, change or delete something",
+    "~ a link that changes something just by being opened, such as an unsubscribe link, is followed like any other",
+  ],
   "may-submit-forms": [
     "+ fill in and send forms, and press buttons that send something",
     "~ what it sends can create a record, or change one that was there",
@@ -75,16 +81,18 @@ export const PHONE_VIEWPORT = { width: 390, height: 844 } as const;
  */
 export const HELD_BACK: Record<CheckArea, Partial<Record<Care, string>>> = {
   "sign-in": { "look-only": "Only signing in is tried. Sign-up is looked at but never sent." },
-  forms: { "look-only": "Forms are filled in and checked but never sent." },
+  forms: {
+    "look-only": "Forms are filled in and checked. Only a form that just opens a page, such as a search, is sent; one that would save something is never sent.",
+  },
   "broken-pages": {},
   phone: {},
   journey: {
-    "look-only": "The journey stops at the first step that would send something to your site, and says so.",
+    "look-only": "The journey stops at the first step that would save something on your site, and says so.",
     "may-submit-forms": "The journey stops at the first step this care level blocks, such as a delete, and says so.",
     "may-create-test-data": "The journey stops at the first step this care level blocks, such as deleting something it did not create, and says so.",
   },
   tickets: {
-    "look-only": "A criterion that needs something sent to your site is marked not tested, and says why.",
+    "look-only": "A criterion that needs something saved on your site is marked not tested, and says why.",
     "may-submit-forms": "A criterion that needs a step this care level blocks, such as a delete, is marked not tested, and says why.",
     "may-create-test-data":
       "A criterion that needs a step this care level blocks, such as deleting something it did not create, is marked not tested, and says why.",
@@ -129,7 +137,7 @@ export const CONFIRM_UNAVAILABLE = `This app cannot show the confirmation form, 
 
 /** The answer to "Is it safe to run on my live site?", word for word on every surface. */
 export const SAFETY_EXPLAINER: readonly string[] = [
-  `${CARE_LABEL["look-only"]}, the default, only opens pages: nothing is sent to your site except signing in, so it is safe on a live site.`,
+  `${CARE_LABEL["look-only"]}, the default, opens pages and signs in. A search still runs, because all it does is open a page of results, but nothing that would save something is sent. Links are opened like any page, so a link that changes something just by being opened, such as an unsubscribe link, is not stopped. It is the safest choice for a live site.`,
   `${CARE_LABEL["may-submit-forms"]} sends forms, and presses buttons that send something. What it sends can create a record, or change one that was there, as it would for anyone who sent it; deletes are blocked. On a site that is not on this computer, it asks you first.`,
   `${CARE_LABEL["may-create-test-data"]} creates the records it needs. What it sends can also change records that were there, but it deletes only what it created. It always asks you first, and is for a test copy only.`,
   "Deleting data that was already there is never offered here.",
@@ -145,4 +153,33 @@ export const NEEDS_YOU_SENTENCE = {
   "browser-download-failed": (_where: string) => "I could not download the test browser. Check your internet connection and try again.",
   "server-error": (_where: string) => "I could not reach the SceneScout server. Is the scenescout plugin installed and turned on?",
   "address-unreachable": (where: string) => `I could not open ${where}. Check the address, and that the site is running.`,
+} as const;
+
+/** What the confirmation form says above its fields when it also asks for a code. */
+export function confirmCodeLine(code: string): string {
+  return `To go on, choose "${CONFIRM_ANSWER.testCopy}" and type this code: ${code}. It is not a password; it is there so that a stray click cannot start the check.`;
+}
+
+/** What the confirmation form says above its fields when it asks for the answer alone. */
+export const CONFIRM_ANSWER_LINE = `To go on, choose "${CONFIRM_ANSWER.yes}".`;
+
+/** The confirmation form's fields, as the person sees them. */
+export const CONFIRM_FIELD = {
+  answer: { title: "Your answer", description: "Choose whether the check may start with this care level." },
+  code: { title: "Code to go on", description: "The four digits shown above. Leave it empty if you are going back." },
+} as const;
+
+/** The heading over a care level's preview in the confirmation form. */
+export const CONFIRM_PREVIEW_HEADING = "What this check may do there:";
+
+/** What the person is told after the confirmation form, by how it ended. */
+export const CONFIRM_SAYS = {
+  "not-needed": "This care level needs no confirmation here, so the check can start.",
+  accepted: "Thank you. The check can start with the care level you chose.",
+  "went-back": `You chose "${CONFIRM_ANSWER.back}", so the check has not started. You can choose another care level, or run it as "${CARE_LABEL["look-only"]}".`,
+  "wrong-code": `The code did not match, so the check has not started. You can try again, or run it as "${CARE_LABEL["look-only"]}".`,
+  declined: `You turned the confirmation down, so the check has not started. You can run it as "${CARE_LABEL["look-only"]}" instead.`,
+  cancelled: `The confirmation was closed without an answer, so the check has not started. You can try again, or run it as "${CARE_LABEL["look-only"]}".`,
+  failed: `The confirmation form did not work, so the check has not started. You can try again, or run it as "${CARE_LABEL["look-only"]}".`,
+  unsupported: `${CONFIRM_UNAVAILABLE} You can run it as "${CARE_LABEL["look-only"]}", or start it from an app that can show the form.`,
 } as const;

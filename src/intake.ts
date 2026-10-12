@@ -12,7 +12,14 @@
  * The skill (skills/scenescout/SKILL.md) states the same questions and the same
  * mapping in words; guide-test holds that text to this module, so the two
  * cannot drift. The `explore` prompt asks them through `introQuestions`.
+ *
+ * Where the client can show a form, scout_intake asks the guided start instead
+ * (below): the same address and sign-in, what to check as areas, and a care
+ * level and thoroughness in plain words, which become a guided plan (ADR 24).
  */
+import { AREA_LABEL, AREA_WHAT_HAPPENS, CARE_EXPLAIN, CARE_LABEL, DESTRUCTIVE_NOT_OFFERED, THOROUGHNESS_LABEL } from "./engine/guided-words.js";
+// guided.ts imports this module too; what is taken from it here is used only inside functions, so the cycle is safe.
+import { checkGuidedChoices, MAX_ADDRESS, MAX_JOURNEY, type Care, type CheckArea, type GuidedChoices, type Thoroughness } from "./engine/guided.js";
 
 /** The flags the skill reads. Any one given means the person chose settings themselves. */
 export const SKILL_FLAGS = ["url", "role", "focus", "level", "observe", "read-only", "safe-write", "allow-destructive"] as const;
@@ -142,12 +149,17 @@ export function introQuestions(): string {
   return INTAKE_QUESTIONS.map((q, i) => `${i + 1}. ${q.ask}`).join("\n");
 }
 
-// ── The questions as one form ────────────────────────────────────────────────
+// ── The guided start as one form ─────────────────────────────────────────────
 //
-// A client that can show a form (MCP elicitation, form mode) gets the four
-// questions as one, through scout_intake; every other client, and a person who
-// declines or dismisses the form, gets them as text for the agent to ask in
-// chat. Specification: https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation
+// A client that can show a form (MCP elicitation, form mode) gets the guided
+// start through scout_intake: the address, what to check, a journey, tickets,
+// how the person signs in, how careful to be and how thorough. The answers are
+// GuidedChoices (src/engine/guided.ts), and the tool builds the plan from them;
+// a care level that writes is then confirmed by the person in a second form
+// (scout_guided_confirm, ADR 24). Every other client, and a person who declines
+// or dismisses the form, gets the four plain questions above as text for the
+// agent to ask in chat, mapped by settingsFromAnswers as before.
+// Specification: https://modelcontextprotocol.io/specification/2025-11-25/client/elicitation
 // (the version the SDK speaks; the 2026-07-28 revision keeps the same capability,
 // schema subset and three actions). Two of its rules shape this:
 // - a server MUST NOT send a mode the client did not declare, and an empty
@@ -155,6 +167,9 @@ export function introQuestions(): string {
 // - a server MUST NOT ask for passwords, API keys or tokens in form mode. The
 //   form asks HOW the person signs in, never with what: the sign-in itself is
 //   scout_login's window.
+// What to check is one yes-or-no field per area rather than a multi-select:
+// booleans are in every revision of form mode, so every client that shows a
+// form can show these.
 
 /** The tool that asks the questions, as a form where the client can show one. */
 export const INTAKE_TOOL = "scout_intake";
@@ -176,16 +191,26 @@ export function formElicitationSupported(capabilities: { elicitation?: Elicitati
   return e.form !== undefined || e.url === undefined;
 }
 
-/** What the person picks for what to check. The free text is in `details`. */
-export type CheckKind = "everything" | "description" | "tickets";
+/** The form's yes-or-no fields, one per area that needs no text, in the order the areas are listed. */
+export const AREA_FIELDS = [
+  { field: "checkSignIn", area: "sign-in", default: true },
+  { field: "checkForms", area: "forms", default: true },
+  { field: "checkBrokenPages", area: "broken-pages", default: true },
+  { field: "checkPhone", area: "phone", default: false },
+] as const satisfies ReadonlyArray<{ field: string; area: CheckArea; default: boolean }>;
 
 /** The form's fields, as the client returns them on accept. */
 interface IntakeFormContent {
   address?: unknown;
+  checkSignIn?: unknown;
+  checkForms?: unknown;
+  checkBrokenPages?: unknown;
+  checkPhone?: unknown;
+  journey?: unknown;
+  tickets?: unknown;
   signIn?: unknown;
-  whatToCheck?: unknown;
-  details?: unknown;
-  realData?: unknown;
+  care?: unknown;
+  thoroughness?: unknown;
 }
 
 const choice = <T extends string>(value: T, title: string) => ({ const: value, title });
@@ -199,47 +224,73 @@ export const FORM_CHOICES = {
     choice<SignInAnswer>("password", "An email and password"),
     choice<SignInAnswer>("one-time-code", "A one-time code"),
   ],
-  whatToCheck: [
-    choice<CheckKind>("everything", "Everything: the whole site"),
-    choice<CheckKind>("description", "What I describe below"),
-    choice<CheckKind>("tickets", "The tickets I paste below"),
+  care: [
+    choice<Care>("look-only", CARE_LABEL["look-only"]),
+    choice<Care>("may-submit-forms", CARE_LABEL["may-submit-forms"]),
+    choice<Care>("may-create-test-data", CARE_LABEL["may-create-test-data"]),
   ],
-  realData: [choice<RealDataAnswer>("yes", "Yes"), choice<RealDataAnswer>("no", "No"), choice<RealDataAnswer>("unsure", "Not sure")],
+  thoroughness: [
+    choice<Thoroughness>("quick", THOROUGHNESS_LABEL.quick),
+    choice<Thoroughness>("normal", THOROUGHNESS_LABEL.normal),
+    choice<Thoroughness>("thorough", THOROUGHNESS_LABEL.thorough),
+  ],
 } as const;
 
 /** What the form says above its fields. */
 export const INTAKE_FORM_MESSAGE =
-  "Four questions before SceneScout starts testing. It never asks for a password here: if the site needs one, a browser window opens later for you to sign in as you normally would.";
+  "Before SceneScout starts: the site, what to check, and how careful to be. It never asks for a password here: if the site needs one, a browser window opens later for you to sign in as you normally would.";
+
+/** The words under "How careful", one sentence per care level, so the choice is explained where it is made. */
+export function careFieldDescription(): string {
+  return ["How careful should I be?", ...FORM_CHOICES.care.map((c) => `${c.title}: ${CARE_EXPLAIN[c.const]}`), DESTRUCTIVE_NOT_OFFERED].join(" ");
+}
 
 /**
- * The form, as an `elicitation/create` request's `requestedSchema`: a flat object
- * of strings and single-choice lists, the only shapes form mode allows. `address`
- * starts filled in when the agent already knows it. Real data starts at "Not sure",
- * which tests as carefully as "Yes".
+ * The form, as an `elicitation/create` request's `requestedSchema`: a flat
+ * object of strings, yes-or-no fields and single-choice lists, the only shapes
+ * form mode allows. `address` starts filled in when the agent already knows
+ * it. The care level starts at Look only and the thoroughness at Normal, the
+ * least-harm defaults; how the person signs in has no default, so it is chosen.
  */
 export function intakeFormSchema(knownAddress?: string) {
   const address = knownAddress?.trim();
+  const areaFields = Object.fromEntries(
+    AREA_FIELDS.map((f) => [f.field, { type: "boolean" as const, title: AREA_LABEL[f.area], description: AREA_WHAT_HAPPENS[f.area], default: f.default }]),
+  ) as Record<(typeof AREA_FIELDS)[number]["field"], { type: "boolean"; title: string; description: string; default: boolean }>;
   return {
     type: "object" as const,
     properties: {
-      address: { type: "string" as const, title: "Address", description: askOf("address"), minLength: 1, ...(address ? { default: address } : {}) },
+      address: {
+        type: "string" as const,
+        title: "Address",
+        description: askOf("address"),
+        minLength: 1,
+        maxLength: MAX_ADDRESS,
+        ...(address ? { default: address } : {}),
+      },
+      ...areaFields,
+      journey: {
+        type: "string" as const,
+        title: AREA_LABEL.journey,
+        description: "Optional: a journey to follow, in a sentence, e.g. Buy the cheapest item and check the receipt.",
+        maxLength: MAX_JOURNEY,
+      },
+      tickets: {
+        type: "string" as const,
+        title: AREA_LABEL.tickets,
+        description: "Optional: paste tickets to check, with a line of --- between them. Each acceptance criterion is answered.",
+      },
       signIn: { type: "string" as const, title: "Sign-in", description: askOf("sign-in"), oneOf: [...FORM_CHOICES.signIn] },
-      whatToCheck: {
+      care: { type: "string" as const, title: "How careful", description: careFieldDescription(), oneOf: [...FORM_CHOICES.care], default: "look-only" },
+      thoroughness: {
         type: "string" as const,
-        title: "What to check",
-        description: "What should I check?",
-        oneOf: [...FORM_CHOICES.whatToCheck],
-        default: "everything",
+        title: "How thorough",
+        description: "A quick look, a normal check, or a thorough one. Each stops at its own time and page limits.",
+        oneOf: [...FORM_CHOICES.thoroughness],
+        default: "normal",
       },
-      details: {
-        type: "string" as const,
-        title: "Description or tickets",
-        description:
-          "Describe what to check in a sentence, or paste the tickets with a line of --- between them. To upload a file of tickets instead, leave this empty and I will ask for it.",
-      },
-      realData: { type: "string" as const, title: "Real data", description: askOf("real-data"), oneOf: [...FORM_CHOICES.realData], default: "unsure" },
     },
-    required: ["address", "signIn", "whatToCheck", "realData"],
+    required: ["address", "signIn", "care", "thoroughness"],
   };
 }
 
@@ -257,22 +308,19 @@ export function splitTickets(text: string): string[] {
 export type FormOutcome =
   { kind: "unsupported" } | { kind: "declined" } | { kind: "cancelled" } | { kind: "failed"; error: string } | { kind: "accepted"; content: IntakeFormContent };
 
-/** What scout_intake hands the agent: settings to use, or questions to ask in chat. */
-export type IntakeReply = { kind: "settings"; settings: IntakeSettings } | { kind: "ask"; questions: IntakeQuestion[]; known: string[]; why: string };
-
-const SIGN_IN_WORDS: Record<SignInAnswer, string> = {
-  none: "no sign-in",
-  sso: "Google or Microsoft single sign-on",
-  password: "an email and password",
-  "one-time-code": "a one-time code",
-};
+/**
+ * What scout_intake hands on: the person's choices to build a plan from, one
+ * sentence saying what to fix in the form, or the plain questions to ask in chat.
+ */
+export type IntakeReply =
+  { kind: "choices"; choices: GuidedChoices } | { kind: "fix"; error: string } | { kind: "ask"; questions: IntakeQuestion[]; known: string[]; why: string };
 
 /**
- * What a form round comes to. Accepted answers become settings through
- * settingsFromAnswers. Anything else asks in chat: all four questions when
- * there was no form or the person turned it down, and only what is still
- * missing when the form came back without it (tickets to upload, an empty
- * description). An answer is never guessed.
+ * What a form round comes to. Accepted answers become GuidedChoices, checked
+ * by checkGuidedChoices: a yes-or-no field ticks its area, and a journey or
+ * tickets written in their boxes choose those areas. Answers it refuses come
+ * back as the one sentence that says what to fix, never as a guess. Anything
+ * else asks the four plain questions in chat, as before.
  */
 export function intakeFromForm(outcome: FormOutcome): IntakeReply {
   const all = (why: string): IntakeReply => ({ kind: "ask", questions: [...INTAKE_QUESTIONS], known: [], why });
@@ -281,56 +329,39 @@ export function intakeFromForm(outcome: FormOutcome): IntakeReply {
   if (outcome.kind === "cancelled") return all("the person closed the form without answering");
   if (outcome.kind === "failed") return all(`the form failed: ${outcome.error}`);
   const c = outcome.content;
-  const address = typeof c.address === "string" ? c.address.trim() : "";
+  const text = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
+  const journey = text(c.journey);
+  const tickets = splitTickets(text(c.tickets));
+  const areas: CheckArea[] = AREA_FIELDS.filter((f) => c[f.field] === true).map((f) => f.area);
+  if (journey) areas.push("journey");
+  if (tickets.length > 0) areas.push("tickets");
   const signIn = oneOf(FORM_CHOICES.signIn, c.signIn);
-  const kind = oneOf(FORM_CHOICES.whatToCheck, c.whatToCheck);
-  const realData = oneOf(FORM_CHOICES.realData, c.realData);
-  const details = typeof c.details === "string" ? c.details.trim() : "";
-  let whatToCheck: WhatToCheck | undefined;
-  // "Everything" with text in the box is a contradiction (the choice starts on everything, so pasted tickets
-  // would be dropped unseen): asked again rather than guessed either way.
-  if (kind === "everything" && !details) whatToCheck = "everything";
-  else if (kind === "description" && details) whatToCheck = { description: details };
-  else if (kind === "tickets" && splitTickets(details).length > 0) whatToCheck = { tickets: splitTickets(details) };
-  const missing = INTAKE_QUESTIONS.filter(
-    (q) =>
-      (q.id === "address" && !address) || (q.id === "sign-in" && !signIn) || (q.id === "what-to-check" && !whatToCheck) || (q.id === "real-data" && !realData),
-  );
-  if (!address || !signIn || !whatToCheck || !realData) {
-    const known = [
-      address ? `Address: ${address}` : "",
-      signIn ? `Sign-in: ${SIGN_IN_WORDS[signIn]}` : "",
-      kind === "everything" && details
-        ? "What to check: everything was chosen, but there is text in the box too"
-        : kind
-          ? `What to check: ${kind}${whatToCheck ? "" : ", not given yet"}`
-          : "",
-      realData ? `Real data: ${FORM_CHOICES.realData.find((r) => r.const === realData)!.title.toLowerCase()}` : "",
-    ].filter(Boolean);
-    return { kind: "ask", questions: missing, known, why: "the form came back without every answer" };
-  }
-  return { kind: "settings", settings: settingsFromAnswers({ address, signIn, whatToCheck, realData }) };
+  if (!signIn) return { kind: "fix", error: "choose how you sign in, or No sign-in" };
+  const checked = checkGuidedChoices({
+    address: c.address,
+    areas,
+    ...(journey ? { journey } : {}),
+    ...(tickets.length > 0 ? { tickets } : {}),
+    signIn,
+    // A care level or a thoroughness the form never offered is refused by name in checkGuidedChoices, not replaced by a default.
+    ...(c.care !== undefined ? { care: c.care } : {}),
+    ...(c.thoroughness !== undefined ? { thoroughness: c.thoroughness } : {}),
+  });
+  return checked.ok ? { kind: "choices", choices: checked.choices } : { kind: "fix", error: checked.error };
 }
 
-/** scout_intake's reply as text: the calls to make in order, or the questions to ask in chat. */
-export function intakeReplyText(reply: IntakeReply): string {
-  if (reply.kind === "ask") {
-    const numbered = reply.questions.map((q, i) => `${i + 1}. ${q.ask}`).join("\n");
+/** scout_intake's reply as text when no plan was built: the questions to ask in chat, or what to fix in the form. */
+export function intakeReplyText(reply: Exclude<IntakeReply, { kind: "choices" }>): string {
+  if (reply.kind === "fix")
     return [
-      `No settings from a form (${reply.why}). Ask the person ${reply.questions.length === 1 ? "this question" : "these questions"} in chat, in one message, then choose the settings from the answers as the method says.`,
-      ...(reply.known.length > 0 ? ["", "Already answered in the form:", ...reply.known.map((k) => `- ${k}`)] : []),
-      "",
-      numbered,
+      `The form came back with answers that cannot be used: ${reply.error}.`,
+      `Tell the person that, in those words, and call ${INTAKE_TOOL} again (with url when they gave it) so they can change it. Nothing was started.`,
     ].join("\n");
-  }
-  const s = reply.settings;
-  const steps: string[] = [];
-  if (s.login) {
-    steps.push(`Tell the person: "${s.login.tellUser}"`);
-    steps.push(`Call ${s.login.tool} ${JSON.stringify({ url: s.login.url, role: s.login.role })}, which returns once they are signed in.`);
-  }
-  steps.push(`Call scout_attach ${JSON.stringify(s.attach)}, with projectPath as the method's setup says.`);
-  if (s.readTickets) steps.push(`Once attached, read the tickets: ${s.readTickets.tool} ${JSON.stringify({ text: s.readTickets.text })}.`);
-  if (s.focus) steps.push(`Keep to this area: ${s.focus}`);
-  return ["The person answered the form. Use these settings; do not ask the questions again.", ...steps.map((step, i) => `${i + 1}. ${step}`)].join("\n");
+  const numbered = reply.questions.map((q, i) => `${i + 1}. ${q.ask}`).join("\n");
+  return [
+    `No settings from a form (${reply.why}). Ask the person ${reply.questions.length === 1 ? "this question" : "these questions"} in chat, in one message, then choose the settings from the answers as the method says.`,
+    ...(reply.known.length > 0 ? ["", "Already answered in the form:", ...reply.known.map((k) => `- ${k}`)] : []),
+    "",
+    numbered,
+  ].join("\n");
 }

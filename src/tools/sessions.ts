@@ -34,6 +34,8 @@ import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "../en
 import { RECORD_MAX_FRAMES } from "../engine/replay.js";
 import { describePace, normalizePace } from "../engine/settle.js";
 import { formatScan, scanProject } from "../scan.js";
+import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, type CheckArea } from "../engine/guided.js";
+import { AREA_LABEL } from "../engine/guided-words.js";
 import { EVIDENCE_ENV, EVIDENCE_MODES, evidenceSettings, RECORD_ENV, recordChoice, type EvidenceMode } from "../engine/capture.js";
 
 import {
@@ -58,6 +60,8 @@ import {
   settleProjectWrites,
   writeStatus,
   sessionQueue,
+  guidedPlans,
+  guidedSessions,
   callWork,
   CLOSE_WORK_WAIT_MS,
   flushAfterClose,
@@ -328,6 +332,14 @@ export function registerSessionTools(): void {
               "It needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment, and sends each pair's titles, categories and evidence, and the page's path, to that provider — ONLY when the user asked for it. " +
               "Applies to every session of the project until the run ends.",
           ),
+        planId: z
+          .string()
+          .max(20)
+          .optional()
+          .describe(
+            "The guided plan this attach carries out, as its scout_attach call lists it. Once any guided plan is built in this server, an attach above 'observe' without an accepted plan's id is refused, " +
+              "and so is one above the plan's mode or on another site than the plan's. Never leave it out to get round a plan's confirmation.",
+          ),
         open: z
           .enum(OPEN_CHOICES)
           .optional()
@@ -361,6 +373,7 @@ export function registerSessionTools(): void {
         session,
         dedup,
         open,
+        planId,
       }: {
         url: string;
         projectPath?: string;
@@ -383,8 +396,12 @@ export function registerSessionTools(): void {
         session?: string;
         dedup?: DedupMode;
         open?: OpenChoice;
+        planId?: string;
       }) => {
         try {
+          // Before anything else: while a guided plan is open, nothing above observe starts without the person's confirmation (ADR 24).
+          const guided = guidedAttachVerdict(guidedPlans, { planId, mode: mode ?? "read-only", url });
+          if (!guided.ok) return errorText(new Error(`scout_attach refused: ${guided.why}`));
           // Settled first: a refusal leaves the default session as it was.
           const folder = await projectFolderFor(url, projectPath);
           if ("refused" in folder) return errorText(new Error(folder.refused));
@@ -492,6 +509,8 @@ export function registerSessionTools(): void {
             await ensureLive(eng.memory.dir);
             writeStatus(target, "idle", "scout_attach");
           }
+          // Which plan this session carries out, for scout_session {area}; a new attach starts with no area.
+          guidedSessions.set(target, guided.plan ? { planId: guided.plan.planId } : {});
           // A new attach is a new count of pictures returned.
           evidenceFor.set(eng, { ...pictures, shown: 0 });
           openDecisions.set(target, opening);
@@ -670,20 +689,41 @@ export function registerSessionTools(): void {
           .describe(
             "Change how fast this session acts, mid-run: a floor between actions in milliseconds, for when a person is watching and needs to keep up. 0 restores full speed. With `name`, applies to that session; without, to every live session — which is what 'slow everything down so I can follow' means.",
           ),
+        area: z
+          .enum(CHECK_AREAS)
+          .optional()
+          .describe(
+            "In a guided check: the area this session is working on now, one of its plan's areas, shown to the person following the check. With `name`, that session (the default session is left as it is); without, the default one. Set it as each area starts.",
+          ),
       },
     },
-    serializedControl(async ({ name, session, paceMs }: { name?: string; session?: string; paceMs?: number }) => {
+    serializedControl(async ({ name, session, paceMs, area }: { name?: string; session?: string; paceMs?: number; area?: CheckArea }) => {
       try {
         name = name ?? session;
+        let areaNote = "";
+        if (area !== undefined) {
+          const target = name ?? activeName;
+          if (!engines.has(target))
+            return text(`No session named "${target}" yet — create it with scout_attach { session: "${target}", … }.\n${sessionLines()}`, activeName);
+          const held = guidedSessions.get(target) ?? {};
+          const refused = areaRefusal(held.planId ? guidedPlans.get(held.planId) : undefined, area);
+          if (refused) return errorText(new Error(`scout_session refused: ${refused}`));
+          guidedSessions.set(target, { ...held, area });
+          areaNote = `${target} is now working on: ${AREA_LABEL[area]}.\n`;
+          // With an area, `name` says which session it is for; the default session stays as it was.
+          if (paceMs === undefined) return text(areaNote.trimEnd(), activeName);
+        }
         // A pace with no session named is meant for the whole run: somebody is
         // watching and wants to keep up with all of it, not one lane.
         if (paceMs !== undefined && !name) {
           const applied = [...engines.values()].map((e) => e.setPace(paceMs));
           const at = applied[0] ?? normalizePace(paceMs);
           return text(
-            (at > 0
-              ? `Every live session now waits at least ${at} ms between actions, so a person can follow along.`
-              : `Every live session is back to full speed: as fast as its page allows.`) + `\n${sessionLines()}`,
+            areaNote +
+              (at > 0
+                ? `Every live session now waits at least ${at} ms between actions, so a person can follow along.`
+                : `Every live session is back to full speed: as fast as its page allows.`) +
+              `\n${sessionLines()}`,
             activeName,
           );
         }
@@ -691,7 +731,10 @@ export function registerSessionTools(): void {
           if (!engines.has(name))
             return text(`No session named "${name}" yet — create it with scout_attach { session: "${name}", … }.\n${sessionLines()}`, activeName);
           const at = engines.get(name)!.setPace(paceMs);
-          return text((at > 0 ? `${name} now waits at least ${at} ms between actions.` : `${name} is back to full speed.`) + `\n${sessionLines()}`, activeName);
+          return text(
+            areaNote + (at > 0 ? `${name} now waits at least ${at} ms between actions.` : `${name} is back to full speed.`) + `\n${sessionLines()}`,
+            activeName,
+          );
         }
         if (!name) return text(sessionLines() + liveLine(), activeName);
         if (!engines.has(name)) {
@@ -753,6 +796,7 @@ export function registerCloseTool(): void {
           for (const e of closing) flushAfterClose(e);
           for (const store of stores) store.endRun();
           sessionQueue.clear();
+          guidedSessions.clear();
           board.clear();
           laneLedger.clear();
           setLastWriter(null);
@@ -779,6 +823,7 @@ export function registerCloseTool(): void {
         // The last session on this project ends its run.
         if (eng.memory && ![...engines.values()].some((e) => e.memory === eng.memory)) eng.memory.endRun();
         sessionQueue.forget(name);
+        guidedSessions.delete(name);
         board.remove(name);
         laneLedger.forget(name);
         // The last session closing ends the run, and its lanes with it: a brief's

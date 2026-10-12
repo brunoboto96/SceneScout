@@ -11,6 +11,12 @@ import test from "node:test";
 import {
   buildGuidedPlan,
   CARE_MODE,
+  confirmForm,
+  confirmVerdict,
+  GuidedPlans,
+  guidedPlanText,
+  MAX_PLANS,
+  newConfirmCode,
   CARES,
   CHECK_AREAS,
   checkGuidedChoices,
@@ -25,6 +31,7 @@ import {
   newPlanId,
   THOROUGHNESSES,
   type GuidedChoices,
+  type GuidedPlan,
 } from "../src/engine/guided.ts";
 import {
   AREA_LABEL,
@@ -32,7 +39,12 @@ import {
   CARE_EXPLAIN,
   CARE_LABEL,
   CARE_PREVIEW,
+  CONFIRM_ANSWER,
+  CONFIRM_ANSWER_LINE,
   CONFIRM_COMING,
+  CONFIRM_FIELD,
+  CONFIRM_SAYS,
+  confirmCodeLine,
   confirmSentence,
   DESTRUCTIVE_NOT_OFFERED,
   HELD_BACK,
@@ -42,6 +54,7 @@ import {
 } from "../src/engine/guided-words.ts";
 import { settingsFromAnswers } from "../src/intake.ts";
 import { allowsWrite } from "../src/engine/policy.ts";
+import { isReadMethod } from "../src/engine/unload.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import { IMPACT, PLAIN_WORDING, plainCard, plainFinding, plainSteps } from "../src/engine/plain.ts";
 
@@ -239,7 +252,18 @@ test("confirmation: may submit forms on this computer needs none; the same choic
 });
 
 test("confirmation: only localhost, 127.0.0.1 and ::1 are on this computer; anything else is asked about", () => {
-  for (const address of ["http://localhost", "http://localhost:3000/app", "http://LOCALHOST:8080", "http://127.0.0.1:5173", "http://[::1]:3000"]) {
+  // Numeric forms the browser itself reads as 127.0.0.1 or ::1 are the same address, so they count as local too (ADR 24).
+  for (const address of [
+    "http://localhost",
+    "http://localhost:3000/app",
+    "http://LOCALHOST:8080",
+    "http://127.0.0.1:5173",
+    "http://[::1]:3000",
+    "http://127.1:3000",
+    "http://2130706433:3000",
+    "http://0x7f.0.0.1",
+    "http://[0:0:0:0:0:0:0:1]:3000",
+  ]) {
     assert.equal(isLocalAddress(address), true, address);
     assert.equal(confirmationReason({ care: "may-submit-forms", address }), null, address);
   }
@@ -344,7 +368,7 @@ test("plan: each area is labelled and explained, and says what the care level ho
 
 test("plan: no sign-in attaches without a role; any sign-in calls scout_login first, as the plain questions do", () => {
   assert.deepEqual(plan({ signIn: "none" }).calls, [
-    { tool: "scout_attach", args: { url: REMOTE, mode: "observe", objective: "Check broken pages and links." } },
+    { tool: "scout_attach", args: { url: REMOTE, mode: "observe", objective: "Check broken pages and links.", planId: "gp-0123456789" } },
   ]);
   for (const signIn of ["sso", "password", "one-time-code"] as const) {
     const p = plan({ signIn });
@@ -399,7 +423,14 @@ test("plan: the same choices give the same plan apart from its id", () => {
   const b = guidedPlan(input);
   assert.ok(a.ok && b.ok);
   assert.notEqual(a.plan.planId, b.plan.planId);
-  assert.deepEqual({ ...a.plan, planId: "" }, { ...b.plan, planId: "" });
+  // Each attach names its own plan, so the plan can be held to it; that is the only other difference.
+  const apart = (p: GuidedPlan) => ({
+    ...p,
+    planId: "",
+    calls: p.calls.map((c) => ({ ...c, args: { ...c.args, planId: c.args.planId === p.planId ? "" : c.args.planId } })),
+  });
+  assert.deepEqual(apart(a.plan), apart(b.plan));
+  for (const c of a.plan.calls) if (c.tool === "scout_attach") assert.equal(c.args.planId, a.plan.planId);
   assert.deepEqual(guidedPlan({ address: REMOTE }), { ok: false, error: "choose at least one thing to check" });
 });
 
@@ -482,6 +513,173 @@ test("wording: no care level says a form is the only way something changes, beca
   assert.equal(allowsWrite("safe-write", "DELETE", false, true), true);
   assert.match(CARE_EXPLAIN["may-submit-forms"], /Deletes are blocked/);
   assert.match(CARE_EXPLAIN["may-create-test-data"], /deletes only what it created/);
+});
+
+test("wording: Look only says exactly what observe lets out: page loads, so a search runs and a link that changes something when opened is not stopped", () => {
+  // observe judges the method, not the page: every page load passes, a form sent by GET (a search) is a page load,
+  // and a link whose page changes something just by being opened is one too. Anything else is held back.
+  assert.equal(isReadMethod("GET"), true);
+  assert.equal(allowsWrite("observe", "POST", false, false), false);
+  assert.equal(allowsWrite("observe", "PUT", false, true), false);
+  const said = [CARE_EXPLAIN["look-only"], ...CARE_PREVIEW["look-only"], SAFETY_EXPLAINER[0], ...Object.values(HELD_BACK).map((h) => h["look-only"] ?? "")];
+  for (const s of said) {
+    // Promises observe cannot keep: a search form is sent, and a page load can change something.
+    assert.doesNotMatch(
+      s,
+      /never send(?:s)? a form|forms? (?:are|is) (?:filled in and checked but )?never sent|never create, change or delete anything|Nothing is sent to your site except signing in|Safe on a live site\./i,
+      s,
+    );
+  }
+  for (const s of [CARE_EXPLAIN["look-only"], SAFETY_EXPLAINER[0], CARE_PREVIEW["look-only"].join(" ")]) {
+    assert.match(s, /search/i, `says a search still runs: ${s}`);
+    assert.match(s, /link/i, `says a link that changes something when opened is not stopped: ${s}`);
+  }
+  assert.match(HELD_BACK.forms["look-only"]!, /search/i, "the forms area says which forms are still sent");
+});
+
+// ---- The person's confirmation (scout_guided_confirm) ----
+
+const CODE = "4821";
+
+test("confirmation: only the person's yes with the code the form showed accepts May create test data", () => {
+  const p = plan({ care: "may-create-test-data" });
+  const yes = (content: Record<string, unknown>) => confirmVerdict(p, { kind: "accepted", content }, CODE);
+  assert.deepEqual(yes({ answer: "yes", code: CODE }), { accepted: true, outcome: "accepted", tellPerson: CONFIRM_SAYS.accepted });
+  assert.equal(yes({ answer: "yes", code: ` ${CODE} ` }).accepted, true, "spaces around the code are forgiven");
+  // A wrong or missing code never accepts it.
+  for (const content of [
+    { answer: "yes" },
+    { answer: "yes", code: "" },
+    { answer: "yes", code: "1234" },
+    { answer: "yes", code: `${CODE}0` },
+    { answer: "yes", code: "48 21" },
+    { answer: "yes", code: 4821 },
+  ])
+    assert.deepEqual(yes(content), { accepted: false, outcome: "wrong-code", tellPerson: CONFIRM_SAYS["wrong-code"] }, JSON.stringify(content));
+  // A code the server never made matches nothing, not even an empty answer.
+  assert.equal(confirmVerdict(p, { kind: "accepted", content: { answer: "yes", code: "" } }, "").accepted, false);
+  // Anything but the yes value is going back, whatever code comes with it.
+  for (const answer of ["back", "Yes", "YES", "true", true, undefined, "Yes, it is a test copy"])
+    assert.equal(yes({ answer, code: CODE }).outcome, "went-back", String(answer));
+});
+
+test("confirmation: a declined, closed, failed or absent form leaves the plan unaccepted", () => {
+  for (const care of ["may-create-test-data", "may-submit-forms"] as const) {
+    const p = plan({ care });
+    for (const outcome of [{ kind: "unsupported" }, { kind: "declined" }, { kind: "cancelled" }, { kind: "failed", error: "timed out" }] as const) {
+      const v = confirmVerdict(p, outcome, CODE);
+      assert.deepEqual(v, { accepted: false, outcome: outcome.kind, tellPerson: CONFIRM_SAYS[outcome.kind] }, `${care} ${outcome.kind}`);
+    }
+    assert.equal(confirmVerdict(p, { kind: "accepted", content: {} }, CODE).accepted, false, "an accept with no answer is not a yes");
+  }
+  assert.match(CONFIRM_SAYS.unsupported, /cannot show the confirmation form/);
+  for (const o of ["went-back", "wrong-code", "declined", "cancelled", "failed", "unsupported"] as const)
+    assert.match(CONFIRM_SAYS[o], /has not started|Look only/, o);
+});
+
+test("confirmation: May submit forms on another site needs the yes alone; a plan that needs none is never asked", () => {
+  const remote = plan({ address: REMOTE, care: "may-submit-forms" });
+  assert.equal(confirmVerdict(remote, { kind: "accepted", content: { answer: "yes" } }, CODE).accepted, true);
+  assert.equal(confirmVerdict(remote, { kind: "accepted", content: { answer: "back" } }, CODE).accepted, false);
+  for (const p of [plan({ address: LOCAL, care: "may-submit-forms" }), plan({ care: "look-only" })]) {
+    assert.equal(p.confirm, null);
+    assert.equal(confirmForm(p, CODE), null, "no form for a plan that needs no confirmation");
+    assert.deepEqual(confirmVerdict(p, { kind: "unsupported" }, CODE), { accepted: true, outcome: "not-needed", tellPerson: CONFIRM_SAYS["not-needed"] });
+  }
+});
+
+test("confirmation form: the sentence, what the care level may do, one answer with no default, and a code field only for test data", () => {
+  const create = confirmForm(plan({ care: "may-create-test-data" }), CODE)!;
+  assert.ok(create.message.startsWith(confirmSentence("creates-data", REMOTE)));
+  for (const line of CARE_PREVIEW["may-create-test-data"]) assert.ok(create.message.includes(line), line);
+  assert.ok(create.message.includes(CODE), "the form shows the code to type");
+  assert.deepEqual(Object.keys(create.requestedSchema.properties), ["answer", "code"]);
+  assert.deepEqual(create.requestedSchema.required, ["answer"]);
+  const answer = create.requestedSchema.properties.answer;
+  assert.ok(!("default" in answer), "a held Enter key accepts nothing");
+  assert.deepEqual(
+    answer.oneOf.map((o) => o.title),
+    [CONFIRM_ANSWER.testCopy, CONFIRM_ANSWER.back],
+  );
+  const forms = confirmForm(plan({ care: "may-submit-forms" }), CODE)!;
+  assert.deepEqual(Object.keys(forms.requestedSchema.properties), ["answer"]);
+  assert.ok(!forms.message.includes(CODE), "no code where none is asked for");
+  assert.deepEqual(
+    forms.requestedSchema.properties.answer.oneOf.map((o) => o.title),
+    [CONFIRM_ANSWER.yes, CONFIRM_ANSWER.back],
+  );
+  // Form mode's subset: flat strings, and nothing a client might draw as a secret field.
+  for (const [name, field] of Object.entries(create.requestedSchema.properties)) {
+    assert.equal(field.type, "string", name);
+    assert.ok(!("format" in field), name);
+    assert.doesNotMatch(`${field.title} ${field.description}`, /password|token|secret/i, name);
+  }
+  for (const s of [
+    confirmCodeLine(CODE),
+    CONFIRM_ANSWER_LINE,
+    ...Object.values(CONFIRM_SAYS),
+    CONFIRM_FIELD.answer.description,
+    CONFIRM_FIELD.code.description,
+  ])
+    assert.doesNotMatch(s, /scout_|observe|read-only|safe-write|destructive|\bPOST\b|\bGET\b|_/, `"${s}" is not plain`);
+});
+
+test("confirmation codes: four digits, fresh each time", () => {
+  const codes = Array.from({ length: 200 }, newConfirmCode);
+  for (const c of codes) assert.match(c, /^\d{4}$/);
+  assert.ok(new Set(codes).size > 100, "codes vary");
+});
+
+// ---- The plans a server holds ----
+
+test("plans: kept unaccepted, handed out as copies, accepted only by an accepting verdict", () => {
+  const plans = new GuidedPlans();
+  assert.equal(plans.open, false, "no plan built: nothing is gated");
+  const p = plans.add(plan({ care: "may-create-test-data" }));
+  assert.equal(plans.open, true);
+  // A copy changed by a caller changes nothing kept.
+  p.confirm!.accepted = true;
+  assert.equal(plans.get(p.planId)!.confirm!.accepted, false);
+  assert.throws(() => plans.add(p), /kept unaccepted/, "a plan arriving accepted is refused");
+  assert.throws(() => plans.add(plan({ care: "look-only" })), /already kept/, "one id, one plan");
+  assert.throws(() => plans.accept(p.planId, { accepted: false, outcome: "wrong-code", tellPerson: "" }), /only by a verdict that accepted it/);
+  assert.equal(plans.get(p.planId)!.confirm!.accepted, false);
+  const verdict = confirmVerdict(plans.get(p.planId)!, { kind: "accepted", content: { answer: "yes", code: CODE } }, CODE);
+  assert.equal(plans.accept(p.planId, verdict).confirm!.accepted, true);
+  assert.equal(plans.get(p.planId)!.confirm!.accepted, true);
+  assert.equal(plans.get("gp-zzzzzzzzzz"), undefined);
+});
+
+test("plans: the oldest is forgotten past the cap, and the store stays open", () => {
+  const plans = new GuidedPlans();
+  const ids = Array.from({ length: MAX_PLANS + 1 }, () => plans.add(buildGuidedPlan(ok({ address: REMOTE, areas: ["forms"] }))).planId);
+  assert.equal(plans.get(ids[0]), undefined);
+  assert.ok(plans.get(ids[MAX_PLANS]));
+  assert.equal(plans.open, true);
+});
+
+test("plan text: the confirmation first while it is needed, then the calls with the plan's id, the areas and the limits", () => {
+  const p = plan({ care: "may-create-test-data", areas: ["forms", "sign-in"], signIn: "sso" });
+  const t = guidedPlanText(p);
+  for (const s of p.tellPerson) assert.ok(t.includes(`- ${s}`), s);
+  const order = [
+    `scout_guided_confirm {"planId":"${p.planId}"}`,
+    "scout_login {",
+    `scout_attach {`,
+    `"planId":"${p.planId}"`,
+    'scout_session {area} with it: "forms", "sign-in"',
+    "at most 20 minutes and 60 pages",
+  ];
+  let at = -1;
+  for (const part of order) {
+    const i = t.indexOf(part, at + 1);
+    assert.ok(i > at, `${part} comes next in:\n${t}`);
+    at = i;
+  }
+  assert.match(t, /you cannot answer it for them/);
+  const accepted = { ...p, confirm: { ...p.confirm!, accepted: true } };
+  assert.doesNotMatch(guidedPlanText(accepted), /scout_guided_confirm/);
+  assert.doesNotMatch(guidedPlanText(plan({ care: "look-only" })), /scout_guided_confirm|confirmed/);
 });
 
 // ---- A finding as a card ----
