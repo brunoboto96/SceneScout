@@ -4,6 +4,7 @@
  * browser.ts so both rules can be table-tested without a browser.
  */
 import { isNonPageRoute } from "./fingerprint.js";
+import { isTimeoutMessage } from "./limits.js";
 
 /** One crawled route, as the summary line needs it. */
 export interface CrawlOutcome {
@@ -116,24 +117,117 @@ export function isFileMediaType(contentType: string | null | undefined): boolean
   return type !== undefined && !PAGE_MEDIA_TYPES.includes(type);
 }
 
+/** The main document's response to a navigation, as the browser received it. */
+export interface MainDocumentAnswer {
+  /** Where it answered from, after any redirects. */
+  url: string;
+  status: number;
+  /** The media type (mediaTypeOf), undefined when the response named none. */
+  contentType: string | undefined;
+}
+
+/** How a browser fails page.goto for a response it takes as a download. */
+const DOWNLOAD_STARTED = /\bDownload is starting\b/;
+
 /**
  * Whether a navigation that failed may leave the browser about to show an
  * error page for it, so the next navigation must wait for that page first.
- * `status` is the main document's response status, or null when none came.
+ * `status` is the main document's response status, or null when none came;
+ * `downloaded` says the browser started a download for it.
  *
  * The page can commit for the failed URL a few milliseconds after goto threw,
  * and a navigation started before that commit is interrupted by it, charging
  * the failure to the next page. Measured on all three browsers:
  * - a file answered 4xx or 5xx: Firefox throws NS_ERROR_NET_ERROR_RESPONSE,
  *   Chromium "Download is starting", and both then commit an error page;
+ *   WebKit downloads it instead and shows none;
  * - a file answered 2xx or 3xx that became a download: the page stays where it
  *   was on every browser, so nothing follows and nothing is waited for;
+ * - a download that started, whatever its status: the page stays where it was;
  * - no response at all (refused, aborted, timed out): the browser may show its
  *   own error page, so it is waited for.
- * The wait ends at the commit or at its limit, so a wrong yes costs the limit
- * once (a missing download on WebKit, which shows no error page) and a wrong
- * no lets the next page's load fail.
+ * The wait ends at the commit, at a download or at its limit, so a wrong yes
+ * costs the limit once and a wrong no lets the next page's load fail.
  */
-export function failedNavigationLeavesErrorPage(message: string, status: number | null): boolean {
-  return !(status !== null && status < 400 && /\bDownload is starting\b/.test(message));
+export function failedNavigationLeavesErrorPage(message: string, status: number | null, downloaded = false): boolean {
+  if (downloaded) return false;
+  return !(status !== null && status < 400 && DOWNLOAD_STARTED.test(message));
+}
+
+/**
+ * Whether a download the page reported is this navigation's: for the URL it
+ * asked for, or one it was answered from on the way (a redirect's target).
+ * Chromium reports a download a few milliseconds after goto has thrown for
+ * it, so a download from the navigation before arrives during the next one;
+ * taken as the next one's, it ended the wait for the error page Chromium then
+ * commits for a missing file, and that page interrupted the load after it.
+ * Fragments are never sent, so they are not compared.
+ */
+export function downloadIsNavigations(downloadUrl: string, asked: string, answeredFrom: readonly string[]): boolean {
+  const bare = (u: string): string => u.replace(/#.*$/, "");
+  const url = bare(downloadUrl);
+  return url === bare(asked) || answeredFrom.some((u) => bare(u) === url);
+}
+
+/**
+ * Whether a main-document response is the navigation's answer rather than a
+ * hop on the way to it. A 3xx with a Location is a redirect the browser
+ * follows, so the answer is still to come: WebKit reports a redirect's 302
+ * before it throws for the download it leads to and the file's own response
+ * only after, and taken as the answer the 302 ended the wait for the file's
+ * (awaitsLateAnswer). A 3xx without a Location (304 among them) is the answer.
+ */
+export function answersNavigation(status: number, location: string | undefined): boolean {
+  return !(status >= 300 && status < 400 && location !== undefined && location !== "");
+}
+
+/**
+ * Whether a navigation that threw should wait for its main document's
+ * response before it is judged. WebKit fails goto for a download before it
+ * reports the response, which follows a few milliseconds later; without it a
+ * PDF that answered 200 reads as a route that did not load. Chromium and
+ * Firefox report the response first, so they never wait.
+ */
+export function awaitsLateAnswer(message: string, answered: boolean): boolean {
+  return !answered && DOWNLOAD_STARTED.test(message);
+}
+
+/**
+ * What a navigation that threw is reported as when its main document did
+ * answer: the HTTP status, rather than the browser's own words for refusing
+ * the response ("Download is starting", NS_ERROR_NET_ERROR_RESPONSE). Null
+ * when the browser's message is the better account: nothing answered, the
+ * load timed out (limits.ts explains a timeout) or another navigation
+ * interrupted it, or a page answered without error and failed for another
+ * reason.
+ */
+export function answeredNavigationFailure(message: string, answer: Pick<MainDocumentAnswer, "status" | "contentType"> | null): string | null {
+  if (!answer || isTimeoutMessage(message) || /\bis interrupted by another navigation\b/.test(message)) return null;
+  const said = answeredStatus(answer);
+  if (answer.status >= 400) return said;
+  // A navigate step cannot open a file, so the reason says what checks one: the request the click that downloads it makes.
+  if (DOWNLOAD_STARTED.test(message)) {
+    return `${said}, which the browser downloaded instead of opening a page; a file is checked by an expect-request step after the click that downloads it`;
+  }
+  return null;
+}
+
+/**
+ * How a navigation's answer is named in a failure: "the file answered HTTP 404 (application/pdf)" for a feed or a
+ * file, "the page answered HTTP 404" for a page, whether the browser showed it or refused it.
+ */
+export function answeredStatus(answer: Pick<MainDocumentAnswer, "status" | "contentType">): string {
+  return isFileMediaType(answer.contentType) ? `the file answered HTTP ${answer.status} (${answer.contentType})` : `the page answered HTTP ${answer.status}`;
+}
+
+/** A navigation that threw although its main document answered: the message names the answer (answeredNavigationFailure). */
+export class AnsweredNavigationError extends Error {
+  constructor(
+    message: string,
+    readonly answer: MainDocumentAnswer,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "AnsweredNavigationError";
+  }
 }

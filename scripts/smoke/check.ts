@@ -231,10 +231,10 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
     JSON.stringify({ routes: alone.routes, issues: alone.issues }),
   );
   check(
-    "...and measured right after a feed, a plain-text file, a missing feed and a missing file, it loads the same, with no route-load-failed charged to it",
+    "...and measured right after a feed, a plain-text file, a missing feed and a missing file, it loads the same, with no route-load-failed charged to it or to them",
     [1, 2, 3].every((n) => pageRecord(followed, `/check-no-links.html?round=${n}`) === JSON.stringify([[200, 0]])) &&
-      // Only the page's own: WebKit reports no response for a file it downloads, so it charges the missing file itself.
-      !followed.issues.some((i) => i.rule === "route-load-failed" && i.routes.some((r) => r.startsWith("/check-no-links.html"))),
+      // Nor to the files: each answered, so none failed to load, on WebKit, which downloads them, included.
+      !followed.issues.some((i) => i.rule === "route-load-failed"),
     JSON.stringify({ routes: followed.routes, issues: followed.issues }).replaceAll(baseUrl, ""),
   );
 
@@ -262,6 +262,73 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
     "...and a session navigating to that page straight after a missing feed or file reaches it",
     reached.length === 6 && reached.every((r) => /^OK: navigate \S*\/check-no-links\.html\?round=\d/.test(r)),
     reached.map((r) => r.split("\n")[0].replaceAll(baseUrl, "")).join("\n"),
+  );
+
+  // Files that answer and files that are missing, crawled by name beside an HTML page with no controls. Every browser
+  // takes a PDF or an attachment as a download and fails the load; WebKit reports the file's response only after goto
+  // has thrown, and Chromium shows a missing feed as a page. Each is the file's own status either way: the files that
+  // answered are resources, the missing ones the route's client error, and only the HTML page is a dead end.
+  const files = await measuredPage("files", [
+    "/check-file",
+    "/check-file-moved",
+    "/check-sheet",
+    "/check-file-gone",
+    "/check-feed-gone",
+    "/check-no-links.html",
+  ]);
+  const filesResources = (files as unknown as { resources: Array<{ path: string; status: number; contentType: string }> }).resources;
+  check(
+    "a PDF, the same PDF behind a redirect and a CSV attachment that answer 200 are resources with their status and content type, not routes that failed to load",
+    JSON.stringify(filesResources.map((r) => `${r.path} ${r.status} ${r.contentType}`).sort()) ===
+      JSON.stringify(["/check-file 200 application/pdf", "/check-file-moved 200 application/pdf", "/check-sheet 200 text/csv"]) &&
+      !files.issues.some((i) => i.rule === "route-load-failed"),
+    JSON.stringify({ resources: filesResources, routes: files.routes, issues: files.issues }).replaceAll(baseUrl, ""),
+  );
+  check(
+    "...a missing PDF and a missing feed are each the route's client error, with no dead end, while the HTML page is a dead end",
+    ["/check-file-gone", "/check-feed-gone"].every((p) => files.issues.some((i) => i.rule === "route-client-error" && i.routes.includes(p))) &&
+      JSON.stringify(files.issues.filter((i) => i.rule === "dead-end").flatMap((i) => i.routes)) === JSON.stringify(["/check-no-links.html"]),
+    JSON.stringify(files.issues).replaceAll(baseUrl, ""),
+  );
+  const crawlEngine = new BrowserEngine();
+  crawlEngine.sessionKey = "check-crawl-files";
+  let crawled = "";
+  const navigated: string[] = [];
+  try {
+    await crawlEngine.attach({
+      url: `${baseUrl}/check-resources.html`,
+      projectDir: fs.mkdtempSync(path.join(os.tmpdir(), "ft-crawl-files-")),
+      mode: "observe",
+    });
+    crawled = await crawlEngine.crawl(["/check-feed-gone", "/check-file", "/check-no-links.html"]);
+    // A file that downloads, then a missing one, then a page. The first file's download is reported a few milliseconds
+    // after its navigation failed, during the next one's: taken as the missing file's, it skipped the wait for the error
+    // page Chromium commits for that 404, and the page's load was interrupted by it.
+    for (const target of ["/check-file", "/check-file-gone", "/check-no-links.html"]) {
+      navigated.push(
+        await crawlEngine.navigate(target).then(
+          (r) => `${target}: ${r.split("\n")[0]}`,
+          (err: unknown) => `${target}: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`,
+        ),
+      );
+    }
+  } finally {
+    await crawlEngine.close();
+  }
+  check(
+    "scout_navigate to a file that downloads, then to a missing file, names each by its status, and the page after them loads",
+    /^\/check-file: the file answered HTTP 200 \(application\/pdf\), which the browser downloaded/.test(navigated[0] ?? "") &&
+      navigated[1] === "/check-file-gone: the file answered HTTP 404 (application/pdf)" &&
+      /^\/check-no-links\.html: OK: navigate /.test(navigated[2] ?? ""),
+    navigated.join("\n").replaceAll(baseUrl, ""),
+  );
+  check(
+    "...and the crawl's own lines say so: the missing feed and the PDF are not pages, with their status, and only the HTML page is a dead end",
+    /\/check-feed-gone — 404 · not a page \(application\/rss\+xml\)/.test(crawled) &&
+      /\/check-file — 200 · not a page \(application\/pdf\)/.test(crawled) &&
+      /\/check-no-links\.html — 200 · 0 el.*DEAD-END/.test(crawled) &&
+      (crawled.match(/DEAD-END/g) ?? []).length === 1,
+    crawled.replaceAll(baseUrl, ""),
   );
 
   // The same field labelled every way that counts, then by its placeholder alone, then by nothing but its name attribute.
@@ -531,6 +598,26 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     "a flow that opens a page straight after a flow that failed on a missing file passes, each of three times",
     JSON.stringify(flowStatus(afterMissing.summary)) === JSON.stringify([1, 2, 3].flatMap((n) => [`${n}a-file-gone.json:failed`, `${n}b-page.json:passed`])),
     `${JSON.stringify(afterMissing.summary?.flows)} ${afterMissing.out.slice(-600)}`.replaceAll(baseUrl, ""),
+  );
+
+  // A flow that opens a missing file fails naming the file's HTTP status, not the browser's words for refusing it
+  // ("Download is starting", NS_ERROR_NET_ERROR_RESPONSE); the same flow opening an HTML page passes.
+  const fileFlows = await checkWith(
+    project("flow-missing-file", {
+      "a-file-gone.json": { steps: [{ action: "navigate", target: "/check-file-gone" }] },
+      "b-feed-gone.json": { steps: [{ action: "navigate", target: "/check-feed-gone" }] },
+      "c-page.json": { steps: [{ action: "navigate", target: "/check-no-links.html" }] },
+    }),
+  );
+  const fileFlowReasons = (fileFlows.summary?.flows ?? []).map((f) => `${f.file}:${f.status}:${f.reason ?? ""}`);
+  check(
+    "a flow that navigates to a missing file or feed fails naming HTTP 404 and its type, on every browser, and the same flow to an HTML page passes",
+    fileFlowReasons.length === 3 &&
+      /^a-file-gone\.json:failed:the file answered HTTP 404 \(application\/pdf\)$/.test(fileFlowReasons[0]) &&
+      /^b-feed-gone\.json:failed:the file answered HTTP 404 \(application\/rss\+xml\)$/.test(fileFlowReasons[1]) &&
+      fileFlowReasons[2] === "c-page.json:passed:" &&
+      !fileFlowReasons.some((r) => /Download is starting|NS_ERROR/.test(r)),
+    fileFlowReasons.join("\n").replaceAll(baseUrl, ""),
   );
 
   await recordedChecks({ baseUrl, flowFor, project, checkWith });
