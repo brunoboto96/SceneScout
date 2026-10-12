@@ -812,6 +812,76 @@ export function generateReport(
   const ticketInput: TicketReportInput = { tickets: ticketRun.tickets, verdicts: ticketRun.verdicts, findings: memory.findings };
   lines.push(...formatTicketsTechnical(ticketInput));
 
+  // The sections in the report's order; each writes its own lines.
+  const scores = pageScoreSection(lines, memory);
+  roleMatrixSection(lines, memory);
+  const gaps = gapLedgerSection(lines, memory, extras);
+  findingSections(lines, current, historical, extras, now);
+  lines.push(...formatWorthALook(worthALook, memory.sessionStart));
+  resolvedSection(lines, resolved, extras, now);
+  runSettingsSections(lines, extras);
+  trailingSections(lines, memory, oracleLog, extras, cov);
+
+  const markdown = withAudience(lines, extras?.report ?? DEFAULT_REPORT_AUDIENCE, () => {
+    const frames = lastFrames(memory);
+    return formatPlainSection({
+      current,
+      historical: historical.length,
+      worthALook: worthALook.length,
+      violations: oracleLog.filter((v) => !v.embed),
+      routes: extras && extras.routesTotal > 0 ? { visited: extras.routesVisited, total: extras.routesTotal } : undefined,
+      gaps,
+      lastFrames: frames,
+      audience: extras?.report ?? DEFAULT_REPORT_AUDIENCE,
+      tickets: formatTicketsPlain({
+        ...ticketInput,
+        problemNumber: new Map(current.map((f, i) => [f.id, i + 1])),
+        pictureOf: (f) => pictureOf(f, frames.get(f.id)),
+      }),
+    });
+  });
+  const { outPath, htmlPath, htmlWritten, htmlProblem } = writeReportFiles(memory, markdown, extras, opts);
+
+  // Bounded summary for the tool result: full reports have exceeded client
+  // token limits in real runs (66–72KB observed) — the wire gets the digest,
+  // the disk gets the document.
+  const summaryLines: string[] = [
+    `Report written to ${outPath}`,
+    ...(htmlWritten
+      ? [`The same run as one page, with every session's steps: ${htmlPath}`]
+      : htmlProblem
+        ? [`The one-page version of this run could NOT be written (${htmlProblem}); ${outPath} is unaffected.`]
+        : []),
+    ``,
+    `OPEN FINDINGS: ${open.length} (${open.filter((f) => f.severity === "high").length} high) — ${current.length} this session, ${historical.length} historical${resolved.length ? `, ${resolved.length} resolved` : ""}`,
+    ...[ticketSummaryLine(ticketRun.tickets, ticketRun.verdicts)].filter((l): l is string => l !== null),
+    ...(extras && extras.routesTotal > 0
+      ? [
+          `COVERAGE: routes ${extras.routesVisited}/${extras.routesTotal} · ${cov.states} states · ${cov.elementsExercised}/${cov.elementsTotal} elements exercised`,
+        ]
+      : []),
+    ...(scores.length > 0
+      ? [
+          `WORST PAGES: ${scores
+            .slice(0, 3)
+            .map(([r, sc]) => `${r} ${sc.overall}/100`)
+            .join(" · ")}`,
+        ]
+      : []),
+    ``,
+    `Top open findings:`,
+    ...open.slice(0, 10).map((f) => `  ${SEVERITY_ICON[f.severity]} [${f.severity}] ${f.title} (${f.id})`),
+    ...(open.length > 10 ? [`  … +${open.length - 10} more in the report`] : []),
+    ...(worthALook.length > 0 ? [`Worth a look (defects only under a project convention; not counted above): ${worthALook.length}`] : []),
+    ``,
+    `Gap ledger${gaps.length === 0 ? ": EMPTY — nothing known left untested" : ` (${gaps.length}):`}`,
+    ...gaps.map((g) => `  ⚠ ${g}`),
+  ];
+  return { markdown, path: outPath, summary: summaryLines.join("\n"), ...(htmlWritten ? { html: htmlPath } : {}) };
+}
+
+/** The page quality scores, worst first, with any not re-measured this session marked stale. */
+function pageScoreSection(lines: string[], memory: MemoryStore): Array<[string, PageScore]> {
   // ---- Page quality scores, worst first — the cross-page comparator. ----
   // Scores persist across runs, so a table sorted purely by number ranks
   // yesterday's un-fixed measurement above today's re-audit and reports a page
@@ -837,7 +907,11 @@ export function generateReport(
     }
     lines.push(``);
   }
+  return scores;
+}
 
+/** The role capability matrix: routes where two or more roles that tried them got different answers. */
+function roleMatrixSection(lines: string[], memory: MemoryStore): void {
   // ---- Role capability matrix — what each role could/couldn't reach. ----
   const roleAccess = memory.roleAccess;
   const roles = Object.keys(roleAccess);
@@ -882,7 +956,10 @@ export function generateReport(
     if (differing.length === 0) lines.push(`(no divergence recorded — all roles saw the same surface)`);
     lines.push(``);
   }
+}
 
+/** The gap ledger, and the routes it declined to judge. */
+function gapLedgerSection(lines: string[], memory: MemoryStore, extras: ReportExtras | undefined): string[] {
   // ---- GAP LEDGER — what this run did NOT test. ----
   const gaps = computeGaps(memory, extras);
   lines.push(`## Gap ledger — what was NOT tested`);
@@ -907,7 +984,11 @@ export function generateReport(
     );
   }
   lines.push(``);
+  return gaps;
+}
 
+/** A finding's full entry, written to `lines`: open, or `complete` for a resolved one. */
+function findingRenderer(lines: string[]): (f: Finding, complete?: boolean) => void {
   const renderFinding = (f: Finding, complete = false): void => {
     lines.push(complete ? `### 🟢 [COMPLETE] ${f.title}` : `### ${SEVERITY_ICON[f.severity]} [${f.severity.toUpperCase()}] ${f.title}`);
     lines.push(``);
@@ -945,7 +1026,12 @@ export function generateReport(
     lines.push("```");
     lines.push(``);
   };
+  return renderFinding;
+}
 
+/** The findings seen this session in full, then the historical ones in full or as an index. */
+function findingSections(lines: string[], current: Finding[], historical: Finding[], extras: ReportExtras | undefined, now: number): void {
+  const renderFinding = findingRenderer(lines);
   lines.push(`## Findings — seen this session (${current.length})`);
   lines.push(``);
   if (current.length === 0) lines.push(`None recorded or re-confirmed this session.`, ``);
@@ -981,9 +1067,11 @@ export function generateReport(
       lines.push(``);
     }
   }
+}
 
-  lines.push(...formatWorthALook(worthALook, memory.sessionStart));
-
+/** The resolved findings, in full or as an index. */
+function resolvedSection(lines: string[], resolved: Finding[], extras: ReportExtras | undefined, now: number): void {
+  const renderFinding = findingRenderer(lines);
   if (resolved.length > 0) {
     lines.push(`## ✅ Resolved (${resolved.length})`);
     lines.push(``);
@@ -1004,7 +1092,10 @@ export function generateReport(
       lines.push(``);
     }
   }
+}
 
+/** What the run's settings let it do: the data it created, the embeds it trusted and the POSTs it read. */
+function runSettingsSections(lines: string[], extras: ReportExtras | undefined): void {
   if (extras?.createdResources && extras.createdResources.length > 0) {
     lines.push(`## Data created by this session (cleanup list)`);
     lines.push(``);
@@ -1041,7 +1132,16 @@ export function generateReport(
     for (const e of extras.readPosts) lines.push(`- \`${e}\``);
     lines.push(``);
   }
+}
 
+/** The oracle violations, embeds, unexplored surface, pace and lane calibration that close the report. */
+function trailingSections(
+  lines: string[],
+  memory: MemoryStore,
+  oracleLog: OracleViolation[],
+  extras: ReportExtras | undefined,
+  cov: ReturnType<MemoryStore["coverage"]>,
+): void {
   lines.push(...violationRollup(oracleLog.filter((v) => !v.embed)));
   lines.push(
     ...embedSection(
@@ -1072,25 +1172,15 @@ export function generateReport(
   // Only on a run that used lanes, and only once enough of them have been
   // judged for the number to mean anything; formatCalibration decides both.
   lines.push(...formatCalibration(calibrate(memory.laneDecisions, memory.findings)));
+}
 
-  const markdown = withAudience(lines, extras?.report ?? DEFAULT_REPORT_AUDIENCE, () => {
-    const frames = lastFrames(memory);
-    return formatPlainSection({
-      current,
-      historical: historical.length,
-      worthALook: worthALook.length,
-      violations: oracleLog.filter((v) => !v.embed),
-      routes: extras && extras.routesTotal > 0 ? { visited: extras.routesVisited, total: extras.routesTotal } : undefined,
-      gaps,
-      lastFrames: frames,
-      audience: extras?.report ?? DEFAULT_REPORT_AUDIENCE,
-      tickets: formatTicketsPlain({
-        ...ticketInput,
-        problemNumber: new Map(current.map((f, i) => [f.id, i + 1])),
-        pictureOf: (f) => pictureOf(f, frames.get(f.id)),
-      }),
-    });
-  });
+/** Writes report.md and report.html unless `opts.write` is false, and says where and whether the page was written. */
+function writeReportFiles(
+  memory: MemoryStore,
+  markdown: string,
+  extras: ReportExtras | undefined,
+  opts: { write?: boolean },
+): { outPath: string; htmlPath: string; htmlWritten: boolean; htmlProblem: string } {
   const outPath = path.join(memory.dir, "report.md");
   const htmlPath = path.join(memory.dir, "report.html");
   let htmlWritten = false;
@@ -1128,41 +1218,5 @@ export function generateReport(
       }
     }
   }
-
-  // Bounded summary for the tool result: full reports have exceeded client
-  // token limits in real runs (66–72KB observed) — the wire gets the digest,
-  // the disk gets the document.
-  const summaryLines: string[] = [
-    `Report written to ${outPath}`,
-    ...(htmlWritten
-      ? [`The same run as one page, with every session's steps: ${htmlPath}`]
-      : htmlProblem
-        ? [`The one-page version of this run could NOT be written (${htmlProblem}); ${outPath} is unaffected.`]
-        : []),
-    ``,
-    `OPEN FINDINGS: ${open.length} (${open.filter((f) => f.severity === "high").length} high) — ${current.length} this session, ${historical.length} historical${resolved.length ? `, ${resolved.length} resolved` : ""}`,
-    ...[ticketSummaryLine(ticketRun.tickets, ticketRun.verdicts)].filter((l): l is string => l !== null),
-    ...(extras && extras.routesTotal > 0
-      ? [
-          `COVERAGE: routes ${extras.routesVisited}/${extras.routesTotal} · ${cov.states} states · ${cov.elementsExercised}/${cov.elementsTotal} elements exercised`,
-        ]
-      : []),
-    ...(scores.length > 0
-      ? [
-          `WORST PAGES: ${scores
-            .slice(0, 3)
-            .map(([r, sc]) => `${r} ${sc.overall}/100`)
-            .join(" · ")}`,
-        ]
-      : []),
-    ``,
-    `Top open findings:`,
-    ...open.slice(0, 10).map((f) => `  ${SEVERITY_ICON[f.severity]} [${f.severity}] ${f.title} (${f.id})`),
-    ...(open.length > 10 ? [`  … +${open.length - 10} more in the report`] : []),
-    ...(worthALook.length > 0 ? [`Worth a look (defects only under a project convention; not counted above): ${worthALook.length}`] : []),
-    ``,
-    `Gap ledger${gaps.length === 0 ? ": EMPTY — nothing known left untested" : ` (${gaps.length}):`}`,
-    ...gaps.map((g) => `  ⚠ ${g}`),
-  ];
-  return { markdown, path: outPath, summary: summaryLines.join("\n"), ...(htmlWritten ? { html: htmlPath } : {}) };
+  return { outPath, htmlPath, htmlWritten, htmlProblem };
 }

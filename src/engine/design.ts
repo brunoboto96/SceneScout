@@ -853,6 +853,90 @@ export function analyzeDesign(
   }
   const sections: string[] = [];
 
+  // Each section builder adds its lines to `sections` in the report's order and returns what the score and the defects need.
+  const contrastFails = contrastSection(records, sections);
+  const { sizes, families, nearDupSizes } = typographySection(records, sections);
+  const { readability, prose } = readabilitySection(records, sections);
+  const { pad, mar } = spacingSection(records, sections);
+  const tiny = tinyTargetSection(records, allRecords, sections);
+  const clipped = clippedSection(records, sections);
+  const nearMiss = alignmentSection(records, viewport, sections);
+  const { consistency, buttonRadii, buttonHeights, shadows } = consistencySection(records, sections);
+  const { palette, grays, hueFamilies } = paletteSection(records, prose, sections);
+  const slopTells = slopTellSection(records, sections);
+  const structure = structureSection(page, sections);
+  const names = namesSection(records, sections);
+  const { focusless, dominantBody, indistinct, chromeIndistinct } = affordancesSection(records, chromeRecords, page, sections);
+  const distorted = imagesSection(page, sections);
+  layoutSection(allRecords, page, viewport, sections);
+  const effort = taskEfficiencySection(records, page, viewport, sections);
+
+  // ---- Always-on coherence summary: the design system at a glance, with healthy ranges.
+  const gridPct = pad.n > 0 ? 100 - pad.pct : 100;
+  const summary =
+    `SYSTEM SUMMARY: ${sizes.length} font sizes (≤7 healthy) · ${families.length} families (≤2) · ` +
+    `${buttonRadii.length} button radii (1–2) · ${buttonHeights.length} button heights (1–3) · ${shadows.size} shadow styles (≤3) · ` +
+    `${grays.length} grays (4–6) · ${hueFamilies.size} accent hue families (1–3 + status) · ${gridPct}% spacing on 4px grid · ` +
+    `${page.density} interactive elements in first viewport${page.density > 40 ? " (dense — consider progressive disclosure)" : ""}`;
+
+  // ---- Multi-indicator PAGE SCORE. Deductive: start at 100 per dimension,
+  //      subtract per measured issue, floor at 0. Weights favour a11y and
+  //      task clarity — a page can be pretty and still hard to use.
+  const floor0 = (n: number): number => Math.max(0, Math.round(n));
+  const a11yScore = floor0(100 - contrastFails.length * 4 - focusless.length * 6 - tiny.length * 3 - names.unnamed.length * 6 - names.placeholder.length * 4);
+  const craftScore = floor0(100 - readability.length * 4 - palette.length * 4 - slopTells.length * 5 - clipped.length * 3 - distorted.length * 4);
+  const consistencyScore = floor0(
+    100 -
+      consistency.length * 8 -
+      (pad.n > 10 && pad.pct > 20 ? 10 : 0) -
+      (mar.n > 10 && mar.pct > 20 ? 6 : 0) -
+      nearMiss.length * 3 -
+      (sizes.length > 7 ? 5 : 0) -
+      (nearDupSizes.length > 0 ? 5 : 0),
+  );
+  const clarityScore = floor0(100 - effort.length * 8 - (page.scrollW > viewport.width + 8 ? 15 : 0) - structure.length * 4);
+  const overall = Math.round(a11yScore * 0.3 + craftScore * 0.25 + consistencyScore * 0.2 + clarityScore * 0.25);
+  const grade = overall >= 90 ? "A" : overall >= 80 ? "B" : overall >= 70 ? "C" : overall >= 60 ? "D" : "E";
+  const score: DesignScore = { overall, a11y: a11yScore, craft: craftScore, consistency: consistencyScore, clarity: clarityScore };
+  const scoreLine = `PAGE SCORE: ${overall}/100 (${grade}) — a11y ${a11yScore} · craft ${craftScore} · consistency ${consistencyScore} · task-clarity ${clarityScore}`;
+
+  const { chromeSection, chromeDefects } = sharedChromeSection(chromeRecords, allRecords, chromeIndistinct, dominantBody);
+
+  const header =
+    `DESIGN AUDIT (${records.length} page elements sampled` +
+    `${chromeRecords.length > 0 ? `, ${chromeRecords.length} shared-chrome elements excluded from the score` : ""}): ` +
+    `${sections.length === 0 ? "no measurable issues — and see the system summary below." : `${sections.length} issue group(s).`}`;
+  const report =
+    [header, ...sections, ...chromeSection, summary, scoreLine].join("\n\n") +
+    `\n\nJudge with product context: ⚠ lines are measurable defects; → lines are craft suggestions (how the page could be BETTER, not just what's broken). ` +
+    `Not every flag is a bug — dense data tables legitimately use small targets. The score is a comparator across pages and runs, not an absolute verdict. ` +
+    `File real defects with scout_finding (category "visual"/"a11y") and genuine improvement opportunities as severity-low "ux-polish", quoting the concrete numbers.`;
+  const defects: DesignDefect[] = [
+    ...contrastFails.map((detail) => ({ rule: "contrast" as const, detail })),
+    // Worded exactly as the shell's (below), so one control is one fact whether or not it is known chrome yet.
+    ...tiny.map((r) => ({ rule: "tiny-target" as const, detail: tinyTargetDetail(r) })),
+    ...clipped.filter((r) => r.textLen > 0).map((r) => ({ rule: "clipped-text" as const, detail: clippedTextDetail(r) })),
+    ...focusless.map((f) => ({ rule: "focus-indicator" as const, detail: `${f.label} — no visible focus indicator` })),
+    ...distorted.map(({ img, off }) => ({
+      rule: "image-aspect" as const,
+      detail: `${img.label} — rendered ${img.rw}×${img.rh} vs natural ${img.nw}×${img.nh} (aspect off by ${Math.round(off * 100)}%)`,
+    })),
+    ...(page.scrollW > viewport.width + 8
+      ? [{ rule: "horizontal-scroll" as const, detail: `content ${page.scrollW}px wide in a ${viewport.width}px viewport` }]
+      : []),
+    // The same thresholds as the SPACING and AFFORDANCES lines above, so the check and the audit agree on what they saw.
+    // Worded without counts or percentages: a spacing scale and a link style are app-wide conventions, so the same
+    // values on ten pages are one entry on ten routes, and the entry's fingerprint does not move when content does.
+    ...(pad.n > 10 && pad.pct > 20 ? [{ rule: "off-grid-spacing" as const, detail: `paddings off a 4px grid: ${gridValues(pad.top)}` }] : []),
+    ...(mar.n > 10 && mar.pct > 20 ? [{ rule: "off-grid-spacing" as const, detail: `vertical margins off a 4px grid: ${gridValues(mar.top)}` }] : []),
+    ...(indistinct.length > 0 ? [{ rule: "indistinct-link" as const, detail: indistinctDetail(dominantBody ?? "") }] : []),
+    ...chromeDefects,
+  ];
+  return { report, score, signatures, defects };
+}
+
+/** Section 1 of the audit, CONTRAST: the page's WCAG contrast failures. */
+function contrastSection(records: StyleRecord[], sections: string[]): string[] {
   // ---- 1. CONTRAST (WCAG): normal text needs 4.5:1, large text (≥24px, or ≥18.7px bold) needs 3:1.
   const contrastFails = contrastFailures(records);
   if (contrastFails.length > 0) {
@@ -864,7 +948,11 @@ export function analyzeDesign(
           .join("\n"),
     );
   }
+  return contrastFails;
+}
 
+/** Section 2 of the audit, TYPOGRAPHY: the page's font sizes and families. */
+function typographySection(records: StyleRecord[], sections: string[]): { sizes: number[]; families: string[]; nearDupSizes: number[] } {
   // ---- 2. TYPOGRAPHY entropy: a page using >7 font sizes or >2 families usually
   //      lacks a scale, and sizes <1px apart are drift, not deliberate steps.
   const sizes = [...new Set(records.filter((r) => r.text).map((r) => r.fontSize))].sort((a, b) => a - b);
@@ -879,7 +967,11 @@ export function analyzeDesign(
           : ""),
     );
   }
+  return { sizes, families, nearDupSizes };
+}
 
+/** Section 3 of the audit, READABILITY: measure, line height, body size, justified text and long capitals. */
+function readabilitySection(records: StyleRecord[], sections: string[]): { readability: string[]; prose: StyleRecord[] } {
   // ---- 3. READABILITY: measure, line-height rhythm, body size, justified text, long ALL-CAPS.
   // Per-check caps keep any single symptom from drowning the section; one
   // overall truncation caps the section itself.
@@ -930,7 +1022,18 @@ export function analyzeDesign(
           .map((s) => `  ${s}`)
           .join("\n"),
     );
+  return { readability, prose };
+}
 
+/** How many spacing values sit off a 4px grid, as a percentage, the commonest of them and how many were measured. */
+interface GridStats {
+  pct: number;
+  top: Array<[number, number]>;
+  n: number;
+}
+
+/** Section 4 of the audit, SPACING: paddings and vertical margins off a 4px grid. */
+function spacingSection(records: StyleRecord[], sections: string[]): { pad: GridStats; mar: GridStats } {
   // ---- 4. SPACING scale: paddings AND vertical margins off a 4px grid suggest ad-hoc values.
   const gridStats = (values: number[]): { pct: number; top: Array<[number, number]>; n: number } => {
     const off = new Map<number, number>();
@@ -951,7 +1054,11 @@ export function analyzeDesign(
   if (mar.n > 10 && mar.pct > 20)
     spacingLines.push(`${mar.pct}% of vertical margins are off a 4px grid — ad-hoc values: ${mar.top.map(([v, n]) => `${v}px×${n}`).join(", ")}`);
   if (spacingLines.length > 0) sections.push(`SPACING: ` + spacingLines.join("\n  "));
+  return { pad, mar };
+}
 
+/** Section 5 of the audit, TINY targets: controls below the WCAG 2.5.8 target size. */
+function tinyTargetSection(records: StyleRecord[], allRecords: StyleRecord[], sections: string[]): StyleRecord[] {
   // ---- 5. Touch/click targets below ~24px are hard to hit (WCAG 2.5.8). Measured
   //      on what the user hits (a native input's label or drop zone), with
   //      that rule's exceptions: inline links, and a small target with nothing
@@ -966,7 +1073,11 @@ export function analyzeDesign(
           .join("\n"),
     );
   }
+  return tiny;
+}
 
+/** Section 6 of the audit, CLIPPED text. */
+function clippedSection(records: StyleRecord[], sections: string[]): StyleRecord[] {
   // ---- 6. Clipped text (overflow hidden without ellipsis) — content silently cut off.
   const clipped = records.filter((r) => r.clipped);
   if (clipped.length > 0) {
@@ -978,7 +1089,11 @@ export function analyzeDesign(
           .join("\n"),
     );
   }
+  return clipped;
+}
 
+/** Section 7 of the audit, ALIGNMENT: columns whose left edges nearly line up. */
+function alignmentSection(records: StyleRecord[], viewport: { width: number; height: number }, sections: string[]): string[] {
   // ---- 7. Near-miss alignment: columns whose left edges differ by 1–4px look "off" without being nameable from a screenshot.
   const xCounts = new Map<number, number>();
   for (const r of records) {
@@ -998,7 +1113,14 @@ export function analyzeDesign(
   if (nearMiss.length > 0) {
     sections.push(`ALIGNMENT near-misses:\n` + nearMiss.map((s) => `  ⚠ ${s}`).join("\n"));
   }
+  return nearMiss;
+}
 
+/** Section 8 of the audit, CONSISTENCY: button radii and heights, and shadow styles. */
+function consistencySection(
+  records: StyleRecord[],
+  sections: string[],
+): { consistency: string[]; buttonRadii: string[]; buttonHeights: number[]; shadows: Map<string, number> } {
   // ---- 8. CONSISTENCY: one control system, one elevation system.
   //      Radii ≥ half the element height render as a pill regardless of raw value (9999px, Chromium's 16777200px clamp).
   const consistency: string[] = [];
@@ -1026,7 +1148,15 @@ export function analyzeDesign(
     consistency.push(`→ ${shadows.size} distinct box-shadow styles (${top.join(", ")}…) — an elevation system needs 2–3 levels, not one per component`);
   }
   if (consistency.length > 0) sections.push(`CONSISTENCY:\n` + consistency.map((s) => `  ${s}`).join("\n"));
+  return { consistency, buttonRadii, buttonHeights, shadows };
+}
 
+/** Section 9 of the audit, PALETTE: pure black body text, the gray scale and the accent hues. */
+function paletteSection(
+  records: StyleRecord[],
+  prose: StyleRecord[],
+  sections: string[],
+): { palette: string[]; grays: Array<{ rgb: [number, number, number]; n: number }>; hueFamilies: Map<number, number> } {
   // ---- 9. PALETTE discipline: near-black beats #000; a gray SCALE beats ad-hoc grays; few accent hues beat many.
   const palette: string[] = [];
   const pureBlack = prose.filter((r) => r.color === "rgba(0, 0, 0, 1)" && (parseRgb(r.bg) ?? [0, 0, 0]).slice(0, 3).every((c) => c >= 250));
@@ -1062,7 +1192,11 @@ export function analyzeDesign(
     );
   }
   if (palette.length > 0) sections.push(`PALETTE:\n` + palette.map((s) => `  ${s}`).join("\n"));
+  return { palette, grays, hueFamilies };
+}
 
+/** Section 9b of the audit, AI-SLOP TELLS: stylistic patterns that read as template output. */
+function slopTellSection(records: StyleRecord[], sections: string[]): string[] {
   // ---- 9b. AI-SLOP TELLS (impeccable.style's absolute bans): stylistic patterns
   //      so strongly associated with template/AI output that their presence
   //      reads as "nobody designed this". Counted, first offender named.
@@ -1094,7 +1228,11 @@ export function analyzeDesign(
     }
   }
   if (slopTells.length > 0) sections.push(`AI-SLOP TELLS:\n` + slopTells.map((s) => `  ${s}`).join("\n"));
+  return slopTells;
+}
 
+/** Section 10 of the audit, STRUCTURE: the heading hierarchy. */
+function structureSection(page: DesignPagePayload, sections: string[]): string[] {
   // ---- 10. STRUCTURE: heading hierarchy is the page's information architecture made visible.
   const structure: string[] = [];
   const h1s = page.headings.filter((h) => h.level === 1);
@@ -1119,7 +1257,11 @@ export function analyzeDesign(
     }
   }
   if (structure.length > 0) sections.push(`STRUCTURE:\n` + structure.map((s) => `  ${s}`).join("\n"));
+  return structure;
+}
 
+/** Section 10b of the audit, NAMES: controls with no accessible name, or named only by a placeholder. */
+function namesSection(records: StyleRecord[], sections: string[]): { unnamed: StyleRecord[]; placeholder: StyleRecord[] } {
   // ---- 10b. NAMES: a control a screen reader cannot name, or a field labelled
   //      only by a placeholder that disappears as the user types.
   const names = unnamedControls(records);
@@ -1138,7 +1280,16 @@ export function analyzeDesign(
           .join("\n"),
     );
   }
+  return names;
+}
 
+/** Section 11 of the audit, AFFORDANCES: focus indicators, and links that look like body text. */
+function affordancesSection(
+  records: StyleRecord[],
+  chromeRecords: StyleRecord[],
+  page: DesignPagePayload,
+  sections: string[],
+): { focusless: FocusSample[]; dominantBody: string | undefined; indistinct: StyleRecord[]; chromeIndistinct: StyleRecord[] } {
   // ---- 11. AFFORDANCES: keyboard focus visibility (trusted-Tab sampled engine-side) + indistinguishable links.
   const affordances: string[] = [];
   const focusless = page.focusSamples.filter((f) => !f.indicator);
@@ -1165,7 +1316,11 @@ export function analyzeDesign(
     }
   }
   if (affordances.length > 0) sections.push(`AFFORDANCES:\n` + affordances.map((s) => `  ${s}`).join("\n"));
+  return { focusless, dominantBody, indistinct, chromeIndistinct };
+}
 
+/** Section 12 of the audit, IMAGES: aspect-ratio distortion. */
+function imagesSection(page: DesignPagePayload, sections: string[]): Array<{ img: PageImage; off: number }> {
   // ---- 12. IMAGES: aspect-ratio distortion (rendered box fights the source's proportions).
   const distorted = page.images.flatMap((img) => {
     const off = aspectDistortion(img);
@@ -1183,7 +1338,11 @@ export function analyzeDesign(
           .join("\n"),
     );
   }
+  return distorted;
+}
 
+/** Section 13 of the audit, LAYOUT: horizontal overflow and the share of the viewport fixed chrome takes. */
+function layoutSection(allRecords: StyleRecord[], page: DesignPagePayload, viewport: { width: number; height: number }, sections: string[]): void {
   // ---- 13. LAYOUT: horizontal overflow + fixed chrome share. Sticky bars ride
   //      along as the user scrolls; past ~1/4 of the viewport they turn every
   //      screenful of content into a letterbox.
@@ -1212,7 +1371,10 @@ export function analyzeDesign(
     );
   }
   if (layout.length > 0) sections.push(`LAYOUT:\n` + layout.map((l) => `  ${l}`).join("\n"));
+}
 
+/** Section 14 of the audit, TASK EFFICIENCY: the primary action, form burden and information scent. */
+function taskEfficiencySection(records: StyleRecord[], page: DesignPagePayload, viewport: { width: number; height: number }, sections: string[]): string[] {
   // ---- 14. TASK EFFICIENCY: not "does it work" but "is it easy" — can a user
   //      see what to do, find it without scrolling, and finish without being
   //      over-asked? These are the journey-level questions a pass/fail e2e
@@ -1278,36 +1440,16 @@ export function analyzeDesign(
     effort.push(`→ ${fields.length} input fields but no obvious submit/confirm control detected — a user filling this in has no clear way to commit it`);
   }
   if (effort.length > 0) sections.push(`TASK EFFICIENCY:\n` + effort.map((s) => `  ${s}`).join("\n"));
+  return effort;
+}
 
-  // ---- Always-on coherence summary: the design system at a glance, with healthy ranges.
-  const gridPct = pad.n > 0 ? 100 - pad.pct : 100;
-  const summary =
-    `SYSTEM SUMMARY: ${sizes.length} font sizes (≤7 healthy) · ${families.length} families (≤2) · ` +
-    `${buttonRadii.length} button radii (1–2) · ${buttonHeights.length} button heights (1–3) · ${shadows.size} shadow styles (≤3) · ` +
-    `${grays.length} grays (4–6) · ${hueFamilies.size} accent hue families (1–3 + status) · ${gridPct}% spacing on 4px grid · ` +
-    `${page.density} interactive elements in first viewport${page.density > 40 ? " (dense — consider progressive disclosure)" : ""}`;
-
-  // ---- Multi-indicator PAGE SCORE. Deductive: start at 100 per dimension,
-  //      subtract per measured issue, floor at 0. Weights favour a11y and
-  //      task clarity — a page can be pretty and still hard to use.
-  const floor0 = (n: number): number => Math.max(0, Math.round(n));
-  const a11yScore = floor0(100 - contrastFails.length * 4 - focusless.length * 6 - tiny.length * 3 - names.unnamed.length * 6 - names.placeholder.length * 4);
-  const craftScore = floor0(100 - readability.length * 4 - palette.length * 4 - slopTells.length * 5 - clipped.length * 3 - distorted.length * 4);
-  const consistencyScore = floor0(
-    100 -
-      consistency.length * 8 -
-      (pad.n > 10 && pad.pct > 20 ? 10 : 0) -
-      (mar.n > 10 && mar.pct > 20 ? 6 : 0) -
-      nearMiss.length * 3 -
-      (sizes.length > 7 ? 5 : 0) -
-      (nearDupSizes.length > 0 ? 5 : 0),
-  );
-  const clarityScore = floor0(100 - effort.length * 8 - (page.scrollW > viewport.width + 8 ? 15 : 0) - structure.length * 4);
-  const overall = Math.round(a11yScore * 0.3 + craftScore * 0.25 + consistencyScore * 0.2 + clarityScore * 0.25);
-  const grade = overall >= 90 ? "A" : overall >= 80 ? "B" : overall >= 70 ? "C" : overall >= 60 ? "D" : "E";
-  const score: DesignScore = { overall, a11y: a11yScore, craft: craftScore, consistency: consistencyScore, clarity: clarityScore };
-  const scoreLine = `PAGE SCORE: ${overall}/100 (${grade}) — a11y ${a11yScore} · craft ${craftScore} · consistency ${consistencyScore} · task-clarity ${clarityScore}`;
-
+/** The SHARED CHROME section and its defects: the shell's own, reported apart from the page's score. */
+function sharedChromeSection(
+  chromeRecords: StyleRecord[],
+  allRecords: StyleRecord[],
+  chromeIndistinct: StyleRecord[],
+  dominantBody: string | undefined,
+): { chromeSection: string[]; chromeDefects: DesignDefect[] } {
   // Shared shell, reported separately and NOT scored into this page. Contrast
   // is the only rule worth restating here: it is the one that generated the
   // duplicate findings, and the fix lives in one stylesheet rather than on
@@ -1338,36 +1480,5 @@ export function analyzeDesign(
       );
     }
   }
-
-  const header =
-    `DESIGN AUDIT (${records.length} page elements sampled` +
-    `${chromeRecords.length > 0 ? `, ${chromeRecords.length} shared-chrome elements excluded from the score` : ""}): ` +
-    `${sections.length === 0 ? "no measurable issues — and see the system summary below." : `${sections.length} issue group(s).`}`;
-  const report =
-    [header, ...sections, ...chromeSection, summary, scoreLine].join("\n\n") +
-    `\n\nJudge with product context: ⚠ lines are measurable defects; → lines are craft suggestions (how the page could be BETTER, not just what's broken). ` +
-    `Not every flag is a bug — dense data tables legitimately use small targets. The score is a comparator across pages and runs, not an absolute verdict. ` +
-    `File real defects with scout_finding (category "visual"/"a11y") and genuine improvement opportunities as severity-low "ux-polish", quoting the concrete numbers.`;
-  const defects: DesignDefect[] = [
-    ...contrastFails.map((detail) => ({ rule: "contrast" as const, detail })),
-    // Worded exactly as the shell's (below), so one control is one fact whether or not it is known chrome yet.
-    ...tiny.map((r) => ({ rule: "tiny-target" as const, detail: tinyTargetDetail(r) })),
-    ...clipped.filter((r) => r.textLen > 0).map((r) => ({ rule: "clipped-text" as const, detail: clippedTextDetail(r) })),
-    ...focusless.map((f) => ({ rule: "focus-indicator" as const, detail: `${f.label} — no visible focus indicator` })),
-    ...distorted.map(({ img, off }) => ({
-      rule: "image-aspect" as const,
-      detail: `${img.label} — rendered ${img.rw}×${img.rh} vs natural ${img.nw}×${img.nh} (aspect off by ${Math.round(off * 100)}%)`,
-    })),
-    ...(page.scrollW > viewport.width + 8
-      ? [{ rule: "horizontal-scroll" as const, detail: `content ${page.scrollW}px wide in a ${viewport.width}px viewport` }]
-      : []),
-    // The same thresholds as the SPACING and AFFORDANCES lines above, so the check and the audit agree on what they saw.
-    // Worded without counts or percentages: a spacing scale and a link style are app-wide conventions, so the same
-    // values on ten pages are one entry on ten routes, and the entry's fingerprint does not move when content does.
-    ...(pad.n > 10 && pad.pct > 20 ? [{ rule: "off-grid-spacing" as const, detail: `paddings off a 4px grid: ${gridValues(pad.top)}` }] : []),
-    ...(mar.n > 10 && mar.pct > 20 ? [{ rule: "off-grid-spacing" as const, detail: `vertical margins off a 4px grid: ${gridValues(mar.top)}` }] : []),
-    ...(indistinct.length > 0 ? [{ rule: "indistinct-link" as const, detail: indistinctDetail(dominantBody ?? "") }] : []),
-    ...chromeDefects,
-  ];
-  return { report, score, signatures, defects };
+  return { chromeSection, chromeDefects };
 }
