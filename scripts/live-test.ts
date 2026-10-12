@@ -947,6 +947,80 @@ test("a viewer that disconnects while its screencast is still starting leaves no
   }
 });
 
+test("a session dropped while its screencast is still starting has the screencast stopped once it starts", async () => {
+  // A viewer that leaves is only seen after the start, so this is the one path where the start itself must stop it.
+  const { provider, stops, asked, hold, release } = streamingProvider(["admin"]);
+  const live = new LiveServer(provider);
+  try {
+    const { port, token } = await live.start();
+    hold();
+    const reply = request(port, `/${token}/stream/admin.mjpg`);
+    await until("the screencast to be asked for, and held starting", () => asked.length === 1);
+    live.dropSession("admin");
+    release();
+    assert.equal((await reply).status, 503, "the viewer that was waiting is told the session cannot stream");
+    await until("the screencast nobody can watch to stop", () => stops.length >= 1);
+    await settle(100);
+    assert.deepEqual(stops, ["admin"], "stopped once, not again");
+  } finally {
+    await live.stop();
+  }
+});
+
+test("a screencast whose stop fails is still forgotten, and the next viewer starts a fresh one", async () => {
+  const { provider, calls } = fakeProvider(["admin"]);
+  const failing: LiveProvider = {
+    ...provider,
+    startStream: async (session, onFrame, onEnd) => {
+      const stop = await provider.startStream(session, onFrame, onEnd);
+      return async () => {
+        await stop?.();
+        throw new Error("the page closed first");
+      };
+    },
+  };
+  const live = new LiveServer(failing);
+  try {
+    const { port, token } = await live.start();
+    const first = await openStream(port, `/${token}/stream/admin.mjpg`, 1);
+    first.close();
+    await until("the screencast to be stopped", () => calls.stop === 1);
+    const again = await openStream(port, `/${token}/stream/admin.mjpg`, 1);
+    assert.equal(calls.startStream, 2);
+    again.close();
+    await until("the second stop", () => calls.stop === 2);
+  } finally {
+    await live.stop();
+  }
+});
+
+test("a thumbnail that cannot be captured answers 503, and the next poll tries again", async () => {
+  const { provider, calls } = fakeProvider(["admin"]);
+  let fail = true;
+  const flaky: LiveProvider = {
+    ...provider,
+    screenshot: async (session) => {
+      if (fail) {
+        calls.screenshot += 1;
+        throw new Error("the page navigated mid-capture");
+      }
+      return provider.screenshot(session);
+    },
+  };
+  const live = new LiveServer(flaky);
+  try {
+    const { port, token } = await live.start();
+    assert.equal((await request(port, `/${token}/shot/admin.jpg`)).status, 503);
+    fail = false;
+    const ok = await request(port, `/${token}/shot/admin.jpg`);
+    assert.equal(ok.status, 200, "a failed capture is not cached");
+    assert.deepEqual(ok.body, JPEG);
+    assert.equal(calls.screenshot, 2);
+  } finally {
+    await live.stop();
+  }
+});
+
 test("the feed's follow-the-tail check is measured before the node is emptied", () => {
   // Measured after, an empty node always reads as scrolled to its end, so
   // every refresh pulled a reader back to the bottom.
