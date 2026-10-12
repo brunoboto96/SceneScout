@@ -115,3 +115,17 @@ export function isFileMediaType(contentType: string | null | undefined): boolean
   const type = mediaTypeOf(contentType);
   return type !== undefined && !PAGE_MEDIA_TYPES.includes(type);
 }
+
+/**
+ * Whether a navigation that failed leaves the browser about to show an error
+ * page for it. A download leaves the page where it was, so nothing follows. Any
+ * other failure can still commit a page for the failed URL a moment after the
+ * navigation was reported failed: Firefox fails a 4xx or 5xx response it would
+ * otherwise download (a missing feed) with NS_ERROR_NET_ERROR_RESPONSE, then
+ * commits its error page for that URL. A crawl that goes on to the next route
+ * before that commit has its next navigation interrupted by it, and would
+ * report a healthy page as failing to load; so it waits for this page first.
+ */
+export function failedNavigationLeavesErrorPage(message: string): boolean {
+  return !/\bDownload is starting\b/.test(message);
+}

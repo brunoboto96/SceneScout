@@ -207,6 +207,33 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
     JSON.stringify(resourceSummary.issues),
   );
 
+  // The same HTML page measured straight after a feed, a plain-text file and a missing feed, and measured alone. A browser
+  // that fails the missing feed's load and then commits its own error page for it must not charge that to the page after.
+  // Three rounds, because the error page lands a few milliseconds after the failure and a single round can miss the race.
+  const afterFiles = [1, 2, 3].flatMap((n) => ["/check-feed", "/check-licence", "/check-feed-gone", "/check-no-links.html"].map((p) => `${p}?round=${n}`));
+  const measuredPage = async (
+    out: string,
+    paths: string[],
+  ): Promise<Omit<Summary, "routes"> & { routes: Array<{ path: string; status: number | null; controls: number }> }> => {
+    await runCli([`${baseUrl}/check-resources.html`, "--project", work, "--out", path.join(work, out), "--paths", paths.join(","), "--fail-on", "never"]);
+    return JSON.parse(fs.readFileSync(path.join(work, out, "check.json"), "utf8"));
+  };
+  const alone = await measuredPage("page-alone", ["/check-no-links.html"]);
+  const followed = await measuredPage("page-after-files", afterFiles);
+  const pageRecord = (s: typeof alone, p: string): string => JSON.stringify(s.routes.filter((r) => r.path === p).map((r) => [r.status, r.controls]));
+  check(
+    "an HTML page measured alone loads and is a dead end",
+    pageRecord(alone, "/check-no-links.html") === JSON.stringify([[200, 0]]) &&
+      JSON.stringify(alone.issues.map((i) => [i.rule, i.routes])) === JSON.stringify([["dead-end", ["/check-no-links.html"]]]),
+    JSON.stringify({ routes: alone.routes, issues: alone.issues }),
+  );
+  check(
+    "...and measured right after a feed, a plain-text file and a missing feed, it loads the same, with no route-load-failed",
+    [1, 2, 3].every((n) => pageRecord(followed, `/check-no-links.html?round=${n}`) === JSON.stringify([[200, 0]])) &&
+      !followed.issues.some((i) => i.rule === "route-load-failed"),
+    JSON.stringify({ routes: followed.routes, issues: followed.issues }).replaceAll(baseUrl, ""),
+  );
+
   // The same field labelled every way that counts, then by its placeholder alone, then by nothing but its name attribute.
   await runCli([`${baseUrl}/field-labels.html`, "--project", work, "--out", path.join(work, "labels"), "--paths", "/field-labels.html"]);
   const labelIssues = (JSON.parse(fs.readFileSync(path.join(work, "labels", "check.json"), "utf8")) as Summary).issues.filter((i) =>

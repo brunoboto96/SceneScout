@@ -42,7 +42,7 @@ import {
 } from "../action/check-action.mjs";
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engine/design.ts";
-import { isFileMediaType, isNonPageResource, mediaTypeOf } from "../src/engine/crawl.ts";
+import { failedNavigationLeavesErrorPage, isFileMediaType, isNonPageResource, mediaTypeOf } from "../src/engine/crawl.ts";
 import { httpErrorDetail } from "../src/engine/oracles.ts";
 import {
   describeStep,
@@ -497,6 +497,17 @@ test("whether a route answered as a page is decided by its content type, not its
   assert.equal(mediaTypeOf("Text/HTML; charset=utf-8"), "text/html");
   assert.equal(mediaTypeOf("  "), undefined);
   assert.equal(mediaTypeOf(undefined), undefined);
+});
+
+test("a crawl waits for the error page a failed navigation leaves, and not after a download", () => {
+  const cases: Array<[string, boolean, string]> = [
+    ["page.goto: Download is starting", false, "a feed taken as a download: the page stays where it was"],
+    ["page.goto: NS_ERROR_NET_ERROR_RESPONSE", true, "a missing feed in Firefox: its error page commits after goto threw"],
+    ["page.goto: net::ERR_ABORTED at http://127.0.0.1/feed", true, "an aborted load"],
+    ["page.goto: Timeout 10000ms exceeded.", true, "a timeout"],
+    ["", true, "no message: waited for, since the wait only times out"],
+  ];
+  for (const [message, expected, what] of cases) assert.equal(failedNavigationLeavesErrorPage(message), expected, what);
 });
 
 test("a feed or a text file with no controls is not a dead end; the same route served as HTML is", () => {

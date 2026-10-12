@@ -136,7 +136,7 @@ import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
 import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
-import { crawledRoute, crawlLine, isFileMediaType, isNonPageResource, mainStateFlag, mediaTypeOf } from "./crawl.js";
+import { crawledRoute, crawlLine, failedNavigationLeavesErrorPage, isFileMediaType, isNonPageResource, mainStateFlag, mediaTypeOf } from "./crawl.js";
 import {
   authToRemember,
   BODY_FETCH_MAX,
@@ -4971,8 +4971,11 @@ export class BrowserEngine {
       // A browser that took the answer as a download failed the navigation, but the route did answer, with its status:
       // a feed that is missing is the route's 404, not a page that did not load.
       const seen = answered.last;
-      if (seen && isFileMediaType(seen.contentType)) resource = { url: seen.url, status: seen.status, contentType: seen.contentType! };
-      else {
+      if (seen && isFileMediaType(seen.contentType)) {
+        resource = { url: seen.url, status: seen.status, contentType: seen.contentType! };
+        // Unless it became a download, the browser may still commit an error page for it, which would interrupt the next route's load.
+        if (failedNavigationLeavesErrorPage(err instanceof Error ? err.message : String(err))) await this.errorPageCommitted(page);
+      } else {
         const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
         const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
         // Not retried by later crawls in this process (a check would otherwise try it
