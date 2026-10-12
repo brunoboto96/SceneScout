@@ -115,3 +115,25 @@ export function isFileMediaType(contentType: string | null | undefined): boolean
   const type = mediaTypeOf(contentType);
   return type !== undefined && !PAGE_MEDIA_TYPES.includes(type);
 }
+
+/**
+ * Whether a navigation that failed may leave the browser about to show an
+ * error page for it, so the next navigation must wait for that page first.
+ * `status` is the main document's response status, or null when none came.
+ *
+ * The page can commit for the failed URL a few milliseconds after goto threw,
+ * and a navigation started before that commit is interrupted by it, charging
+ * the failure to the next page. Measured on all three browsers:
+ * - a file answered 4xx or 5xx: Firefox throws NS_ERROR_NET_ERROR_RESPONSE,
+ *   Chromium "Download is starting", and both then commit an error page;
+ * - a file answered 2xx or 3xx that became a download: the page stays where it
+ *   was on every browser, so nothing follows and nothing is waited for;
+ * - no response at all (refused, aborted, timed out): the browser may show its
+ *   own error page, so it is waited for.
+ * The wait ends at the commit or at its limit, so a wrong yes costs the limit
+ * once (a missing download on WebKit, which shows no error page) and a wrong
+ * no lets the next page's load fail.
+ */
+export function failedNavigationLeavesErrorPage(message: string, status: number | null): boolean {
+  return !(status !== null && status < 400 && /\bDownload is starting\b/.test(message));
+}

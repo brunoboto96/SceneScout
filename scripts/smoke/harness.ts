@@ -405,6 +405,13 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end('<?xml version="1.0"?><rss version="2.0"><channel><title>Updates</title><link>/</link><description>d</description></channel></rss>');
       return;
     }
+    // A file that is missing, as a server that names its type answers it: a browser that would download the file
+    // refuses the 404 and then shows its own error page.
+    if (urlPath === "/check-file-gone") {
+      res.writeHead(404, { "content-type": "application/pdf" });
+      res.end("missing");
+      return;
+    }
     if (urlPath === "/check-licence") {
       res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
       res.end("Permission is granted to use this fixture for any purpose.\n");

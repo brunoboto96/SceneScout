@@ -136,7 +136,7 @@ import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
 import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
-import { crawledRoute, crawlLine, isFileMediaType, isNonPageResource, mainStateFlag, mediaTypeOf } from "./crawl.js";
+import { crawledRoute, crawlLine, failedNavigationLeavesErrorPage, isFileMediaType, isNonPageResource, mainStateFlag, mediaTypeOf } from "./crawl.js";
 import {
   authToRemember,
   BODY_FETCH_MAX,
@@ -4152,7 +4152,7 @@ export class BrowserEngine {
     const stayed = new Promise<"stayed">((resolve) => {
       this.onLeaveRefused = () => resolve("stayed");
     });
-    const going = this.withinLimit("nav", () => page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
+    const going = this.withinLimit("nav", () => this.gotoSettlingFailure(page, url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
     let outcome: "went" | "stayed";
     try {
       outcome = await Promise.race([going.then(() => "went" as const), stayed]);
@@ -4209,7 +4209,7 @@ export class BrowserEngine {
     const returnUrl = plan.returnTo;
     let recovered: string;
     try {
-      await this.withinLimit("nav", () => page.goto(returnUrl, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
+      await this.withinLimit("nav", () => this.gotoSettlingFailure(page, returnUrl, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
       recovered = await this.afterAction("navigate", returnUrl);
     } catch (err) {
       this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
@@ -4950,17 +4950,7 @@ export class BrowserEngine {
     let status: number | string = "ERR";
     // The main document's response, as the browser received it. Kept apart from goto's own result: a browser that
     // treats a PDF, a feed or an attachment as a download throws from goto, and this is then the only record of it.
-    const answered: { last: { url: string; status: number; contentType: string | undefined } | null } = { last: null };
-    const asked = new URL(url).href;
-    const onResponse = (r: Response): void => {
-      if (r.frame() !== page.mainFrame() || !r.request().isNavigationRequest()) return;
-      // A late event from the page before is not this route's: its redirect chain must start at the URL asked for.
-      let first = r.request();
-      for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
-      if (first.url() !== asked) return;
-      answered.last = { url: r.url(), status: r.status(), contentType: mediaTypeOf(r.headers()["content-type"]) };
-    };
-    page.on("response", onResponse);
+    const answered = BrowserEngine.watchMainDocument(page, url);
     let resource: { url: string; status: number; contentType: string } | null = null;
     try {
       const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
@@ -4970,9 +4960,12 @@ export class BrowserEngine {
     } catch (err) {
       // A browser that took the answer as a download failed the navigation, but the route did answer, with its status:
       // a feed that is missing is the route's 404, not a page that did not load.
-      const seen = answered.last;
-      if (seen && isFileMediaType(seen.contentType)) resource = { url: seen.url, status: seen.status, contentType: seen.contentType! };
-      else {
+      const seen = answered.last();
+      if (seen && isFileMediaType(seen.contentType)) {
+        resource = { url: seen.url, status: seen.status, contentType: seen.contentType! };
+        // Unless it downloaded, the browser may still commit an error page for it, which would interrupt the next route's load.
+        await this.afterFailedNavigation(page, err, seen.status);
+      } else {
         const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
         const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
         // Not retried by later crawls in this process (a check would otherwise try it
@@ -5001,7 +4994,7 @@ export class BrowserEngine {
         return "load-failed";
       }
     } finally {
-      page.off("response", onResponse);
+      answered.stop();
     }
     // A feed, a file or data: recorded as what it is and left there. It has no controls to collect or audit, and one
     // that answered leaves the route contract, so it is neither a dead end nor a gap.
@@ -5690,9 +5683,9 @@ export class BrowserEngine {
         const resolved = resolveTarget(this.baseUrl, step.target);
         if (!("url" in resolved)) throw new Error(resolved.problem);
         const url = resolved.url;
-        const resp = await current
-          .goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs })
-          .catch((err: unknown) => Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)));
+        const resp = await this.gotoSettlingFailure(current, url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs }).catch((err: unknown) =>
+          Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs)),
+        );
         await this.settle();
         const status = resp?.status() ?? null;
         if (status !== null && status >= 400) {
@@ -5955,6 +5948,52 @@ export class BrowserEngine {
    */
   private async errorPageCommitted(page: Page): Promise<void> {
     await page.waitForEvent("framenavigated", { predicate: (f) => f === page.mainFrame(), timeout: 1500 }).catch(() => undefined);
+  }
+
+  /**
+   * After a navigation threw, with the main document's status if one came: wait for the error page the browser may
+   * still commit for it, unless the failure was a file that downloaded, which leaves the page where it was
+   * (crawl.ts failedNavigationLeavesErrorPage).
+   */
+  private async afterFailedNavigation(page: Page, err: unknown, status: number | null): Promise<void> {
+    if (failedNavigationLeavesErrorPage(err instanceof Error ? err.message : String(err), status)) await this.errorPageCommitted(page);
+  }
+
+  /**
+   * page.goto for a navigation the session goes on from: when it throws, the error page its failure may still commit
+   * is waited for before the error is passed on, so the session's next navigation is not interrupted by that page.
+   */
+  private async gotoSettlingFailure(page: Page, url: string, options: Parameters<Page["goto"]>[1]): Promise<Response | null> {
+    const answered = BrowserEngine.watchMainDocument(page, url);
+    try {
+      return await page.goto(url, options);
+    } catch (err) {
+      await this.afterFailedNavigation(page, err, answered.last()?.status ?? null);
+      throw err;
+    } finally {
+      answered.stop();
+    }
+  }
+
+  /**
+   * The main document's response to a navigation to `url`, as the browser received it, until stop() is called. A late
+   * response from the page before is not this navigation's: its redirect chain must start at the URL asked for.
+   */
+  private static watchMainDocument(
+    page: Page,
+    url: string,
+  ): { last: () => { url: string; status: number; contentType: string | undefined } | null; stop: () => void } {
+    let last: { url: string; status: number; contentType: string | undefined } | null = null;
+    const asked = new URL(url).href;
+    const onResponse = (r: Response): void => {
+      if (r.frame() !== page.mainFrame() || !r.request().isNavigationRequest()) return;
+      let first = r.request();
+      for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
+      if (first.url() !== asked) return;
+      last = { url: r.url(), status: r.status(), contentType: mediaTypeOf(r.headers()["content-type"]) };
+    };
+    page.on("response", onResponse);
+    return { last: () => last, stop: () => void page.off("response", onResponse) };
   }
 
   /** The browser this session drives. */

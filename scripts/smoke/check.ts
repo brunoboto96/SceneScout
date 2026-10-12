@@ -207,6 +207,63 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
     JSON.stringify(resourceSummary.issues),
   );
 
+  // The same HTML page measured straight after a feed, a plain-text file, a missing feed and a missing file, and measured
+  // alone. A browser that fails the missing one's load and then commits its own error page for it (Firefox for both,
+  // Chromium for the file it would have downloaded) must not charge that to the page after. Three rounds, because the
+  // error page lands a few milliseconds after the failure and a single round can miss the race.
+  const afterFiles = [1, 2, 3].flatMap((n) =>
+    ["/check-feed", "/check-licence", "/check-feed-gone", "/check-file-gone", "/check-no-links.html"].map((p) => `${p}?round=${n}`),
+  );
+  const measuredPage = async (
+    out: string,
+    paths: string[],
+  ): Promise<Omit<Summary, "routes"> & { routes: Array<{ path: string; status: number | null; controls: number }> }> => {
+    await runCli([`${baseUrl}/check-resources.html`, "--project", work, "--out", path.join(work, out), "--paths", paths.join(","), "--fail-on", "never"]);
+    return JSON.parse(fs.readFileSync(path.join(work, out, "check.json"), "utf8"));
+  };
+  const alone = await measuredPage("page-alone", ["/check-no-links.html"]);
+  const followed = await measuredPage("page-after-files", afterFiles);
+  const pageRecord = (s: typeof alone, p: string): string => JSON.stringify(s.routes.filter((r) => r.path === p).map((r) => [r.status, r.controls]));
+  check(
+    "an HTML page measured alone loads and is a dead end",
+    pageRecord(alone, "/check-no-links.html") === JSON.stringify([[200, 0]]) &&
+      JSON.stringify(alone.issues.map((i) => [i.rule, i.routes])) === JSON.stringify([["dead-end", ["/check-no-links.html"]]]),
+    JSON.stringify({ routes: alone.routes, issues: alone.issues }),
+  );
+  check(
+    "...and measured right after a feed, a plain-text file, a missing feed and a missing file, it loads the same, with no route-load-failed charged to it",
+    [1, 2, 3].every((n) => pageRecord(followed, `/check-no-links.html?round=${n}`) === JSON.stringify([[200, 0]])) &&
+      // Only the page's own: WebKit reports no response for a file it downloads, so it charges the missing file itself.
+      !followed.issues.some((i) => i.rule === "route-load-failed" && i.routes.some((r) => r.startsWith("/check-no-links.html"))),
+    JSON.stringify({ routes: followed.routes, issues: followed.issues }).replaceAll(baseUrl, ""),
+  );
+
+  // The same race on a session's own navigation (scout_navigate, and a plan's navigate step): a page asked for straight
+  // after a missing feed or file that failed to load is reached, not reported as interrupted.
+  const navEngine = new BrowserEngine();
+  navEngine.sessionKey = "check-after-missing";
+  const reached: string[] = [];
+  try {
+    await navEngine.attach({
+      url: `${baseUrl}/check-resources.html`,
+      projectDir: fs.mkdtempSync(path.join(os.tmpdir(), "ft-after-missing-")),
+      mode: "observe",
+    });
+    for (const n of [1, 2, 3]) {
+      for (const gone of ["/check-feed-gone", "/check-file-gone"]) {
+        await navEngine.navigate(`${gone}?round=${n}`).catch(() => "");
+        reached.push(await navEngine.navigate(`/check-no-links.html?round=${n}`).catch((err: unknown) => `THREW ${String(err)}`));
+      }
+    }
+  } finally {
+    await navEngine.close();
+  }
+  check(
+    "...and a session navigating to that page straight after a missing feed or file reaches it",
+    reached.length === 6 && reached.every((r) => /^OK: navigate \S*\/check-no-links\.html\?round=\d/.test(r)),
+    reached.map((r) => r.split("\n")[0].replaceAll(baseUrl, "")).join("\n"),
+  );
+
   // The same field labelled every way that counts, then by its placeholder alone, then by nothing but its name attribute.
   await runCli([`${baseUrl}/field-labels.html`, "--project", work, "--out", path.join(work, "labels"), "--paths", "/field-labels.html"]);
   const labelIssues = (JSON.parse(fs.readFileSync(path.join(work, "labels", "check.json"), "utf8")) as Summary).issues.filter((i) =>
@@ -446,6 +503,34 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     "...with the failed request the flow caused as its own issue",
     broken.summary?.issues.some((i) => i.rule === "server-error" && /GET \/api\/refuse\/500 → HTTP 500/.test(i.evidence)) === true,
     JSON.stringify(broken.summary?.issues),
+  );
+
+  // A flow that ends at a missing file, then a flow that opens a page, three times over. The first fails, as it should;
+  // the error page the browser commits for the file after the failure must not interrupt the next flow's navigate.
+  const afterMissing = await checkWith(
+    project(
+      "flow-after-missing",
+      Object.fromEntries(
+        [1, 2, 3].flatMap((n) => [
+          [`${n}a-file-gone.json`, { steps: [{ action: "navigate", target: `/check-file-gone?round=${n}` }] }],
+          [
+            `${n}b-page.json`,
+            {
+              steps: [
+                { action: "navigate", target: `/check-no-links.html?round=${n}` },
+                { action: "expect-url", pattern: `round=${n}$` },
+              ],
+            },
+          ],
+        ]),
+      ),
+    ),
+  );
+  const flowStatus = (s: typeof afterMissing.summary) => (s?.flows ?? []).map((f) => `${f.file}:${f.status}`);
+  check(
+    "a flow that opens a page straight after a flow that failed on a missing file passes, each of three times",
+    JSON.stringify(flowStatus(afterMissing.summary)) === JSON.stringify([1, 2, 3].flatMap((n) => [`${n}a-file-gone.json:failed`, `${n}b-page.json:passed`])),
+    `${JSON.stringify(afterMissing.summary?.flows)} ${afterMissing.out.slice(-600)}`.replaceAll(baseUrl, ""),
   );
 
   await recordedChecks({ baseUrl, flowFor, project, checkWith });
