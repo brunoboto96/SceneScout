@@ -85,6 +85,7 @@ import {
 } from "../src/engine/forms.ts";
 import { coverageView, generateReport, runRecordOf } from "../src/engine/report.ts";
 import { maskedValue, maskFillCalls, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
+import { MASK_COLOR, MAX_FIELD_MASKS, masksToPaint, SECRET_BY_ATTRIBUTE } from "../src/engine/secret-pixels.ts";
 import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
 
 /** The action log a store writes this run: the one session-*.jsonl file in its folder. */
@@ -1548,6 +1549,45 @@ test("a field labelled for a secret in another language is secret too; near miss
     "Kortnummerets type",
   ])
     assert.equal(secretFieldKind({ type: "text", label }), null, label);
+});
+
+test("a picture paints over every field the typed-value rule calls secret, and over every field of a frame it could not read", () => {
+  // One frame read field by field, in the order the page lists them; a second frame that could not be read.
+  const fields: SecretFieldFacts[] = [
+    { type: "password", label: "Account phrase" },
+    // The same field after a show-password toggle: only its label says it is a password.
+    { type: "text", label: ["Password"] },
+    { type: "text", label: "Account phrase (shown)" },
+    { type: "text", autocomplete: "cc-number", label: "Number" },
+    { type: "text", name: "search", label: "Search" },
+    { type: "text", maxLength: 1, label: "Digit 1" },
+    { type: "email", autocomplete: "email", label: "Email" },
+    // A contenteditable named only by its aria-label.
+    { type: null, label: ["Client secret"] },
+    { type: "text", label: "Passwort" },
+  ];
+  assert.deepEqual(masksToPaint([fields, null]), [[0, 1, 3, 5, 7, 8], "all"]);
+  assert.deepEqual(masksToPaint([[{ type: "text", label: "Name" }], []]), [[], []], "a frame with no secret field gets no paint");
+  assert.deepEqual(masksToPaint([]), []);
+  // Each field painted by its place is found again on its own as the picture is taken, at a cost that grows with the
+  // page: a grid of 625 one-character boxes took 14 s a picture in Firefox. Past the cap, every field of the frame is
+  // painted by one selector instead, which errs towards hiding as an unreadable frame does.
+  const digits = (n: number): SecretFieldFacts[] => Array.from({ length: n }, (_, i) => ({ type: "text", maxLength: 1, label: `Cell ${i}` }));
+  const atCap = masksToPaint([digits(MAX_FIELD_MASKS)])[0];
+  assert.ok(Array.isArray(atCap) && atCap.length === MAX_FIELD_MASKS, "up to the cap, each secret field is painted by its place");
+  assert.deepEqual(
+    masksToPaint([digits(MAX_FIELD_MASKS + 1), [{ type: "text", label: "Name" }]]),
+    ["all", []],
+    "past it, the whole frame's fields; other frames as before",
+  );
+  assert.ok(MAX_FIELD_MASKS >= 16 && MAX_FIELD_MASKS <= 64, `cap ${MAX_FIELD_MASKS}`);
+  // One fixed colour, so two pictures of the same page compare (a baseline).
+  assert.match(MASK_COLOR, /^#[0-9A-F]{6}$/);
+  // The selector that paints fields secret by an attribute alone names only what the rule calls secret by that attribute.
+  for (const token of [...SECRET_BY_ATTRIBUTE.matchAll(/autocomplete~="([^"]+)"/g)].map((m) => m[1])) {
+    assert.notEqual(secretFieldKind({ type: "text", autocomplete: token }), null, token);
+  }
+  assert.match(SECRET_BY_ATTRIBUTE, /input\[type="password" i\]/);
 });
 
 test("a secret field's typed value is shown as a fixed mask that says why, never its length", () => {
