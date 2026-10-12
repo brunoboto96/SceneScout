@@ -50,17 +50,25 @@ a writing mode.
   that was there, and that deletes are blocked; "May create test data" says
   the same and that it deletes only what it created. No care level's words
   promise that what was there is untouched, or that only a form can change
-  it. The write policy itself is unchanged (ADR 2).
+  it. "Look only" says what `observe` lets out and no more: page loads, so a
+  search form that only opens a page of results is sent, and a link that
+  changes something just by being opened is followed like any other; anything
+  that would save something is held back. The write policy itself is
+  unchanged (ADR 2).
 - **This is a rule change.** A plain choice may now reach `safe-write`. The
   old rule's intent is kept: `safe-write` is reached only by choosing it under
   its own name, whose description says it creates records and is for a test
-  copy, and never as a side effect of answering another question. The plain
-  start questions of `scout_intake` keep their own rule until the guided form
-  replaces them (build plan, PR 2).
+  copy, and never as a side effect of answering another question.
+  `scout_intake`'s form asks the guided choices. The four plain questions it
+  hands to the chat where no form can be shown keep their own rule: a plain
+  no to "real data" is `read-only`, and nothing higher.
 - **"On this computer" means `localhost`, `127.0.0.1` or `::1`, and nothing
   else.** Any other address, including other loopback addresses, `0.0.0.0`,
   a private network address and a `*.localhost` name, is treated as a site
-  that may be live and asks first.
+  that may be live and asks first. The address is read as the browser reads
+  it, so the other ways of writing those two numbers that a browser turns
+  into them (`127.1`, `2130706433`, `0x7f.0.0.1`, `[0:0:0:0:0:0:0:1]`) are the
+  same address and count as local.
 - **A confirmation counts only when the person gives it through the server's
   own form** (MCP elicitation, from the server straight to the person; design
   section 6.3). Claude, the panel or a mod may start the request; none of them
@@ -90,10 +98,20 @@ a writing mode.
   access is still governed by the person's own permission settings, as for any
   other command; the chat has no shell, so there the guarantee is the whole
   story.
-- Building this record's rules adds no tool by itself. The server tools that
-  ask through the form and refuse an unaccepted plan come in the next change
-  (design build plan, PR 2), with `policy-test` holding that an unaccepted
-  plan cannot go above `observe`.
+- The server holds the rule, not the prompt. `scout_guided_confirm` shows the
+  form and marks a plan accepted only on the person's yes. Plans live in the
+  server process only. Once any plan has been built there, `scout_attach`
+  above `observe` is refused without an accepted plan's `planId`, above the
+  plan's mode, or on another site than the plan's, so leaving the id out is
+  not a way round the confirmation. While a plan is open, `readPosts` and
+  `trustedEmbeds` are refused on any attach, as developer settings that let
+  out writes a care level holds back. A yes covers one check: once no session
+  carries the plan, it is unaccepted again. `policy-test` holds that gate, and
+  `guided-test` holds that a wrong or missing code, or a declined, closed or
+  failed form, accepts nothing.
+- A developer who builds a guided plan in a server and then wants a writing
+  mode outside it must name a plan or start a new server. That is deliberate:
+  the server cannot tell the developer's call from a model's.
 - The plan states its time and page limits (`THOROUGHNESS_BUDGET`) so a guided
   run is never unbounded.
 

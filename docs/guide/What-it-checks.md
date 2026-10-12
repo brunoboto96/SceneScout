@@ -24,7 +24,7 @@ Every tool that acts on the page returns, with its result, whatever went wrong w
 
 | Phase | Tools | What they do |
 |---|---|---|
-| Set up | `scout_playbook` `scout_intake` `scout_scan` `scout_attach` `scout_login` `scout_session` | Hand the testing method to an agent with no skill loaded; ask the start-of-run questions as one form where the client can show one; discover routes; save a sign-in for a role; open a browser in a write mode; list the live sessions, pick the default one and set its pace |
+| Set up | `scout_playbook` `scout_intake` `scout_guided_plan` `scout_guided_confirm` `scout_scan` `scout_attach` `scout_login` `scout_session` | Hand the testing method to an agent with no skill loaded; ask the guided start as one form where the client can show one; turn a person's choices into a guided plan, and ask the person, in the server's own form, to confirm a care level that writes; discover routes; save a sign-in for a role; open a browser in a write mode; list the live sessions, pick the default one, set its pace and the area it is checking |
 | Explore | `scout_crawl` `scout_coverage` | Visit every known route in one call; ask what is still untested |
 | Look | `scout_snapshot` `scout_hover` `scout_screenshot` `scout_capture` | Read the page as a structured list (diffed on a second look); reveal tooltips and hover cards; take pixels only when they are needed; save one element as a PNG to show someone |
 | Ask the server | `scout_request` `scout_network` | Call the app's own API as this session, with the UI bypassed, so a hidden button becomes a proven refusal; list the requests the page made since it loaded |

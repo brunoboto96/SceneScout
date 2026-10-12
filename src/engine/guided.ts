@@ -26,7 +26,14 @@ import {
   budgetSentence,
   CARE_EXPLAIN,
   CARE_LABEL,
+  CARE_PREVIEW,
+  CONFIRM_ANSWER,
+  CONFIRM_ANSWER_LINE,
   CONFIRM_COMING,
+  CONFIRM_FIELD,
+  CONFIRM_PREVIEW_HEADING,
+  CONFIRM_SAYS,
+  confirmCodeLine,
   confirmSentence,
   DESTRUCTIVE_NOT_OFFERED,
   HELD_BACK,
@@ -432,20 +439,32 @@ export function guidedObjective(choices: Pick<GuidedChoices, "areas" | "journey"
   return clip(`Check ${list}.`, MAX_OBJECTIVE);
 }
 
-/** The calls the agent makes, in order: sign in, attach, read the tickets, and a phone-sized browser when other areas share the first. */
-function guidedCalls(choices: GuidedChoices, mode: GuidedMode, objective: string): GuidedCall[] {
+/**
+ * The calls the agent makes, in order: sign in, attach, read the tickets, and
+ * a phone-sized browser when other areas share the first. Each attach names the
+ * plan, which is what lets it above observe while a guided plan is open.
+ */
+function guidedCalls(choices: GuidedChoices, mode: GuidedMode, objective: string, planId: string): GuidedCall[] {
   const calls: GuidedCall[] = [];
   const role = choices.signIn === "none" ? {} : { role: INTAKE_ROLE };
   if (choices.signIn !== "none") calls.push({ tool: "scout_login", args: { url: choices.address, ...role } });
   const phone = { viewportWidth: PHONE_VIEWPORT.width, viewportHeight: PHONE_VIEWPORT.height };
   const phoneOnly = choices.areas.length === 1 && choices.areas[0] === "phone";
-  calls.push({ tool: "scout_attach", args: { url: choices.address, mode, ...role, objective, ...(phoneOnly ? phone : {}) } });
+  calls.push({ tool: "scout_attach", args: { url: choices.address, mode, ...role, objective, ...(phoneOnly ? phone : {}), planId } });
   // A rule between them, so each one given is read as its own ticket (as intake.ts does).
   if (choices.tickets) calls.push({ tool: "scout_tickets", args: { text: choices.tickets.join("\n\n---\n\n") } });
   if (choices.areas.includes("phone") && !phoneOnly) {
     calls.push({
       tool: "scout_attach",
-      args: { url: choices.address, mode, ...role, session: PHONE_SESSION, objective: `${AREA_LABEL.phone}: ${lowerFirst(AREA_WHAT_HAPPENS.phone)}`, ...phone },
+      args: {
+        url: choices.address,
+        mode,
+        ...role,
+        session: PHONE_SESSION,
+        objective: `${AREA_LABEL.phone}: ${lowerFirst(AREA_WHAT_HAPPENS.phone)}`,
+        ...phone,
+        planId,
+      },
     });
   }
   return calls;
@@ -490,7 +509,7 @@ export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId
     areas,
     confirm,
     tellPerson,
-    calls: guidedCalls(choices, mode, objective),
+    calls: guidedCalls(choices, mode, objective, planId),
     budget,
   };
 }
@@ -499,4 +518,308 @@ export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId
 export function guidedPlan(input: unknown, planId?: string): { ok: true; plan: GuidedPlan } | { ok: false; error: string } {
   const checked = checkGuidedChoices(input);
   return checked.ok ? { ok: true, plan: buildGuidedPlan(checked.choices, planId) } : checked;
+}
+
+// ---- The plans a server holds, the person's confirmation, and the gate on scout_attach ----
+//
+// ADR 24: a plan that needs a confirmation is accepted only by the person's
+// answer to the server's own form (MCP elicitation). The server tools show the
+// form and pass its outcome here; everything that decides what the outcome
+// means, and what an attach may do while a guided plan is open, is below, so it
+// is table-tested (guided-test for the confirmation, policy-test for the gate).
+
+/** How many plans one server keeps. An older one is forgotten, and an attach that names it is then refused, never let through. */
+export const MAX_PLANS = 50;
+
+/**
+ * The guided plans built in this server process, by id. Nothing else holds
+ * them: they are never written to disk, and they end with the process. A plan
+ * handed out is a copy, so the only way to mark one accepted is `accept`,
+ * which only the confirmation's verdict calls.
+ *
+ * Once any plan has been built the store stays open for the rest of the
+ * process, so that leaving a plan's id out of an attach is never a way round
+ * its confirmation (see guidedAttachVerdict).
+ */
+export class GuidedPlans {
+  private readonly plans = new Map<string, GuidedPlan>();
+  private opened = false;
+
+  /** Keeps a plan, which must be unaccepted, and opens the store. */
+  add(plan: GuidedPlan): GuidedPlan {
+    if (plan.confirm?.accepted) throw new Error("a guided plan is kept unaccepted: only the person's confirmation accepts it");
+    if (this.plans.has(plan.planId)) throw new Error(`a guided plan with id ${plan.planId} is already kept`);
+    this.plans.set(plan.planId, structuredClone(plan));
+    while (this.plans.size > MAX_PLANS) this.plans.delete(this.plans.keys().next().value!);
+    this.opened = true;
+    return structuredClone(plan);
+  }
+
+  /** A copy of the plan, or undefined for an id this server does not hold. */
+  get(planId: string): GuidedPlan | undefined {
+    const plan = this.plans.get(planId);
+    return plan ? structuredClone(plan) : undefined;
+  }
+
+  /** Whether a guided plan has been built in this server: from then on an attach above observe must name an accepted one. */
+  get open(): boolean {
+    return this.opened;
+  }
+
+  /** Marks a kept plan's confirmation accepted. Called with a verdict that accepted it, and nothing else. */
+  accept(planId: string, verdict: ConfirmVerdict): GuidedPlan {
+    const plan = this.plans.get(planId);
+    if (!plan) throw new Error(`no guided plan ${planId} is kept`);
+    if (!verdict.accepted) throw new Error("a plan is accepted only by a verdict that accepted it");
+    if (plan.confirm) plan.confirm.accepted = true;
+    return structuredClone(plan);
+  }
+
+  /**
+   * Ends a kept plan's acceptance, so the next check with it asks the person
+   * again. Called when no session carries the plan any more (holdGuidedPlan):
+   * one yes is one check, as design section 6.2 asks of a re-run.
+   */
+  spend(planId: string): void {
+    const plan = this.plans.get(planId);
+    if (plan?.confirm) plan.confirm.accepted = false;
+  }
+}
+
+/**
+ * Records which plan a session now carries (`undefined` for none, `null` when
+ * the session closed), and spends the plan it carried before when no session
+ * carries that one any more. Re-attaching a session with the plan it already
+ * carries keeps it, so signing in again mid-check is not a new check.
+ */
+export function holdGuidedPlan(
+  sessions: Map<string, { planId?: string }>,
+  plans: Pick<GuidedPlans, "spend">,
+  session: string,
+  planId: string | undefined | null,
+): void {
+  const before = sessions.get(session)?.planId;
+  if (planId === null) sessions.delete(session);
+  else sessions.set(session, planId ? { planId } : {});
+  if (before === undefined || before === planId) return;
+  if (![...sessions.values()].some((s) => s.planId === before)) plans.spend(before);
+}
+
+/** The digits a confirmation for creating test data asks the person to type back. */
+export const CONFIRM_CODE_LENGTH = 4;
+
+/** A fresh code for one confirmation form: four random digits. It is a pause, not a secret (ADR 24). */
+export function newConfirmCode(): string {
+  return String(crypto.randomInt(0, 10 ** CONFIRM_CODE_LENGTH)).padStart(CONFIRM_CODE_LENGTH, "0");
+}
+
+/** The answer values the confirmation form offers. */
+export const CONFIRM_VALUES = { yes: "yes", back: "back" } as const;
+
+/**
+ * The confirmation form for a plan, as an `elicitation/create` request's
+ * message and requestedSchema: the sentence the person accepts, what the care
+ * level may do there, and one choice with no default, so pressing Enter alone
+ * accepts nothing. For creating test data it also has a field for the code
+ * the message shows. Null for a plan that needs no confirmation.
+ */
+export function confirmForm(plan: GuidedPlan, code: string) {
+  if (!plan.confirm) return null;
+  const needsCode = CONFIRM_NEEDS_CODE[plan.confirm.reason];
+  const message = [
+    plan.confirm.sentence,
+    "",
+    CONFIRM_PREVIEW_HEADING,
+    ...CARE_PREVIEW[plan.choices.care].map((line) => `  ${line}`),
+    "",
+    needsCode ? confirmCodeLine(code) : CONFIRM_ANSWER_LINE,
+  ].join("\n");
+  const yesTitle = needsCode ? CONFIRM_ANSWER.testCopy : CONFIRM_ANSWER.yes;
+  return {
+    message,
+    requestedSchema: {
+      type: "object" as const,
+      properties: {
+        answer: {
+          type: "string" as const,
+          title: CONFIRM_FIELD.answer.title,
+          description: CONFIRM_FIELD.answer.description,
+          oneOf: [
+            { const: CONFIRM_VALUES.yes, title: yesTitle },
+            { const: CONFIRM_VALUES.back, title: CONFIRM_ANSWER.back },
+          ],
+        },
+        ...(needsCode
+          ? {
+              code: {
+                type: "string" as const,
+                title: CONFIRM_FIELD.code.title,
+                description: CONFIRM_FIELD.code.description,
+                maxLength: 20,
+              },
+            }
+          : {}),
+      },
+      required: ["answer"],
+    },
+  };
+}
+
+/** How the confirmation form ended, as the server tool saw it. */
+export type ConfirmFormOutcome =
+  | { kind: "unsupported" }
+  | { kind: "declined" }
+  | { kind: "cancelled" }
+  | { kind: "failed"; error: string }
+  | { kind: "accepted"; content: Record<string, unknown> };
+
+/** What a confirmation came to. `accepted` is true only for the person's yes (with the right code where one is asked), or a plan that needs none. */
+export interface ConfirmVerdict {
+  accepted: boolean;
+  outcome: "not-needed" | "accepted" | "went-back" | "wrong-code" | "declined" | "cancelled" | "failed" | "unsupported";
+  /** What to tell the person, in plain words. */
+  tellPerson: string;
+}
+
+/**
+ * What the person's answer to the confirmation form means. Only an accepted
+ * form whose answer is yes accepts a plan, and for creating test data only
+ * with the code the form showed, typed back. A form that was declined, closed,
+ * failed or could not be shown leaves the plan unaccepted, and so does any
+ * other answer: nothing here guesses a yes.
+ */
+export function confirmVerdict(plan: Pick<GuidedPlan, "confirm">, outcome: ConfirmFormOutcome, code: string): ConfirmVerdict {
+  if (!plan.confirm) return { accepted: true, outcome: "not-needed", tellPerson: CONFIRM_SAYS["not-needed"] };
+  const no = (o: Exclude<ConfirmVerdict["outcome"], "accepted" | "not-needed">): ConfirmVerdict => ({
+    accepted: false,
+    outcome: o,
+    tellPerson: CONFIRM_SAYS[o],
+  });
+  if (outcome.kind !== "accepted") return no(outcome.kind);
+  if (outcome.content.answer !== CONFIRM_VALUES.yes) return no("went-back");
+  if (CONFIRM_NEEDS_CODE[plan.confirm.reason]) {
+    const typed = outcome.content.code;
+    // A code the server did not make is never matched: an empty one would otherwise equal an empty answer.
+    if (!/^\d{4}$/.test(code) || typeof typed !== "string" || typed.trim() !== code) return no("wrong-code");
+  }
+  return { accepted: true, outcome: "accepted", tellPerson: CONFIRM_SAYS.accepted };
+}
+
+/** The write modes from the strictest to the loosest, as the attach gate compares them. */
+const MODE_ORDER = ["observe", "read-only", "safe-write", "destructive"] as const;
+type AnyMode = (typeof MODE_ORDER)[number];
+
+function originOf(address: string): string | null {
+  try {
+    return new URL(address).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether scout_attach may go ahead while guided plans are kept.
+ *
+ * - No plan built in this server: yes, exactly as before (`plan` is absent).
+ * - `observe` without a plan id: yes. Looking only is always allowed.
+ * - Above `observe` without a plan id, once any plan has been built: no, so
+ *   leaving the id out is not a way round a confirmation.
+ * - A plan id this server does not hold: no, in any mode.
+ * - A plan that needs a confirmation the person has not given: no, above
+ *   `observe`.
+ * - A mode above the plan's, or (above `observe`) an address on another site
+ *   than the plan's: no.
+ * - readPosts or trustedEmbeds, once any plan has been built: no, in any mode.
+ *   Both loosen a mode, and no guided check takes them (design 6.1).
+ */
+export function guidedAttachVerdict(
+  plans: Pick<GuidedPlans, "open" | "get">,
+  input: { planId?: string; mode: AnyMode; url: string; readPosts?: readonly string[]; trustedEmbeds?: readonly string[] },
+): { ok: true; plan?: GuidedPlan } | { ok: false; why: string } {
+  const above = input.mode !== "observe";
+  // Developer settings no guided check takes (design 6.1): readPosts lets named POSTs out of observe, and
+  // trustedEmbeds lets frames' writes out of safe-write, so either would loosen a care level the person chose.
+  if (plans.open) {
+    const named = [input.readPosts?.length ? "readPosts" : "", input.trustedEmbeds?.length ? "trustedEmbeds" : ""].filter(Boolean);
+    if (named.length > 0)
+      return {
+        ok: false,
+        why: `a guided plan is open in this server, and ${named.join(" and ")} ${named.length > 1 ? "are developer settings" : "is a developer setting"} no guided check takes: attach without ${named.length > 1 ? "them" : "it"}. A developer who needs ${named.length > 1 ? "them" : "it"} sets ${named.length > 1 ? "them" : "it"} in a server with no guided plan.`,
+      };
+  }
+  if (input.planId === undefined) {
+    if (above && plans.open)
+      return {
+        ok: false,
+        why: `a guided plan is open in this server, so an attach in "${input.mode}" must name it: pass the planId its scout_attach call lists. Without one, only mode "observe" is allowed.`,
+      };
+    return { ok: true };
+  }
+  const plan = isPlanId(input.planId) ? plans.get(input.planId) : undefined;
+  if (!plan)
+    return {
+      ok: false,
+      why: `this server holds no guided plan "${isPlanId(input.planId) ? input.planId : "(not a plan id)"}": build one with scout_guided_plan.`,
+    };
+  if (!above) return { ok: true, plan };
+  if (plan.confirm && !plan.confirm.accepted)
+    return {
+      ok: false,
+      why: `guided plan ${plan.planId} needs the person's confirmation before it may run in "${input.mode}": call scout_guided_confirm {"planId":"${plan.planId}"}, and the person answers its form. Until then only mode "observe" is allowed.`,
+    };
+  if (MODE_ORDER.indexOf(input.mode) > MODE_ORDER.indexOf(plan.mode))
+    return { ok: false, why: `guided plan ${plan.planId} is for mode "${plan.mode}" at most; "${input.mode}" is above it.` };
+  const want = originOf(plan.choices.address);
+  if (want === null || originOf(input.url) !== want)
+    return { ok: false, why: `guided plan ${plan.planId} is for ${want ?? plan.choices.address}; an attach above "observe" with it must be on that site.` };
+  return { ok: true, plan };
+}
+
+/**
+ * A plan as the agent reads it: what to tell the person, the confirmation
+ * when one is still needed, the calls in order, and the limits to keep to.
+ */
+export function guidedPlanText(plan: GuidedPlan): string {
+  const lines = [
+    `Guided plan ${plan.planId}: ${CARE_LABEL[plan.choices.care]} (mode "${plan.mode}"), level "${plan.level}".`,
+    "",
+    "Tell the person, in these words:",
+    ...plan.tellPerson.map((s) => `- ${s}`),
+    "",
+  ];
+  let step = 0;
+  const steps: string[] = [];
+  if (plan.confirm && !plan.confirm.accepted) {
+    steps.push(
+      `Call scout_guided_confirm ${JSON.stringify({ planId: plan.planId })}. The person answers its form; you cannot answer it for them. ` +
+        `Go on only if it says the plan is accepted. If it is not, nothing above mode "observe" may run with this plan: offer the person the same check in ${CARE_LABEL["look-only"]}.`,
+    );
+  } else if (plan.confirm) steps.push("The person has confirmed this plan.");
+  for (const call of plan.calls) {
+    const after =
+      call.tool === "scout_attach"
+        ? ", with projectPath as the method's setup says"
+        : call.tool === "scout_login"
+          ? ", which returns once they are signed in"
+          : "";
+    steps.push(`Call ${call.tool} ${JSON.stringify(call.args)}${after}.`);
+  }
+  steps.push(
+    `As you start each area, call scout_session {area} with it: ${plan.areas.map((a) => `"${a.area}"`).join(", ")}. Where the care level holds a step back, stop there and say so.`,
+  );
+  steps.push(
+    `Stop after at most ${plan.budget.minutes} minutes and ${plan.budget.pages} pages, then write the report with scout_report ${JSON.stringify({ level: plan.level, force: true })} if the limits ended the run, else ${JSON.stringify({ level: plan.level })}.`,
+  );
+  lines.push("Then, in order:", ...steps.map((s) => `${(step += 1)}. ${s}`));
+  return lines.join("\n");
+}
+
+/**
+ * Why a session may not be marked as working on an area, or null when it may.
+ * A session attached with a plan works only on that plan's areas; one attached
+ * without a plan may name any area.
+ */
+export function areaRefusal(plan: Pick<GuidedPlan, "planId" | "areas"> | undefined, area: CheckArea): string | null {
+  if (!plan || plan.areas.some((a) => a.area === area)) return null;
+  return `guided plan ${plan.planId} does not check "${area}": its areas are ${plan.areas.map((a) => `"${a.area}"`).join(", ")}`;
 }

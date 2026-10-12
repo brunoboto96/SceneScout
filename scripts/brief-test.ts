@@ -181,6 +181,14 @@ test("each lane is told to sign in the way the planner did", () => {
   assert.doesNotMatch(anonymous, /storageStatePath|role: "/);
 });
 
+test("each lane attaches with the guided plan the planner attached with, and none is named without one", () => {
+  const lanes = planLanes(["/orders/a", "/stock/a"], 2);
+  const attachLine = (out: string) => out.split("\n").find((l) => l.includes("scout_attach {")) ?? "";
+  // Once a guided plan is open, an attach above observe without its id is refused, so a lane told no id could not start.
+  assert.match(attachLine(formatBriefs(lanes, { mode: "safe-write", planId: "gp-abcdefghij" })), /mode: "safe-write", planId: "gp-abcdefghij"/);
+  assert.doesNotMatch(attachLine(formatBriefs(lanes, { mode: "safe-write" })), /planId/);
+});
+
 // ── starting from an earlier run (from-run.ts) ──────────────────────────────
 
 test("from run: the path option, else SCENESCOUT_FROM_RUN, else none; the mode option, else its variable, else continue", () => {
