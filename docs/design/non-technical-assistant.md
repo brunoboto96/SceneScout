@@ -213,7 +213,7 @@ The budget-guard, burn-meter and context-lens mods show what a session is spendi
 |                                                           |
 | How careful should I be?                                  |
 |  (o) Look only - nothing is sent but page loads           |
-|  ( ) May submit forms - nothing existing is changed       |
+|  ( ) May submit forms - forms are sent, nothing deleted   |
 |  ( ) May create test data - only on a test copy           |
 |      [ What does this mean? ]                             |
 |                                                           |
@@ -236,9 +236,11 @@ The radio list is drawn as a `Select` or as three `Button`s with one marked; the
 |                                                          |
 | What this check may do there:                            |
 |   + create accounts, orders or other records it needs    |
-|   ~ change or delete only the records it created         |
-|   - never change or delete anything that was there       |
-|   - never delete anything at all outside its own records |
+|   ~ a form it sends can also change a record that was    |
+|     there                                                |
+|   ~ delete, or change other than through a form, only    |
+|     the records it created                               |
+|   - never delete anything outside its own records        |
 | Use this only on a test copy, never on a live site.      |
 |                                                          |
 | Next, a short form asks you to type a code to go on.     |
@@ -609,9 +611,11 @@ None takes a password, token or code (the existing prompt rule in `src/prompts.t
 | The person sees | Under it, in small text | Mode | Default? | Confirmation |
 |---|---|---|---|---|
 | **Look only** | Only opens pages. Nothing is sent to your site except signing in. Safe on a live site. | `observe` | Yes, always | None |
-| **May submit forms** | Fills in and sends forms, such as a contact form or a sign-up. Nothing that already exists is changed or deleted. A form it sends can create a record. | `read-only` | No | When the address is not on this machine (not `localhost`, `127.0.0.1` or `::1`) |
-| **May create test data** | Creates records it needs, such as an account or an order, and may change or delete only what it created. Use only on a test copy. | `safe-write` | No | Always |
-| *(not offered)* | Deleting or changing existing data needs a developer to ask for it by name. | `destructive` | Never | Not reachable from either guided surface |
+| **May submit forms** | Fills in and sends forms, such as a contact form, a sign-up or a settings page. A form it sends can create a record, and can change one that was there, as that form would for anyone. Deletes, and changes sent any other way than a form, are blocked. | `read-only` | No | When the address is not on this machine (not `localhost`, `127.0.0.1` or `::1`) |
+| **May create test data** | Creates records it needs, such as an account or an order. Forms it sends can also change records that were there. Deletes, and changes sent any other way than a form, are allowed only on what it created. Use only on a test copy. | `safe-write` | No | Always |
+| *(not offered)* | Deleting anything, or changing it other than through a form, on data that was already there needs a developer to ask for it by name. | `destructive` | Never | Not reachable from either guided surface |
+
+A form is the one route by which an existing record can change below `safe-write`: `read-only` lets an ordinary form submission (a plain `POST`) through, because that is how validation bugs are found, and many apps save an edit (a profile, a setting) with one. The words say so rather than promise that what was there is untouched; the write policy is unchanged. (Corrected while building PR 1: an earlier draft of this table said nothing existing is changed.)
 
 This is a change from today's rule ("plain answers never reach `safe-write`"). The design keeps that rule's intent — nobody reaches a writing mode by answering an unrelated question — by making `safe-write` a separately named choice with a confirmation the person gives, not Claude. It needs an ADR ([8, question 2](#8-open-questions)).
 
