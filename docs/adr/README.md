@@ -32,6 +32,7 @@ and which failure direction was chosen deliberately.
 | [0021](0021-update-the-docs-in-the-pull-request.md) | A pull request that changes what a user can do or see updates the README and `docs/` in that same pull request. A change with no user-facing surface does not |
 | [0022](0022-a-test-report-is-laid-out-by-a-template-and-signs-nothing.md) | `check --record --template` renders a recorded run as a test report whose layout and words come from the template; results come from assertions only, a failed step is a deviation, a manifest hashes the evidence, and the signature blocks are blank |
 | [0023](0023-the-actions-install-the-releases-locked-dependency-tree.md) | The check and ci actions install the release their ref names with `npm ci --ignore-scripts` from the repository's own lockfile, production entries only; another `version`, or a ref whose dependencies moved on, installs as npm would with a warning. npm, `npx` and plugin installs are unchanged |
+| [0024](0024-care-levels-in-plain-words-and-confirmations-only-the-person-gives.md) | The guided assistant's care levels are plain named choices, each one write mode: Look only (`observe`, the default), May submit forms (`read-only`, confirmed on an address not on this computer) and May create test data (`safe-write`, always confirmed with a typed code); `destructive` is not offered. A plain choice may now reach `safe-write`, and a confirmation counts only when the person gives it through the server's own form |
 
 ## Writing a new one
 

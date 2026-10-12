@@ -14,6 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
+import { fileURLToPath } from "node:url";
 import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
 import { crawledRoute, crawlLine, mainStateFlag } from "../src/engine/crawl.ts";
 import { MemoryStore, reachedRoutes, type ActionLogEntry } from "../src/engine/memory.ts";
@@ -32,7 +33,19 @@ import {
   reportEvidence,
   withAudience,
 } from "../src/engine/report.ts";
-import { IMPACT, isSafeRelativePath, PLAIN_WORDING, pictureOf, plainFinding, plainStep, plainSteps, plainWording } from "../src/engine/plain.ts";
+import {
+  formatPlainSection,
+  IMPACT,
+  isSafeRelativePath,
+  PLAIN_WORDING,
+  pictureOf,
+  plainFinding,
+  plainStep,
+  plainSteps,
+  plainWording,
+  type PlainInput,
+} from "../src/engine/plain.ts";
+import type { Finding } from "../src/engine/memory.ts";
 import { FINDING_CATEGORIES } from "../src/engine/memory.ts";
 import { ORACLE_KINDS } from "../src/engine/oracles.ts";
 import {
@@ -1400,6 +1413,95 @@ test("the report setting: both puts the plain section first, qa prints it alone,
   assert.equal(
     dev,
     withAudience(dev.split("\n"), "dev", () => ["never built"]),
+  );
+});
+
+/** Findings that reach every branch of the plain section's wording, with fixed ids so the page is the same on every run. */
+function plainGoldenInput(audience: PlainInput["audience"]): PlainInput {
+  const base = { foundAt: "2026-01-01T00:00:00.000Z", runs: 1 };
+  const current: Finding[] = [
+    {
+      ...base,
+      id: "0a1b2c3d4e",
+      severity: "high",
+      category: "false_success" as never,
+      title: "Saving a thing says it worked when it did not",
+      detail: 'The page shows "Saved".\nThe server answered with an error.',
+      evidence: "POST /api/things → HTTP 500",
+      url: "http://app.test/things/new",
+      state: "/things/new#abc",
+      repro: [
+        "navigate http://app.test/ @ http://app.test/",
+        "snapshot @ http://app.test/",
+        "navigate http://app.test/things/new @ http://app.test/things/new",
+        'type textbox "Name" ← "A thing" + Enter @ http://app.test/things/new',
+        'click button "Save" @ http://app.test/things/new',
+      ],
+      seenOn: ["/other-things", "/more-things"],
+      picture: "recordings/s1/finding-0a1b2c3d4e.png",
+      pictureShot: { width: 400, height: 120, frame: "element", label: "Save", at: "2026-01-01T00:00:00.000Z" },
+    },
+    {
+      ...base,
+      id: "1b2c3d4e5f",
+      severity: "medium",
+      category: "ux-confusing",
+      title: "The error hides behind the banner",
+      detail: "The error message is under the cookie banner.",
+      url: "http://app.test/login",
+      state: "/login#def",
+      repro: ['click×2 button "Sign in" @ http://app.test/login', 'select combobox "Country" = Narnia @ http://app.test/login'],
+    },
+    {
+      ...base,
+      id: "2c3d4e5f60",
+      severity: "low",
+      category: "a-category-from-an-older-file",
+      title: "A label is clipped",
+      detail: "The label is cut off.",
+      url: "http://app.test/",
+      state: "/#ghi",
+      repro: [],
+    },
+    {
+      // A picture whose path leaves the folder is never linked; a re-test's verdict and one other page change no words.
+      ...base,
+      id: "3d4e5f6071",
+      severity: "medium",
+      category: "http-error",
+      title: "The orders page fails to load its list",
+      detail: "The list stays empty.\r\nThe server answered 502.",
+      evidence: "GET /api/orders → HTTP 502",
+      url: "http://app.test/orders?page=2#top",
+      state: "/orders#jkl",
+      repro: ["navigate http://app.test/orders?page=2 @ http://app.test/orders?page=2", "scroll down @ http://app.test/orders?page=2"],
+      seenOn: ["/orders/archive"],
+      picture: "../outside.png",
+      verdict: "present",
+      runs: 4,
+    },
+  ];
+  return {
+    current,
+    historical: 2,
+    worthALook: 1,
+    violations: [{ kind: "http_error" }, { kind: "http_error" }, { kind: "console_error" }],
+    routes: { visited: 3, total: 5 },
+    gaps: ["The admin pages were not visited", "One form was never submitted"],
+    lastFrames: new Map([["1b2c3d4e5f", "recordings/s1/0004-click.jpg"]]),
+    audience,
+    tickets: ["### Ticket THING-1: one criterion answered", ""],
+  };
+}
+
+test("the plain section is the same page, word for word, before and after it is built from cards", () => {
+  const golden = path.join(path.dirname(fileURLToPath(import.meta.url)), "golden", "plain-section.md");
+  const page = (["both", "qa"] as const).map((a) => [`<!-- audience: ${a} -->`, ...formatPlainSection(plainGoldenInput(a))].join("\n")).join("\n\n");
+  if (process.env.UPDATE_GOLDEN === "1") fs.writeFileSync(golden, `${page}\n`);
+  assert.equal(
+    `${page}\n`,
+    fs.readFileSync(golden, "utf8").replace(/\r\n/g, "\n"),
+    "the plain section matches scripts/golden/plain-section.md (UPDATE_GOLDEN=1 rewrites it after an intended change)",
   );
 });
 
