@@ -30,6 +30,7 @@ import type { AddressInfo } from "node:net";
 import { LIVE_PAGE } from "./live-page.js";
 import { writeOwnerOnly } from "./owner-file.js";
 import { isPng } from "./png.js";
+import { bestEffort } from "./best-effort.js";
 import { JOURNEY_END, JOURNEY_START, TASK_SET, type ActionLogEntry } from "./memory.js";
 
 /** Holds the live view's token, next to status.json. Written owner-only; removed when the engine shuts down. */
@@ -470,6 +471,15 @@ interface Viewer {
   gone: () => void;
 }
 
+/**
+ * Stop a screencast nobody is watching any more. It fails only when its page or
+ * browser has already closed, which ends the screencast anyway, and no viewer
+ * is left to tell, so the failure is dropped.
+ */
+function stopScreencast(stop: () => Promise<void>): Promise<void> {
+  return stop().catch(() => {});
+}
+
 interface StreamEntry {
   /** Each open response watching this session. */
   viewers: Map<http.ServerResponse, Viewer>;
@@ -531,7 +541,7 @@ export class LiveServer {
     const stops: Array<Promise<void>> = [];
     for (const entry of this.streams.values()) {
       for (const viewer of entry.viewers.keys()) viewer.end();
-      if (entry.screencast.state === "live") stops.push(entry.screencast.stop().catch(() => {}));
+      if (entry.screencast.state === "live") stops.push(stopScreencast(entry.screencast.stop));
     }
     this.streams.clear();
     this.shots.clear();
@@ -677,9 +687,7 @@ export class LiveServer {
     if (cached && this.now() - cached.at < SHOT_MAX_AGE_MS) return cached.jpeg;
     const pending = this.shotsInFlight.get(session);
     if (pending) return pending;
-    const capture = this.provider
-      .screenshot(session)
-      .catch(() => null)
+    const capture = bestEffort(this.provider.screenshot(session), null)
       .then((jpeg) => {
         if (jpeg) this.shots.set(session, { at: this.now(), jpeg });
         return jpeg;
@@ -718,7 +726,7 @@ export class LiveServer {
     this.streams.delete(session);
     for (const viewer of stream.viewers.values()) viewer.gone();
     stream.viewers.clear();
-    if (stream.screencast.state === "live") void stream.screencast.stop().catch(() => {});
+    if (stream.screencast.state === "live") void stopScreencast(stream.screencast.stop);
   }
 
   /**
@@ -733,26 +741,26 @@ export class LiveServer {
       const entry: StreamEntry = { viewers: new Map(), lastFrame: null, screencast: { state: "starting", ready: Promise.resolve(false) } };
       entry.screencast = {
         state: "starting",
-        ready: this.provider
-          .startStream(
+        ready: bestEffort(
+          this.provider.startStream(
             session,
             (jpeg) => {
               entry.lastFrame = jpeg;
               for (const v of entry.viewers.values()) v.frame(jpeg);
             },
             () => this.dropSession(session),
-          )
-          .catch(() => null)
-          .then((stop) => {
-            if (!stop) return false;
-            // Stopped or dropped while it was starting: nobody is left to watch, so end it now.
-            if (this.streams.get(session) !== entry) {
-              void stop().catch(() => {});
-              return false;
-            }
-            entry.screencast = { state: "live", stop };
-            return true;
-          }),
+          ),
+          null,
+        ).then((stop) => {
+          if (!stop) return false;
+          // Stopped or dropped while it was starting: nobody is left to watch, so end it now.
+          if (this.streams.get(session) !== entry) {
+            void stopScreencast(stop);
+            return false;
+          }
+          entry.screencast = { state: "live", stop };
+          return true;
+        }),
       };
       this.streams.set(session, entry);
       stream = entry;
@@ -768,7 +776,7 @@ export class LiveServer {
       entry.viewers.delete(res);
       if (entry.viewers.size > 0 || this.streams.get(session) !== entry) return;
       this.streams.delete(session);
-      if (entry.screencast.state === "live") void entry.screencast.stop().catch(() => {});
+      if (entry.screencast.state === "live") void stopScreencast(entry.screencast.stop);
     };
   }
 

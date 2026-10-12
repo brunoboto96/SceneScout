@@ -204,7 +204,7 @@ export function capFrames(replay: CheckReplay, max: number = replay.frameCap ?? 
   return { ...replay, roles, framesLeftOut: leftOut, frameCap: max };
 }
 
-/** Secrets in addresses (memory.ts redactRoute) and personal data (redactPersonal), for any text the page shows. */
+/** Secrets in addresses (redact.ts redactRoute) and personal data (redactPersonal), for any text the page shows. */
 const redactText = (text: string): string => redactPersonal(redactRoute(text));
 
 /** The report's redaction on every path, caption and reason the page shows. */
