@@ -897,10 +897,68 @@ async function exploreInLanes(o: {
   };
 }
 
+/** What runCi is handed besides its options and provider: how the model is reached, and the run's log, secrets and clock. */
+export interface CiRunDeps {
+  makeClient: (system: string, tools: readonly ToolSpec[], kickoff: string) => ModelClient;
+  /**
+   * The dedup judge's model call (httpJudgeAsk in the CLI). With `--dedup
+   * judge` and no judge given, the rule decides and the log says so.
+   */
+  judge?: Ask;
+  /** The effort `judge` asks at, for the summary. */
+  judgeEffort?: string;
+  log?: (line: string) => void;
+  secrets?: readonly string[];
+  version: string;
+  now?: () => number;
+  /** How the MCP server is reached: started in a child process, unless a test hands in another. */
+  startHost?: (log: (line: string) => void, judge?: ReturnType<typeof judgeHandler>) => Promise<ToolHost>;
+}
+
 export interface CiRunResult {
   result: CiResult;
   exitCode: number;
   written: string[];
+}
+
+/**
+ * What a CI run decides as it goes. It is one object, so the catch and the
+ * finally in runCi see whatever the steps before a throw had set.
+ */
+interface CiRunState {
+  outcome: LoopOutcome;
+  contractMet: boolean;
+  reportWritten: boolean;
+  capture?: CaptureOutcome;
+  lanes?: CiLanes;
+  runFromRun?: CiFromRun;
+  runRecord?: RunRecord;
+  /** Set when the exploration ends (or never starts): the report and the close share FINISH_MS from then. */
+  finishBy: number;
+}
+
+/** What the steps of a CI run after the attach work with. */
+interface CiRunContext {
+  options: CiOptions;
+  deps: CiRunDeps;
+  log: (line: string) => void;
+  now: () => number;
+  budget: Budget;
+  host: ToolHost;
+  attachArgs: (a: { url: string; objective: string; task: string; session?: string }) => Record<string, unknown>;
+  attachMs: number;
+  earlier: RunRecord | undefined;
+  outDir: string;
+  finishLeft: () => number;
+  startedIso: string;
+}
+
+/** What the exploration leaves for the report: the element a capture run found, and a continued run's record. */
+interface CiExplored {
+  captured: CaptureInfo | null;
+  prefixes: PrefixNote[];
+  continuedFresh: boolean;
+  assigned: string[];
 }
 
 /**
@@ -909,26 +967,7 @@ export interface CiRunResult {
  * once, or once per lane. Everything logged or written passes through the key
  * redaction first.
  */
-export async function runCi(
-  options: CiOptions,
-  resolved: ResolvedProvider,
-  deps: {
-    makeClient: (system: string, tools: readonly ToolSpec[], kickoff: string) => ModelClient;
-    /**
-     * The dedup judge's model call (httpJudgeAsk in the CLI). With `--dedup
-     * judge` and no judge given, the rule decides and the log says so.
-     */
-    judge?: Ask;
-    /** The effort `judge` asks at, for the summary. */
-    judgeEffort?: string;
-    log?: (line: string) => void;
-    secrets?: readonly string[];
-    version: string;
-    now?: () => number;
-    /** How the MCP server is reached: started in a child process, unless a test hands in another. */
-    startHost?: (log: (line: string) => void, judge?: ReturnType<typeof judgeHandler>) => Promise<ToolHost>;
-  },
-): Promise<CiRunResult> {
+export async function runCi(options: CiOptions, resolved: ResolvedProvider, deps: CiRunDeps): Promise<CiRunResult> {
   const secrets = deps.secrets ?? [];
   const log = (line: string): void => (deps.log ?? (() => {}))(redactKeys(line, secrets));
   const now = deps.now ?? Date.now;
@@ -944,20 +983,13 @@ export async function runCi(
   if (wantsJudge && !deps.judge) log("No model was given for the dedup judge; the rule decides duplicates.");
   const judgeAsk = wantsJudge ? deps.judge : undefined;
   const judgeCalls: JudgeCalls = { calls: 0, failed: 0, usage: { ...NO_USAGE }, ms: 0 };
-  let outcome: LoopOutcome = { stop: "could-not-start", spend: budgetSpend(budget) };
-  let contractMet = false;
-  let reportWritten = false;
-  let capture: CaptureOutcome | undefined;
-  let lanes: CiLanes | undefined;
-  let runFromRun: CiFromRun | undefined;
-  let runRecord: RunRecord | undefined;
+  // What the run decides as it goes, in one object the steps below, the catch and the finally all see.
+  const state: CiRunState = { outcome: { stop: "could-not-start", spend: budgetSpend(budget) }, contractMet: false, reportWritten: false, finishBy: 0 };
   let earlier: RunRecord | undefined;
   // The real clock, as the server's: this run's record is the one its report wrote after this.
   const startedIso = new Date().toISOString();
   let host: ToolHost | null = null;
-  // Set when the exploration ends (or never starts): the report and the close share FINISH_MS from then.
-  let finishBy = 0;
-  const finishLeft = (): number => Math.max(1_000, finishBy - now());
+  const finishLeft = (): number => Math.max(1_000, state.finishBy - now());
   try {
     // The page-load limit may be longer than the usual attach budget; the attach gets that limit and a minute to launch.
     const attachMs = Math.max(ATTACH_MS, resolveTimeLimits(options, process.env).navMs + 60_000);
@@ -1002,177 +1034,20 @@ export async function runCi(
     );
     const failed = attachFailure(attached);
     if (failed !== null) {
-      outcome = { ...outcome, stopDetail: failed.slice(0, 400) };
+      state.outcome = { ...state.outcome, stopDetail: failed.slice(0, 400) };
     } else {
       log(`Attached to ${options.url} in ${options.mode} mode.`);
-      const listed = await host.tools();
-      const toolHost = host;
-      let captured: CaptureInfo | null = null;
-      // Named as it was given: a resolved path would put a local directory in the report and ci.json.
-      const from = options.fromRun ? (options.fromRun.given ?? options.fromRun.path) : "";
-      const replay: ReplayLane[] | undefined = earlier && options.fromRun?.mode === "replay" ? replayPlan(earlier) : undefined;
-      const continuing = earlier && options.fromRun?.mode === "continue" ? earlier : undefined;
-      // A run split into lanes, or a continued one, crawls first: the lanes are split, and a continued run's routes ordered, from what it finds.
-      // A replay does not: its routes and steps are the record's.
-      const timeLeft = (): number => wallLeftMs(budgetSpend(budget), options.caps, now());
-      const plans = !options.show && !replay && (options.lanes > 1 || !!continuing);
-      const planned = plans ? await planningCrawl({ host, log, timeLeft, label: options.lanes > 1 ? "Lanes" : "From run" }) : undefined;
-      const planItems: ContinueItem[] | undefined = continuing && planned ? continuePlan(continuing, plannedRoutes(options.url, planned.notes)) : undefined;
-      // A record with no work left anywhere: explore as a fresh run (the stable split, the landing page, no path), and say so.
-      const continuedFresh = !!planItems && continueExhausted(planItems);
-      const items = continuedFresh ? undefined : planItems;
-      // How many pages a continued run takes on, from its budget (from-run.ts pageCap): each lane's share of the turns, or the run's.
-      const perPage = options.fromRun?.turnsPerPage ?? DEFAULT_TURNS_PER_PAGE;
-      const cap = items ? pageCap(options.caps.turns, perPage) : undefined;
-      const laneCap = items ? pageCap(Math.floor(options.caps.turns / Math.max(1, options.lanes)), perPage) : undefined;
-      // The pages this run was given, kept in its record so the next continued run takes the next ones.
-      const assigned: string[] = [];
-      if (options.fromRun && earlier && !options.show) {
-        runFromRun = { mode: options.fromRun.mode, source: from, runId: earlier.runId, recordAt: earlier.at };
-        log(`From run: ${fromRunLine(runFromRun)}.`);
-        if (items)
-          log(
-            `From run: ${items.filter((i) => i.tier === 1).length} route(s) it never worked on, ${items.filter((i) => i.tier === 2).length} with work left, ${items.filter((i) => i.tier === 3).length} worked through.`,
-          );
-        if (continuedFresh) log("From run: the earlier run left no recorded work on any route, so this run explores as a fresh one.");
-        // Noted in the project's memory for the report, which the server writes. Never fatal: the run goes on.
-        try {
-          noteFromRunOnDisk(options.projectDir, { at: new Date().toISOString(), ...runFromRun });
-        } catch (err) {
-          log(`From run: the project's memory could not be told, so the report will not name the earlier run: ${messageOf(err)}`);
-        }
-      }
-      // How a continued run's lanes (or its one loop) reached their first page by the earlier run's path, for the record.
-      const prefixes: PrefixNote[] = [];
-      const reach = items
-        ? async (session: string, route: string | undefined, say: (line: string) => void): Promise<string[]> => {
-            const r = await reachByPath({ host: toolHost, session, record: continuing!, route, timeLeft, say });
-            if (r.note) prefixes.push(r.note);
-            return r.lines;
-          }
-        : undefined;
-      const oneLoop = async (): Promise<LoopOutcome> => {
-        const tools = ciTools(listed, options.show ? CAPTURE_TOOLS : undefined);
-        const system = options.show ? ciCaptureSystemPrompt() : ciSystemPrompt(loadPlaybook(packageRoot), options);
-        const reached = reach && items && !options.show ? await reach(PLANNER_SESSION, items[0]?.route, (l) => log(`From run: ${l}`)) : [];
-        if (items && cap !== undefined) {
-          const mine = takenPages(items, cap);
-          assigned.push(...mine);
-          log(`From run: takes on ${mine.join(", ")} (${cap} page(s) at ${perPage} turns a page).`);
-        }
-        const fromRun = planItems
-          ? [...continueLines(planItems, { from, ...(cap !== undefined ? { cap } : {}) }), ...reached]
-          : replay && replay.length > 0
-            ? replayLines(replay[0], { from })
-            : undefined;
-        const kickoff = options.show
-          ? ciCaptureKickoff({ url: options.url, show: options.show })
-          : ciKickoff({ ...options, ...(fromRun && fromRun.length > 0 ? { fromRunLines: fromRun } : {}) });
-        return agentLoop({
-          client: deps.makeClient(system, tools, kickoff),
-          host: toolHost,
-          tools,
-          caps: options.caps,
-          log,
-          now,
-          budget,
-          projectDir: options.projectDir,
-          onResult: (name, _args, r) => {
-            if (name === "scout_capture" && !r.isError) captured = parseCaptureResult(r.text) ?? captured;
-          },
-        });
-      };
-      // A replay has as many lanes as the recorded run had sessions; otherwise the planning crawl is split as asked.
-      const lanePlan: LanePlan | undefined = options.show
-        ? undefined
-        : replay
-          ? planReplayLanes({ target: options.url, lanes: replay, ...(options.focus ? { focus: options.focus } : {}) })
-          : options.lanes > 1 && planned
-            ? planCiLanes({
-                target: options.url,
-                // A continued run splits every route it orders, the record's own included, so none is left out of every lane.
-                notes: items
-                  ? withRoutes(
-                      planned.notes,
-                      items.map((i) => i.route),
-                    )
-                  : planned.notes,
-                count: options.lanes,
-                focus: options.focus,
-                mode: options.mode,
-                ...(planned.planningFailed ? { planningFailed: planned.planningFailed } : {}),
-                ...(items ? { order: items.map((i) => i.route) } : {}),
-              })
-            : undefined;
-      if (replay && replay.length > 1 && replay.length !== options.lanes)
-        log(`From run: replaying the recorded run's ${replay.length} sessions as ${replay.length} lanes.`);
-      if (lanePlan && (lanePlan.lanes.length > 0 || options.lanes > 1)) {
-        // A replayed lane is told its own session's steps: the plan keeps the recorded sessions' order.
-        const replayed = new Map(replay ? lanePlan.lanes.map((l, i) => [l.session, replay[i]] as const) : []);
-        const laneLines = planItems
-          ? (lane: CiLane): readonly string[] => {
-              if (items && laneCap !== undefined) {
-                const mine = takenPages(items, laneCap, lane.routes);
-                assigned.push(...mine);
-                log(`From run: lane ${lane.session} takes on ${mine.join(", ") || "no page with work left"} (${laneCap} page(s) at ${perPage} turns a page).`);
-              }
-              return continueLines(planItems, { from, only: lane.routes, ...(laneCap !== undefined ? { cap: laneCap } : {}) });
-            }
-          : replay
-            ? (lane: CiLane): readonly string[] => replayLines(replayed.get(lane.session)!, { from })
-            : undefined;
-        const split = await exploreInLanes({
-          host,
-          listed,
-          options,
-          makeClient: deps.makeClient,
-          log,
-          now,
-          budget,
-          attachArgs,
-          attachMs,
-          plan: lanePlan,
-          ...(laneLines ? { laneLines } : {}),
-          ...(reach ? { reach } : {}),
-        });
-        lanes = split.lanes;
-        outcome = split.outcome ?? (await oneLoop());
-      } else {
-        outcome = await oneLoop();
-      }
-      log(`Run ended: ${describeStop(outcome.stop, options.caps, outcome.stopDetail)}.`);
-      finishBy = now() + FINISH_MS;
-      if (options.show) {
-        // A run asked to show an element writes pictures, not a report: it did not explore.
-        capture = await captureShots({ host, options, captured, finalText: outcome.finalText, outDir, timeLeft: finishLeft, log });
-      } else {
-        // The report is written whatever ended the run. A forced report still prints its gaps.
-        // From the planner's session by name: a lane attaching made itself the server's default.
-        let report = await host.call("scout_report", { level: options.level, session: PLANNER_SESSION }, finishLeft());
-        contractMet = !report.isError && !/NOT GENERATED/.test(report.text);
-        if (!contractMet && !report.isError)
-          report = await host.call("scout_report", { level: options.level, force: true, session: PLANNER_SESSION }, finishLeft());
-        reportWritten = !report.isError && !/^ERROR:/.test(report.text) && fs.existsSync(path.join(options.projectDir, MEMORY_DIRNAME, "report.md"));
-        if (!reportWritten) log(`The report could not be generated: ${report.text.slice(0, 400)}`);
-        else
-          runRecord = thisRunsRecord({
-            projectDir: options.projectDir,
-            since: startedIso,
-            continued: earlier && options.fromRun?.mode === "continue" ? earlier : undefined,
-            prefixes,
-            continuedFresh,
-            assigned,
-            log,
-          });
-      }
+      const ctx: CiRunContext = { options, deps, log, now, budget, host, attachArgs, attachMs, earlier, outDir, finishLeft, startedIso };
+      const explored = await exploreCi(state, ctx);
+      await reportCi(state, ctx, explored);
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (outcome.stop === "could-not-start") outcome = { ...outcome, stopDetail: message };
+    if (state.outcome.stop === "could-not-start") state.outcome = { ...state.outcome, stopDetail: message };
     else log(`The run could not finish cleanly: ${message}`);
   } finally {
     if (host) {
-      if (finishBy === 0) finishBy = now() + FINISH_MS;
+      if (state.finishBy === 0) state.finishBy = now() + FINISH_MS;
       await host
         .call("scout_close", { all: true }, finishLeft())
         .catch((err: unknown) => log(`Closing the browser failed: ${err instanceof Error ? err.message : String(err)}`));
@@ -1181,6 +1056,7 @@ export async function runCi(
     }
   }
 
+  const { outcome, contractMet, capture, lanes, runFromRun, runRecord } = state;
   const endedAt = now();
   const result: CiResult = {
     url: options.url,
@@ -1208,6 +1084,195 @@ export async function runCi(
           dedup: judgeAsk ? { by: "judge" as const, ...(deps.judgeEffort ? { effort: deps.judgeEffort } : {}), ...judgeCalls } : { by: "rule" as const },
         }),
   };
+  return writeCiResults(result, endedAt, state.reportWritten, options, deps, outDir, secrets, log);
+}
+
+/**
+ * The exploration after the attach: the planning crawl, a continued or replayed run's plan, then one
+ * agent loop or the lanes. What it ends with is in `state.outcome`.
+ */
+async function exploreCi(state: CiRunState, ctx: CiRunContext): Promise<CiExplored> {
+  const { options, deps, log, now, budget, host, attachArgs, attachMs, earlier } = ctx;
+  const listed = await host.tools();
+  const toolHost = host;
+  let captured: CaptureInfo | null = null;
+  // Named as it was given: a resolved path would put a local directory in the report and ci.json.
+  const from = options.fromRun ? (options.fromRun.given ?? options.fromRun.path) : "";
+  const replay: ReplayLane[] | undefined = earlier && options.fromRun?.mode === "replay" ? replayPlan(earlier) : undefined;
+  const continuing = earlier && options.fromRun?.mode === "continue" ? earlier : undefined;
+  // A run split into lanes, or a continued one, crawls first: the lanes are split, and a continued run's routes ordered, from what it finds.
+  // A replay does not: its routes and steps are the record's.
+  const timeLeft = (): number => wallLeftMs(budgetSpend(budget), options.caps, now());
+  const plans = !options.show && !replay && (options.lanes > 1 || !!continuing);
+  const planned = plans ? await planningCrawl({ host, log, timeLeft, label: options.lanes > 1 ? "Lanes" : "From run" }) : undefined;
+  const planItems: ContinueItem[] | undefined = continuing && planned ? continuePlan(continuing, plannedRoutes(options.url, planned.notes)) : undefined;
+  // A record with no work left anywhere: explore as a fresh run (the stable split, the landing page, no path), and say so.
+  const continuedFresh = !!planItems && continueExhausted(planItems);
+  const items = continuedFresh ? undefined : planItems;
+  // How many pages a continued run takes on, from its budget (from-run.ts pageCap): each lane's share of the turns, or the run's.
+  const perPage = options.fromRun?.turnsPerPage ?? DEFAULT_TURNS_PER_PAGE;
+  const cap = items ? pageCap(options.caps.turns, perPage) : undefined;
+  const laneCap = items ? pageCap(Math.floor(options.caps.turns / Math.max(1, options.lanes)), perPage) : undefined;
+  // The pages this run was given, kept in its record so the next continued run takes the next ones.
+  const assigned: string[] = [];
+  if (options.fromRun && earlier && !options.show) {
+    state.runFromRun = { mode: options.fromRun.mode, source: from, runId: earlier.runId, recordAt: earlier.at };
+    log(`From run: ${fromRunLine(state.runFromRun)}.`);
+    if (items)
+      log(
+        `From run: ${items.filter((i) => i.tier === 1).length} route(s) it never worked on, ${items.filter((i) => i.tier === 2).length} with work left, ${items.filter((i) => i.tier === 3).length} worked through.`,
+      );
+    if (continuedFresh) log("From run: the earlier run left no recorded work on any route, so this run explores as a fresh one.");
+    // Noted in the project's memory for the report, which the server writes. Never fatal: the run goes on.
+    try {
+      noteFromRunOnDisk(options.projectDir, { at: new Date().toISOString(), ...state.runFromRun });
+    } catch (err) {
+      log(`From run: the project's memory could not be told, so the report will not name the earlier run: ${messageOf(err)}`);
+    }
+  }
+  // How a continued run's lanes (or its one loop) reached their first page by the earlier run's path, for the record.
+  const prefixes: PrefixNote[] = [];
+  const reach = items
+    ? async (session: string, route: string | undefined, say: (line: string) => void): Promise<string[]> => {
+        const r = await reachByPath({ host: toolHost, session, record: continuing!, route, timeLeft, say });
+        if (r.note) prefixes.push(r.note);
+        return r.lines;
+      }
+    : undefined;
+  const oneLoop = async (): Promise<LoopOutcome> => {
+    const tools = ciTools(listed, options.show ? CAPTURE_TOOLS : undefined);
+    const system = options.show ? ciCaptureSystemPrompt() : ciSystemPrompt(loadPlaybook(packageRoot), options);
+    const reached = reach && items && !options.show ? await reach(PLANNER_SESSION, items[0]?.route, (l) => log(`From run: ${l}`)) : [];
+    if (items && cap !== undefined) {
+      const mine = takenPages(items, cap);
+      assigned.push(...mine);
+      log(`From run: takes on ${mine.join(", ")} (${cap} page(s) at ${perPage} turns a page).`);
+    }
+    const fromRun = planItems
+      ? [...continueLines(planItems, { from, ...(cap !== undefined ? { cap } : {}) }), ...reached]
+      : replay && replay.length > 0
+        ? replayLines(replay[0], { from })
+        : undefined;
+    const kickoff = options.show
+      ? ciCaptureKickoff({ url: options.url, show: options.show })
+      : ciKickoff({ ...options, ...(fromRun && fromRun.length > 0 ? { fromRunLines: fromRun } : {}) });
+    return agentLoop({
+      client: deps.makeClient(system, tools, kickoff),
+      host: toolHost,
+      tools,
+      caps: options.caps,
+      log,
+      now,
+      budget,
+      projectDir: options.projectDir,
+      onResult: (name, _args, r) => {
+        if (name === "scout_capture" && !r.isError) captured = parseCaptureResult(r.text) ?? captured;
+      },
+    });
+  };
+  // A replay has as many lanes as the recorded run had sessions; otherwise the planning crawl is split as asked.
+  const lanePlan: LanePlan | undefined = options.show
+    ? undefined
+    : replay
+      ? planReplayLanes({ target: options.url, lanes: replay, ...(options.focus ? { focus: options.focus } : {}) })
+      : options.lanes > 1 && planned
+        ? planCiLanes({
+            target: options.url,
+            // A continued run splits every route it orders, the record's own included, so none is left out of every lane.
+            notes: items
+              ? withRoutes(
+                  planned.notes,
+                  items.map((i) => i.route),
+                )
+              : planned.notes,
+            count: options.lanes,
+            focus: options.focus,
+            mode: options.mode,
+            ...(planned.planningFailed ? { planningFailed: planned.planningFailed } : {}),
+            ...(items ? { order: items.map((i) => i.route) } : {}),
+          })
+        : undefined;
+  if (replay && replay.length > 1 && replay.length !== options.lanes)
+    log(`From run: replaying the recorded run's ${replay.length} sessions as ${replay.length} lanes.`);
+  if (lanePlan && (lanePlan.lanes.length > 0 || options.lanes > 1)) {
+    // A replayed lane is told its own session's steps: the plan keeps the recorded sessions' order.
+    const replayed = new Map(replay ? lanePlan.lanes.map((l, i) => [l.session, replay[i]] as const) : []);
+    const laneLines = planItems
+      ? (lane: CiLane): readonly string[] => {
+          if (items && laneCap !== undefined) {
+            const mine = takenPages(items, laneCap, lane.routes);
+            assigned.push(...mine);
+            log(`From run: lane ${lane.session} takes on ${mine.join(", ") || "no page with work left"} (${laneCap} page(s) at ${perPage} turns a page).`);
+          }
+          return continueLines(planItems, { from, only: lane.routes, ...(laneCap !== undefined ? { cap: laneCap } : {}) });
+        }
+      : replay
+        ? (lane: CiLane): readonly string[] => replayLines(replayed.get(lane.session)!, { from })
+        : undefined;
+    const split = await exploreInLanes({
+      host,
+      listed,
+      options,
+      makeClient: deps.makeClient,
+      log,
+      now,
+      budget,
+      attachArgs,
+      attachMs,
+      plan: lanePlan,
+      ...(laneLines ? { laneLines } : {}),
+      ...(reach ? { reach } : {}),
+    });
+    state.lanes = split.lanes;
+    state.outcome = split.outcome ?? (await oneLoop());
+  } else {
+    state.outcome = await oneLoop();
+  }
+  return { captured, prefixes, continuedFresh, assigned };
+}
+
+/** After the exploration: the capture run's pictures, or the report and this run's record. */
+async function reportCi(state: CiRunState, ctx: CiRunContext, explored: CiExplored): Promise<void> {
+  const { options, log, now, host, earlier, outDir, finishLeft, startedIso } = ctx;
+  const { captured, prefixes, continuedFresh, assigned } = explored;
+  log(`Run ended: ${describeStop(state.outcome.stop, options.caps, state.outcome.stopDetail)}.`);
+  state.finishBy = now() + FINISH_MS;
+  if (options.show) {
+    // A run asked to show an element writes pictures, not a report: it did not explore.
+    state.capture = await captureShots({ host, options, captured, finalText: state.outcome.finalText, outDir, timeLeft: finishLeft, log });
+  } else {
+    // The report is written whatever ended the run. A forced report still prints its gaps.
+    // From the planner's session by name: a lane attaching made itself the server's default.
+    let report = await host.call("scout_report", { level: options.level, session: PLANNER_SESSION }, finishLeft());
+    state.contractMet = !report.isError && !/NOT GENERATED/.test(report.text);
+    if (!state.contractMet && !report.isError)
+      report = await host.call("scout_report", { level: options.level, force: true, session: PLANNER_SESSION }, finishLeft());
+    state.reportWritten = !report.isError && !/^ERROR:/.test(report.text) && fs.existsSync(path.join(options.projectDir, MEMORY_DIRNAME, "report.md"));
+    if (!state.reportWritten) log(`The report could not be generated: ${report.text.slice(0, 400)}`);
+    else
+      state.runRecord = thisRunsRecord({
+        projectDir: options.projectDir,
+        since: startedIso,
+        continued: earlier && options.fromRun?.mode === "continue" ? earlier : undefined,
+        prefixes,
+        continuedFresh,
+        assigned,
+        log,
+      });
+  }
+}
+
+/** Writes the run's files (the report, summary.md, ci.json, ci.sarif) and the step summary, and decides the exit code. */
+function writeCiResults(
+  result: CiResult,
+  endedAt: number,
+  reportWritten: boolean,
+  options: CiOptions,
+  deps: CiRunDeps,
+  outDir: string,
+  secrets: readonly string[],
+  log: (line: string) => void,
+): CiRunResult {
   const written: string[] = [];
   try {
     if (!options.outDir) writeSelfIgnore(path.dirname(outDir));
