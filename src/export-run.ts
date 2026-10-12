@@ -743,50 +743,20 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
         : jiraApi(o.jira, client(o.jira.baseUrl, credentials.headers, http));
     // A closed issue counts as filed unless --refile-closed.
     const includeClosed = !o.refileClosed;
-    let existing: Map<string, FiledIssue> | null = null;
     const recordPath = path.join(memoryDir, EXPORT_RECORD_FILE);
     const key = recordKey(o);
-    let candidates = selection.candidates;
-    let heldBack = 0;
-    if (tracker) {
-      const recorded = readRecord(recordPath)[key] ?? {};
-      const found = await tracker.existing(includeClosed);
-      existing = found.map;
-      say(
-        `Compared with ${tracker.label}: ${found.issues} ${includeClosed ? "" : "open "}issue(s) carry the ${MARKER_LABEL} label` +
-          `${includeClosed ? " (open or closed)" : ""}${found.unmarked ? `, ${found.unmarked} of them with no marker` : ""}` +
-          `${includeClosed ? "" : "; a finding whose issue was closed is filed again (--refile-closed)"}.`,
-      );
-      // The listing can lag behind a create, so an issue an earlier export recorded is read back by its number before its finding counts as unfiled.
-      let readBack = 0;
-      for (const f of candidates) {
-        const entry = recorded[f.id];
-        if (!entry || "uncertain" in entry || existing.has(f.id)) continue;
-        const read = await tracker.read(entry.ref, entry.number);
-        // Gone, moved, or no longer carrying the marker: the finding is filed again, as the listing says.
-        if (!read || !read.ids.includes(f.id) || (!includeClosed && !read.issue.open)) continue;
-        rememberFiled(existing, f.id, read.issue);
-        readBack++;
-      }
-      if (readBack > 0) say(`  ${readBack} more finding(s) found filed by the issue number recorded in ${recordPath}, as the listing does not show them yet.`);
-      // A Jira create that may have been made, and that the search does not show yet, holds its finding back for a while rather than file it twice.
-      if (!tracker.consistentListing) {
-        const held = candidates.filter((f) => !existing!.has(f.id) && recorded[f.id] && uncertainHolds(recorded[f.id], http.now()));
-        for (const f of held) {
-          const until = new Date(Date.parse(recorded[f.id].at) + UNCERTAIN_HOLD_MS).toISOString();
-          say(`  ${"held back".padEnd(13)}  ${findingLine(f)}`);
-          // A dry run says so and files nothing anyway, so a hold is not a failure of it.
-          if (!o.dryRun)
-            problems.push(
-              `finding ${f.id} was held back: an export at ${recorded[f.id].at} may have filed it before an error, and ${tracker.label}'s search does not show it yet. An export after ${until} files it if it is still not found`,
-            );
-        }
-        candidates = candidates.filter((f) => !held.includes(f));
-        heldBack = held.length;
-      }
-    } else if (!credentials.ok) {
-      say(`Not compared with ${TRACKER_LABEL[o.to]}: ${credentials.error}. A finding filed earlier is listed below as one to file.`);
-    }
+    const { existing, candidates, heldBack } = await compareWithTracker(
+      tracker,
+      credentials,
+      selection,
+      recordPath,
+      key,
+      includeClosed,
+      problems,
+      o,
+      say,
+      http,
+    );
     const record = (f: Finding, entry: Parameters<typeof recordWith>[3], ref: string): void => {
       try {
         writeRecord(recordPath, key, f.id, entry);
@@ -823,112 +793,232 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
             : { files: [], tickets: [] },
       };
     };
-    let writes = 0;
+    const run: ExportRun = { o, say, http, pauseMs, tracker, result, screenshots, includeClosed, contextOf, record, filed, updated, problems, writes: 0 };
 
     for (const entry of plan) {
       const f = entry.finding;
       if (entry.outcome === "already-filed") {
-        const issue = entry.issue;
-        const already = `  ${OUTCOME_WORDS[entry.outcome].padEnd(13)}  ${findingLine(f)}  as ${issue.ref}${issue.open ? "" : " (closed)"}`;
-        // Only an open Jira issue filed earlier is brought up to date; a closed one is the team's decision and left alone.
-        // An export --from a result never updates: the file holds less than the memory that may have filed the issue.
-        if (o.to !== "jira" || !o.jira.update || result || !issue.open || !issue.jira || !tracker?.update) {
-          say(already);
-          continue;
-        }
-        const { ctx, extras } = contextOf(f);
-        const wanted = jiraEditFields(f, ctx);
-        const upd = planJiraUpdate(f, issue.jira, {
-          ...wanted,
-          files: extras.files.map((x) => x.upload),
-          tickets: extras.tickets,
-        });
-        const changesOf = (rewrite: boolean, attach: readonly string[], link: readonly string[], tense: "would" | "did"): string[] =>
-          [
-            rewrite ? (tense === "would" ? "rewrite its summary and description" : "rewrote its summary and description") : "",
-            attach.length ? `${tense === "would" ? "attach" : "attached"} ${attach.join(", ")}` : "",
-            link.length ? `${tense === "would" ? "link it to" : "linked it to"} ${link.join(", ")}` : "",
-          ].filter(Boolean);
-        const changes = changesOf(upd.fields === "change", upd.attach, upd.link, "would");
-        const kept =
-          upd.fields === "edited"
-            ? "; its summary or description was edited in Jira, so it is left as written"
-            : upd.fields === "no-revision"
-              ? "; it was filed by an earlier version, so its summary and description are left as they are"
-              : "";
-        if (changes.length === 0 || o.dryRun) {
-          const would = changes.length ? `; would ${changes.join(", ")}` : upd.fields === "same" ? ", up to date" : "";
-          say(`${already}${would}${kept}`);
-          continue;
-        }
-        if (writes > 0 && pauseMs > 0) await http.wait(pauseMs);
-        writes++;
-        const did = await tracker.update(f, ctx, issue, upd, extras);
-        const done = changesOf(did.rewrote, did.attached, did.linked, "did");
-        // Said only of what Jira took: an update whose every attachment and link failed changed nothing.
-        if (done.length > 0) {
-          updated.push({ id: f.id, issue });
-          say(`  ${`updated ${issue.ref}`.padEnd(13)}  ${findingLine(f)}  ${issue.url}: ${done.join(", ")}${kept}`);
-        } else say(`${already}; nothing could be updated${kept}`);
-        for (const p of did.problems) problems.push(`${issue.ref}: ${p}`);
+        await updateFiledIssue(run, entry, f);
         continue;
       }
-      // Listed, not filed: over the cap, or a dry run (the only way to be here with no tracker, as --yes needs credentials).
-      if (entry.outcome === "over-cap" || o.dryRun || !tracker) {
-        const shown = entry.outcome === "file" && screenshots ? contextOf(f).ctx : null;
-        const shots = shown && shown.screenshots !== "off" ? shown.screenshots.length + (shown.picture ? 1 : 0) : 0;
-        say(`  ${OUTCOME_WORDS[entry.outcome].padEnd(13)}  ${findingLine(f)}${shots ? `  with ${shots} screenshot(s)` : ""}`);
-        continue;
-      }
-      if (writes > 0 && pauseMs > 0) await http.wait(pauseMs);
-      const { ctx, extras } = contextOf(f);
-      let done: Awaited<ReturnType<typeof fileOne>>;
-      try {
-        done = await fileOne(tracker, f, ctx, extras, includeClosed, http);
-      } catch (err) {
-        if (err instanceof ExportError && err.uncertain && !tracker.consistentListing)
-          record(f, { uncertain: true, at: new Date(http.now()).toISOString() }, `finding ${f.id}`);
-        throw err;
-      }
-      writes++;
-      filed.push({ id: f.id, issue: done.issue });
-      record(f, { ref: done.issue.ref, number: done.issue.number, url: done.issue.url, at: new Date(http.now()).toISOString() }, done.issue.ref);
-      say(
-        `  ${`filed ${done.issue.ref}`.padEnd(13)}  ${findingLine(f)}  ${done.issue.url}${done.confirmed ? " (found by its marker after the tracker's error)" : ""}`,
-      );
-      for (const p of done.problems) problems.push(`${done.issue.ref}: ${p}`);
-      if (done.stop) throw new ExportError(done.stop);
+      await fileEntry(run, entry, f);
     }
     reportFrames();
 
-    const count = (outcome: PlanEntry["outcome"]): number => plan.filter((e) => e.outcome === outcome).length;
-    const over = count("over-cap");
-    const overText =
-      (over ? `; ${over} over the cap of ${o.maxIssues} (--max-issues): export again to file them` : "") + (heldBack ? `; ${heldBack} held back` : "");
-    say(
-      o.dryRun
-        ? `Would file ${count("file")}; ${count("already-filed")} already filed${overText}.`
-        : `Filed ${filed.length}; ${count("already-filed")} already filed${updated.length ? `, ${updated.length} of them updated` : ""}${overText}.`,
-    );
-    if (problems.length > 0) {
-      for (const p of problems) complain(`scenescout export: ${p}`);
-      return { exitCode: EXIT_EXPORT.couldNotExport, plan, filed, updated };
-    }
-    return { exitCode: EXIT_EXPORT.done, plan, filed, updated };
+    return exportSummary(plan, o, filed, updated, problems, heldBack, say, complain);
   } catch (err) {
-    reportFrames();
-    complain(`scenescout export: ${err instanceof Error ? err.message : String(err)}`);
-    if (err instanceof ExportError && err.uncertain)
-      complain(
-        o.to === "jira"
-          ? `Jira may have made that issue before the error, and its search can take minutes to show a new one, so it was not sent again. Export again later: the issue is found by its marker if it exists, and filed if it does not. An export within ${UNCERTAIN_HOLD_MS / 60_000} minutes holds that finding back unless it finds the issue.`
-          : "The tracker may have made that issue before the error. The next export finds it by its marker and does not file it again.",
-      );
+    return exportStopped(err, reportFrames, complain, o, problems, filed, updated, plan);
+  }
+}
+
+/** What the per-finding steps of an export share: its settings, its tracker, what it filed and updated, and its problems. */
+interface ExportRun {
+  o: ExportOptions;
+  say: (line: string) => void;
+  http: Http;
+  pauseMs: number;
+  tracker: TrackerApi | null;
+  result: ResultSource | null;
+  screenshots: boolean;
+  includeClosed: boolean;
+  contextOf: (f: Finding) => { ctx: IssueContext; extras: Extras };
+  record: (f: Finding, entry: Parameters<typeof recordWith>[3], ref: string) => void;
+  filed: ExportOutcome["filed"];
+  updated: ExportOutcome["updated"];
+  problems: string[];
+  /** Writes sent to the tracker so far: the pause comes between them. */
+  writes: number;
+}
+
+/**
+ * Compare the findings with the tracker: what its listing and the export record say is filed, and,
+ * where its search lags, the findings held back because an earlier create may have been made.
+ */
+async function compareWithTracker(
+  tracker: TrackerApi | null,
+  credentials: ReturnType<typeof trackerCredentials>,
+  selection: ReturnType<typeof selectFindings>,
+  recordPath: string,
+  key: string,
+  includeClosed: boolean,
+  problems: string[],
+  o: ExportOptions,
+  say: (line: string) => void,
+  http: Http,
+): Promise<{ existing: Map<string, FiledIssue> | null; candidates: Finding[]; heldBack: number }> {
+  let existing: Map<string, FiledIssue> | null = null;
+  let candidates = selection.candidates;
+  let heldBack = 0;
+  if (tracker) {
+    const recorded = readRecord(recordPath)[key] ?? {};
+    const found = await tracker.existing(includeClosed);
+    existing = found.map;
+    say(
+      `Compared with ${tracker.label}: ${found.issues} ${includeClosed ? "" : "open "}issue(s) carry the ${MARKER_LABEL} label` +
+        `${includeClosed ? " (open or closed)" : ""}${found.unmarked ? `, ${found.unmarked} of them with no marker` : ""}` +
+        `${includeClosed ? "" : "; a finding whose issue was closed is filed again (--refile-closed)"}.`,
+    );
+    // The listing can lag behind a create, so an issue an earlier export recorded is read back by its number before its finding counts as unfiled.
+    let readBack = 0;
+    for (const f of candidates) {
+      const entry = recorded[f.id];
+      if (!entry || "uncertain" in entry || existing.has(f.id)) continue;
+      const read = await tracker.read(entry.ref, entry.number);
+      // Gone, moved, or no longer carrying the marker: the finding is filed again, as the listing says.
+      if (!read || !read.ids.includes(f.id) || (!includeClosed && !read.issue.open)) continue;
+      rememberFiled(existing, f.id, read.issue);
+      readBack++;
+    }
+    if (readBack > 0) say(`  ${readBack} more finding(s) found filed by the issue number recorded in ${recordPath}, as the listing does not show them yet.`);
+    // A Jira create that may have been made, and that the search does not show yet, holds its finding back for a while rather than file it twice.
+    if (!tracker.consistentListing) {
+      const held = candidates.filter((f) => !existing!.has(f.id) && recorded[f.id] && uncertainHolds(recorded[f.id], http.now()));
+      for (const f of held) {
+        const until = new Date(Date.parse(recorded[f.id].at) + UNCERTAIN_HOLD_MS).toISOString();
+        say(`  ${"held back".padEnd(13)}  ${findingLine(f)}`);
+        // A dry run says so and files nothing anyway, so a hold is not a failure of it.
+        if (!o.dryRun)
+          problems.push(
+            `finding ${f.id} was held back: an export at ${recorded[f.id].at} may have filed it before an error, and ${tracker.label}'s search does not show it yet. An export after ${until} files it if it is still not found`,
+          );
+      }
+      candidates = candidates.filter((f) => !held.includes(f));
+      heldBack = held.length;
+    }
+  } else if (!credentials.ok) {
+    say(`Not compared with ${TRACKER_LABEL[o.to]}: ${credentials.error}. A finding filed earlier is listed below as one to file.`);
+  }
+  return { existing, candidates, heldBack };
+}
+
+/** A finding already filed: said so, and its open Jira issue brought up to date when --update asks for it. */
+async function updateFiledIssue(run: ExportRun, entry: Extract<PlanEntry, { outcome: "already-filed" }>, f: Finding): Promise<void> {
+  const { o, say, http, pauseMs, tracker, result, contextOf, updated, problems } = run;
+  const issue = entry.issue;
+  const already = `  ${OUTCOME_WORDS[entry.outcome].padEnd(13)}  ${findingLine(f)}  as ${issue.ref}${issue.open ? "" : " (closed)"}`;
+  // Only an open Jira issue filed earlier is brought up to date; a closed one is the team's decision and left alone.
+  // An export --from a result never updates: the file holds less than the memory that may have filed the issue.
+  if (o.to !== "jira" || !o.jira.update || result || !issue.open || !issue.jira || !tracker?.update) {
+    say(already);
+    return;
+  }
+  const { ctx, extras } = contextOf(f);
+  const wanted = jiraEditFields(f, ctx);
+  const upd = planJiraUpdate(f, issue.jira, {
+    ...wanted,
+    files: extras.files.map((x) => x.upload),
+    tickets: extras.tickets,
+  });
+  const changesOf = (rewrite: boolean, attach: readonly string[], link: readonly string[], tense: "would" | "did"): string[] =>
+    [
+      rewrite ? (tense === "would" ? "rewrite its summary and description" : "rewrote its summary and description") : "",
+      attach.length ? `${tense === "would" ? "attach" : "attached"} ${attach.join(", ")}` : "",
+      link.length ? `${tense === "would" ? "link it to" : "linked it to"} ${link.join(", ")}` : "",
+    ].filter(Boolean);
+  const changes = changesOf(upd.fields === "change", upd.attach, upd.link, "would");
+  const kept =
+    upd.fields === "edited"
+      ? "; its summary or description was edited in Jira, so it is left as written"
+      : upd.fields === "no-revision"
+        ? "; it was filed by an earlier version, so its summary and description are left as they are"
+        : "";
+  if (changes.length === 0 || o.dryRun) {
+    const would = changes.length ? `; would ${changes.join(", ")}` : upd.fields === "same" ? ", up to date" : "";
+    say(`${already}${would}${kept}`);
+    return;
+  }
+  if (run.writes > 0 && pauseMs > 0) await http.wait(pauseMs);
+  run.writes++;
+  const did = await tracker.update(f, ctx, issue, upd, extras);
+  const done = changesOf(did.rewrote, did.attached, did.linked, "did");
+  // Said only of what Jira took: an update whose every attachment and link failed changed nothing.
+  if (done.length > 0) {
+    updated.push({ id: f.id, issue });
+    say(`  ${`updated ${issue.ref}`.padEnd(13)}  ${findingLine(f)}  ${issue.url}: ${done.join(", ")}${kept}`);
+  } else say(`${already}; nothing could be updated${kept}`);
+  for (const p of did.problems) problems.push(`${issue.ref}: ${p}`);
+}
+
+/** A finding to file: listed when it is over the cap or the export is a dry run, filed and recorded otherwise. */
+async function fileEntry(run: ExportRun, entry: PlanEntry, f: Finding): Promise<void> {
+  const { o, say, http, pauseMs, tracker, screenshots, includeClosed, contextOf, record, filed, problems } = run;
+  // Listed, not filed: over the cap, or a dry run (the only way to be here with no tracker, as --yes needs credentials).
+  if (entry.outcome === "over-cap" || o.dryRun || !tracker) {
+    const shown = entry.outcome === "file" && screenshots ? contextOf(f).ctx : null;
+    const shots = shown && shown.screenshots !== "off" ? shown.screenshots.length + (shown.picture ? 1 : 0) : 0;
+    say(`  ${OUTCOME_WORDS[entry.outcome].padEnd(13)}  ${findingLine(f)}${shots ? `  with ${shots} screenshot(s)` : ""}`);
+    return;
+  }
+  if (run.writes > 0 && pauseMs > 0) await http.wait(pauseMs);
+  const { ctx, extras } = contextOf(f);
+  let done: Awaited<ReturnType<typeof fileOne>>;
+  try {
+    done = await fileOne(tracker, f, ctx, extras, includeClosed, http);
+  } catch (err) {
+    if (err instanceof ExportError && err.uncertain && !tracker.consistentListing)
+      record(f, { uncertain: true, at: new Date(http.now()).toISOString() }, `finding ${f.id}`);
+    throw err;
+  }
+  run.writes++;
+  filed.push({ id: f.id, issue: done.issue });
+  record(f, { ref: done.issue.ref, number: done.issue.number, url: done.issue.url, at: new Date(http.now()).toISOString() }, done.issue.ref);
+  say(
+    `  ${`filed ${done.issue.ref}`.padEnd(13)}  ${findingLine(f)}  ${done.issue.url}${done.confirmed ? " (found by its marker after the tracker's error)" : ""}`,
+  );
+  for (const p of done.problems) problems.push(`${done.issue.ref}: ${p}`);
+  if (done.stop) throw new ExportError(done.stop);
+}
+
+/** The export's last line, and its outcome: the problems it met, if any, make it one that could not export. */
+function exportSummary(
+  plan: PlanEntry[],
+  o: ExportOptions,
+  filed: ExportOutcome["filed"],
+  updated: ExportOutcome["updated"],
+  problems: string[],
+  heldBack: number,
+  say: (line: string) => void,
+  complain: (line: string) => void,
+): ExportOutcome {
+  const count = (outcome: PlanEntry["outcome"]): number => plan.filter((e) => e.outcome === outcome).length;
+  const over = count("over-cap");
+  const overText =
+    (over ? `; ${over} over the cap of ${o.maxIssues} (--max-issues): export again to file them` : "") + (heldBack ? `; ${heldBack} held back` : "");
+  say(
+    o.dryRun
+      ? `Would file ${count("file")}; ${count("already-filed")} already filed${overText}.`
+      : `Filed ${filed.length}; ${count("already-filed")} already filed${updated.length ? `, ${updated.length} of them updated` : ""}${overText}.`,
+  );
+  if (problems.length > 0) {
     for (const p of problems) complain(`scenescout export: ${p}`);
-    if (filed.length > 0) complain(`Filed before it stopped: ${filed.map((x) => x.issue.ref).join(", ")}.`);
-    if (updated.length > 0) complain(`Updated before it stopped: ${updated.map((x) => x.issue.ref).join(", ")}.`);
     return { exitCode: EXIT_EXPORT.couldNotExport, plan, filed, updated };
   }
+  return { exitCode: EXIT_EXPORT.done, plan, filed, updated };
+}
+
+/** An export that stopped part-way: what stopped it, the problems before it, and what it had filed and updated by then. */
+function exportStopped(
+  err: unknown,
+  reportFrames: () => void,
+  complain: (line: string) => void,
+  o: ExportOptions,
+  problems: string[],
+  filed: ExportOutcome["filed"],
+  updated: ExportOutcome["updated"],
+  plan: PlanEntry[],
+): ExportOutcome {
+  reportFrames();
+  complain(`scenescout export: ${err instanceof Error ? err.message : String(err)}`);
+  if (err instanceof ExportError && err.uncertain)
+    complain(
+      o.to === "jira"
+        ? `Jira may have made that issue before the error, and its search can take minutes to show a new one, so it was not sent again. Export again later: the issue is found by its marker if it exists, and filed if it does not. An export within ${UNCERTAIN_HOLD_MS / 60_000} minutes holds that finding back unless it finds the issue.`
+        : "The tracker may have made that issue before the error. The next export finds it by its marker and does not file it again.",
+    );
+  for (const p of problems) complain(`scenescout export: ${p}`);
+  if (filed.length > 0) complain(`Filed before it stopped: ${filed.map((x) => x.issue.ref).join(", ")}.`);
+  if (updated.length > 0) complain(`Updated before it stopped: ${updated.map((x) => x.issue.ref).join(", ")}.`);
+  return { exitCode: EXIT_EXPORT.couldNotExport, plan, filed, updated };
 }
 
 const GITHUB_HEADERS = { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28" };
