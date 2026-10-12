@@ -1,0 +1,39 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-25-0-4",
+  "date": "2026-10-12",
+  "note": "Unattended scenescout ci run (scheduled) of v3.25.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Home notices fail to load with HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Fines page presents an empty list when fines request is forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; fines-rows empty"
+    },
+    {
+      "title": "Account data export link is unreachable due to clipping",
+      "severity": "high",
+      "category": "visual",
+      "evidence": "account.html account-export UNREACHABLE overflow-hidden"
+    },
+    {
+      "title": "Account export link lacks a distinct visual link treatment",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "account.html account-export link same color as body and no underline"
+    },
+    {
+      "title": "Event page columns are misaligned by one pixel",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "events.html column x218 vs x219"
+    }
+  ],
+  "decisions": []
+}
