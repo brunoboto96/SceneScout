@@ -6,6 +6,7 @@ import {
   type BrowserType,
   type BrowserContext,
   type BrowserContextOptions,
+  type Download,
   type FileChooser,
   type Frame,
   type Locator,
@@ -140,8 +141,10 @@ import {
   AnsweredNavigationError,
   answeredNavigationFailure,
   answeredStatus,
+  answersNavigation,
   awaitsLateAnswer,
   crawledRoute,
+  downloadIsNavigations,
   crawlLine,
   failedNavigationLeavesErrorPage,
   isFileMediaType,
@@ -6028,18 +6031,23 @@ export class BrowserEngine {
     let downloadedNow: () => void = () => undefined;
     const download = new Promise<void>((resolve) => (downloadedNow = resolve));
     const asked = new URL(url).href;
+    /** Every URL this navigation was answered from, redirects included: a download from one of them is its own. */
+    const answeredFrom: string[] = [];
     const onResponse = (r: Response): void => {
       if (r.frame() !== page.mainFrame() || !r.request().isNavigationRequest()) return;
       let first = r.request();
       for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
       if (first.url() !== asked) return;
+      answeredFrom.push(r.url());
+      // A redirect's own response is a hop: the answer is the response it leads to.
+      if (!answersNavigation(r.status(), r.headers()["location"])) return;
       last = { url: r.url(), status: r.status(), contentType: mediaTypeOf(r.headers()["content-type"]) };
       answeredNow();
     };
-    // A download the page starts while this navigation is under way is taken as this navigation's. A wrong match ends
-    // the error-page wait early, so the next navigation could be interrupted; that is accepted because a script
-    // starting a download at the same moment is far less likely than the file asked for.
-    const onDownload = (): void => {
+    // Only a download of what this navigation asked for or was redirected to is its own (crawl.ts downloadIsNavigations):
+    // the previous navigation's arrives late, during this one, and taken as this one's it ended the error-page wait early.
+    const onDownload = (d: Download): void => {
+      if (!downloadIsNavigations(d.url(), asked, answeredFrom)) return;
       downloaded = true;
       downloadedNow();
     };

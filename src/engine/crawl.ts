@@ -155,6 +155,33 @@ export function failedNavigationLeavesErrorPage(message: string, status: number 
 }
 
 /**
+ * Whether a download the page reported is this navigation's: for the URL it
+ * asked for, or one it was answered from on the way (a redirect's target).
+ * Chromium reports a download a few milliseconds after goto has thrown for
+ * it, so a download from the navigation before arrives during the next one;
+ * taken as the next one's, it ended the wait for the error page Chromium then
+ * commits for a missing file, and that page interrupted the load after it.
+ * Fragments are never sent, so they are not compared.
+ */
+export function downloadIsNavigations(downloadUrl: string, asked: string, answeredFrom: readonly string[]): boolean {
+  const bare = (u: string): string => u.replace(/#.*$/, "");
+  const url = bare(downloadUrl);
+  return url === bare(asked) || answeredFrom.some((u) => bare(u) === url);
+}
+
+/**
+ * Whether a main-document response is the navigation's answer rather than a
+ * hop on the way to it. A 3xx with a Location is a redirect the browser
+ * follows, so the answer is still to come: WebKit reports a redirect's 302
+ * before it throws for the download it leads to and the file's own response
+ * only after, and taken as the answer the 302 ended the wait for the file's
+ * (awaitsLateAnswer). A 3xx without a Location (304 among them) is the answer.
+ */
+export function answersNavigation(status: number, location: string | undefined): boolean {
+  return !(status >= 300 && status < 400 && location !== undefined && location !== "");
+}
+
+/**
  * Whether a navigation that threw should wait for its main document's
  * response before it is judged. WebKit fails goto for a download before it
  * reports the response, which follows a few milliseconds later; without it a
@@ -178,7 +205,10 @@ export function answeredNavigationFailure(message: string, answer: Pick<MainDocu
   if (!answer || isTimeoutMessage(message) || /\bis interrupted by another navigation\b/.test(message)) return null;
   const said = answeredStatus(answer);
   if (answer.status >= 400) return said;
-  if (DOWNLOAD_STARTED.test(message)) return `${said}, which the browser downloaded instead of opening a page`;
+  // A navigate step cannot open a file, so the reason says what checks one: the request the click that downloads it makes.
+  if (DOWNLOAD_STARTED.test(message)) {
+    return `${said}, which the browser downloaded instead of opening a page; a file is checked by an expect-request step after the click that downloads it`;
+  }
   return null;
 }
 

@@ -45,7 +45,9 @@ import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engi
 import {
   answeredNavigationFailure,
   answeredStatus,
+  answersNavigation,
   awaitsLateAnswer,
+  downloadIsNavigations,
   failedNavigationLeavesErrorPage,
   isFileMediaType,
   isNonPageResource,
@@ -546,6 +548,40 @@ test("a download's failed load waits for its response only when none was seen", 
   for (const [message, seen, expected, what] of cases) assert.equal(awaitsLateAnswer(message, seen), expected, what);
 });
 
+test("a download is a navigation's only when it is for the URL that navigation asked for or was redirected to", () => {
+  const asked = "http://127.0.0.1/files/gone.pdf";
+  // [download URL, URLs the navigation answered from, its, what it is].
+  const cases: Array<[string, string[], boolean, string]> = [
+    ["http://127.0.0.1/files/gone.pdf", [], true, "the file asked for, before its response was seen (WebKit)"],
+    ["http://127.0.0.1/files/gone.pdf", ["http://127.0.0.1/files/gone.pdf"], true, "the file asked for"],
+    ["http://127.0.0.1/files/report.pdf", ["http://127.0.0.1/moved", "http://127.0.0.1/files/report.pdf"], true, "the file a redirect led to"],
+    ["http://127.0.0.1/files/report.pdf", ["http://127.0.0.1/files/gone.pdf"], false, "the previous navigation's download, reported late (Chromium)"],
+    ["http://127.0.0.1/export.csv", [], false, "a download a script started"],
+  ];
+  for (const [download, answered, expected, what] of cases) assert.equal(downloadIsNavigations(download, asked, answered), expected, what);
+  // The fragment is never sent, so a download never carries the one the navigation asked with.
+  assert.equal(downloadIsNavigations("http://127.0.0.1/files/gone.pdf", `${asked}#page=2`, []), true, "a fragment on the URL asked for");
+});
+
+test("a redirect the browser follows is a hop, not the navigation's answer", () => {
+  // WebKit reports a redirect's 302 before it throws for the file it leads to, and that file's response only after:
+  // taken as the answer, the 302 stopped the wait for the file's, and a PDF behind a redirect read as a failed load.
+  // [status, Location header, answers, what it is].
+  const cases: Array<[number, string | undefined, boolean, string]> = [
+    [302, "/files/report.pdf", false, "a redirect to a file"],
+    [301, "https://example.test/moved", false, "a permanent redirect"],
+    [307, "/next", false, "a temporary redirect"],
+    [308, "/next", false, "a permanent redirect keeping the method"],
+    [304, undefined, true, "not modified: the cached document is the answer"],
+    [300, undefined, true, "multiple choices without a Location: nothing is followed"],
+    [302, undefined, true, "a 302 without a Location: nothing is followed"],
+    [200, undefined, true, "a page or file"],
+    [404, undefined, true, "a missing file"],
+    [201, "/things/1", true, "a Location on a success is not a redirect"],
+  ];
+  for (const [status, location, expected, what] of cases) assert.equal(answersNavigation(status, location), expected, what);
+});
+
 test("a navigation that threw after its document answered is reported by its HTTP status, not the browser's words", () => {
   const pdf = (status: number) => ({ status, contentType: "application/pdf" });
   // [message, the main document's answer, reported as, what it is].
@@ -564,8 +600,8 @@ test("a navigation that threw after its document answered is reported by its HTT
     [
       "page.goto: Download is starting",
       pdf(200),
-      "the file answered HTTP 200 (application/pdf), which the browser downloaded instead of opening a page",
-      "a PDF that answered: named, with why no page opened",
+      "the file answered HTTP 200 (application/pdf), which the browser downloaded instead of opening a page; a file is checked by an expect-request step after the click that downloads it",
+      "a PDF that answered: named, with why no page opened and how a file is checked instead",
     ],
     ["page.goto: Download is starting", null, null, "nothing answered: the browser's message stands"],
     ["page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1/", null, null, "a refused connection"],

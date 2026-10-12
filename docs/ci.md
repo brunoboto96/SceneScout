@@ -260,7 +260,7 @@ A flow has a `name` (the file name when left out) and its `steps`. The first ste
 
 | Step | Fields | |
 |---|---|---|
-| `navigate` | `target` | A path on the app, starting with `/`. A page or file that answers 4xx or 5xx fails the step naming its status, e.g. `the file answered HTTP 404 (application/pdf)`, and so does a file the browser downloads instead of opening a page |
+| `navigate` | `target` | A path on the app, starting with `/`. A page or file that answers 4xx or 5xx fails the step naming its status, e.g. `the file answered HTTP 404 (application/pdf)`, and so does a file the browser downloads instead of opening a page. To check a file, click the control that downloads it and follow with an `expect-request` step for its path |
 | `click` | `target` | |
 | `type` | `target`, `value`, `pressEnter`?, `replace`? | Appends unless `replace` is true |
 | `select` | `target`, `value` | |

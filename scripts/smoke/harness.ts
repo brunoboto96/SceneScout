@@ -419,6 +419,13 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end("%PDF-1.4\n%%EOF\n");
       return;
     }
+    // The same PDF behind a redirect: WebKit reports the redirect's 302 before it throws for the download, and the file's
+    // own response only after.
+    if (urlPath === "/check-file-moved") {
+      res.writeHead(302, { location: "/check-file" });
+      res.end();
+      return;
+    }
     if (urlPath === "/check-sheet") {
       res.writeHead(200, { "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="sheet.csv"' });
       res.end("name,count\nwidget,3\n");
