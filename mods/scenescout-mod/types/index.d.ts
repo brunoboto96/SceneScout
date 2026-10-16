@@ -25,6 +25,7 @@ export type ScenescoutModWizard = {
   pictureFiles: Record<string, string>;
   cardId: string | null;
   lastChoices: Record<string, unknown> | null;
+  returnTo: ScenescoutModWizard["step"] | null;
 };
 
 export type ScenescoutModStatus = {

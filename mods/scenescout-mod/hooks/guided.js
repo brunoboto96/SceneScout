@@ -145,7 +145,19 @@ export const SAFETY_EXPLAINER = [
   "It never asks for your password. When your site needs one, a browser window opens for you to sign in as you normally would.",
 ];
 
-export const SERVER_ERROR_SENTENCE = "I could not reach the SceneScout server. Is the scenescout plugin installed and turned on?";
+export const SERVER_ERROR_SENTENCE = "I could not reach the SceneScout server: check that the scenescout plugin is installed and turned on.";
+
+/** The heading over a screen for something that went wrong, and over one that waits on the person. */
+export const SCREEN_HEADING = { wentWrong: "Something went wrong", needYou: "I need you" };
+
+/** Which heading each error screen goes under, as guided-words.ts's ERROR_HEADING. */
+export const ERROR_HEADING = {
+  "server-error": "wentWrong",
+  "address-unreachable": "wentWrong",
+  "browser-download-failed": "wentWrong",
+  "sign-in-expired": "needYou",
+  "stopped-by-cap": "wentWrong",
+};
 
 export const STARTING_SENTENCE = "Getting ready to start.";
 
@@ -158,6 +170,8 @@ export const ACTION_LABEL = {
   notABug: "Not a bug",
   explain: "Explain more",
   again: "Check again",
+  tryAgain: "Try again",
+  signInAgain: "Sign in again",
 };
 
 export const ACTION_PROMPT = {
@@ -175,6 +189,7 @@ export const PANEL_WORDS = {
   welcome: "Find what is broken on your site, in plain words.",
   checkSite: "Check a site",
   safety: "How it keeps your data safe",
+  isItSafe: "Is it safe on a live site?",
   following: "A check is going:",
   follow: "Follow it",
   lastCheck: "Your last check:",
@@ -205,9 +220,8 @@ export const PANEL_WORDS = {
   expected: "What was expected",
   happened: "What happened",
   technical: "Technical detail",
-  needYou: "I need you",
-  wentWrong: "Something went wrong",
-  tryAgain: "Try again",
+  tryAgain: ACTION_LABEL.tryAgain,
+  technicalDetail: "Technical detail",
   howToFix: "How to fix this",
   lookOnly: `Run it as "${CARE_LABEL["look-only"]}"`,
   waitingForm: "A form has opened for you to answer. The check starts only when you say yes there.",
@@ -239,6 +253,7 @@ export const IMPACT_MARK = { "Blocks users": "!", Annoying: "~", Cosmetic: ".", 
  *   pictureFiles: Record<string, string>,
  *   cardId: string | null,
  *   lastChoices: any,
+ *   returnTo: string | null,
  * }} Wizard
  */
 
@@ -268,6 +283,7 @@ export function initialWizard() {
     pictureFiles: {},
     cardId: null,
     lastChoices: null,
+    returnTo: null,
   };
 }
 
@@ -318,6 +334,7 @@ export function wizardOf(value) {
     pictureFiles: isRecord(value.pictureFiles) ? /** @type {Record<string, string>} */ (value.pictureFiles) : {},
     cardId: str(value.cardId) || null,
     lastChoices: isRecord(value.lastChoices) ? value.lastChoices : null,
+    returnTo: STEPS.includes(str(value.returnTo)) && str(value.returnTo) !== "safety" ? str(value.returnTo) : null,
   };
 }
 
@@ -334,6 +351,8 @@ export function reduce(w, action) {
   switch (action.type) {
     case "go":
       if (!STEPS.includes(action.step)) return w;
+      // The explainer goes back to where it was opened from: the welcome, or a check being set up, whose choices are kept.
+      if (action.step === "safety") return { ...w, step: "safety", returnTo: w.step === "safety" ? w.returnTo : w.step, notice: null, busy: null };
       return { ...w, step: action.step, notice: null, busy: null };
     case "newCheck":
       return { ...w, step: "configuring", draft: defaultDraft(), planId: null, plan: null, notice: null, busy: null };
@@ -741,10 +760,10 @@ export function renderGuided(els, w, ctx, act) {
     rows.push(
       column(
         [
-          heading(PANEL_WORDS.wentWrong),
+          heading(SCREEN_HEADING[ERROR_HEADING["server-error"]]),
           text(SERVER_ERROR_SENTENCE, { color: "red" }),
-          dim(str(ctx.status.error).slice(0, 300)),
           row([button("guided-error-retry", PANEL_WORDS.tryAgain, () => act("retry")), link(PANEL_WORDS.howToFix, TROUBLESHOOTING_URL)].filter(Boolean)),
+          dim(`${PANEL_WORDS.technicalDetail}: ${str(ctx.status.error).slice(0, 300)}`),
         ],
         { marginBottom: 1 },
       ),
@@ -860,7 +879,12 @@ export function renderGuided(els, w, ctx, act) {
         ),
       ),
     );
-    out.push(text(PANEL_WORDS.careful, { bold: true }));
+    out.push(
+      row([
+        text(PANEL_WORDS.careful, { bold: true }),
+        button("guided-config-safety", PANEL_WORDS.isItSafe, () => act("go", { step: "safety" }), { plain: true }),
+      ]),
+    );
     for (const care of CARES) {
       out.push(
         button(
@@ -947,10 +971,16 @@ export function renderGuided(els, w, ctx, act) {
       );
     if (isRecord(g.saved)) out.push(dim(str(g.saved.sentence)));
     if (isRecord(g.needsYou)) {
+      const wentWrong = needsYouHeading(g.needsYou.kind) === SCREEN_HEADING.wentWrong;
       out.push(
-        column([heading(PANEL_WORDS.needYou), text(str(g.needsYou.sentence), { color: "yellow" }), row(actionButtons(g.needsYou.actions, "guided-needs"))], {
-          marginTop: 1,
-        }),
+        column(
+          [
+            heading(needsYouHeading(g.needsYou.kind)),
+            text(str(g.needsYou.sentence), { color: wentWrong ? "red" : "yellow" }),
+            row(actionButtons(g.needsYou.actions, "guided-needs")),
+          ],
+          { marginTop: 1 },
+        ),
       );
     }
     const live = link(PANEL_WORDS.watchLive, liveHref(ctx.status.data?.liveUrl));
@@ -1079,9 +1109,21 @@ export function renderGuided(els, w, ctx, act) {
     return [
       heading(PANEL_WORDS.safety),
       ...SAFETY_EXPLAINER.map((s) => text(s)),
-      row([button("guided-safety-back", PANEL_WORDS.back, () => act("go", { step: "welcome" }))]),
+      row([button("guided-safety-back", PANEL_WORDS.back, () => act("go", { step: w.returnTo ?? "welcome" }))]),
     ];
   }
+}
+
+/**
+ * The heading over what the engine says it needs of the person: an error
+ * screen's own heading, or "I need you" for a confirmation, a sign-in and a
+ * step that is stuck.
+ *
+ * @param {unknown} kind
+ */
+export function needsYouHeading(kind) {
+  const k = str(kind);
+  return SCREEN_HEADING[Object.hasOwn(ERROR_HEADING, k) ? ERROR_HEADING[/** @type {keyof typeof ERROR_HEADING} */ (k)] : "needYou"];
 }
 
 /**
@@ -1100,7 +1142,7 @@ export function guidedText(w, status) {
     lines.push(`${str(g.title)} (${timeLine(g.time)}). Now: ${str(g.now)}`, `${PANEL_WORDS.problemsSoFar} ${problemsLine(g.problems)}`);
     for (const card of Array.isArray(g.latest) ? g.latest.filter(isRecord) : [])
       lines.push(`- ${str(card.impact)}: ${str(card.title)} (${str(card.page)}, id ${str(card.id)})`);
-    if (isRecord(g.needsYou)) lines.push(`${PANEL_WORDS.needYou}: ${str(g.needsYou.sentence)}`);
+    if (isRecord(g.needsYou)) lines.push(`${needsYouHeading(g.needsYou.kind)}: ${str(g.needsYou.sentence)}`);
     lines.push(
       "",
       PANEL_WORDS.fallbackNext,
