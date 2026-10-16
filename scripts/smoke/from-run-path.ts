@@ -90,7 +90,13 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     async (engine) => {
       const changed = steps.map((s) => (s.action === "click" ? { ...s, target: 'role=button[name="Open file"]' } : s));
       const outcome = prefixOutcome(await engine.runPlan(changed), changed.length, "/path-gated-detail.html");
-      check("a path the page changed under is reported as not repeated", !outcome.ok, JSON.stringify(outcome));
+      // At the lower limit, a step before the click that ran out would also fail the path: the reason must be the click.
+      const at = changed.findIndex((s) => s.action === "click") + 1;
+      check(
+        "a path the page changed under is reported as not repeated, at the click on the button it no longer has",
+        !outcome.ok && new RegExp(`^${at} of ${changed.length} step\\(s\\) ran: ${at}\\. click role=button\\[name="Open file"\\] → FAILED`).test(outcome.why),
+        JSON.stringify(outcome),
+      );
     },
     DEFAULT_ACTION_TIMEOUT_MS,
   );
