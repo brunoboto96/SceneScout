@@ -33,12 +33,14 @@ import {
   isAuthExempt,
   isDestructive,
   isDestructiveWire,
+  isDestructiveRequest,
   BlockNotices,
   blockSignature,
   destructiveLabelOf,
   dialogNote,
   dialogResponse,
   ESCAPE_REFUSAL,
+  DESTRUCTIVE_GET_REFUSAL,
   pickIsDestructive,
   LABEL_HEAD_WORDS,
   COMMAND_TEXT_WORDS,
@@ -55,6 +57,8 @@ import {
   LOOSENED_RULE_HOLD_MS,
   stricterMode,
   WriteRule,
+  writeMethod,
+  writeMethodLabel,
 } from "../src/engine/policy.ts";
 import { scriptLiteral } from "../src/engine/script-literal.ts";
 import {
@@ -82,6 +86,16 @@ import {
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 import type { Request, Route } from "playwright";
 import { marksRouteExercised, pathnameOf, RouteGuard, routedWriteVerdict, type RouteGuardHost } from "../src/engine/route-guard.ts";
+import {
+  destructiveGet,
+  identifierWords,
+  mutationRootFields,
+  refuseDestructiveGetsSetting,
+  strictIsDestructive,
+  writeClassifierSetting,
+  type WriteClassifier,
+} from "../src/engine/strict-writes.ts";
+import { fuzzCases, fuzzRates } from "./policy-fuzz.ts";
 
 // ---------------------------------------------------------------------------
 // isDestructiveWire — argument order is load-bearing
@@ -1612,7 +1626,14 @@ test("pathnameOf reads a request URL's path, and keeps what does not parse", () 
 type GuardCall = string;
 function guardRig(
   rule: (typeof WRITE_MODES)[number],
-  opts: { foreign?: string | null; owned?: (pathname: string) => boolean; readPost?: string; frameDoc?: "foreign" | "app" | null } = {},
+  opts: {
+    foreign?: string | null;
+    owned?: (pathname: string) => boolean;
+    readPost?: string;
+    frameDoc?: "foreign" | "app" | null;
+    classifier?: WriteClassifier;
+    refuseGets?: boolean;
+  } = {},
 ) {
   const calls: GuardCall[] = [];
   const owned = new Set<string>();
@@ -1640,12 +1661,14 @@ function guardRig(
     recordCreation: async (res) => {
       owned.add(String((res as unknown as { created: string }).created));
     },
+    writeClassifier: () => opts.classifier ?? "standard",
+    refuseDestructiveGets: () => opts.refuseGets ?? false,
   };
   const guard = new RouteGuard(host);
   const send = (
     method: string,
     path: string,
-    { type = "xhr", body = null as string | null, created = undefined as string | undefined, answerAfterMs = 0 } = {},
+    { type = "xhr", body = null as string | null, created = undefined as string | undefined, answerAfterMs = 0, headers = {} as Record<string, string> } = {},
   ) => {
     const url = `https://app.example.com${path}`;
     const request = {
@@ -1654,7 +1677,7 @@ function guardRig(
       resourceType: () => type,
       postData: () => body,
       postDataBuffer: () => (body === null ? null : Buffer.from(body)),
-      headers: () => ({ origin: "https://app.example.com" }),
+      headers: () => ({ origin: "https://app.example.com", ...headers }),
       frame: () => {
         throw new Error("no frame");
       },
@@ -1741,6 +1764,312 @@ test("RouteGuard: a safe-write PUT right after the POST that created its record 
   // Judged while the POST's answer is still on its way: allowed only because the handler waits for the pending creation.
   assert.equal(await send("PUT", "/api/things/9", { body: "{}" }).done, "fallback");
   assert.equal(await send("PUT", "/api/things/10", { body: "{}" }).done, "fulfill 403");
+});
+
+// ── Method overrides (#548): a POST that names another method is judged as that method ──
+
+test("writeMethod: an override is read from every place a server takes one, and never loosens the method", () => {
+  const as = (method: string, url: string, headers?: Record<string, string>, body?: string | null) => writeMethod({ method, url, headers, body });
+  const u = "https://app.example.com/api/things/3";
+  assert.deepEqual(as("POST", u), { method: "POST" }, "no override: the sent method");
+  assert.deepEqual(
+    as("POST", u, { "X-HTTP-Method-Override": "delete" }),
+    { method: "DELETE", via: "X-HTTP-Method-Override: DELETE" },
+    "header names in any case",
+  );
+  assert.deepEqual(as("POST", u, { "x-http-method": "PUT" }), { method: "PUT", via: "X-HTTP-Method: PUT" });
+  assert.deepEqual(as("POST", u, { "X-Method-Override": "PATCH" }), { method: "PATCH", via: "X-Method-Override: PATCH" });
+  assert.equal(as("POST", `${u}?_method=DELETE`).method, "DELETE", "the query");
+  assert.equal(as("POST", `${u}?a=1&_method=delete#x`).method, "DELETE");
+  assert.equal(as("POST", u, {}, "name=x&_method=put").method, "PUT", "a form-encoded body (how server-rendered forms send an edit)");
+  assert.equal(as("POST", u, {}, "name=x&_method=DE%4CETE").method, "DELETE", "percent-encoded");
+  assert.equal(as("POST", u, {}, '--b\r\nContent-Disposition: form-data; name="_method"\r\n\r\nDELETE\r\n--b--').method, "DELETE", "a multipart field");
+  assert.equal(as("POST", u, {}, JSON.stringify({ _method: "delete", id: 3 })).method, "DELETE", "a top-level JSON key");
+  // Keys as a server decodes them: percent-encoded, and `.` or a space read as `_`.
+  assert.equal(as("POST", u, {}, "%5Fmethod=DELETE").method, "DELETE", "a percent-encoded key");
+  assert.equal(as("POST", u, {}, ".method=DELETE").method, "DELETE", "`.method`, read as `_method`");
+  assert.equal(as("POST", `${u}?%5Fmethod=PUT`).method, "PUT", "a percent-encoded key in the query");
+  assert.equal(as("POST", u, {}, "--b\r\nContent-Disposition: form-data; name=_method\r\n\r\nDELETE\r\n--b--").method, "DELETE", "an unquoted multipart name");
+  // Never looser: an override naming a read, or a POST on a DELETE, leaves the sent method.
+  assert.deepEqual(as("POST", u, { "x-http-method-override": "GET" }), { method: "POST" });
+  assert.deepEqual(as("DELETE", u, { "x-http-method-override": "POST" }), { method: "DELETE" });
+  assert.deepEqual(as("PUT", `${u}?_method=GET`), { method: "PUT" });
+  // A list, as a lenient server might read the first of: judged by the one that writes most.
+  assert.equal(as("POST", u, { "x-http-method-override": "GET, DELETE" }).method, "DELETE");
+  // Several places at once: the one that writes most.
+  assert.equal(as("POST", `${u}?_method=GET`, { "x-http-method-override": "PATCH" }).method, "PATCH");
+  // Content that merely mentions the word is not an override.
+  assert.deepEqual(as("POST", u, {}, JSON.stringify({ note: "_method=delete in the old form" })), { method: "POST" });
+  assert.deepEqual(as("POST", u, { "x-requested-with": "DELETE" }), { method: "POST" }, "an unrelated header");
+  assert.deepEqual(as("POST", u, { "x-http-method-override": "<script>" }), { method: "POST" }, "a value that is not a method");
+  // Labels: the sent method, then what it was judged as.
+  assert.equal(writeMethodLabel("POST", as("POST", u, { "x-http-method-override": "DELETE" })), "POST as DELETE");
+  assert.equal(writeMethodLabel("POST", as("POST", u)), "POST");
+});
+
+test("RouteGuard: a POST carrying a method override is judged as the method it names, in every mode", async () => {
+  const overrides: Array<[string, { headers?: Record<string, string>; query?: string; body?: string; type?: string }]> = [
+    ["X-HTTP-Method-Override header", { headers: { "x-http-method-override": "DELETE" } }],
+    ["X-HTTP-Method header", { headers: { "x-http-method": "DELETE" } }],
+    ["X-Method-Override header", { headers: { "x-method-override": "delete" } }],
+    ["_method in the query", { query: "?_method=DELETE" }],
+    ["_method in a form body", { body: "_method=delete&id=3", type: "document" }],
+  ];
+  // Read-only: the contrastive pair. The same POST with no override goes out; with any override naming DELETE it is refused.
+  {
+    const { send } = guardRig("read-only");
+    assert.equal(await send("POST", "/api/things/3", { body: "id=3" }).done, "fallback", "a plain POST goes out in read-only");
+    for (const [what, o] of overrides) {
+      const r = send("POST", `/api/things/3${o.query ?? ""}`, { body: o.body ?? "id=3", headers: o.headers, type: o.type ?? "xhr" });
+      assert.match(await r.done, /^(fulfill 403|abort blockedbyclient)$/, `read-only refuses a POST overridden by ${what}`);
+    }
+    // Naming PUT or PATCH is refused too: read-only lets none of them out.
+    for (const m of ["PUT", "PATCH"])
+      assert.equal(await send("POST", "/api/things/3", { body: "{}", headers: { "x-http-method-override": m } }).done, "fulfill 403", m);
+    // A GET that names DELETE is not a read.
+    assert.equal(await send("GET", "/api/things/3", { headers: { "x-http-method-override": "DELETE" } }).done, "fulfill 403", "GET overridden to DELETE");
+    assert.equal(await send("GET", "/api/things/3?_method=delete").done, "fulfill 403", "GET with ?_method=delete");
+  }
+  // An override never loosens: a POST that names GET is still a POST, refused in observe.
+  {
+    const { send } = guardRig("observe");
+    assert.equal(await send("POST", "/api/things", { body: "{}", headers: { "x-http-method-override": "GET" } }).done, "fulfill 403");
+    // A sign-in overridden to DELETE is no longer a sign-in.
+    assert.equal(await send("POST", "/api/auth/login", { body: "{}" }).done, "fallback", "the plain sign-in goes out");
+    assert.equal(await send("POST", "/api/auth/login", { body: "{}", headers: { "x-http-method-override": "DELETE" } }).done, "fulfill 403");
+  }
+  // Safe-write: the override is judged by ownership, as the method it names would be.
+  {
+    const { send } = guardRig("safe-write", { owned: (p) => p === "/api/things/mine" });
+    const del = { headers: { "x-http-method-override": "DELETE" } };
+    assert.equal(await send("POST", "/api/things/mine", { body: "{}", ...del }).done, "fallback", "an owned record");
+    assert.equal(await send("POST", "/api/things/theirs", { body: "{}", ...del }).done, "fulfill 403", "a record this run did not create");
+    assert.equal(await send("POST", "/api/things/theirs", { body: "{}" }).done, "fallback", "the plain POST to it goes out");
+  }
+  // Destructive lets everything out.
+  {
+    const { send } = guardRig("destructive");
+    assert.equal(await send("POST", "/api/things/3", { body: "{}", headers: { "x-http-method-override": "DELETE" } }).done, "fallback");
+  }
+});
+
+test("writeMethod: a body built to slow the multipart scan is read in linear time", () => {
+  const body = 'name="_method"\n'.repeat(20000);
+  const started = performance.now();
+  assert.deepEqual(writeMethod({ method: "POST", url: "https://app.example.com/x", body }), { method: "POST" });
+  assert.ok(performance.now() - started < 1000, `took ${performance.now() - started} ms`);
+});
+
+test("RouteGuard: a frame document is judged for an override and, when turned on, as a destructive page load", async () => {
+  // An app frame's GET naming DELETE is a write, not a frame load.
+  assert.equal(
+    await guardRig("read-only", { frameDoc: "app" }).send("GET", "/items/3", { type: "document", headers: { "x-http-method-override": "DELETE" } }).done,
+    "abort blockedbyclient",
+  );
+  assert.equal(await guardRig("read-only", { frameDoc: "app" }).send("GET", "/items/3", { type: "document" }).done, "fallback", "the plain frame loads");
+  assert.equal(
+    await guardRig("read-only", { frameDoc: "app", refuseGets: true }).send("GET", "/items/3/delete", { type: "document" }).done,
+    "abort blockedbyclient",
+  );
+  assert.equal(await guardRig("read-only", { frameDoc: "app" }).send("GET", "/items/3/delete", { type: "document" }).done, "fallback", "off by default");
+});
+
+test("RouteGuard: a redirect's later hop to a destructive page load is refused at the browser level when turned on", async () => {
+  const hop = async (refuseGets: boolean, url: string) => {
+    const { guard } = guardRig("read-only", { refuseGets });
+    const sent: string[] = [];
+    await (guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+      { send: async (cmd: string) => void sent.push(cmd) },
+      { requestId: "1", resourceType: "Document", request: { url, method: "GET", headers: {} } },
+    );
+    return sent[0];
+  };
+  assert.equal(await hop(true, "https://app.example.com/items/3/delete"), "Fetch.failRequest");
+  assert.equal(await hop(false, "https://app.example.com/items/3/delete"), "Fetch.continueRequest");
+  assert.equal(await hop(true, "https://app.example.com/blog/archive"), "Fetch.continueRequest");
+});
+
+test("RouteGuard: the refusal of an overridden POST names the method it was judged as", async () => {
+  const { calls, send } = guardRig("read-only");
+  assert.equal(await send("POST", "/api/things/3", { body: "{}", headers: { "x-http-method-override": "DELETE" } }).done, "fulfill 403");
+  assert.equal(calls[0], "noteBlocked POST as DELETE https://app.example.com/api/things/3 answered=true");
+});
+
+test("RouteGuard: the browser-level interception judges a method override too", async () => {
+  const judge = async (rule: (typeof WRITE_MODES)[number], headers: Record<string, string>, url = "https://app.example.com/api/things/3") => {
+    const { guard } = guardRig(rule);
+    const sent: string[] = [];
+    const session = { send: async (cmd: string) => void sent.push(cmd) };
+    await (guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(session, {
+      requestId: "1",
+      resourceType: "Ping",
+      request: { url, method: "POST", headers: { Origin: "https://app.example.com", ...headers }, postData: "{}" },
+    });
+    return sent[0];
+  };
+  assert.equal(await judge("read-only", {}), "Fetch.continueRequest", "a plain beacon goes out in read-only");
+  assert.equal(await judge("read-only", { "X-HTTP-Method-Override": "DELETE" }), "Fetch.failRequest");
+  assert.equal(await judge("read-only", {}, "https://app.example.com/api/things/3?_method=DELETE"), "Fetch.failRequest");
+});
+
+// ── The strict write classifier and destructive page loads (#548): opt-in ──
+
+test("strict classifier: identifiers are split into words on camelCase, dots, dashes and underscores", () => {
+  assert.deepEqual(identifierWords("UserService.DeleteUser"), ["user", "service", "delete", "user"]);
+  assert.deepEqual(identifierWords("productDelete"), ["product", "delete"]);
+  assert.deepEqual(identifierWords("bulk-delete_all"), ["bulk", "delete", "all"]);
+  assert.deepEqual(identifierWords("HTMLDeleteButton"), ["html", "delete", "button"]);
+});
+
+test("strict classifier: the shapes the standard one misses are destructive when it is on, and not when it is off", () => {
+  const H = "https://app.example.com";
+  const missedByStandard: Array<[string, string | null, string]> = [
+    [`${H}/api/deleteUser`, '{"id":3}', "camelCase path"],
+    [`${H}/rpc/UserService.DeleteUser`, "{}", "RPC path"],
+    [`${H}/api/things/3?action=delete`, null, "the query's action"],
+    [`${H}/jsonrpc`, JSON.stringify({ jsonrpc: "2.0", method: "things.delete", params: { id: 3 } }), "JSON-RPC method"],
+    [`${H}/graphql`, JSON.stringify({ query: "mutation { productDelete(id: 3) { id } }" }), "noun-first GraphQL"],
+    [`${H}/api/batch`, JSON.stringify({ filter: "x".repeat(2500), action: "delete" }), "a command after 2,000 characters"],
+  ];
+  for (const verb of ["trash", "erase", "terminate", "disable", "cancel", "refund"])
+    missedByStandard.push([`${H}/api/orders/3/${verb}`, "{}", `the verb ${verb}`]);
+  for (const [url, body, what] of missedByStandard) {
+    assert.equal(isDestructiveRequest(url, body, "standard"), false, `standard (today's behaviour) misses: ${what}`);
+    assert.equal(isDestructiveRequest(url, body, "strict"), true, `strict catches: ${what}`);
+  }
+  // What the standard one catches, the strict one catches too.
+  for (const [url, body] of [
+    [`${H}/api/users/3/delete`, null],
+    [`${H}/api/widgets/bulk-delete`, "{}"],
+    [`${H}/graphql`, "mutation { deleteUser(id: 7) { id } }"],
+    [`${H}/api/batch`, JSON.stringify({ action: "delete", ids: [1] })],
+    [`${H}/api/patch`, JSON.stringify([{ op: "remove", path: "/a" }])],
+    [`${H}/api/form`, "action=delete&id=3"],
+    [`${H}/api/x`, JSON.stringify({ _method: "DELETE" })],
+    // A verb before its object, where the object is a word that could also head a noun phrase.
+    [`${H}/api/purge_logs`, "{}"],
+    [`${H}/queues/3/purge-queue`, "{}"],
+    [`${H}/api/users/3/delete-history`, "{}"],
+    [`${H}/api/delete-settings`, "{}"],
+    [`${H}/api/items/3/remove-status`, "{}"],
+    [`${H}/api/jobs`, "action=delete-logs"],
+    [`${H}/api/jobs`, JSON.stringify({ cmd: "destroy-queue" })],
+  ] as Array<[string, string | null]>) {
+    assert.equal(isDestructiveRequest(url, body, "standard"), true, url);
+    assert.equal(strictIsDestructive(url, body), true, `strict: ${url} ${body}`);
+  }
+});
+
+test("strict classifier: a noun phrase and prose that looks like a command are not destructive (the false alarms the standard one raises)", () => {
+  const H = "https://app.example.com";
+  const harmless: Array<[string, string | null, string, boolean]> = [
+    // url, body, what, what the standard classifier says today
+    [`${H}/api/delete-requests`, JSON.stringify({ reason: "moving" }), "a collection of deletion requests", true],
+    [`${H}/api/notes`, JSON.stringify({ note: "action: delete" }), "a note whose text looks like a command key", true],
+    [`${H}/api/orders/3/cancel-reasons`, "{}", "the reasons offered for cancelling", false],
+    [
+      `${H}/graphql`,
+      JSON.stringify({ query: 'mutation { updateThing(id: 3, input: { note: "delete later" }) { id deletedAt } }' }),
+      "a harmless mutation",
+      true,
+    ],
+    [`${H}/graphql`, JSON.stringify({ query: "query { things { id deletedAt canDelete } }" }), "a query naming verbs", false],
+    [`${H}/api/search?q=delete`, JSON.stringify({ q: "delete" }), "a search for the word", false],
+    [`${H}/api/things`, JSON.stringify({ title: "How to delete a user", action: "create" }), "content and a harmless command", false],
+  ];
+  for (const [url, body, what, today] of harmless) {
+    assert.equal(isDestructiveRequest(url, body, "standard"), today, `standard: ${what}`);
+    assert.equal(isDestructiveRequest(url, body, "strict"), false, `strict: ${what}`);
+  }
+});
+
+test("strict classifier: a GraphQL mutation is judged by its root fields, not by its arguments or selections", () => {
+  assert.deepEqual(mutationRootFields('mutation Go($id: ID!) { a: productDelete(id: $id, note: "x{y}") { id deletedAt } other { z } }'), [
+    "a",
+    "productDelete",
+    "other",
+  ]);
+  assert.deepEqual(mutationRootFields("query { deleteUser { id } }"), [], "a query has no mutation fields");
+  assert.deepEqual(mutationRootFields("query Q { a } mutation M { cancelOrder(id: 1) { id } }"), ["cancelOrder"]);
+});
+
+test("destructive page loads: an address that is a command counts; a listing page that shares the word does not", () => {
+  const H = "https://app.example.com";
+  for (const url of [
+    `${H}/items/3/delete`,
+    `${H}/items/delete/3`,
+    `${H}/orders/3/cancel`,
+    `${H}/unsubscribe?token=abc`,
+    `${H}/items/3?action=delete`,
+    `${H}/items/3/archive`,
+    `${H}/messages/0f8e2c1a-4b5d-4e6f-8a9b-0c1d2e3f4a5b/trash`,
+    `${H}/api/deleteItem?id=3`,
+  ])
+    assert.equal(destructiveGet(url), true, url);
+  for (const url of [
+    `${H}/blog/archive`,
+    `${H}/mail/trash`,
+    `${H}/items/3`,
+    `${H}/search?q=delete`,
+    `${H}/help/how-to-delete-requests`,
+    `${H}/items?status=archived`,
+    `${H}/deleted-items`,
+  ])
+    assert.equal(destructiveGet(url), false, url);
+});
+
+test("strict settings: read from the environment, off by default, and a value that is not on or off is an error", () => {
+  assert.equal(writeClassifierSetting({}), "standard");
+  assert.equal(writeClassifierSetting({ SCENESCOUT_STRICT_WRITES: "1" }), "strict");
+  assert.equal(writeClassifierSetting({ SCENESCOUT_STRICT_WRITES: "true" }), "strict");
+  assert.equal(writeClassifierSetting({ SCENESCOUT_STRICT_WRITES: "0" }), "standard");
+  assert.equal(writeClassifierSetting({ SCENESCOUT_STRICT_WRITES: "" }), "standard");
+  assert.throws(() => writeClassifierSetting({ SCENESCOUT_STRICT_WRITES: "yes please" }), /SCENESCOUT_STRICT_WRITES must be 1 or 0/);
+  assert.equal(refuseDestructiveGetsSetting({}), false);
+  assert.equal(refuseDestructiveGetsSetting({ SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "on" }), true);
+  assert.throws(() => refuseDestructiveGetsSetting({ SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "2" }), /SCENESCOUT_REFUSE_DESTRUCTIVE_GETS/);
+});
+
+test("RouteGuard: the strict classifier and destructive page loads apply only when turned on", async () => {
+  // A camelCase delete goes out in read-only with the standard classifier, and is refused with the strict one.
+  assert.equal(await guardRig("read-only").send("POST", "/api/deleteUser", { body: "{}" }).done, "fallback");
+  assert.equal(await guardRig("read-only", { classifier: "strict" }).send("POST", "/api/deleteUser", { body: "{}" }).done, "fulfill 403");
+  // The contrast the other way: the noun phrase the standard classifier refuses goes out with the strict one.
+  assert.equal(await guardRig("read-only").send("POST", "/api/delete-requests", { body: "{}" }).done, "fulfill 403");
+  assert.equal(await guardRig("read-only", { classifier: "strict" }).send("POST", "/api/delete-requests", { body: "{}" }).done, "fallback");
+  // A link to /items/3/delete is followed unless destructive page loads are refused, and only in observe and read-only.
+  assert.equal(await guardRig("read-only").send("GET", "/items/3/delete", { type: "document" }).done, "fallback");
+  for (const rule of ["observe", "read-only"] as const) {
+    const { calls, guard, send } = guardRig(rule, { refuseGets: true });
+    assert.equal(await send("GET", "/items/3/delete", { type: "document" }).done, "abort blockedbyclient", rule);
+    // The navigation that asked for it is told once, so it reports the refusal rather than a failed load.
+    assert.equal(guard.tookRefusedLoad("https://app.example.com/items/3/delete"), true);
+    assert.equal(guard.tookRefusedLoad("https://app.example.com/items/3/delete"), false);
+    assert.equal(calls[0], `noteBlocked GET https://app.example.com/items/3/delete answered=false why=${DESTRUCTIVE_GET_REFUSAL}`);
+    assert.equal(await send("GET", "/blog/archive", { type: "document" }).done, "fallback", `${rule}: a listing page`);
+    assert.equal(await send("GET", "/items/3/delete", { type: "fetch" }).done, "fallback", `${rule}: a script's GET is not a page load`);
+  }
+  assert.equal(await guardRig("safe-write", { refuseGets: true }).send("GET", "/items/3/delete", { type: "document" }).done, "fallback");
+});
+
+test("the block notice explains a refused destructive page load as that, not as an embed's write", () => {
+  const notice = new BlockNotices().notice("read-only", [{ sig: "GET https://app.example.com/items/3/delete", late: false, why: DESTRUCTIVE_GET_REFUSAL }]);
+  assert.match(notice, /A page load whose address names a destructive command/);
+  assert.doesNotMatch(notice, /embedded in the page/);
+});
+
+test("fuzz: the strict classifier misses less and flags less than the standard one, and misses nothing the standard one catches", () => {
+  const cases = fuzzCases(4000, 548);
+  const standard = fuzzRates(cases, "standard");
+  const strict = fuzzRates(cases, "strict");
+  assert.ok(strict.missRate < standard.missRate / 4, `strict misses ${strict.missRate}, standard ${standard.missRate}`);
+  assert.ok(strict.falseAlarmRate < standard.falseAlarmRate, `strict flags ${strict.falseAlarmRate}, standard ${standard.falseAlarmRate}`);
+  // Its residue is only the shapes written to be beyond it: a verb no list names, and a verb used as a noun.
+  assert.deepEqual(Object.keys(strict.missedShapes), ["verb outside every list"]);
+  assert.deepEqual(Object.keys(strict.falseAlarmShapes), ["verb used as a noun"]);
+  for (const c of cases)
+    if (c.destructive && isDestructiveRequest(c.url, c.body, "standard"))
+      assert.equal(isDestructiveRequest(c.url, c.body, "strict"), true, `strict misses what standard catches: ${c.url} ${c.body}`);
 });
 
 // ── The guided plan's gate on scout_attach (ADR 24) ─────────────────────────

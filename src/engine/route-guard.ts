@@ -16,13 +16,16 @@ import { INFRASTRUCTURE_WRITE_RE } from "./claims.js";
 import {
   allowsWrite,
   answersWithRefusal,
+  DESTRUCTIVE_GET_REFUSAL,
   ESCAPE_REFUSAL,
   isAuthExempt,
-  isDestructiveWire,
+  isDestructiveRequest,
   offAppPageWrite,
   policyRefusal,
   sandboxedRedirectPage,
   withForeignFrameSandbox,
+  writeMethod,
+  writeMethodLabel,
   type ReadPost,
   type WriteMode,
 } from "./policy.js";
@@ -37,6 +40,7 @@ import {
   unseenWriteSource,
   type UnseenWriteVerdict,
 } from "./unload.js";
+import { destructiveGet, type WriteClassifier } from "./strict-writes.js";
 
 const BENIGN_MUTATION_RE = INFRASTRUCTURE_WRITE_RE;
 
@@ -106,6 +110,10 @@ export interface RouteGuardHost {
   isOwnedResource(pathname: string): boolean;
   /** Record what a successful POST created (safe-write ownership). */
   recordCreation(res: Response): Promise<void>;
+  /** Which classifier judges whether a write is destructive (strict-writes.ts; standard unless the operator turned strict on). */
+  writeClassifier(): WriteClassifier;
+  /** Whether a page load whose address is a destructive command is refused in observe and read-only (strict-writes.ts destructiveGet; off unless turned on). */
+  refuseDestructiveGets(): boolean;
 }
 
 /** What the route handler does with a write it sees, short of the ownership rule. */
@@ -204,7 +212,21 @@ export class RouteGuard {
    */
   private pendingCreations = new Set<Promise<unknown>>();
 
+  /** Page loads refused as destructive commands, by URL, until the navigation that asked for one reads it (tookRefusedLoad). */
+  private readonly refusedLoads = new Set<string>();
+
   constructor(private readonly host: RouteGuardHost) {}
+
+  /** Whether a page load of `url` was refused as a destructive command; forgotten once asked. */
+  tookRefusedLoad(url: string): boolean {
+    let key = url;
+    try {
+      key = new URL(url).href;
+    } catch {
+      /* compared as given */
+    }
+    return this.refusedLoads.delete(key);
+  }
 
   /** Whether the write policy stopped this request, at the route handler or at the browser level. */
   refused(req: Request): boolean {
@@ -258,7 +280,7 @@ export class RouteGuard {
 
   private async judge(route: Route): Promise<unknown> {
     const req = route.request();
-    const method = req.method();
+    const sent = req.method();
     // Read once, as the request arrives: the rule the page sent it under (policy.ts WriteRule), not whatever holds after an await below.
     const rule = this.host.rule();
     // A redirect is followed by the browser without asking, so its target
@@ -279,7 +301,7 @@ export class RouteGuard {
     // place. A top-window navigation out of the app, with no Referer, while
     // a frame that held another site sits on a non-web URL, is that frame's
     // escape: refused, judged on the page as it is when the request arrives.
-    if (method === "GET" && req.resourceType() === "document" && this.host.embedEscapeNavigation(req)) {
+    if (sent === "GET" && req.resourceType() === "document" && this.host.embedEscapeNavigation(req)) {
       const why = ESCAPE_REFUSAL;
       // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
       this.host.noteBlocked({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType() });
@@ -290,7 +312,41 @@ export class RouteGuard {
       await route.abort("blockedbyclient").catch(() => {});
       return;
     }
-    const frameDoc = method === "GET" && req.resourceType() === "document" ? this.host.frameDocumentKind(req) : null;
+    const url = req.url();
+    // Judged as the method it names when it carries an override (policy.ts writeMethod): never looser than the one it was sent with.
+    const judged = writeMethod({ method: sent, url, headers: req.headers(), body: req.postData() });
+    const method = judged.method;
+    const label = writeMethodLabel(sent, judged);
+    const pathname = pathnameOf(url);
+    const refuse = (why?: string) => {
+      const answered = answersWithRefusal(req.resourceType());
+      if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url))
+        this.host.noteObserveRefusedPost(url, req.postData(), this.host.sentByMainFrame(req) ? req.headers()["referer"] : undefined);
+      this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
+      this.host.logAction({
+        action: "write-policy:blocked",
+        target: `${label} ${pathname}${judged.via ? ` (${judged.via})` : ""}${why ? ` (${why})` : ""}`,
+        url: this.host.pageUrl() ?? "",
+      });
+      this.refusedByPolicy.add(req);
+      this.host.notePolicyBlock();
+      // A script's request is answered with a refusal, so the page's handling
+      // of one actually runs; a navigation is dropped (policy.ts says why).
+      // Caught: a request the page has already cancelled rejects these, and an unhandled rejection ends the process.
+      if (answered) return route.fulfill(policyRefusal(rule, label, pathname, req.headers()["origin"], why ?? judged.via)).catch(() => {});
+      return route.abort("blockedbyclient").catch(() => {});
+    };
+    if (isReadMethod(method)) {
+      // Opt-in: a page load whose address is a destructive command (`/items/3/delete`) is refused where the mode keeps data.
+      if ((rule === "observe" || rule === "read-only") && req.resourceType() === "document" && this.host.refuseDestructiveGets() && destructiveGet(url)) {
+        // At most a few kept: a navigation reads its own at once, and a click's is never asked about.
+        if (this.refusedLoads.size >= 20) this.refusedLoads.clear();
+        this.refusedLoads.add(url);
+        return refuse(DESTRUCTIVE_GET_REFUSAL);
+      }
+    }
+    // A frame document carrying an override that names a write is judged below as that write, not loaded as a frame.
+    const frameDoc = sent === "GET" && isReadMethod(method) && req.resourceType() === "document" ? this.host.frameDocumentKind(req) : null;
     // A document loading into a frame of another origin gets the sandbox
     // that forbids popups and top-window navigation (policy.ts says why).
     if (frameDoc === "foreign") {
@@ -337,24 +393,8 @@ export class RouteGuard {
     }
     // What the policy lets out it hands on with route.fallback, never route.continue: the
     // refresh broker, registered before this handler, runs next. With no broker it goes out.
-    if (method === "GET" || method === "HEAD" || method === "OPTIONS") return route.fallback();
-    const url = req.url();
-    const pathname = pathnameOf(url);
-    const refuse = (why?: string) => {
-      const answered = answersWithRefusal(req.resourceType());
-      if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url))
-        this.host.noteObserveRefusedPost(url, req.postData(), this.host.sentByMainFrame(req) ? req.headers()["referer"] : undefined);
-      this.host.noteBlocked({ at: Date.now(), sig: `${method} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
-      this.host.logAction({ action: "write-policy:blocked", target: `${method} ${pathname}${why ? ` (${why})` : ""}`, url: this.host.pageUrl() ?? "" });
-      this.refusedByPolicy.add(req);
-      this.host.notePolicyBlock();
-      // A script's request is answered with a refusal, so the page's handling
-      // of one actually runs; a navigation is dropped (policy.ts says why).
-      // Caught: a request the page has already cancelled rejects these, and an unhandled rejection ends the process.
-      if (answered) return route.fulfill(policyRefusal(rule, method, pathname, req.headers()["origin"], why)).catch(() => {});
-      return route.abort("blockedbyclient").catch(() => {});
-    };
-    const destructiveWire = isDestructiveWire(pathname, req.postData());
+    if (isReadMethod(method)) return route.fallback();
+    const destructiveWire = isDestructiveRequest(url, req.postData(), this.host.writeClassifier());
     // A POST the user named as a read (observe only, never one that looks destructive).
     const readPost = this.host.readPostOf(rule, method, url, req.postData(), destructiveWire);
     const verdict = routedWriteVerdict({
@@ -372,7 +412,7 @@ export class RouteGuard {
     // Auth/session flows must work in every mode — but never a destructive
     // one, and in observe only the requests a login itself needs.
     if (verdict.kind === "auth") {
-      this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+      this.routedWrites.note(rule, sent, url, bodyDigest(req.postDataBuffer()));
       return route.fallback();
     }
     if (verdict.kind === "read-post" && readPost) {
@@ -381,7 +421,7 @@ export class RouteGuard {
         target: `${method} ${pathname} (named as a read: ${readPost.entry})`,
         url: this.host.pageUrl() ?? "",
       });
-      this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+      this.routedWrites.note(rule, sent, url, bodyDigest(req.postDataBuffer()));
       this.host.clearRefusedPost(url);
       return route.fallback();
     }
@@ -420,7 +460,7 @@ export class RouteGuard {
           .finally(() => this.pendingCreations.delete(task));
         this.pendingCreations.add(task);
       }
-      this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
+      this.routedWrites.note(rule, sent, url, bodyDigest(req.postDataBuffer()));
       if (method === "POST") this.host.clearRefusedPost(url);
       return route.fallback();
     }
@@ -447,7 +487,9 @@ export class RouteGuard {
       request: { url: string; method: string; headers?: Record<string, string>; postData?: string; postDataEntries?: Array<{ bytes?: string }> };
     },
   ): Promise<void> {
-    const { url, method, headers } = event.request;
+    const { url, method: sent, headers } = event.request;
+    let method = sent;
+    let label = sent;
     // Every paused request gets exactly one answer, whatever throws on the way: a request left paused hangs its page.
     let answered = false;
     const answer = async (allow: boolean): Promise<void> => {
@@ -464,14 +506,39 @@ export class RouteGuard {
       // A request paused here was sent a moment ago, possibly by a page a flow has just left: WriteRule still holds the flow's rule.
       const rule = this.host.rule();
       // Reads, and everything in destructive, go on. A later hop of a redirect is judged like any write: the route handler never sees one.
-      if (isReadMethod(method) || rule === "destructive") return await answer(true);
+      if (rule === "destructive") return await answer(true);
       const bytes = pausedRequestBytes(event.request);
-      if (this.routedWrites.claim(rule, method, url, bodyDigest(bytes))) return await answer(true);
+      // Judged as the method it names when it carries an override, as the route handler does.
+      const judged = writeMethod({ method: sent, url, headers, body: bytes?.toString("utf8") });
+      method = judged.method;
+      label = writeMethodLabel(sent, judged);
+      if (isReadMethod(method)) {
+        // A later hop of a redirect is a page load the route handler never saw: refused here when it is a destructive command (opt-in).
+        const refuseLoad =
+          (rule === "observe" || rule === "read-only") &&
+          (event.resourceType ?? "").toLowerCase() === "document" &&
+          this.host.refuseDestructiveGets() &&
+          destructiveGet(url);
+        if (!refuseLoad) return await answer(true);
+        this.unseenRefusals.note(sent, url);
+        await answer(false);
+        this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered: false, why: DESTRUCTIVE_GET_REFUSAL, type: "document" });
+        this.host.logAction({
+          action: "write-policy:blocked",
+          target: `${label} ${pathnameOf(url)} (${DESTRUCTIVE_GET_REFUSAL})`,
+          url: this.host.pageUrl() ?? "",
+        });
+        this.host.notePolicyBlock();
+        return;
+      }
+      if (this.routedWrites.claim(rule, sent, url, bodyDigest(bytes))) return await answer(true);
       let verdict: UnseenWriteVerdict;
       let pathname = url;
       try {
         pathname = pathnameOf(url);
-        const readPost = this.host.readPostOf(rule, method, url, bytes?.toString("utf8"));
+        const body = bytes?.toString("utf8");
+        const destructiveWire = isDestructiveRequest(url, body, this.host.writeClassifier());
+        const readPost = this.host.readPostOf(rule, method, url, body, destructiveWire);
         const { foreign, offApp } = unseenWriteSource({
           appUrl: this.host.appUrl(),
           mode: rule,
@@ -486,7 +553,7 @@ export class RouteGuard {
           mode: rule,
           method,
           pathname,
-          destructiveWire: isDestructiveWire(pathname, bytes?.toString("utf8")),
+          destructiveWire,
           foreign,
           offApp,
           owned: this.host.isOwnedResource(pathname),
@@ -506,24 +573,24 @@ export class RouteGuard {
         verdict = { allow: false };
       }
       // Known as refused before the browser fails it, so the driver's report of the failure finds it.
-      if (!verdict.allow) this.unseenRefusals.note(method, url);
+      if (!verdict.allow) this.unseenRefusals.note(sent, url);
       await answer(verdict.allow);
       if (verdict.allow) {
         // Reported like any other write that went out, as the request event does for a routed one.
-        if (!BENIGN_MUTATION_RE.test(url)) this.host.noteSentWrite({ at: Date.now(), sig: `${method} ${url.slice(0, 120)}` });
+        if (!BENIGN_MUTATION_RE.test(url)) this.host.noteSentWrite({ at: Date.now(), sig: `${label} ${url.slice(0, 120)}` });
         return;
       }
       // Refused and reported as any refusal is. Dropped rather than answered: the page that sent it is going or gone.
       this.host.noteBlocked({
         at: Date.now(),
-        sig: `${method} ${url.slice(0, 140)}`,
+        sig: `${label} ${url.slice(0, 140)}`,
         answered: false,
         why: verdict.why,
         type: (event.resourceType ?? "other").toLowerCase(),
       });
       this.host.logAction({
         action: "write-policy:blocked",
-        target: `${method} ${pathname}${verdict.why ? ` (${verdict.why})` : ""}`,
+        target: `${label} ${pathname}${verdict.why ? ` (${verdict.why})` : ""}`,
         url: this.host.pageUrl() ?? "",
       });
       this.host.notePolicyBlock();
@@ -533,7 +600,7 @@ export class RouteGuard {
       if (!answered) {
         // Fail closed, and still say so: a refusal nobody hears about reads as a write that went out.
         try {
-          this.unseenRefusals.note(method, url);
+          this.unseenRefusals.note(sent, url);
         } catch {
           /* the error above is already logged */
         }

@@ -1169,6 +1169,87 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
   }
   await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
   await readPosts({ baseUrl, projectDir, stats } as SmokeContext);
+  await methodOverrides({ baseUrl, projectDir, stats } as SmokeContext);
+}
+
+/**
+ * A POST that names another method in an override header or `_method` is
+ * judged as the method it names: in read-only each one is refused, while the
+ * same page's plain POST goes out. Sent by the page's script, by a native form,
+ * by scout_request, and as beacons while the page is left (in Chromium those
+ * reach the browser-level interception, not the route handler).
+ */
+async function methodOverrides({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
+  const writesTo = (key: string): number => stats.writes[key] ?? 0;
+  console.log("read-only: a POST naming another method is judged as that method");
+  const engine = new BrowserEngine();
+  try {
+    await engine.attach({ url: baseUrl, projectDir, mode: "read-only" });
+    await engine.navigate("/method-override.html");
+    let snap = "";
+    const settled = await eventually(
+      async () => {
+        snap = await engine.snapshot(true);
+        return !/Pending/.test(snap);
+      },
+      WAIT_MS,
+      200,
+    );
+    check("the override fixture's requests all settled", settled, snap);
+    const lineOf = (testid: string): string => snap.match(new RegExp(`[^\\n]*\\[testid=${testid}[,\\]][^\\n]*`))?.[0] ?? "";
+    check("the plain POST reached the server", writesTo("POST /api/override/plain") === 1, JSON.stringify(stats.writes));
+    for (const [testid, path] of [
+      ["override-header", "/api/override/header"],
+      ["override-http-method", "/api/override/http-method"],
+      ["override-method-override", "/api/override/method-override"],
+      ["override-query", "/api/override/query"],
+    ]) {
+      check(`${path}: a POST naming DELETE never reached the server`, writesTo(`POST ${path}`) === 0, JSON.stringify(stats.writes));
+      check(`${path}: ...and the page was answered with the policy's 403`, lineOf(testid).includes("status 403"), lineOf(testid) || snap);
+    }
+    const formRef = snap.match(/(e\d+) button "Send form"/)?.[1];
+    if (!formRef) throw new Error(`Send form not found in:\n${snap}`);
+    const form = await engine.click(formRef);
+    check("a native form carrying _method=delete is refused", form.includes("WRITE-POLICY blocked") && /POST as DELETE/.test(form), form);
+    check("...and never reached the server", writesTo("POST /api/override/form") === 0, JSON.stringify(stats.writes));
+
+    const replayed = await engine.apiRequest({ method: "POST", path: "/api/override/replay", body: "{}", headers: { "X-HTTP-Method-Override": "DELETE" } });
+    check("scout_request with an override header is refused", /REFUSED by the write policy/.test(replayed), replayed.slice(0, 300));
+    check("...and never reached the server", writesTo("POST /api/override/replay") === 0, JSON.stringify(stats.writes));
+    const plainReplay = await engine.apiRequest({ method: "POST", path: "/api/override/replay-plain", body: "{}" });
+    check("...while the same call with no override goes out", writesTo("POST /api/override/replay-plain") === 1, plainReplay.slice(0, 300));
+
+    // Leaving the page sends both beacons. The plain one arriving says the beacons were sent; the override one must not.
+    await engine.navigate("/method-override.html");
+    await engine.navigate("/index.html");
+    check(
+      "the plain beacon sent as the page was left arrived",
+      await eventually(() => writesTo("POST /api/override/beacon-plain") >= 1),
+      JSON.stringify(stats.writes),
+    );
+    check("...and the beacon naming DELETE in its query did not", writesTo("POST /api/override/beacon") === 0, JSON.stringify(stats.writes));
+  } finally {
+    await engine.close().catch(() => {});
+  }
+
+  console.log("read-only, opted in: a page load whose address is a destructive command is refused");
+  const strict = new BrowserEngine();
+  process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS = "1";
+  try {
+    const attached = await strict.attach({ url: baseUrl, projectDir, mode: "read-only" });
+    check("the attach says destructive page loads are refused", attached.includes("SCENESCOUT_REFUSE_DESTRUCTIVE_GETS"), attached);
+    const refused = await strict.navigate("/things/3/delete");
+    check("a link to /things/3/delete is refused", /WRITE-POLICY blocked/.test(refused) && /destructive command/.test(refused), refused);
+    check("...and the server never received it", (stats.loads["GET /things/3/delete"] ?? 0) === 0, JSON.stringify(stats.loads));
+    // The contrast on the server's side: the same kind of address that is not a command arrives.
+    await strict.navigate("/things/3");
+    check("...while /things/3 reaches the server", (stats.loads["GET /things/3"] ?? 0) >= 1, JSON.stringify(stats.loads));
+    const listing = await strict.navigate("/blog/archive");
+    check("...while /blog/archive, a listing page, loads", !/WRITE-POLICY blocked/.test(listing), listing);
+  } finally {
+    delete process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS;
+    await strict.close().catch(() => {});
+  }
 }
 
 /**

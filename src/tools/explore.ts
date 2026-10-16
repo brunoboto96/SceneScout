@@ -391,7 +391,9 @@ export function registerExploreTools(): void {
         headers: z
           .record(z.string().max(2000))
           .optional()
-          .describe("Extra headers. One given here wins over the app's own, which is how a session tests a different or absent credential."),
+          .describe(
+            "Extra headers. One given here wins over the app's own, which is how a session tests a different or absent credential. A method override (X-HTTP-Method-Override, X-HTTP-Method, X-Method-Override, or _method in the path's query or the body) is judged by the write policy as the method it names.",
+          ),
         select: z
           .string()
           .max(500)

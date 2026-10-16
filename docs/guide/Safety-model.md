@@ -34,7 +34,7 @@ A guided check (the `scout_intake` form, or a panel building a plan with `scout_
 | May create test data | `safe-write` | Always, with a four-digit code the form shows and the person types back |
 | *(not offered)* | `destructive` | Not reachable from a guided check |
 
-Look only lets out what `observe` lets out: page loads, so a search form that only opens a page of results still runs, and a link that changes something just by being opened (an unsubscribe link, say) is followed like any other.
+Look only lets out what `observe` lets out: page loads, so a search form that only opens a page of results still runs, and a link that changes something just by being opened (an unsubscribe link, say) is followed like any other, unless [destructive page loads are refused](#stricter-judgement-of-destructive-writes).
 
 The confirmation is a form the server shows the person directly (MCP elicitation), started by `scout_guided_confirm`. The agent may call that tool but cannot answer the form, and nothing it passes accepts a plan. A plan is accepted only by the person's yes, and for May create test data only with the code typed back. A form that is declined, closed, fails, or that the client cannot show leaves the plan unaccepted, and the check is offered in Look only.
 
@@ -69,6 +69,20 @@ In `observe` and `read-only` a click is also refused before it happens when the 
 - Removing a filter chip ("Remove Status: Open filter") drops a condition from the view, so it is allowed. "Remove member" is refused.
 - "Sign off" is refused as a command: at the start of a label, or joined to another verb ("Save and sign off"). Elsewhere it is the approval noun ("Needs sign-off", "Manager sign-off") and is allowed.
 - "Discard changes", "Discard your edits" and the like drop only what was typed and never sent, so they are allowed. "Discard draft", "Discard record" and a bare "Discard" are refused, and a write the confirm sends is judged on the network like any other: `discard` in a request path is treated as destructive.
+
+## What is a guarantee and what is best effort
+
+- **The method rule is a guarantee.** `observe` lets out only `GET`, `HEAD` and `OPTIONS` (the exceptions above aside); `read-only` refuses every `PUT`, `PATCH` and `DELETE`; `safe-write` allows them only on records the run created. A request is judged as the method it names, not only the one it is sent with: a `POST` carrying `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override`, or `_method` in its query or in a form, multipart or JSON body, is judged as the method named there, in every mode but `destructive`, whether the page, a beacon or `scout_request` sent it. An override never loosens: a `POST` naming `GET` is still a `POST`. The refusal names both (`POST as DELETE`).
+- **Whether a `POST` is destructive is best effort.** `read-only` refuses a `POST` whose path or body looks destructive (`/items/3/delete`, `{"action":"delete"}`, a GraphQL `deleteUser` mutation), but that is pattern matching, and an app can name a delete anything. A plain `POST` to a neutral path goes out in `read-only`. When nothing may change, use `observe`.
+
+## Stricter judgement of destructive writes
+
+Two settings, both off by default, make the best-effort part stricter.
+
+- `SCENESCOUT_STRICT_WRITES=1` judges writes with the strict classifier. It splits identifiers into words before matching (`/api/deleteUser`, `/rpc/UserService.DeleteUser`, a GraphQL `productDelete`), reads the query's command keys (`?action=delete`) and the whole body rather than its first 2,000 characters, parses a JSON or form body rather than matching its text, and knows more verbs (cancel, refund, terminate, disable, trash, erase, as well as delete, remove, archive, revoke and the rest). It refuses everything the standard classifier refuses except three of its false alarms, which it lets out: a verb followed by `requests` or `reasons` (`POST /api/delete-requests`, `/orders/3/cancel-reasons`), a destructive word in a field that is not a command (a note whose text reads `action: delete`), and a harmless GraphQL mutation that selects a field such as `deletedAt`. A verb no list names (`/orders/3/void`) is still missed, and a verb used as a noun with nothing after it to say so (`/products/trash-can/reviews`) is still refused.
+- `SCENESCOUT_REFUSE_DESTRUCTIVE_GETS=1` refuses, in `observe` and `read-only`, a page load whose address is a destructive command: `/items/3/delete`, `/orders/3/cancel`, `/unsubscribe?…`, `?action=delete`. `archive` and `trash` count only right after a record's id, so `/blog/archive` and `/mail/trash` still load. Frame documents are judged too, and so are the later hops of a redirect in Chromium (Firefox and WebKit follow a redirect without asking). A script's own `GET` is not judged.
+
+An operator policy file will be able to lock these on (`writeClassifier: "strict"`).
 
 ## POST endpoints that only read
 

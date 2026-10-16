@@ -4,6 +4,7 @@
  * enforcement lives here, at the tool layer, never in the model's prompt.
  */
 import { scriptLiteral } from "./script-literal.js";
+import { strictIsDestructive, type WriteClassifier } from "./strict-writes.js";
 
 const DESTRUCTIVE_PATTERNS: RegExp[] = [
   /\bdelete\b/i,
@@ -97,6 +98,123 @@ const DESTRUCTIVE_BODY_RE =
 
 export function isDestructiveWire(url: string, body?: string | null): boolean {
   return DESTRUCTIVE_URL_RE.test(url) || (!!body && DESTRUCTIVE_BODY_RE.test(body.slice(0, 2000)));
+}
+
+/**
+ * Whether a write to `url` (the full request URL) with this body looks
+ * destructive, by the classifier the session runs with. The standard one
+ * judges the path and the first 2,000 characters of the body
+ * (isDestructiveWire); the strict one (strict-writes.ts, opt-in) splits
+ * identifiers into words, reads the query's command keys and the whole body,
+ * and knows more verbs.
+ */
+export function isDestructiveRequest(url: string, body: string | null | undefined, classifier: WriteClassifier = "standard"): boolean {
+  if (classifier === "strict") return strictIsDestructive(url, body);
+  let pathname = url;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    /* not a full URL: judged as given, as the route handler always has */
+  }
+  return isDestructiveWire(pathname, body);
+}
+
+/**
+ * The headers a server may read as the request's real method. Many
+ * frameworks let a POST stand in for PUT, PATCH or DELETE this way, for
+ * clients and proxies that can send only GET and POST.
+ */
+export const METHOD_OVERRIDE_HEADERS = ["x-http-method-override", "x-http-method", "x-method-override"] as const;
+
+/** The method a request is judged as, and how it named it when that is not the method it was sent with. */
+export interface WriteMethod {
+  method: string;
+  /** "X-HTTP-Method-Override: DELETE", "_method=DELETE in the query", …; absent when the sent method stands. */
+  via?: string;
+}
+
+/** How much a method writes, for choosing between the sent method and an override: a read, a POST, or anything else. */
+function methodWeight(method: string): number {
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return 0;
+  return method === "POST" ? 1 : 2;
+}
+
+/** The method names an override value holds: one token, or a list a lenient server might read the first of. */
+function overrideNames(value: string): string[] {
+  return value
+    .split(/[\s,;]+/)
+    .map((v) => v.trim().toUpperCase())
+    .filter((v) => /^[A-Z][A-Z-]*$/.test(v));
+}
+
+/**
+ * Whether a form or query key is `_method` as a server reads it: decoded, and
+ * with `.` or a space read as `_`, as PHP does.
+ */
+function isMethodKey(key: string): boolean {
+  return key.replace(/[ .]/g, "_").toLowerCase() === "_method";
+}
+
+/** `_method` among a query's or a form body's fields, keys decoded. */
+function formMethodOverrides(text: string): string[] {
+  const out: string[] = [];
+  for (const [key, value] of new URLSearchParams(text)) if (isMethodKey(key)) out.push(value);
+  return out;
+}
+
+/** `_method` in a body: a form-encoded field, a multipart field, or a top-level JSON key. */
+function bodyMethodOverrides(body: string): string[] {
+  const trimmed = body.trimStart();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      return typeof parsed?._method === "string" ? [parsed._method] : [];
+    } catch {
+      /* not JSON: read as the other shapes below */
+    }
+  }
+  const out = formMethodOverrides(body);
+  // A multipart part named _method: its header lines (a bounded few, so the scan stays linear), a blank line, the value.
+  for (const m of body.matchAll(/name=(?:"_method"|_method)(?:;[^\r\n]*)?\r?\n(?:[^\r\n]+\r?\n){0,8}\r?\n([^\r\n]*)/gi)) out.push(m[1]);
+  return out;
+}
+
+/**
+ * The method the write policy judges a request as. A request may name
+ * another method than the one it is sent with, in an override header
+ * (METHOD_OVERRIDE_HEADERS), in `_method` in the query, or in `_method` in a
+ * form, multipart or JSON body, and a server that honours it acts on the
+ * named method: `POST /items/3` with `X-HTTP-Method-Override: DELETE` deletes.
+ *
+ * Every override is read, from every place, and the request is judged as the
+ * one that writes most: any method that is not GET, HEAD, OPTIONS or POST
+ * outweighs a POST, which outweighs a read. An override can therefore only
+ * make a request stricter to judge, never looser: a POST naming GET is still
+ * a POST. This is structural, and on in every mode but destructive.
+ */
+export function writeMethod(input: { method: string; url: string; headers?: Record<string, string>; body?: string | null }): WriteMethod {
+  const sent = input.method.toUpperCase();
+  const named: Array<{ method: string; via: string }> = [];
+  for (const [name, value] of Object.entries(input.headers ?? {})) {
+    const lower = name.toLowerCase();
+    if (!(METHOD_OVERRIDE_HEADERS as readonly string[]).includes(lower)) continue;
+    const display = lower.replace(/(^|-)([a-z])/g, (_, dash: string, c: string) => dash + c.toUpperCase()).replace("Http", "HTTP");
+    for (const m of overrideNames(value)) named.push({ method: m, via: `${display}: ${m}` });
+  }
+  const query = input.url.indexOf("?");
+  if (query >= 0) {
+    for (const v of formMethodOverrides(input.url.slice(query + 1).split("#")[0]))
+      for (const m of overrideNames(v)) named.push({ method: m, via: `_method=${m} in the query` });
+  }
+  if (input.body) for (const v of bodyMethodOverrides(input.body)) for (const m of overrideNames(v)) named.push({ method: m, via: `_method=${m} in the body` });
+  let best: WriteMethod = { method: sent };
+  for (const n of named) if (methodWeight(n.method) > methodWeight(best.method)) best = { method: n.method, via: n.via };
+  return best;
+}
+
+/** How a blocked or logged request is named: its method, and the method it was judged as when an override changed it. */
+export function writeMethodLabel(sent: string, judged: WriteMethod): string {
+  return judged.via ? `${sent.toUpperCase()} as ${judged.method}` : judged.method;
 }
 
 /** Auth/session flows must work even under strict write policies (login, token refresh, logout). */
@@ -268,6 +386,9 @@ export interface BlockedWrite {
 /** The `why` of a page move refused as a possible escape from a foreign frame's sandbox. */
 export const ESCAPE_REFUSAL = "a possible frame escape";
 
+/** The `why` of a page load refused because its address is a destructive command (strict-writes.ts destructiveGet, opt-in). */
+export const DESTRUCTIVE_GET_REFUSAL = "a page load whose address is a destructive command";
+
 /** New blocked endpoints listed by name in one notice; the rest are counted. */
 export const BLOCK_NOTICE_LIST = 5;
 
@@ -354,6 +475,7 @@ export class BlockNotices {
     const also = repeatLine ? `; also ${repeatLine}` : "";
     const whys = new Set(fresh.flatMap(([, g]) => [...g.whys]));
     const escaped = whys.delete(ESCAPE_REFUSAL);
+    const destructiveLoad = whys.delete(DESTRUCTIVE_GET_REFUSAL);
     const foreign = [...whys];
     const answered = fresh.some(([, g]) => g.answered);
     const reasons =
@@ -362,6 +484,9 @@ export class BlockNotices {
         : "") +
       (escaped
         ? `A move of the whole page off the app, with no Referer, was refused: a frame that held another site now sits on a data: or blob: URL, where WebKit drops the frame's sandbox, so the move may be that frame's. No mode but destructive allows it. `
+        : "") +
+      (destructiveLoad
+        ? `A page load whose address names a destructive command (such as /items/3/delete) was refused, because the operator turned on refusing them in observe and read-only. Do not retry it; note the link as untested. `
         : "");
     if (this.explained.has(rule)) {
       return (
