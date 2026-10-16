@@ -20,10 +20,17 @@ import { BROWSER, check, eventually, settle, SIGN_IN_COOKIE, until, type SmokeCo
 import { writeProfile } from "../../dist/engine/profiles.js";
 import { readCheckInputs, runCheck } from "../../dist/check-run.js";
 import { parseCheckArgs, type CheckIssue } from "../../dist/engine/check.js";
+import { DEFAULT_ACTION_TIMEOUT_MS } from "../../dist/engine/limits.js";
 
 export const title = "check (deterministic gate)";
 
 const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "dist", "cli.js");
+
+/**
+ * For a check in which a flow step is meant to wait out the action limit and fail: the engine's own default, rather than
+ * the 15 s the smoke runner sets so a loaded machine does not fail a plain click. Each such step then waits 5 s, not 15.
+ */
+const STEP_FAILS = ["--action-timeout-ms", String(DEFAULT_ACTION_TIMEOUT_MS)];
 
 type Summary = {
   gate: { failOn: string; passed: boolean };
@@ -631,7 +638,7 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     `${honest.status} ${JSON.stringify(honest.summary?.flows)} ${honest.out.slice(-600)}`,
   );
 
-  const broken = await checkWith(project("flow-broken", { "details.json": flowFor("/check-flow-broken.html") }));
+  const broken = await checkWith(project("flow-broken", { "details.json": flowFor("/check-flow-broken.html") }), STEP_FAILS);
   const brokeAt = broken.summary?.issues.find((i) => i.rule === "flow-step-failed");
   check(
     "...and the same flow against the page where its request fails breaks the gate, naming the flow and the step",
@@ -704,6 +711,7 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
         steps: [...flowFor("/check-flow.html").steps.slice(0, 1), { action: "click", target: "testid=flow-nowhere" }],
       },
     }),
+    STEP_FAILS,
   );
   check(
     "a step whose control is gone breaks the flow at that step",
@@ -731,7 +739,10 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
     usable.status === 0 && usable.summary?.flows[0]?.status === "passed",
     `${usable.status} ${JSON.stringify(usable.summary?.flows)} ${usable.out.slice(-600)}`,
   );
-  const disabled = await checkWith(project("flow-disabled", { "disabled.json": blockedFlow([{ action: "click", target: "testid=blocked-archive" }]) }));
+  const disabled = await checkWith(
+    project("flow-disabled", { "disabled.json": blockedFlow([{ action: "click", target: "testid=blocked-archive" }]) }),
+    STEP_FAILS,
+  );
   check(
     "...a click on a visible but disabled button fails leading with that state, then the action limit's hint",
     disabled.status === 1 &&
@@ -741,6 +752,7 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
   );
   const readOnly = await checkWith(
     project("flow-read-only", { "read-only.json": blockedFlow([{ action: "type", target: "testid=blocked-reference", value: "x" }]) }),
+    STEP_FAILS,
   );
   check(
     "...and typing into a read-only field fails saying it is read-only",
@@ -771,6 +783,7 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
   );
   const stateBroken = await checkWith(
     project("flow-state-broken", { "state.json": { steps: [...stateSteps, { action: "expect-element", target: "testid=state-receipt", state: "hidden" }] } }),
+    STEP_FAILS,
   );
   check(
     "...and its twin, expecting the receipt still hidden after Complete, fails at that step saying what is true instead",
@@ -852,7 +865,7 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
   const flowsDir = path.join(rolesProject, ".scenescout", "flows");
   fs.writeFileSync(path.join(flowsDir, "01-as-member.json"), JSON.stringify(accountFlow("member")));
   fs.writeFileSync(path.join(flowsDir, "02-own-session.json"), JSON.stringify(accountFlow()));
-  const roles = await checkWith(rolesProject);
+  const roles = await checkWith(rolesProject, STEP_FAILS);
   const byFile = (file: string) => roles.summary?.flows.find((f) => f.file === file) as (FlowSummary["flows"][number] & { role?: string }) | undefined;
   check(
     "roles: a flow naming a role runs signed in with that role's saved profile, and the report and JSON say which role",
@@ -891,6 +904,7 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
           ],
         },
       }),
+      STEP_FAILS,
     );
     const written = ["check.json", "report.md", "check.sarif"].map((f) => fs.readFileSync(path.join(work, "flow-env", "out", f), "utf8")).join("\n");
     check(
@@ -969,6 +983,7 @@ async function flowsAndRetests({ baseUrl, stats, work }: { baseUrl: string; stat
         ],
       },
     }),
+    STEP_FAILS,
   );
   const guardedByFile = (file: string) => guarded.summary?.flows.find((f) => f.file === file);
   check(
@@ -1437,7 +1452,7 @@ async function templateReport({
       !fs.existsSync(path.join(dir, "out", "check.json")),
     `${unrecorded.status} ${unrecorded.out.slice(-400)}`,
   );
-  const run = await checkWith(dir, ["--record", "--template", template]);
+  const run = await checkWith(dir, ["--record", "--template", template, ...STEP_FAILS]);
   const out = path.join(dir, "out");
   const file = path.join(out, "test-report.html");
   const html = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
@@ -1598,7 +1613,7 @@ async function recordedChecks({
   );
 
   const failing = project("flow-recorded-broken", { "details.json": withTyped("/check-flow-broken.html") });
-  const broken = await checkWith(failing, ["--record"]);
+  const broken = await checkWith(failing, ["--record", ...STEP_FAILS]);
   const bad = page(failing);
   check(
     "...and a recorded flow that breaks at step 4 has four step frames, that step highlighted, and the last two not run",
