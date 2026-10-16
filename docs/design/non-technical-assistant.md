@@ -499,13 +499,13 @@ interface GuidedProgress {
   problems: { blocksUsers: number; annoying: number; cosmetic: number; worthALook: number };
   latest: PlainCard[];        // newest first, at most 5
   /** Clicking saved, with its basis; null until a page has been checked. */
-  saved: null | { minutes: number; basis: string }; // basis: "41 pages and 63 controls at 20 s per control"
+  saved: null | { minutes: number; basis: string; sentence: string }; // basis: "41 pages and 63 controls checked, at 30 s a page and 15 s a control. …"; sentence: the figure and its basis in one line
   needsYou?: NeedsYou;
   next: GuidedAction[];       // the buttons to offer now
 }
 
 interface NeedsYou {
-  kind: "sign-in" | "sign-in-expired" | "confirm" | "browser-download-failed" | "server-error" | "address-unreachable";
+  kind: "sign-in" | "sign-in-expired" | "confirm" | "browser-download-failed" | "server-error" | "address-unreachable" | "stuck"; // "stuck" added in PR 3: a step past its watchdog
   sentence: string;
   actions: GuidedAction[];
 }

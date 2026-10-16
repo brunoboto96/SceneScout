@@ -36,6 +36,8 @@ import { describePace, normalizePace } from "../engine/settle.js";
 import { formatScan, scanProject } from "../scan.js";
 import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, holdGuidedPlan, type CheckArea } from "../engine/guided.js";
 import { AREA_LABEL } from "../engine/guided-words.js";
+import { nowSentence } from "../engine/progress.js";
+import { redactSecrets } from "../engine/redact.js";
 import { EVIDENCE_ENV, EVIDENCE_MODES, evidenceSettings, RECORD_ENV, recordChoice, type EvidenceMode } from "../engine/capture.js";
 
 import {
@@ -61,6 +63,7 @@ import {
   writeStatus,
   sessionQueue,
   guidedPlans,
+  guidedRuns,
   guidedSessions,
   callWork,
   CLOSE_WORK_WAIT_MS,
@@ -282,7 +285,7 @@ export function registerSessionTools(): void {
           .optional()
           .describe(
             `POST endpoints that only read, e.g. ["POST /api/search", "POST https://api.example.com/reports/query"], which observe mode then lets out — ONLY when the user named them. Never add one yourself, even when the gap ledger lists a refused POST: ask the user. ` +
-              `Exact paths; * stands for one path segment. Still refused when the path or body looks destructive or the body is a GraphQL mutation. Observe mode only. Default: the ${READ_POSTS_ENV} environment variable, else none.`,
+              `Exact paths; * stands for one path segment. Still refused when the path or body looks destructive or the body is a GraphQL mutation. Observe mode only. Default: the ${READ_POSTS_ENV} environment variable, else none; while a guided plan is open in this server, none, and the variable is not read.`,
           ),
         record: z
           .boolean()
@@ -497,7 +500,8 @@ export function registerSessionTools(): void {
             task: objective ? task : undefined,
             record: recording,
             trustedEmbeds,
-            readPosts,
+            // While a guided plan is open this is an empty list, so SCENESCOUT_READ_POSTS is not read either (ADR 24).
+            readPosts: guided.readPosts ?? readPosts,
             actionTimeoutMs,
             navTimeoutMs,
             memoryStore: store,
@@ -511,7 +515,14 @@ export function registerSessionTools(): void {
           }
           // Which plan this session carries out, for scout_session {area}; a new attach starts with no area.
           // A plan no session carries any more is spent, so the next check with it asks the person again.
+          // Whether a session already carried the plan: then this attach is part of the same check.
+          const carried = !!guided.plan && [...guidedSessions.values()].some((s) => s.planId === guided.plan!.planId);
           holdGuidedPlan(guidedSessions, guidedPlans, target, guided.plan?.planId);
+          // The check starts with its first attach, and the status pane follows it from now on.
+          if (guided.plan) {
+            guidedRuns.start(guided.plan.planId, Date.now(), carried);
+            guidedRuns.step(guided.plan.planId, nowSentence("scout_attach", redactSecrets(eng.currentUrl)), Date.now());
+          }
           // A new attach is a new count of pictures returned.
           evidenceFor.set(eng, { ...pictures, shown: 0 });
           openDecisions.set(target, opening);
@@ -710,6 +721,7 @@ export function registerSessionTools(): void {
           const refused = areaRefusal(held.planId ? guidedPlans.get(held.planId) : undefined, area);
           if (refused) return errorText(new Error(`scout_session refused: ${refused}`));
           guidedSessions.set(target, { ...held, area });
+          if (held.planId) guidedRuns.areaStarted(held.planId, area);
           areaNote = `${target} is now working on: ${AREA_LABEL[area]}.\n`;
           // With an area, `name` says which session it is for; the default session stays as it was.
           if (paceMs === undefined) return text(areaNote.trimEnd(), activeName);

@@ -153,6 +153,7 @@ export const NEEDS_YOU_SENTENCE = {
   "browser-download-failed": (_where: string) => "I could not download the test browser. Check your internet connection and try again.",
   "server-error": (_where: string) => "I could not reach the SceneScout server. Is the scenescout plugin installed and turned on?",
   "address-unreachable": (where: string) => `I could not open ${where}. Check the address, and that the site is running.`,
+  stuck: (_where: string) => STUCK_SENTENCE,
 } as const;
 
 /** What the confirmation form says above its fields when it also asks for a code. */
@@ -182,4 +183,135 @@ export const CONFIRM_SAYS = {
   cancelled: `The confirmation was closed without an answer, so the check has not started. You can try again, or run it as "${CARE_LABEL["look-only"]}".`,
   failed: `The confirmation form did not work, so the check has not started. You can try again, or run it as "${CARE_LABEL["look-only"]}".`,
   unsupported: `${CONFIRM_UNAVAILABLE} You can run it as "${CARE_LABEL["look-only"]}", or start it from an app that can show the form.`,
+} as const;
+
+// ---- While a guided check runs: the narrator's line, the areas, the clicking saved, and the buttons ----
+//
+// progress.ts builds the progress a person watches from these. The "now"
+// sentence is the task the session stated, where it stated one (already
+// redacted, design 3.7), and otherwise is chosen from a fixed table by the tool
+// a session is running and the page it is on. Nothing is summarised by a
+// model: it costs nothing, it reads the same on every surface, and no text
+// from the page under test is sent anywhere to be summarised.
+
+/** The heading over a running check. `where` is the site's host. */
+export function checkingTitle(where: string): string {
+  return `Checking ${where}`;
+}
+
+/** What a session is doing, by the tool it is running. `page` is the path it is on, or "the site". */
+export const NOW_SENTENCE: Readonly<Record<string, (page: string) => string>> = {
+  scout_attach: (page) => `Opening ${page} in the test browser`,
+  scout_login: () => "Waiting for you to sign in, in the browser window",
+  scout_navigate: (page) => `Opening ${page}`,
+  scout_back: () => "Going back a page",
+  scout_crawl: () => "Opening every page it knows about, one after another",
+  scout_snapshot: (page) => `Reading ${page}`,
+  scout_click: (page) => `Pressing something on ${page}`,
+  scout_type: (page) => `Typing into a field on ${page}`,
+  scout_select: (page) => `Choosing an option on ${page}`,
+  scout_upload: (page) => `Attaching a file on ${page}`,
+  scout_hover: (page) => `Pointing at something on ${page}`,
+  scout_press: (page) => `Pressing a key on ${page}`,
+  scout_scroll: (page) => `Scrolling down ${page}`,
+  scout_run_plan: (page) => `Working through a few steps on ${page}`,
+  scout_screenshot: (page) => `Taking a picture of ${page}`,
+  scout_capture: (page) => `Taking a picture of part of ${page}`,
+  scout_design_audit: (page) => `Checking how ${page} looks and reads`,
+  scout_journey: (page) => `Following the journey, now on ${page}`,
+  scout_finding: (page) => `Writing down a problem found on ${page}`,
+  scout_network: (page) => `Looking at what ${page} asked the server for`,
+  scout_request: (page) => `Asking the server directly about ${page}`,
+  scout_verify: () => "Checking an earlier problem again",
+  scout_report: () => "Writing up what it found",
+  scout_coverage: () => "Working out what is left to check",
+  scout_tickets: () => "Reading your tickets",
+  scout_criterion: () => "Answering one of your tickets' criteria",
+  scout_note: () => "Making a note for next time",
+};
+
+/** The line for a tool the table does not name. */
+export const NOW_OTHER = (page: string): string => `Working on ${page}`;
+
+/** The narrator's line for a phase that has no session doing anything. */
+export const PHASE_NOW = {
+  starting: "Getting ready to start.",
+  done: "The check is finished.",
+  stopped: "The check stopped before it finished.",
+} as const;
+
+/** Said beside an area the check never reached. */
+export const AREA_NOT_REACHED = "Not reached before the check ended.";
+
+/** Said when a step has run far longer than it should. */
+export const STUCK_SENTENCE = "A step is taking much longer than it should. I may need you to stop the check.";
+
+/**
+ * The clicking a check saved, always with what it is based on. The rates are
+ * a rough default, not a measurement (design question 12), and the sentence
+ * says so; the figure is shown while a check runs and never put in a report or
+ * a ticket.
+ */
+export function savedBasis(pages: number, controls: number, rates: { perPageSeconds: number; perControlSeconds: number }): string {
+  const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
+  return `${n(pages, "page", "pages")} and ${n(controls, "control", "controls")} checked, at ${rates.perPageSeconds} s a page and ${rates.perControlSeconds} s a control. These rates are a rough default, not a measurement.`;
+}
+
+/** The figure, as a person reads it. */
+export function savedSentence(minutes: number): string {
+  return minutes < 1 ? "Less than a minute of clicking saved" : `About ${minutes} minute${minutes === 1 ? "" : "s"} of clicking saved`;
+}
+
+/** The buttons a running or finished check offers, and the words each sends. */
+export const ACTION_LABEL = {
+  seeAll: "See all problems",
+  stop: "Stop",
+  recheck: "Check them again",
+  plainReport: "Write the report in plain words",
+  confirm: "Confirm the care level",
+  notABug: "Not a bug",
+  explain: "Explain more",
+  again: "Check again",
+} as const;
+
+/** What a button that starts a turn for the agent says, word for word. */
+export const ACTION_PROMPT = {
+  stop: "Stop the SceneScout run now and write what you have.",
+  recheck: "Check the open SceneScout problems again with scout_verify and tell me which are gone.",
+  plainReport: 'Write the SceneScout report in plain words: scout_report {report: "qa"}.',
+  explain: (id: string) =>
+    `Explain SceneScout finding ${id} to me in more detail, in plain words, from its evidence and steps only (scout_cards {ids: ["${id}"]}).`,
+  again: (id: string) => `Check SceneScout finding ${id} again with scout_verify, and tell me whether it is still there.`,
+} as const;
+
+/** How a card reads as text, where nothing draws it. */
+export const CARD_SAYS = {
+  done: "What was done:",
+  expected: "Expected:",
+  happened: "Happened:",
+  alsoOn: "also seen on",
+  picture: "Picture:",
+  notABug: "You marked this not a bug",
+  confirmed: "You confirmed this is a bug",
+  say: (id: string) => `(id ${id}: say "check ${id} again", "explain ${id}" or "${id} is not a bug")`,
+} as const;
+
+/** What scout_feedback says once a label is kept. */
+export const FEEDBACK_SAYS = {
+  "not-a-bug":
+    "Marked not a bug. It is kept, listed apart from the problems, and a later check that finds it again adds to it rather than filing it anew. A maintainer can review your label; it never changes the benchmark's answers by itself.",
+  confirmed: "Marked as a real bug. A maintainer can review your label; it never changes the benchmark's answers by itself.",
+} as const;
+
+/** What the list of labels says above it. */
+export const CANDIDATES_NOTE =
+  "These labels are candidates for a maintainer to review, not answer-key or dedup entries. To add one to an answer key, a maintainer writes it in by hand, with an example it must match and, where a near miss exists, a counter-example it must not. Nothing here changes a key or the dedup by itself.";
+
+/** The status pane's own few words around a guided check's progress. */
+export const PANE_WORDS = {
+  newest: "Newest problems",
+  all: "All problems",
+  backToNewest: "Show the newest problems",
+  sayThis: "Say this to Claude:",
+  needsYou: "I need you:",
 } as const;
