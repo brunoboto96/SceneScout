@@ -24,6 +24,7 @@ import {
   afterConfirm,
   afterPlan,
   choicesFromDraft,
+  endsMainTurn,
   errorSentence,
   guardFor,
   guidedText,
@@ -91,7 +92,8 @@ export function register(on, options) {
     return next(e);
   });
   on("turn.complete", async ($, e, next) => {
-    isWorking = false;
+    // A lane subagent's turn ending leaves the main turn running.
+    if (endsMainTurn(e)) isWorking = false;
     return next(e);
   });
 
@@ -217,12 +219,22 @@ async function buildAndStart($, servers, choices) {
   await updateWizard($, (w) => ({ ...w, busy: "plan", notice: null }));
   const result = await callServer($, servers, PLAN_TOOL, { choices });
   let send;
+  let planId = null;
   await updateWizard($, (w) => {
     const after = afterPlan(w, result);
     send = after.send;
+    planId = after.wizard.planId;
     return after.wizard;
   });
+  // The person pressed Start on a plan that needs no form: Claude's attach with it is theirs, so it is not asked about again.
+  if (send && planId) await rememberConfirmed($, planId);
   if (send) await sendToClaude($, send);
+}
+
+/** A plan the person said yes to, so the guard does not ask about Claude's attach with it again. */
+async function rememberConfirmed($, planId) {
+  const held = await $.state.get(CONFIRMED);
+  await $.state.set(CONFIRMED, [...(held.value ?? []).filter((id) => id !== planId), planId].slice(-20));
 }
 
 /** What a press asked for. */
@@ -309,10 +321,7 @@ async function confirmPlan($, servers, planId) {
     send = after.send;
     return after.wizard;
   });
-  if (result?.structuredContent?.accepted === true) {
-    const held = await $.state.get(CONFIRMED);
-    await $.state.set(CONFIRMED, [...(held.value ?? []), planId].slice(-20));
-  }
+  if (result?.structuredContent?.accepted === true) await rememberConfirmed($, planId);
   if (send) await sendToClaude($, send);
 }
 

@@ -500,10 +500,30 @@ export function readCards(result) {
   const pictureFiles = {};
   cards.forEach((card, i) => {
     const text = texts[i + 1] ?? "";
-    const m = /^Picture: (.+)$/m.exec(text);
-    if (m && text.includes(`(id ${str(card.id)}:`)) pictureFiles[str(card.id)] = m[1].trim();
+    if (!text.includes(`(id ${str(card.id)}:`)) return;
+    // The card's text carries the tested app's words, which may hold a "Picture:" line of their own:
+    // only the line naming this card's own picture, inside .scenescout/, is taken.
+    const own = isRecord(card.picture) ? str(card.picture.file) : "";
+    const file = [...text.matchAll(/^Picture: (.+)$/gm)].map((m) => m[1].trim()).find((f) => isOwnPicture(f, own));
+    if (file) pictureFiles[str(card.id)] = file;
   });
   return { ok: true, cards, total: num(s.total), pictureFiles };
+}
+
+/**
+ * Whether `file` is the card's own picture: the absolute path of `relative`
+ * (the card's `picture.file`) inside a `.scenescout/` folder, as the server
+ * names it, with no segment that climbs out.
+ *
+ * @param {string} file
+ * @param {string} relative
+ */
+export function isOwnPicture(file, relative) {
+  const rel = relative.replace(/\\/g, "/");
+  if (!rel || rel.startsWith("/") || /^[A-Za-z]:/.test(rel) || !/\.(png|jpe?g)$/i.test(rel)) return false;
+  if (rel.split("/").some((s) => s === "" || s === "." || s === "..")) return false;
+  const abs = file.replace(/\\/g, "/");
+  return abs.endsWith(`/.scenescout/${rel}`) && !abs.split("/").some((s) => s === "." || s === "..");
 }
 
 /** A `file:` address for a picture on disk, or null for anything that is not an absolute path. */
@@ -516,7 +536,7 @@ export function fileHref(/** @type {unknown} */ file) {
   const path = file.replace(/\\/g, "/");
   const encoded = path
     .split("/")
-    .map(encodeURIComponent)
+    .map((s) => encodeURIComponent(s).replace(/[()]/g, (c) => (c === "(" ? "%28" : "%29")))
     .join("/")
     .replace(/^([A-Za-z])%3A/, "$1:");
   return `file://${posix ? "" : "/"}${encoded}`;
@@ -575,6 +595,17 @@ export function sendRoute(isWorking) {
   return isWorking ? "append" : "submit";
 }
 
+/**
+ * Whether a `turn.complete` ends Claude's own turn. A subagent's run (a
+ * SceneScout lane) raises one too, with its `agentId`, while the main turn
+ * goes on; it raises no `turn.start`.
+ *
+ * @param {unknown} e the `turn.complete` input
+ */
+export function endsMainTurn(e) {
+  return !(isRecord(e) && str(e.agentId));
+}
+
 /** The buttons on a card, as the engine's cardActions builds them. */
 export function cardActions(/** @type {string} */ id) {
   return [
@@ -592,12 +623,12 @@ const WRITING_MODES = ["read-only", "safe-write", "destructive"];
 /**
  * Whether a tool call Claude is about to make needs the person's say-so first
  * (design 6.3): `scout_attach` in a mode that writes, unless it names a plan
- * the person already confirmed from the panel, and filing tickets. Null to
+ * the person already started or confirmed from the panel, and filing tickets. Null to
  * let it through. The server's own form stays the rule; this is a reminder
  * at the mod's level.
  *
  * @param {{ tool?: unknown, mode?: unknown, url?: unknown, planId?: unknown }} call
- * @param {readonly string[]} confirmedPlans plan ids the person confirmed in the panel
+ * @param {readonly string[]} confirmedPlans plan ids the person started or confirmed in the panel
  * @returns {{ question: string, allow: string, refuse: string, deny: string } | null}
  */
 export function guardFor(call, confirmedPlans) {

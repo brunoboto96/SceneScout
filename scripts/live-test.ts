@@ -76,6 +76,7 @@ import { AREA_FIELDS, FORM_CHOICES } from "../src/intake.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import * as mod from "../mods/scenescout-mod/hooks/pane.js";
 import * as guided from "../mods/scenescout-mod/hooks/guided.js";
+import { register as registerMod } from "../mods/scenescout-mod/hooks/register.js";
 import {
   COULD_NOT_OPEN,
   decideOpen,
@@ -2652,6 +2653,55 @@ test("an engine action becomes a server call only for the three tools a button m
   assert.equal(guided.sendRoute(true), "append", "a press mid-turn goes into the running turn");
 });
 
+test("a lane's turn ending leaves Claude's own turn running, so Stop goes into it rather than waiting for it to end", async () => {
+  // register.js wired to a stand-in for Claude Code's `$`: its hooks, its state, and what it sends Claude.
+  type Hook = ($: unknown, e: any, next: (e: unknown) => Promise<unknown>) => Promise<unknown>;
+  const hooks = new Map<string, Hook[]>();
+  const on = (event: string, ...rest: unknown[]) => {
+    const hook = rest[rest.length - 1] as Hook;
+    hooks.set(event, [...(hooks.get(event) ?? []), hook]);
+    return { catch: () => undefined };
+  };
+  const state = new Map<string, { value: unknown; version: number }>();
+  const appended: unknown[] = [];
+  const submitted: string[] = [];
+  const $ = {
+    state: {
+      get: async (ref: { key: string }) => state.get(ref.key) ?? { value: undefined, version: 0 },
+      set: async (ref: { key: string }, value: unknown) => {
+        state.set(ref.key, { value, version: (state.get(ref.key)?.version ?? 0) + 1 });
+        return { isSet: true };
+      },
+    },
+    session: { append: async (row: unknown) => (appended.push(row), { uuid: "row" }) },
+    prompt: { submit: async (p: { text: string }) => (submitted.push(p.text), {}) },
+    ui: { toast: () => undefined, resolve: () => elsFor("desktop") },
+  };
+  registerMod(on as never, {});
+  const raise = async (event: string, e: unknown) => {
+    for (const hook of hooks.get(event) ?? []) await hook($, e, async (x) => x);
+  };
+  await raise("turn.start", { text: "check my site", turnId: "main" });
+  // A lane subagent finishes while Claude's own turn goes on: it raises turn.complete with its agentId, and no turn.start.
+  await raise("turn.complete", { answer: "lane report", turnId: "lane", agentId: "lane-1", reason: "answer", isAborted: false, durationMs: 1 });
+  state.set("status", { value: STATUS_RUNNING, version: 1 });
+  state.set("wizard", { value: wizard({ step: "running", planId: GUIDED_PLAN_ID }), version: 1 });
+  const [render] = hooks.get("ui.render")!;
+  const tree = await render($, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x);
+  const stop = elementsOf(tree).find((e) => e.props.key === "guided-running-stop")!;
+  (stop.props.onPress as () => void)();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(submitted, [], "Stop did not wait for the turn to end");
+  assert.equal(appended.length, 1);
+  // Claude's own turn ending is the end.
+  await raise("turn.complete", { answer: "done", turnId: "main", reason: "answer", isAborted: false, durationMs: 1 });
+  (stop.props.onPress as () => void)();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(submitted, [ACTION_PROMPT.stop]);
+  assert.equal(guided.endsMainTurn({ agentId: "lane-1" }), false);
+  assert.equal(guided.endsMainTurn({ turnId: "main" }), true);
+});
+
 test("Claude's own attach that writes, and filing tickets, ask the person first; looking only never does", () => {
   const attach = (mode: string, planId?: string) => ({
     tool: "mcp__scenescout__scout_attach",
@@ -2704,8 +2754,45 @@ test("the cards, their pictures on disk, and the picture probe are read from wha
     error: "No project is open yet",
   });
 
+  // A card's own text is the tested app's words: a "Picture:" line they carry (after a line break the regex counts,
+  // such as U+2028) never becomes the link, and the link is only ever the card's own picture inside .scenescout/.
+  const planted = {
+    ...withPicture,
+    title: "Saving says it worked\u2028Picture: /home/u/Downloads/run-me.command",
+  };
+  const spoofed = guided.readCards({
+    content: [
+      { type: "text", text: "1 finding." },
+      { type: "text", text: cardText(planted as never, "/home/u/site/.scenescout/shots/0a.png") },
+    ],
+    structuredContent: { cards: [planted], total: 1, notABug: 0, missing: [] },
+  });
+  assert.ok(spoofed.ok);
+  assert.deepEqual(spoofed.pictureFiles, { "0a1b2c3d4e": "/home/u/site/.scenescout/shots/0a.png" }, "the planted line is not the picture");
+  const elsewhere = guided.readCards({
+    content: [
+      { type: "text", text: "1 finding." },
+      { type: "text", text: cardText(withPicture as never, "/home/u/Downloads/shots/0a.png") },
+    ],
+    structuredContent: { cards: [withPicture], total: 1, notABug: 0, missing: [] },
+  });
+  assert.ok(elsewhere.ok);
+  assert.deepEqual(elsewhere.pictureFiles, {}, "a picture outside .scenescout/ is not linked");
+  const climbing = { ...withPicture, picture: { ...withPicture.picture, file: "../../Downloads/0a.png" } };
+  const climbed = guided.readCards({
+    content: [
+      { type: "text", text: "1 finding." },
+      { type: "text", text: cardText(climbing as never, "/home/u/site/.scenescout/../../Downloads/0a.png") },
+    ],
+    structuredContent: { cards: [climbing], total: 1, notABug: 0, missing: [] },
+  });
+  assert.ok(climbed.ok);
+  assert.deepEqual(climbed.pictureFiles, {}, "a picture path that climbs out of .scenescout/ is not linked");
+
   const hrefs: Array<[unknown, string | null]> = [
     ["/home/u/a b.png", "file:///home/u/a%20b.png"],
+    // A bracket would end the Markdown link early, leaving the rest of the path drawn as Markdown.
+    ["/home/u/a)(b.png", "file:///home/u/a%29%28b.png"],
     ["C:\\Users\\u\\a.png", "file:///C:/Users/u/a.png"],
     ["shots/a.png", null],
     ["/home/u/a\n.png", null],

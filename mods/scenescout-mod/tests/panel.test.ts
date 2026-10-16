@@ -110,3 +110,45 @@ test("Claude's own attach that writes asks the person first, and a no denies it"
   expect(asked).toBe(2);
   expect(looking).not.toMatchObject({ deny: expect.anything() });
 });
+
+test("a plan the person started from the panel is not asked about a second time when Claude attaches with it", async ($, on) => {
+  let asked = 0;
+  const sent: string[] = [];
+  const local = {
+    planId: "gp-klmnopqrst",
+    choices: { address: "http://localhost:3000", areas: ["forms"], signIn: "none", care: "may-submit-forms", thoroughness: "normal" },
+    mode: "read-only",
+    confirm: null,
+  };
+  on("mcp.call", async (_$: unknown, e: { tool: string }) => {
+    if (e.tool === "scout_guided_plan") return { value: { content: [{ type: "text", text: "plan" }], structuredContent: local } };
+    return { value: { isError: true, content: [{ type: "text", text: "not here" }] } };
+  });
+  on("prompt.submit", async (_$: unknown, e: { text: string }) => {
+    sent.push(e.text);
+    return { text: e.text };
+  });
+  on("tool.call", { tool: "AskUserQuestion" }, async (_$: unknown, e: { questions: Array<{ question: string }> }) => {
+    asked += 1;
+    return { result: { questions: e.questions, answers: { [e.questions[0].question]: "Let it" } } };
+  });
+  on("tool.call", async () => ({ result: { content: [{ type: "text", text: "attached" }] } }));
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop", props: PROPS });
+  await ui.press({ key: "guided-welcome-check" });
+  await ui.input({ key: "guided-config-address", text: "http://localhost:3000" });
+  await ui.press({ key: "guided-config-care-may-submit-forms" });
+  await ui.press({ key: "guided-config-start" });
+  expect(sent.length).toBe(1);
+  await $.tool.call({
+    tool: "mcp__scenescout__scout_attach",
+    tool_use_id: "t1",
+    url: "http://localhost:3000",
+    mode: "read-only",
+    planId: local.planId,
+  } as never);
+  expect(asked).toBe(0);
+  // Another plan, or none, is still asked about.
+  await $.tool.call({ tool: "mcp__scenescout__scout_attach", tool_use_id: "t2", url: "http://localhost:3000", mode: "read-only" } as never);
+  expect(asked).toBe(1);
+  await ui.unmount();
+});
