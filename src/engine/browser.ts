@@ -197,6 +197,8 @@ import {
   MAX_READ_POSTS,
   READ_POSTS_ENV,
   readPostAllowed,
+  AUTH_POSTS_ENV,
+  authPostsSetting,
   matchReadPost,
   refusedPostPage,
   readPostEntries,
@@ -210,6 +212,7 @@ import {
 } from "./policy.js";
 import { scanProject } from "../scan.js";
 import type { RouteHealth } from "./check.js";
+import { botChallenge, challengeBodyMatters, startPageWarning } from "./challenge.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
 import { STORAGE_STATE_ALLOW_ENV, UPLOAD_ALLOW_ENV, allowedPaths } from "./allow-paths.js";
@@ -337,6 +340,8 @@ export interface AttachOptions {
    * none (policy.ts readPostsSetting).
    */
   readPosts?: string[];
+  /** False: SCENESCOUT_AUTH_POSTS is not read and the path rule decides what is a sign-in (a guided check). Default: read it. */
+  operatorAuthPosts?: boolean;
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -750,6 +755,9 @@ export class BrowserEngine {
   /** POST endpoints the user named as reads (policy.ts readPostAllowed decides when that counts). */
   readPosts: ReadPost[] = [];
   private readPostNotice = "";
+  /** The only POSTs that count as signing in, when the operator listed them (SCENESCOUT_AUTH_POSTS); null for the path rule. */
+  private authPosts: ReadPost[] | null = null;
+  private authPostNotice = "";
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
   /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
@@ -1183,6 +1191,7 @@ export class BrowserEngine {
     clearRefusedPost: (url) => this.clearRefusedPost(url),
     isOwnedResource: (pathname) => this.isOwnedResource(pathname),
     recordCreation: (res) => this.recordCreation(res),
+    authPosts: () => this.authPosts,
   });
   /**
    * Every request answered since the last action, with its status. The HTTP
@@ -1488,8 +1497,8 @@ export class BrowserEngine {
     this.configureSession(opts);
     await this.launchContext(opts, profile);
     await this.wireContext(this.context!);
-    await this.firstNavigation(opts.url);
-    return this.attachSummary(opts, auth, storageStatePath, profileNote);
+    const startWarning = await this.firstNavigation(opts.url);
+    return (await this.attachSummary(opts, auth, storageStatePath, profileNote)) + (startWarning ? `\n${startWarning}` : "");
   }
 
   /**
@@ -1547,6 +1556,13 @@ export class BrowserEngine {
         : "") +
       (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "") +
       (trust.overflow.length > 0 ? ` More than ${MAX_TRUSTED_EMBEDS} trusted embeds; not trusted: ${trust.overflow.join(", ")}.` : "");
+    const authList = opts.operatorAuthPosts === false ? null : authPostsSetting(process.env[AUTH_POSTS_ENV]);
+    this.authPosts = authList?.entries ?? null;
+    this.authPostNotice = authList
+      ? ` Sign-in POSTs: only ${authList.entries.length > 0 ? authList.entries.map((e) => e.entry).join(", ") : "none"} (${AUTH_POSTS_ENV}); no other POST counts as signing in.` +
+        (authList.rejected.length > 0 ? ` Not a "POST /path" or "POST https://host/path" entry, so not a sign-in: ${authList.rejected.join(", ")}.` : "") +
+        (authList.overflow.length > 0 ? ` More than ${MAX_READ_POSTS} sign-in POSTs; not counted: ${authList.overflow.join(", ")}.` : "")
+      : "";
     const reads = readPostEntries(readPostsSetting(opts.readPosts, process.env[READ_POSTS_ENV]));
     this.readPosts = reads.entries;
     this.readPostNotice =
@@ -1762,6 +1778,7 @@ export class BrowserEngine {
           destructiveWire: isDestructiveWire(pathnameOf(req.url()), req.postData()),
           foreign: () => this.foreignWriteOf(req),
           offApp: () => offAppPageWrite(this.baseUrl, this.page?.url(), req.url(), this.embedMoves.movedTo),
+          authList: this.guard.authListFor(req.url()),
         })
       )
         return;
@@ -1836,10 +1853,12 @@ export class BrowserEngine {
     });
   }
 
-  /** Attach, phase 5: the first navigation, to the app's URL. */
-  private async firstNavigation(url: string): Promise<void> {
+  /** Attach, phase 5: the first navigation, to the app's URL. Returns the warning when what answered is not the app (challenge.ts). */
+  private async firstNavigation(url: string): Promise<string | null> {
+    let warning: string | null;
     try {
-      await this.page!.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
+      const resp = await this.page!.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
+      warning = startPageWarning(url, resp?.status() ?? null, await BrowserEngine.challengeOf(this.page!, resp));
     } catch (err) {
       // Don't leave a half-attached engine (leaked browser, snapshots of about:blank).
       await this.close();
@@ -1848,6 +1867,17 @@ export class BrowserEngine {
     }
     await this.settle();
     this.logAction({ action: "attach", url: this.page!.url() });
+    return warning;
+  }
+
+  /** The bot protection that answered a navigation in the app's place (challenge.ts botChallenge), or null. */
+  private static async challengeOf(page: Page, resp: Response | null): Promise<string | null> {
+    if (!resp) return null;
+    const status = resp.status();
+    // The body is read only on a refusing status, where a marker can count. One that cannot be read (the challenge
+    // reloaded the page) falls back to the page's markup, then to none, leaving the headers to decide.
+    const body = challengeBodyMatters(status) ? await resp.text().catch(() => page.content().catch(() => "")) : undefined;
+    return botChallenge({ status, headers: resp.headers(), ...(body !== undefined ? { body } : {}) });
   }
 
   /** Attach, phase 6: what attaching found, and the warning when a saved sign-in landed on a login page. */
@@ -1887,7 +1917,7 @@ export class BrowserEngine {
       `Memory: ${this.memory!.dir}.${this.memory!.loadWarning ? ` WARNING: ${this.memory!.loadWarning}` : ""}` +
       (this.memory!.prunedStates > 0 ? ` Trimmed ${this.memory!.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory!.legacyDirNote ? ` ${this.memory!.legacyDirNote}` : ""}` +
-      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice} Call scout_snapshot to see the current state.` +
+      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice}${this.authPostNotice} Call scout_snapshot to see the current state.` +
       profileNote +
       authWarning
     );
@@ -4596,9 +4626,11 @@ export class BrowserEngine {
     // treats a PDF, a feed or an attachment as a download throws from goto, and this is then the only record of it.
     const answered = BrowserEngine.watchMainDocument(page, url);
     let resource: { url: string; status: number; contentType: string } | null = null;
+    let challenge: string | null = null;
     try {
       const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
       status = resp?.status() ?? "no-response";
+      challenge = await BrowserEngine.challengeOf(page, resp);
       const contentType = mediaTypeOf(resp?.headers()["content-type"]);
       // Whatever its status: a feed that answers 404 is shown by some browsers and refused by others, and is the same
       // route's 404 either way, not a page with no controls.
@@ -4731,6 +4763,7 @@ export class BrowserEngine {
       brokenImages: inspected?.brokenImages ?? [],
       design: inspected?.design ?? [],
       ...(inspected?.auditError ? { auditError: inspected.auditError } : {}),
+      ...(challenge ? { challenge } : {}),
     });
     const deadEnd = trackedElements(elements).length === 0;
     // A field labelled only by its placeholder counts here too: to someone reading the crawl, it has no label.
@@ -4746,6 +4779,7 @@ export class BrowserEngine {
 
     const flags = [
       loginRedirect ? "AUTH-REDIRECT" : null,
+      challenge ? `BOT-CHALLENGE (${challenge})` : null,
       deadEnd ? "DEAD-END" : null,
       stateFlag,
       violations.length > 0 ? `${violations.length}⚠` : null,

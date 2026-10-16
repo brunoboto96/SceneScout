@@ -503,6 +503,8 @@ export function registerSessionTools(): void {
             trustedEmbeds,
             // While a guided plan is open this is an empty list, so SCENESCOUT_READ_POSTS is not read either (ADR 24).
             readPosts: guided.readPosts ?? readPosts,
+            // Likewise SCENESCOUT_AUTH_POSTS is not read while a guided plan is open: its entries go out of observe as sign-ins.
+            operatorAuthPosts: guided.operatorAuthPosts,
             actionTimeoutMs,
             navTimeoutMs,
             memoryStore: store,

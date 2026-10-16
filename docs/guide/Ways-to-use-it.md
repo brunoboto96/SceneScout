@@ -227,6 +227,8 @@ Two rules measure something exactly that is a defect only under a convention the
 
 With no `--storage-state`, a route that sends the browser to the sign-in page is doing what it should for a visitor who is not signed in, so it is not an `auth-redirect` issue. Those routes are listed once under "Needs sign-in" (and as `needsSignIn` in `check.json`): "N routes need sign-in; give a role to cover them". Pass `--storage-state` with a signed-in session, such as a profile saved by `scenescout login`, to measure them. `--ignore-path` takes a route off that list. Given a session, a route that still sends the browser to sign-in means the session was lost or expired, and is an `auth-redirect` issue.
 
+A route inside the app that bot protection answers in the app's place (rate limiting part-way through a crawl is the usual case) is not the app either: nothing on it is checked, so its status and the challenge's own page are not issues. It is listed once under "Blocked by bot protection" (and as `blocked` in `check.json`), and a re-test of a finding on it is `not-reached`. A start page answered that way stops the check with exit 2 instead.
+
 ### Saved flows
 
 Every `.scenescout/flows/*.json` is replayed after the crawl with no model involved. A flow is the steps `scout_run_plan` takes, plus assertions:
