@@ -109,9 +109,10 @@ jobs:
       - run: npm ci
       - name: Formatting
         run: npm run format:check
-      # The browser build is cached by OS, browser and Playwright version. Restore
-      # and save are separate steps, as in action.yml: the combined action saves
-      # only when the whole job passes, so a failing suite would never cache it.
+      # The browser build is cached by runner image, browser and Playwright
+      # version. Restore and save are separate steps, as in action.yml: the
+      # combined action saves only when the whole job passes, so a failing suite
+      # would never cache it.
       # A hit skips the download; Linux still installs the system libraries,
       # which live outside the cache.
       - name: Browser cache key
@@ -119,6 +120,8 @@ jobs:
         shell: bash
         run: |
           echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+          # The runner image (ubuntu24, macos15, win25): Playwright's WebKit and Firefox builds differ by OS release.
+          echo "image=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
           case "$RUNNER_OS" in
             Linux) echo "path=$HOME/.cache/ms-playwright" ;;
             macOS) echo "path=$HOME/Library/Caches/ms-playwright" ;;
@@ -129,7 +132,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.browser.outputs.path }}
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
+          key: playwright-${{ runner.os }}-${{ steps.browser.outputs.image }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
       - name: Install browser
         if: steps.browser-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
@@ -185,6 +188,8 @@ jobs:
         shell: bash
         run: |
           echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+          # The runner image (ubuntu24, macos15, win25): Playwright's WebKit and Firefox builds differ by OS release.
+          echo "image=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
           case "$RUNNER_OS" in
             Linux) echo "path=$HOME/.cache/ms-playwright" ;;
             macOS) echo "path=$HOME/Library/Caches/ms-playwright" ;;
@@ -195,7 +200,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.browser.outputs.path }}
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
+          key: playwright-${{ runner.os }}-${{ steps.browser.outputs.image }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
       - name: Install browser
         if: steps.browser-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
@@ -259,6 +264,8 @@ jobs:
         shell: bash
         run: |
           echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+          # The runner image (ubuntu24, macos15, win25): Playwright's WebKit and Firefox builds differ by OS release.
+          echo "image=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
           case "$RUNNER_OS" in
             Linux) echo "path=$HOME/.cache/ms-playwright" ;;
             macOS) echo "path=$HOME/Library/Caches/ms-playwright" ;;
@@ -269,7 +276,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.browser.outputs.path }}
-          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ matrix.browser }}-${{ steps.browser.outputs.playwright }}
+          key: playwright-${{ runner.os }}-${{ steps.browser.outputs.image }}-${{ runner.arch }}-${{ matrix.browser }}-${{ steps.browser.outputs.playwright }}
       - name: Install browser
         if: steps.browser-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps ${{ matrix.browser }}

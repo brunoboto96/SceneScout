@@ -403,6 +403,14 @@ test("the committed timings keep the CI shards within about a minute of each oth
   const shards = balanceShards(files, 3, timings.suites, { together: TOGETHER, extra: timings.jobExtra });
   const jobs = shards.map((s, k) => shardSeconds(s, timings.suites) + timings.jobExtra[k]);
   assert.ok(Math.max(...jobs) - Math.min(...jobs) <= 60, `the shards' jobs take ${jobs.join(", ")} seconds`);
+  // Every real suite runs once, the pair that shares state stays together and in order, and a suite added with no
+  // measured time (first or last by title) is placed once without moving another suite out of the run.
+  const titles = files.map((f) => f.title);
+  assert.deepEqual(shardProblems(shards, titles, TOGETHER), []);
+  for (const added of ["a new suite", "zz new suite"]) {
+    const grown = balanceShards([...files, { title: added }], 3, timings.suites, { together: TOGETHER, extra: timings.jobExtra });
+    assert.deepEqual(shardProblems(grown, [...titles, added], TOGETHER), [], added);
+  }
 });
 
 test("each suite's time is read from a CI log's timestamps, and a suite the log never finished is left out", () => {
