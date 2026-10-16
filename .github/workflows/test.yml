@@ -36,6 +36,85 @@ permissions:
   contents: read
 
 jobs:
+  # What this run needs (scripts/test-plan.mjs; ADR 26). A push to main and a
+  # dispatched run (the release's Version Packages branch) test every cell. A
+  # pull request runs Linux and Windows on Node 24; the macOS, Node 20, Firefox
+  # and WebKit cells join it when it carries the `full-ci` label or changes the
+  # browser code or the dependency tree. A pull request that changes only
+  # documentation runs the `docs` job instead of the matrix.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      kind: ${{ steps.plan.outputs.kind }}
+      full: ${{ steps.plan.outputs.full }}
+      platforms: ${{ steps.plan.outputs.platforms }}
+    steps:
+      # The merge commit and its first parent, the base it was merged onto: the
+      # diff between them is the pull request's change. Other events need only
+      # the plan script.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
+      - name: Changed files and labels
+        id: diff
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            # --no-renames lists a moved file under its old path too, so moving code into docs/ is not docs-only.
+            echo "files<<EOF_FILES"
+            git diff --name-only --no-renames HEAD^1 HEAD
+            echo "EOF_FILES"
+            # Read now rather than from the event, so adding the label and re-running the workflow is enough.
+            echo "labels<<EOF_LABELS"
+            gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name'
+            echo "EOF_LABELS"
+          } >> "$GITHUB_OUTPUT"
+      - name: Plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          FILES: ${{ steps.diff.outputs.files }}
+          LABELS: ${{ steps.diff.outputs.labels }}
+        run: node scripts/test-plan.mjs plan
+
+  # A pull request that changes only documentation: every pure-logic suite and
+  # mcp-check, because several of them read the guide, the README, AGENTS.md or
+  # the changesets (ADR 26 lists which). Nothing a browser-suite cell tests can
+  # change in such a pull request, so the matrix is skipped.
+  docs:
+    name: ubuntu-latest · docs only
+    needs: plan
+    if: needs.plan.outputs.kind == 'docs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Formatting
+        run: npm run format:check
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - name: Unit suites
+        run: npm run test:unit
+      - name: MCP check
+        run: npm run mcp-check:run
+
   # `npm test`, split so no job runs it all: the browser suite is most of its
   # time, so it runs in three shards (scripts/smoke/suites.ts lists them), and
   # the second shard's job, the lightest, also runs the unit suites and
@@ -45,18 +124,14 @@ jobs:
     name: ${{ matrix.platform.os }} · node ${{ matrix.platform.node }} · shard ${{ matrix.shard }}/3
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 35
+    needs: plan
+    if: needs.plan.outputs.kind == 'code'
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          # The supported floor and the current LTS, on the platform CI is cheapest on.
-          - { os: ubuntu-latest, node: 20 }
-          - { os: ubuntu-latest, node: 24 }
-          # Where most contributors actually run it.
-          - { os: macos-latest, node: 24 }
-          # Windows runs everything too: path handling, the installer's symlink
-          # fallback, and the engine driving a real Chromium.
-          - { os: windows-latest, node: 24 }
+        # Every platform on main and on a dispatched run; Linux and Windows on
+        # Node 24 for a pull request. scripts/test-plan.mjs lists both.
+        platform: ${{ fromJSON(needs.plan.outputs.platforms) }}
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -96,9 +171,12 @@ jobs:
 
   # The write policy is a promise about every browser the engine can drive, and
   # the browsers differ exactly where it matters: what the driver can intercept.
-  # The browser suite therefore runs against the other two as well.
+  # The browser suite therefore runs against the other two as well: on main,
+  # on a dispatched run, and on a pull request the plan gives the full matrix.
   cross-browser:
     name: ubuntu-latest · ${{ matrix.browser }} · shard ${{ matrix.shard }}/3
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
@@ -134,6 +212,8 @@ jobs:
   # repository's code-scanning alerts. The job's token cannot upload it anyway.
   check-action:
     name: ubuntu-latest · check action
+    needs: plan
+    if: needs.plan.outputs.kind == 'code'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -210,6 +290,8 @@ jobs:
   # environment. The run must complete, write its files and never print the key.
   ci-action:
     name: ubuntu-latest · ci action
+    needs: plan
+    if: needs.plan.outputs.kind == 'code'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -310,21 +392,23 @@ jobs:
 
   # The branch ruleset requires ONE check, named "test". A matrix reports one
   # check per cell under changing names, so this job is the stable name that
-  # summarises them: green only when every cell is. The action's job is part of
-  # it: a broken action is a broken release, and the job runs alongside the
-  # matrix, so it adds a few runner minutes and no wait.
+  # summarises them. It passes only when every job the plan runs passed and
+  # every job it leaves out was skipped: a job skipped because the plan failed
+  # is a failure, never a pass. The action jobs are part of it: a broken action
+  # is a broken release, and they run alongside the matrix, so they add a few
+  # runner minutes and no wait.
   test:
-    needs: [suite, cross-browser, check-action, ci-action]
+    needs: [plan, docs, suite, cross-browser, check-action, ci-action]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Every matrix cell passed
-        run: |
-          echo "suite result: ${{ needs.suite.result }}"
-          echo "cross-browser result: ${{ needs.cross-browser.result }}"
-          echo "check-action result: ${{ needs.check-action.result }}"
-          echo "ci-action result: ${{ needs.ci-action.result }}"
-          test "${{ needs.suite.result }}" = "success"
-          test "${{ needs.cross-browser.result }}" = "success"
-          test "${{ needs.check-action.result }}" = "success"
-          test "${{ needs.ci-action.result }}" = "success"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/test-plan.mjs
+          sparse-checkout-cone-mode: false
+      - name: Every job the plan runs passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/test-plan.mjs verdict

@@ -21,6 +21,7 @@ import { z } from "zod";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
+import { expectedJobs, FULL_CI_LABEL, FULL_CI_PATHS, FULL_PLATFORMS, isDocsPath, plan, PULL_REQUEST_PLATFORMS, verdict } from "./test-plan.mjs";
 import {
   agentLoop,
   captureShots,
@@ -1943,18 +1944,24 @@ test("action: this repository runs it against the demo app and a stand-in API, g
   assert.ok(checked && /test "\$LOW" = 1/.test(checked.run ?? ""), "the finding every lane filed is counted once");
 });
 
-test("the suite runs on Windows for every pull request", () => {
+test("the suite runs on Windows for every pull request that changes code", () => {
   const workflow = parseYaml(readText(path.join(REPO, ".github", "workflows", "test.yml"))) as Record<string, any>;
   assert.ok("pull_request" in workflow.on, "test.yml does not run on pull_request");
   const pull = workflow.on.pull_request;
   const filters = pull && typeof pull === "object" ? pull : {};
-  assert.equal(filters.paths, undefined, "a paths filter would skip some pull requests");
-  assert.equal(filters["paths-ignore"], undefined, "a paths-ignore filter would skip some pull requests");
-  const cells = workflow.jobs.suite.strategy.matrix.platform as Array<{ os: string; node: number }>;
-  assert.ok(
-    cells.some((c) => c.os === "windows-latest"),
-    "the suite matrix has no windows-latest cell",
-  );
+  assert.equal(filters.paths, undefined, "a paths filter would skip some pull requests, and the required check with them");
+  assert.equal(filters["paths-ignore"], undefined, "a paths-ignore filter would skip some pull requests, and the required check with them");
+  assert.equal(workflow.jobs.suite.strategy.matrix.platform, "${{ fromJSON(needs.plan.outputs.platforms) }}", "the suite's platforms come from the plan");
+  for (const platforms of [PULL_REQUEST_PLATFORMS, FULL_PLATFORMS]) {
+    assert.ok(
+      platforms.some((c) => c.os === "windows-latest"),
+      "the suite has no windows-latest cell",
+    );
+    assert.ok(
+      platforms.some((c) => c.os === "ubuntu-latest" && c.node === 24),
+      "the formatting check and the sample report run on ubuntu-latest, node 24",
+    );
+  }
   const steps = workflow.jobs.suite.steps as Array<{ name?: string; run?: string; if?: string }>;
   const shard = steps.find((s) => /smoke:run -- --shard/.test(s.run ?? ""));
   assert.ok(shard, "no suite step runs a shard of the browser suite");
@@ -1969,6 +1976,199 @@ test("the suite runs on Windows for every pull request", () => {
   }
   const needs = workflow.jobs.test.needs as string[];
   assert.ok(needs.includes("suite"), "the required test check does not wait for the suite, so a Windows failure would not fail it");
+});
+
+// ── which jobs a run of test.yml needs (scripts/test-plan.mjs, ADR 26) ──────
+
+const cell = (os: string, node: number) => ({ os, node });
+
+test("test plan: main and dispatched runs get every cell, a pull request Linux and Windows on Node 24", () => {
+  assert.deepEqual(FULL_PLATFORMS, [cell("ubuntu-latest", 20), cell("ubuntu-latest", 24), cell("macos-latest", 24), cell("windows-latest", 24)]);
+  assert.deepEqual(PULL_REQUEST_PLATFORMS, [cell("ubuntu-latest", 24), cell("windows-latest", 24)]);
+  const src = ["src/engine/policy.ts"];
+  for (const event of ["push", "workflow_dispatch"]) {
+    // Even a documentation change: what lands on main, and every release, is tested on every cell.
+    for (const files of [src, ["docs/ci.md"], undefined]) {
+      const p = plan({ event, files });
+      assert.equal(p.kind, "code", event);
+      assert.equal(p.full, true, event);
+      assert.deepEqual(p.platforms, FULL_PLATFORMS, event);
+    }
+  }
+  const pr = plan({ event: "pull_request", files: src });
+  assert.deepEqual([pr.kind, pr.full, pr.platforms], ["code", false, PULL_REQUEST_PLATFORMS]);
+});
+
+test("test plan: a pull request gets the full matrix by label or by touching browser code, dependencies or the plan", () => {
+  const near = plan({ event: "pull_request", files: ["src/engine/policy.ts"], labels: ["full-ci-later", "wave-2"] });
+  assert.equal(near.full, false, "only the exact label counts");
+  const labelled = plan({ event: "pull_request", files: ["src/engine/policy.ts"], labels: ["wave-2", FULL_CI_LABEL] });
+  assert.deepEqual([labelled.kind, labelled.full, labelled.platforms], ["code", true, FULL_PLATFORMS]);
+  // A documentation-only pull request with the label still runs everything: the label asks for it.
+  assert.equal(plan({ event: "pull_request", files: ["docs/ci.md"], labels: [FULL_CI_LABEL] }).full, true);
+  for (const file of FULL_CI_PATHS) {
+    const p = plan({ event: "pull_request", files: ["docs/ci.md", file] });
+    assert.deepEqual([p.kind, p.full], ["code", true], file);
+  }
+  for (const file of ["src/engine/browsers.ts", "src/browsers.test.ts", "scripts/smoke/harness.ts", "package-lock.json.bak", "docs/package.json"])
+    assert.equal(plan({ event: "pull_request", files: [file] }).full, false, file);
+  assert.ok(FULL_CI_PATHS.includes("src/browsers.ts") && FULL_CI_PATHS.includes("src/engine/browser.ts"));
+  for (const file of FULL_CI_PATHS) assert.ok(fs.existsSync(path.join(REPO, file)), `${file} exists, so a rename does not silently drop it`);
+});
+
+test("test plan: only prose outside what the suites read as data makes a pull request docs-only", () => {
+  const docs = [
+    "docs/ci.md",
+    "docs/guide/Start-here.md",
+    "docs/adr/0001-completion-is-a-contract-not-a-vibe.md",
+    ".changeset/some-change.md",
+    "README.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+  ];
+  for (const file of docs) assert.equal(isDocsPath(file), true, file);
+  const p = plan({ event: "pull_request", files: docs });
+  assert.deepEqual([p.kind, p.full], ["docs", false]);
+  // Markdown the code or the suites read as data, each beside the docs path it nearly is.
+  for (const file of [
+    "skills/scenescout/SKILL.md",
+    "demo-app/README.md",
+    "holdout-app/README.md",
+    "examples/report.md",
+    "scripts/golden/plain-section.md",
+    "src/README.md",
+    "mods/scenescout-mod/README.md",
+    "docs.md.ts",
+    "README.mdx",
+    ".github/workflows/test.yml",
+  ])
+    assert.equal(isDocsPath(file), false, file);
+  assert.equal(plan({ event: "pull_request", files: ["docs/ci.md", "skills/scenescout/SKILL.md"] }).kind, "code", "one non-docs file is enough");
+  // Files that could not be listed: everything runs.
+  for (const files of [undefined, []]) {
+    const unknown = plan({ event: "pull_request", files });
+    assert.deepEqual([unknown.kind, unknown.full], ["code", true]);
+  }
+});
+
+/** The needs context of the test job, with every job given a result. */
+const NEEDS = (kind: string, full: boolean, results: Record<string, string>, planResult = "success") => ({
+  plan: { result: planResult, outputs: planResult === "success" ? { kind, full: String(full), platforms: "[]" } : {} },
+  ...Object.fromEntries(Object.entries(results).map(([job, result]) => [job, { result, outputs: {} }])),
+});
+
+test("test plan: the required check passes only when every planned job passed and every other was skipped", () => {
+  const docsRun = { docs: "success", suite: "skipped", "cross-browser": "skipped", "check-action": "skipped", "ci-action": "skipped" };
+  const prRun = { docs: "skipped", suite: "success", "cross-browser": "skipped", "check-action": "success", "ci-action": "success" };
+  const fullRun = { ...prRun, "cross-browser": "success" };
+  assert.deepEqual(verdict(NEEDS("docs", false, docsRun)), []);
+  assert.deepEqual(verdict(NEEDS("code", false, prRun)), []);
+  assert.deepEqual(verdict(NEEDS("code", true, fullRun)), []);
+  // Each failing case beside the passing one it differs from in one result.
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["the docs job failed", NEEDS("docs", false, { ...docsRun, docs: "failure" })],
+    ["a suite cell failed", NEEDS("code", false, { ...prRun, suite: "failure" })],
+    ["the suite was skipped though the plan runs it", NEEDS("code", false, { ...prRun, suite: "skipped" })],
+    ["the cross-browser jobs were cancelled", NEEDS("code", true, { ...fullRun, "cross-browser": "cancelled" })],
+    ["the cross-browser jobs were skipped on a full run", NEEDS("code", true, { ...fullRun, "cross-browser": "skipped" })],
+    ["an action job failed", NEEDS("code", false, { ...prRun, "ci-action": "failure" })],
+    ["a job the plan leaves out ran", NEEDS("code", false, { ...prRun, docs: "success" })],
+    ["a job is missing from needs", NEEDS("code", false, { suite: "success", "check-action": "success", "ci-action": "success", docs: "skipped" })],
+    [
+      "the plan failed and everything after it was skipped",
+      NEEDS("", false, { docs: "skipped", suite: "skipped", "cross-browser": "skipped", "check-action": "skipped", "ci-action": "skipped" }, "failure"),
+    ],
+    ["the plan wrote no kind", { ...NEEDS("code", false, prRun), plan: { result: "success", outputs: {} } }],
+  ];
+  for (const [what, needs] of cases) assert.notDeepEqual(verdict(needs), [], what);
+});
+
+test("test plan: the script's commands write the plan as outputs and exit by the verdict", () => {
+  const script = path.join(REPO, "scripts", "test-plan.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-plan-"));
+  try {
+    const out = path.join(dir, "output");
+    fs.writeFileSync(out, "");
+    const run = (cmd: string, env: Record<string, string>) =>
+      spawnSync(process.execPath, [script, cmd], { env: { PATH: process.env.PATH ?? "", ...env }, encoding: "utf8" });
+    const planned = run("plan", { EVENT: "pull_request", FILES: "docs/ci.md\r\nREADME.md\n", LABELS: "", GITHUB_OUTPUT: out });
+    assert.equal(planned.status, 0, planned.stderr);
+    const outputs = Object.fromEntries(
+      fs
+        .readFileSync(out, "utf8")
+        .trim()
+        .split("\n")
+        .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
+    );
+    assert.deepEqual(outputs, { kind: "docs", full: "false", platforms: JSON.stringify(PULL_REQUEST_PLATFORMS) });
+    const docsRun = { docs: "success", suite: "skipped", "cross-browser": "skipped", "check-action": "skipped", "ci-action": "skipped" };
+    assert.equal(run("verdict", { NEEDS: JSON.stringify(NEEDS("docs", false, docsRun)) }).status, 0);
+    assert.equal(run("verdict", { NEEDS: JSON.stringify(NEEDS("docs", false, { ...docsRun, docs: "failure" })) }).status, 1);
+    assert.equal(run("plan", { EVENT: "push" }).status, 1, "no GITHUB_OUTPUT is an error, not a silent pass");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("test plan: test.yml runs each job when the plan says, and the required check judges them by it", () => {
+  const workflow = parseYaml(readText(path.join(REPO, ".github", "workflows", "test.yml"))) as Record<string, any>;
+  const jobs = workflow.jobs as Record<string, WorkflowJob & { strategy?: any; outputs?: Record<string, string> }>;
+  const planSteps = jobs.plan.steps ?? [];
+  assert.ok(
+    planSteps.some((s) => s.run === "node scripts/test-plan.mjs plan"),
+    "the plan job runs the plan",
+  );
+  assert.ok(
+    planSteps.some((s) => /git diff --name-only --no-renames HEAD\^1 HEAD/.test(s.run ?? "")),
+    "the pull request's change is the merge commit against its base, with a moved file listed under its old path too",
+  );
+  assert.deepEqual(Object.keys(jobs.plan.outputs ?? {}).sort(), ["full", "kind", "platforms"]);
+  // Each job's condition, held to expectedJobs: the same rule decides what runs and what the check expects.
+  const conditions: Record<string, string> = {
+    docs: "needs.plan.outputs.kind == 'docs'",
+    suite: "needs.plan.outputs.kind == 'code'",
+    "cross-browser": "needs.plan.outputs.full == 'true'",
+    "check-action": "needs.plan.outputs.kind == 'code'",
+    "ci-action": "needs.plan.outputs.kind == 'code'",
+  };
+  assert.deepEqual(Object.keys(conditions).sort(), Object.keys(expectedJobs({ kind: "code", full: true })).sort());
+  for (const [job, condition] of Object.entries(conditions)) {
+    assert.equal(jobs[job].needs, "plan", job);
+    assert.equal(jobs[job].if, condition, job);
+  }
+  for (const p of [
+    { kind: "docs", full: false },
+    { kind: "code", full: false },
+    { kind: "code", full: true },
+  ]) {
+    const expected = expectedJobs(p);
+    for (const [job, condition] of Object.entries(conditions)) {
+      const runs = condition.endsWith("== 'docs'") ? p.kind === "docs" : condition.includes("full") ? p.full : p.kind === "code";
+      assert.equal(runs, expected[job as keyof typeof expected], `${job} on ${JSON.stringify(p)}`);
+    }
+  }
+  // The docs job runs every suite that reads documentation: all the unit suites and mcp-check.
+  const docsRuns = (jobs.docs.steps ?? []).map((s) => s.run);
+  for (const run of ["npm run format:check", "npm run build", "npm run test:unit", "npm run mcp-check:run"])
+    assert.ok(docsRuns.includes(run), `the docs job runs ${run}`);
+  // The required check.
+  assert.deepEqual([...(jobs.test.needs as string[])].sort(), ["plan", ...Object.keys(conditions)].sort());
+  assert.equal(jobs.test.if, "always()");
+  const verdictStep = (jobs.test.steps ?? []).find((s) => s.run === "node scripts/test-plan.mjs verdict");
+  assert.ok(verdictStep, "the test job runs the verdict");
+  assert.equal(verdictStep.env?.NEEDS, "${{ toJSON(needs) }}");
+});
+
+test("test.yml: only a pull request's runs cancel each other; a push to main never cancels a main run", () => {
+  const workflow = parseYaml(readText(path.join(REPO, ".github", "workflows", "test.yml"))) as Record<string, any>;
+  assert.equal(workflow.concurrency["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}");
+  assert.equal(
+    workflow.concurrency.group,
+    "test-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
+    "every other run has a group of its own",
+  );
+  assert.ok("workflow_dispatch" in workflow.on, "the release dispatches the full matrix");
+  assert.deepEqual(workflow.on.push?.branches, ["main"]);
 });
 
 test("every job that runs the browser suite in shards runs each shard it names", () => {
