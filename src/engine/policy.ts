@@ -148,11 +148,17 @@ function overrideNames(value: string): string[] {
 }
 
 /**
- * Whether a form or query key is `_method` as a server reads it: decoded, and
- * with `.` or a space read as `_`, as PHP does.
+ * Whether a form, query or multipart field name is `_method` as a server reads
+ * it, once decoded. PHP drops leading spaces, reads a name only up to a NUL
+ * byte and reads `.` or a space in it as `_`; Rack 2 strips the brackets round
+ * a top-level name (`[_method]`). Any of them makes it the override.
  */
 function isMethodKey(key: string): boolean {
-  return key.replace(/[ .]/g, "_").toLowerCase() === "_method";
+  const name = key
+    .split("\0")[0]
+    .replace(/^[ [\]]+/, "")
+    .replace(/\]+$/, "");
+  return name.replace(/[ .]/g, "_").toLowerCase() === "_method";
 }
 
 /** `_method` among a query's or a form body's fields, keys decoded. */
@@ -173,9 +179,70 @@ function bodyMethodOverrides(body: string): string[] {
       /* not JSON: read as the other shapes below */
     }
   }
-  const out = formMethodOverrides(body);
-  // A multipart part named _method: its header lines (a bounded few, so the scan stays linear), a blank line, the value.
-  for (const m of body.matchAll(/name=(?:"_method"|_method)(?:;[^\r\n]*)?\r?\n(?:[^\r\n]+\r?\n){0,8}\r?\n([^\r\n]*)/gi)) out.push(m[1]);
+  return [...formMethodOverrides(body), ...multipartMethodOverrides(body)];
+}
+
+/**
+ * The `name` parameters of a multipart part's Content-Disposition line, quoted
+ * either way or bare, or none when the line is not one. Split on `;` outside
+ * quotes, as PHP reads it, and every `name` (and RFC 2231 `name*`) is kept: a
+ * server may take the first or the last.
+ */
+function dispositionNames(line: string): string[] {
+  if (!/^content-disposition[ \t]*:/i.test(line)) return [];
+  const params: string[] = [];
+  let current = "";
+  let quote = "";
+  for (const c of line.slice(line.indexOf(":") + 1)) {
+    if (quote) {
+      if (c === quote) quote = "";
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === ";") {
+      params.push(current);
+      current = "";
+      continue;
+    }
+    current += c;
+  }
+  params.push(current);
+  const names: string[] = [];
+  for (const param of params) {
+    const eq = param.indexOf("=");
+    const key = eq < 0 ? "" : param.slice(0, eq).trim().toLowerCase();
+    if (key !== "name" && key !== "name*") continue;
+    let value = param.slice(eq + 1).trim();
+    // RFC 2231: charset'language'value, percent-encoded.
+    if (key === "name*") value = safeDecode(value.replace(/^[^']*'[^']*'/, ""));
+    const q = value[0];
+    names.push(q === '"' || q === "'" ? value.slice(1, value.length > 1 && value.endsWith(q) ? -1 : undefined) : value);
+  }
+  return names;
+}
+
+/** A percent-encoded value decoded, or as given when it does not decode. */
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * `_method` among a multipart body's parts: a part whose Content-Disposition
+ * names it, then its other header lines, a blank line and the value. Read
+ * line by line, so the scan stays linear however the body is built.
+ */
+function multipartMethodOverrides(body: string): string[] {
+  const out: string[] = [];
+  const lines = body.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (!dispositionNames(lines[i]).some(isMethodKey)) continue;
+    // A bounded few header lines after it, then the blank line that ends them.
+    let j = i + 1;
+    while (j < lines.length && j <= i + 8 && lines[j] !== "") j++;
+    if (lines[j] === "" && j + 1 < lines.length) out.push(lines[j + 1]);
+  }
   return out;
 }
 

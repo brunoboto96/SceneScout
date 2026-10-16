@@ -1853,6 +1853,33 @@ test("RouteGuard: a POST carrying a method override is judged as the method it n
   }
 });
 
+test("writeMethod: a `_method` key is read as the servers that honour it normalise names", () => {
+  const as = (url: string, body?: string) => writeMethod({ method: "POST", url, body }).method;
+  const u = "https://app.example.com/api/things/3";
+  const part = (disposition: string, value = "DELETE") => `--b\r\nContent-Disposition: ${disposition}\r\n\r\n${value}\r\n--b--`;
+  // PHP drops leading spaces from a name and reads it only up to a NUL byte; Rack 2 strips the brackets round a top-level name.
+  for (const key of ["+_method", "%20_method", "_method%00x", "[_method]", "_method]", "]]_method"]) {
+    assert.equal(as(u, `${key}=DELETE`), "DELETE", `form key ${key}`);
+    assert.equal(as(`${u}?${key}=DELETE`), "DELETE", `query key ${key}`);
+  }
+  // Multipart names, normalised the same way, quoted either way, wherever `name` sits among the parameters.
+  assert.equal(as(u, part('form-data; name=".method"')), "DELETE", "a dotted multipart name");
+  assert.equal(as(u, part('form-data; name=" _method"')), "DELETE", "a multipart name with a leading space");
+  assert.equal(as(u, part("form-data; name='_method'")), "DELETE", "a single-quoted multipart name");
+  assert.equal(as(u, part('form-data; name="_method" ; x=1')), "DELETE", "a space before the next parameter");
+  assert.equal(as(u, part('form-data; filename="x"; name="_method"')), "DELETE", "name after filename");
+  assert.equal(as(u, part('form-data; name="_method"', "\r\n")), "POST", "an empty value");
+  // A second `name` (PHP keeps the last), a `;` inside another parameter's quotes, and an RFC 2231 `name*`.
+  assert.equal(as(u, part('form-data; name="note"; name="_method"')), "DELETE", "a second name parameter");
+  assert.equal(as(u, part('form-data; x="a;name=y"; name="_method"')), "DELETE", "a quoted `;` before the name");
+  assert.equal(as(u, part("form-data; name*=UTF-8''_method")), "DELETE", "an RFC 2231 name");
+  assert.equal(as(u, part('form-data; x="name=_method"; name="note"')), "POST", "`name=_method` inside another parameter's quotes");
+  // The contrast: other names, and a filename that happens to be `_method`, are not the override.
+  assert.equal(as(u, "_method_x=DELETE&x_method=DELETE&method=DELETE"), "POST");
+  assert.equal(as(u, part('form-data; name="note"')), "POST", "another multipart field");
+  assert.equal(as(u, part('form-data; name="file"; filename="_method"')), "POST", "a file named _method");
+});
+
 test("writeMethod: a body built to slow the multipart scan is read in linear time", () => {
   const body = 'name="_method"\n'.repeat(20000);
   const started = performance.now();
