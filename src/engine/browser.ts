@@ -553,6 +553,7 @@ type FieldFactsRead = {
   id: string | null;
   placeholder: string | null;
   maxLength: number | null;
+  wasPassword: boolean;
   labels: string[];
 };
 
@@ -3135,6 +3136,9 @@ export class BrowserEngine {
         (node) => {
           const n = node as HTMLInputElement & HTMLElement;
           const type = n.tagName === "INPUT" ? n.type.toLowerCase() : "";
+          // Remembered across a show-password toggle; secret-pixels.ts readFieldFacts reads and sets the same property.
+          const seen = n as unknown as Record<string, unknown>;
+          if (type === "password") seen.__scenescoutWasPassword = true;
           // What the page says about the field, for sensitive.ts to decide whether its value is a secret.
           const byIds = (ids: string | null) =>
             (ids ?? "")
@@ -3148,6 +3152,7 @@ export class BrowserEngine {
             id: n.id || null,
             placeholder: n.getAttribute("placeholder"),
             maxLength: typeof n.maxLength === "number" && n.maxLength >= 0 ? n.maxLength : null,
+            wasPassword: seen.__scenescoutWasPassword === true,
             labels: [
               n.getAttribute("aria-label") ?? "",
               byIds(n.getAttribute("aria-labelledby")),
