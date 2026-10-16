@@ -204,18 +204,23 @@ export interface SettleSource {
   current(): unknown;
 }
 
-/** Wait after an action until the page has settled (shouldKeepWaiting), or the session has moved to another page. */
-export async function settlePage(page: SettlingPage, src: SettleSource): Promise<void> {
+/**
+ * Wait after an action until the page has settled (shouldKeepWaiting), or the session has moved to another page.
+ * `now` is the clock the wait measures by; a test passes one its stand-in page advances, so no assertion rests on
+ * how long a real timer took (a 20 ms tick takes about 31 ms on Windows' default timer resolution). It must be the
+ * clock `src.lastRequestStart()` is read on, or the time since the last request means nothing.
+ */
+export async function settlePage(page: SettlingPage, src: SettleSource, now: () => number = Date.now): Promise<void> {
   await bestEffort(page.waitForLoadState("domcontentloaded"));
   // Wait on what is actually in flight rather than a flat sleep. The rule is
   // shouldKeepWaiting above; the reasoning for not using networkidle is at the
   // top of this file.
-  const started = Date.now();
+  const started = now();
   for (;;) {
     const state = {
       inFlight: src.inFlight(),
-      sinceLastStartMs: Date.now() - src.lastRequestStart(),
-      elapsedMs: Date.now() - started,
+      sinceLastStartMs: now() - src.lastRequestStart(),
+      elapsedMs: now() - started,
       paceMs: src.paceMs(),
     };
     if (!shouldKeepWaiting(state)) return;
@@ -232,22 +237,22 @@ export async function settlePage(page: SettlingPage, src: SettleSource): Promise
  * Only called where a bounce verdict is about to be made. A client-side auth
  * guard redirects on a timer and issues no request until it does, so the
  * request-based settle has nothing to wait on and the page is read while it
- * is still, briefly, the page it was asked for.
+ * is still, briefly, the page it was asked for. `now` is the clock it measures by, as for settlePage.
  */
-export async function stableUrlOf(current: () => SettlingPage | null): Promise<string> {
+export async function stableUrlOf(current: () => SettlingPage | null, now: () => number = Date.now): Promise<string> {
   const page = current();
   if (!page || page.isClosed()) return page ? page.url() : "";
-  const started = Date.now();
+  const started = now();
   let url = page.url();
   let changedAt = started;
   for (;;) {
-    if (!keepWatchingUrl({ sinceChangeMs: Date.now() - changedAt, elapsedMs: Date.now() - started })) return url;
+    if (!keepWatchingUrl({ sinceChangeMs: now() - changedAt, elapsedMs: now() - started })) return url;
     await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
     if (current() !== page || page.isClosed()) return url;
-    const now = page.url();
-    if (now !== url) {
-      url = now;
-      changedAt = Date.now();
+    const at = page.url();
+    if (at !== url) {
+      url = at;
+      changedAt = now();
     }
   }
 }
