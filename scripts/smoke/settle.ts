@@ -59,7 +59,7 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
     check(
       "on the next page, the requests the left page and its frames sent are not waited for",
       heldNext === 0 && inFlight(engine) === 0,
-      `${heldNext} in flight; took ${nextMs} ms, the contrast ${onPageMs} ms (cap ${SETTLE_CAP_MS})\n${next.slice(0, 400)}`,
+      `${heldNext} in flight before the snapshot, ${inFlight(engine)} after; took ${nextMs} ms, the contrast ${onPageMs} ms (cap ${SETTLE_CAP_MS})\n${next.slice(0, 400)}`,
     );
     check("...and the snapshot is of the next page", /Healthy second page|Page 2/.test(next), next.slice(0, 400));
 
@@ -74,13 +74,15 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
     await until("frame one to load its new page", () => frameOne.url().endsWith("/page2.html"), 8000);
     await page.evaluate(() => document.querySelector('[data-testid="pending-frame-two"]')?.remove());
     await until("frame two to be removed", () => !page.frames().some((f) => f.url().includes("n=2")), 8000);
+    // Read before the snapshot as well as after: a count that reached 0 only during the snapshot's wait was waited for.
+    const heldSame = inFlight(engine);
     const t2 = Date.now();
     const same = await engine.snapshot();
     const sameMs = Date.now() - t2;
     check(
       "a frame that navigates away and a frame that is removed leave nothing waited for",
-      inFlight(engine) === 0,
-      `${inFlight(engine)} in flight; took ${sameMs} ms, the contrast ${onPageMs} ms (cap ${SETTLE_CAP_MS})\n${same.slice(0, 400)}`,
+      heldSame === 0 && inFlight(engine) === 0,
+      `${heldSame} in flight before the snapshot, ${inFlight(engine)} after; took ${sameMs} ms, the contrast ${onPageMs} ms (cap ${SETTLE_CAP_MS})\n${same.slice(0, 400)}`,
     );
   } finally {
     await engine.close();

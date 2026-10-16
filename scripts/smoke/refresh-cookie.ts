@@ -176,9 +176,11 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     // Read-only mode: observe would refuse a POST to a path that is not an auth flow.
     await recordProfile(baseUrl, project, "scope=root&refresh=odd");
     const [scout] = await attachLanes(baseUrl, project, "read-only", 1, opened);
+    const oddFirst = await settled(scout);
     check(
       "odd endpoint: the first lane loads whole and signed in",
-      JSON.stringify(await settled(scout)) === JSON.stringify({ signedIn: "in", loaded: "whole" }),
+      JSON.stringify(oddFirst) === JSON.stringify({ signedIn: "in", loaded: "whole" }),
+      JSON.stringify(oddFirst),
     );
     const oddStart = refreshFamilies();
     expireFixtureAccess();
