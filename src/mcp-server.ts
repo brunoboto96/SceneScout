@@ -38,6 +38,7 @@ import path from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { reapOrphanBrowsers } from "./engine/reaper.js";
 import { ticketDirsFrom, ticketDirWarnings } from "./engine/tickets.js";
+import { ALLOW_PATH_SETTINGS, allowedPathsFrom } from "./engine/allow-paths.js";
 import { LIVE_TOKEN_FILE, liveEngines, liveTokenFileName, pidAlive, statusFileName } from "./engine/live.js";
 import { engines, server, live, liveDirs, liveTokenWrites, pendingLogins, guidedPlans, setOperatorPolicy } from "./server-context.js";
 import { fsPolicyReader, readLaunchPolicy } from "./engine/project-config.js";
@@ -64,6 +65,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   for (const warning of ticketDirWarnings(ticketDirs.dirs)) console.error(`[scenescout] ${warning}.`);
+  for (const name of ALLOW_PATH_SETTINGS) {
+    const allowed = allowedPathsFrom(process.env, name);
+    if ("error" in allowed) {
+      console.error(`SceneScout MCP server not started: ${allowed.error}. Fix it where the server is configured and start it again.`);
+      process.exit(1);
+    }
+  }
   // The operator's config is read from where the server was started (or SCENESCOUT_CONFIG), never from a folder an agent names.
   const config = readLaunchPolicy(process.env, process.cwd(), fsPolicyReader);
   if (!config.ok) {

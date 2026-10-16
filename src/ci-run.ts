@@ -359,9 +359,10 @@ export function toolHost(client: Client): ToolHost {
   };
 }
 
-async function startServer(log: (line: string) => void, judge?: ReturnType<typeof judgeHandler>): Promise<ToolHost> {
+async function startServer(log: (line: string) => void, judge?: ReturnType<typeof judgeHandler>, storageState?: string): Promise<ToolHost> {
   if (!fs.existsSync(serverPath)) throw new Error(`${serverPath} is missing: run \`npm run build\` first`);
-  const transport = new StdioClientTransport({ command: process.execPath, args: [serverPath], env: childEnv(process.env), stderr: "pipe" });
+  const env = childEnv(process.env, { storageState });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [serverPath], env, stderr: "pipe" });
   transport.stderr?.on("data", (chunk: Buffer) => {
     for (const line of chunk.toString("utf8").split(/\r?\n/)) if (line.trim()) log(`  [server] ${line}`);
   });
@@ -912,7 +913,7 @@ export interface CiRunDeps {
   version: string;
   now?: () => number;
   /** How the MCP server is reached: started in a child process, unless a test hands in another. */
-  startHost?: (log: (line: string) => void, judge?: ReturnType<typeof judgeHandler>) => Promise<ToolHost>;
+  startHost?: (log: (line: string) => void, judge?: ReturnType<typeof judgeHandler>, storageState?: string) => Promise<ToolHost>;
 }
 
 export interface CiRunResult {
@@ -1007,7 +1008,7 @@ export async function runCi(options: CiOptions, resolved: ResolvedProvider, deps
       if (options.fromRun.mode === "replay" && replayPlan(earlier).length === 0)
         throw new Error(`--from-run: the run recorded in ${options.fromRun.path} took no steps, so there is nothing to replay`);
     }
-    host = await (deps.startHost ?? startServer)(log, judge);
+    host = await (deps.startHost ?? startServer)(log, judge, options.storageStatePath);
     // What every session of the run attaches with: the planner's here, and each lane's when the run is split.
     const attachArgs = (a: { url: string; objective: string; task: string; session?: string }): Record<string, unknown> => ({
       url: a.url,

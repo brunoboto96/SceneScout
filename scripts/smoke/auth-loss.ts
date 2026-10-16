@@ -17,10 +17,10 @@ export async function run({ baseUrl, projectDir }: SmokeContext): Promise<void> 
   // the streak. /gated.html redirects client-side AFTER hydration, so a
   // revert of the settle reorder fails these rather than passing quietly.
   console.log("auth loss: detection, reporting, and non-coverage");
-  const deadAuthDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-deadauth-"));
-  const deadState = path.join(deadAuthDir, "expired-fixture.json");
-  fs.writeFileSync(deadState, JSON.stringify({ cookies: [], origins: [] }));
+  // The storage state sits inside the project: a storageStatePath outside it is refused (fenceStorageState).
   const authProject = fs.mkdtempSync(path.join(os.tmpdir(), "ft-authproj-"));
+  const deadState = path.join(authProject, "expired-fixture.json");
+  fs.writeFileSync(deadState, JSON.stringify({ cookies: [], origins: [] }));
   const engDead = new BrowserEngine();
   try {
     const attachOut = await engDead.attach({
@@ -66,7 +66,6 @@ export async function run({ baseUrl, projectDir }: SmokeContext): Promise<void> 
     check("...and the route it asked for is not counted as covered", slow.includes("NOT counted as covered"), slow);
   } finally {
     await engDead.close().catch(() => {});
-    fs.rmSync(deadAuthDir, { recursive: true, force: true });
     fs.rmSync(authProject, { recursive: true, force: true });
   }
 }

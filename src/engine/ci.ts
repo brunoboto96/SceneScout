@@ -16,6 +16,7 @@ import { MAX_LANES } from "./brief.js";
 import type { CaptureOutcome } from "./capture.js";
 import { markdownCell } from "./check.js";
 import { parseLimitFlag } from "./limits.js";
+import { STORAGE_STATE_ALLOW_ENV } from "./allow-paths.js";
 import { isWorthALook, redactSecrets, type Finding } from "./memory.js";
 import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifLocation } from "./sarif.js";
 import { fromRunLine, resolveFromRun, type FromRun, type FromRunMode, type RunRecord } from "./from-run.js";
@@ -461,10 +462,15 @@ export function judgeKeyConfig(env: Record<string, string | undefined>): { ok: t
  * process's, without the keys. Nothing on that side needs them, and a key a
  * process never had cannot end up in its logs or its report.
  */
-export function childEnv(env: Record<string, string | undefined>): Record<string, string> {
+export function childEnv(env: Record<string, string | undefined>, run: { storageState?: string } = {}): Record<string, string> {
   const out: Record<string, string> = {};
   const drop = new Set<string>(Object.values(KEY_ENV));
   for (const [k, v] of Object.entries(env)) if (v !== undefined && !drop.has(k)) out[k] = v;
+  // --storage-state was named by whoever ran the command, so the server reads that file wherever it is; the agent cannot add another.
+  if (run.storageState) {
+    const listed = out[STORAGE_STATE_ALLOW_ENV]?.trim();
+    out[STORAGE_STATE_ALLOW_ENV] = listed ? `${listed}${path.delimiter}${run.storageState}` : run.storageState;
+  }
   // Nobody watches a CI run: the live view would only hold a port open.
   out.SCENESCOUT_LIVE = "off";
   // ...and an unattended run opens nothing in a browser, even on a desktop, unless the user set it.
