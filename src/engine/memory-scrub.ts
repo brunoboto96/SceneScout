@@ -21,8 +21,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { writeOwnerOnlySync } from "./owner-file.js";
 
-/** The redaction a store has been cleaned with. Raise it when the redaction learns to hide something it kept before. */
-export const REDACTION_VERSION = 1;
+/**
+ * The redaction a store has been cleaned with. Raise it when the redaction
+ * learns to hide something it kept before. 2: short and letters-only values
+ * set against a secret's name, more providers' keys, PINs and sign-in codes,
+ * more field words, cards split by slashes, spelled-out email addresses and
+ * more words for a phone (#550).
+ */
+export const REDACTION_VERSION = 2;
 
 type Redact = (text: string) => string;
 

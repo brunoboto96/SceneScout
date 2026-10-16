@@ -297,6 +297,37 @@ test("credentials: the near misses of those pass: a field's name before a colon,
     assert.equal(ok({ address, areas: ["forms"] }).address, address);
 });
 
+test("credentials: a sign-in written as a pair, after 'pass' or as 'enter X when' is refused; test data for a password check is not", () => {
+  // Each refused sentence has a near miss below it that differs in the one fact that makes it a credential.
+  const secret = "Summer2024!";
+  const pairs: Array<[string, string]> = [
+    [`Sign in as bob / ${secret} and buy a thing`, "Sign in as bob / alice and compare their carts"],
+    [`Log in with bob:${secret} and open the orders`, "Log in and open the orders at 10:30"],
+    [`Use bob:${secret} on the staging site`, "Use the ratio 16:9 on the staging site"],
+    [`Sign in, pass ${secret}, then buy a thing`, "Sign in, pass the cookie banner, then buy a thing"],
+    [`Enter ${secret} when asked for the password`, "Enter a wrong value when asked for the password"],
+    [`Type ${secret} when the sign-in box appears`, "Type a long name when the sign-up box appears"],
+  ];
+  for (const [refusedText, kept] of pairs) {
+    assert.equal(holdsCredential(refusedText), true, refusedText);
+    assert.ok(!refused({ address: REMOTE, areas: ["journey"], journey: refusedText }).includes(secret), refusedText);
+    assert.equal(holdsCredential(kept), false, kept);
+  }
+  // A password typed to test the page, not to sign in with, is test data: the same value after a word about the field passes.
+  for (const text of [
+    `test password strength meter with ${secret}`,
+    `check the password field rules with ${secret}`,
+    "Enter 2026-10-16 when asked for the date",
+    "Use version v2.1 when testing",
+    // A host and port, and a path after a colon, are not a user name and a password.
+    "Test the account page at http://localhost:3000/accounts",
+    "Open https://staging.example.org:8443/app and check the menu",
+    "Check the api:v2/orders listing",
+  ])
+    assert.equal(holdsCredential(text), false, text);
+  assert.equal(holdsCredential(`the password for it is ${secret}`), true);
+});
+
 // ---- The confirmation rule, each as a contrastive pair ----
 
 test("confirmation: may submit forms on this computer needs none; the same choice on another address needs one", () => {

@@ -21,6 +21,7 @@ const PLAN_SECRET = "Plan-phrase-31";
 /** Letters in a number field: the browser refuses the fill, and Playwright's error quotes the value without escaping its quote. */
 const REFUSED_PIN = 'Pin"refused-93';
 const DIGIT = "7";
+const TOGGLED_SECRET = "Shown-phrase-58";
 
 export async function run({ baseUrl }: SmokeContext): Promise<void> {
   console.log("masked typing: a secret field's value never reaches the log, an ordinary field's does");
@@ -80,6 +81,15 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       typedDigit.slice(0, 300),
     );
 
+    // A show-password toggle makes the field type=text, and nothing else about it names a secret.
+    await engine.click(refOf(/(e\d+) button "Show phrase"/));
+    const typedToggled = await engine.type(hidden, TOGGLED_SECRET, false, true);
+    check(
+      "after a show-password toggle the field is still masked, as it was a password when typed into before",
+      !typedToggled.includes(TOGGLED_SECRET) && typedToggled.includes("← •••• (masked: password field)"),
+      typedToggled.slice(0, 300),
+    );
+
     const plan = await engine.runPlan([{ action: "type", target: "testid=phrase-hidden", value: PLAN_SECRET, replace: true }]);
     check("a plan's type step into the password field quotes neither value", !plan.includes(PLAN_SECRET) && !plan.includes(SECRET), plan.slice(0, 400));
     check("...and says the previous content was masked", plan.includes("existing content (masked: password field)"), plan.slice(0, 400));
@@ -87,7 +97,9 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     const log = JSON.stringify(engine.memory?.actionLog ?? []);
     check(
       "the action log holds no secret value and still holds the ordinary one",
-      ![SECRET, OLD_SECRET, CODE, PLAN_SECRET, "refused-93"].some((s) => log.includes(s)) && !log.includes(`"${DIGIT}"`) && log.includes("New-shown-42"),
+      ![SECRET, OLD_SECRET, CODE, PLAN_SECRET, TOGGLED_SECRET, "refused-93"].some((s) => log.includes(s)) &&
+        !log.includes(`"${DIGIT}"`) &&
+        log.includes("New-shown-42"),
       log.slice(0, 600),
     );
   } finally {
@@ -103,7 +115,9 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     }
   };
   walk(projectDir);
-  const leaking = files.filter((f) => [SECRET, OLD_SECRET, CODE, PLAN_SECRET, "refused-93"].some((s) => fs.readFileSync(f, "utf8").includes(s)));
+  const leaking = files.filter((f) =>
+    [SECRET, OLD_SECRET, CODE, PLAN_SECRET, TOGGLED_SECRET, "refused-93"].some((s) => fs.readFileSync(f, "utf8").includes(s)),
+  );
   check(
     "no file the run wrote holds a secret value",
     files.length > 0 && leaking.length === 0,

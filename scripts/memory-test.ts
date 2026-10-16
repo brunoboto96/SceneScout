@@ -87,6 +87,7 @@ import {
 import { coverageView, generateReport, runRecordOf } from "../src/engine/report.ts";
 import { maskedValue, maskFillCalls, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
 import { MASK_COLOR, MAX_FIELD_MASKS, masksToPaint, SECRET_BY_ATTRIBUTE } from "../src/engine/secret-pixels.ts";
+import { REDACTION_VERSION } from "../src/engine/memory-scrub.ts";
 import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
 
 /** The action log a store writes this run: the one session-*.jsonl file in its folder. */
@@ -841,12 +842,46 @@ test("a store written by an older engine has the secrets it kept in clear cleane
   if (process.platform !== "win32") assert.equal(fs.statSync(oldLog).mode & 0o777, 0o600);
 
   // Once cleaned, the store says so, and the next open leaves the logs alone.
-  assert.equal((JSON.parse(onDisk) as { redactedWith?: number }).redactedWith, 1);
+  assert.equal((JSON.parse(onDisk) as { redactedWith?: number }).redactedWith, REDACTION_VERSION);
   const before = fs.statSync(oldLog).mtimeMs;
   fs.writeFileSync(oldLog, fs.readFileSync(oldLog, "utf8") + JSON.stringify({ ...lines[0], at: "2025-01-02T00:00:00.000Z" }) + "\n");
   openStore(dir).flush();
   assert.ok(fs.readFileSync(oldLog, "utf8").includes("hunter2"), "a store already cleaned does not read its logs again");
   assert.ok(fs.statSync(oldLog).mtimeMs >= before);
+});
+
+test("a store cleaned by an earlier redaction is cleaned again with the redaction that now hides more, once", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+  dirs.push(dir);
+  const memDir = path.join(dir, MEMORY_DIRNAME);
+  fs.mkdirSync(memDir, { recursive: true });
+  // Kept by an engine whose redaction let a short password and a PIN through (#550), and marked as cleaned by it.
+  const finding = {
+    id: "f1",
+    severity: "high",
+    category: "privacy",
+    title: "Error toast echoes the PIN 4821",
+    detail: "login failed for password: hunter2",
+    evidence: "POST /api/things 500",
+    url: "http://localhost:3000/login",
+    state: "/login#1",
+    repro: ['click button "Sign in"'],
+    foundAt: "2025-01-01T00:00:00.000Z",
+    runs: 1,
+  };
+  fs.writeFileSync(path.join(memDir, "memory.json"), JSON.stringify({ version: 1, states: {}, findings: [finding], redactedWith: 1 }));
+  const oldLog = path.join(memDir, "session-2025-01-01T00-00-00-000Z.jsonl");
+  const line = { at: "2025-01-01T00:00:01.000Z", action: "note", target: "", result: "the toast said PIN 4821", url: "http://localhost:3000/login" };
+  fs.writeFileSync(oldLog, JSON.stringify(line) + "\n");
+
+  openStore(dir).flush();
+  const onDisk = fs.readFileSync(path.join(memDir, "memory.json"), "utf8");
+  for (const text of [onDisk, fs.readFileSync(oldLog, "utf8")]) {
+    assert.ok(!text.includes("hunter2"), text);
+    assert.ok(!text.includes("4821"), text);
+  }
+  assert.equal((JSON.parse(onDisk) as { redactedWith?: number }).redactedWith, REDACTION_VERSION);
+  assert.ok(REDACTION_VERSION > 1, "the redaction learned to hide more, so its version is raised");
 });
 
 test("opening a store it cannot clean leaves it as it was: a memory.json of an unknown version, a folder it may not write", () => {
@@ -1941,7 +1976,7 @@ test("a phone number right after a word for phone is redacted; numbers that only
   for (const kept of [
     // Contrastive with the numbers above: the same digits with no word for phone before them.
     "+44 20 7946 0958",
-    "call 030 123 45 67",
+    "recall 030 123 45 67",
     // Signed amounts and counts, which a phone rule without the word would take.
     "+1 234 567 €",
     "+12.345.678",
@@ -2009,6 +2044,248 @@ test("redactSecrets masks a parameter named for a secret, whatever its value loo
   }
   // Masked once, counted once.
   assert.equal(redactSecrets("note api_key=[redacted]"), "note api_key=[redacted]");
+});
+
+// ---------------------------------------------------------------------------
+// Gaps a fuzz of the redaction found (#550). Each masked case has a near miss
+// that differs in the one fact that makes it a secret, and is left alone.
+// ---------------------------------------------------------------------------
+
+/** Assert a secret is gone from redactSecrets' output and the edit is disclosed. */
+function assertMasked(text: string, secret: string): void {
+  const out = redactSecrets(text);
+  assert.ok(!out.includes(secret), `${secret} must not survive: ${out}`);
+  assert.match(out, /\[\d+ secrets? redacted\]$/, `the edit is disclosed: ${out}`);
+}
+
+test("redactSecrets masks a short or letters-only value set against a secret's name; the same name before a word about the field stays", () => {
+  const masked: Array<[string, string]> = [
+    ["login failed for password: hunter2", "hunter2"],
+    ["Password: letmein", "letmein"],
+    ["password = 'swordfish'", "swordfish"],
+    ['{"password":"abc"}', '"abc"'],
+    ["client_secret: shortone", "shortone"],
+    ["clientSecret=abcdefgh", "abcdefgh"],
+    ["api_key: abcdefgh", "abcdefgh"],
+    ["token: abcdefghijkl", "abcdefghijkl"],
+    ["access_token: Zm9vYmFy", "Zm9vYmFy"],
+  ];
+  for (const [text, secret] of masked) assertMasked(text, secret);
+  for (const kept of [
+    "Password: required",
+    "Password: must be at least 8 characters",
+    "Token: expired.",
+    "token: missing after refresh",
+    "Password: label is above the box",
+    "token_count: 42",
+    "password_hint_enabled: true",
+    "Password requirements are not enforced on signup",
+    "the password field: shown in clear after the toggle",
+    // A strength meter's verdict and a state are words about the field.
+    "Password: Weak",
+    "The secret: revealed.",
+    "Token: expires",
+  ])
+    assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
+});
+
+test("redactSecrets masks provider key shapes, private keys, letters-only bearer tokens and signed-link signatures; their near misses stay", () => {
+  const masked: Array<[string, string]> = [
+    ["Authorization: Bearer abcdefghijklmnopqrstuvwx", "abcdefghijklmnopqrstuvwx"],
+    ["Authorization: Bearer AbCdEfGhIjKlMnOpQrSt", "AbCdEfGhIjKlMnOpQrSt"],
+    [`slack ${"xoxb"}-${"1234567890"}-${"abcdefghijklmn"}`, "abcdefghijklmn"],
+    [`slack ${"xoxp"}-abcdefghijklmnopqrstuv`, "abcdefghijklmnopqrstuv"],
+    [`maps key ${"AIza"}${"SyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUv"}`, "SyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUv"],
+    [`model key ${"sk-ant"}-api03-${"AbCdEfGhIjKlMnOp_qrst-uv"}`, "AbCdEfGhIjKlMnOp_qrst-uv"],
+    [`gitlab ${"glpat"}-${"AbCdEfGhIjKlMnOpQrSt"}`, "AbCdEfGhIjKlMnOpQrSt"],
+    [`registry ${"npm"}_${"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"}`, "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"],
+    [
+      `key ${"-----BEGIN"} RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn\n-----END RSA PRIVATE KEY----- in the response`,
+      "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn",
+    ],
+    ["GET /bucket/file?X-Amz-Date=20261016T000000Z&X-Amz-Signature=abcdef0123456789", "abcdef0123456789"],
+    ["GET /file?X-Goog-Signature=feedface", "feedface"],
+    ["Cookie: sessionid=q1w2e3r4t5", "q1w2e3r4t5"],
+    ["redirect /cb?code=4%2F0AX4XfWh&state=xyz", "4%2F0AX4XfWh"],
+  ];
+  for (const [text, secret] of masked) assertMasked(text, secret);
+  for (const kept of [
+    "Bearer authentication-required banner renders twice",
+    "Bearer tokens are rejected after logout",
+    "the xoxo-pattern divider overlaps the footer",
+    "AIza prefix shown in the docs page",
+    "sk-ant prefix shown in the docs page",
+    "glpat- prefix shown in the docs page",
+    "npm_config_cache is unset",
+    `${"-----BEGIN"} CERTIFICATE----- is shown on the TLS page`,
+    "GET /bucket/file?X-Amz-Date=20261016T000000Z&X-Amz-Expires=300",
+    "sessionid cookie is not HttpOnly",
+    "/search?q=code+review&page=2",
+  ])
+    assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
+});
+
+test("redactSecrets masks a PIN or a sign-in code written after its word; an error, status or postal code stays", () => {
+  const masked: Array<[string, string]> = [
+    ["the PIN 4821 was echoed in the toast", "4821"],
+    ["PIN: 4821", "4821"],
+    ["enter code 482913 to continue", "482913"],
+    ["the code is 48291355", "48291355"],
+    ["verification code: 482913", "482913"],
+  ];
+  for (const [text, secret] of masked) assertMasked(text, secret);
+  for (const kept of [
+    "PIN on map is misplaced",
+    "pin 3 items to the top",
+    "error code 404 page has no link home",
+    "status code 500 on save",
+    "postal code 560001 rejected",
+    "zip code 902101 rejected",
+    "product code 1234567 not found",
+    "code 42 in the log",
+    // A date after the word is not a PIN.
+    "pin 2023-01 release notes",
+  ])
+    assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
+});
+
+test("a field named by a short or uncommon word for a secret is secret; a field about the secret is not", () => {
+  const secret: Array<[SecretFieldFacts, string]> = [
+    [{ name: "pass" }, "password"],
+    [{ name: "pw" }, "password"],
+    [{ id: "pword" }, "password"],
+    [{ label: "Memorable word" }, "password"],
+    [{ label: "Code" }, "one-time code"],
+    [{ name: "smsCode" }, "one-time code"],
+    [{ label: "Enter the 6-digit code" }, "one-time code"],
+    [{ name: "access_key" }, "secret"],
+    [{ name: "accessKeyId" }, "secret"],
+    [{ label: "Bearer" }, "secret"],
+    [{ name: "ssh_key" }, "secret"],
+    [{ label: "Credential" }, "secret"],
+    [{ label: "Credentials" }, "secret"],
+    [{ label: "Signing key" }, "secret"],
+    [{ label: "Session ID" }, "secret"],
+    [{ name: "sessionid" }, "secret"],
+    [{ label: "Seed" }, "secret"],
+    [{ label: "License key" }, "secret"],
+    [{ label: "Licence key" }, "secret"],
+    [{ label: "Password (8 characters minimum)" }, "password"],
+    // A password field after a show-password toggle, named by nothing else: what the reader saw before is kept.
+    [{ type: "text", label: "Account phrase", wasPassword: true }, "password"],
+  ];
+  for (const [facts, kind] of secret) assert.equal(secretFieldKind(facts), kind, JSON.stringify(facts));
+  const ordinary: SecretFieldFacts[] = [
+    { name: "token_count" },
+    { name: "password_hint_enabled" },
+    { name: "pin_on_map" },
+    { name: "otp_enabled" },
+    { label: "Password strength" },
+    { label: "Drop a pin on the map" },
+    { label: "Promo code" },
+    { label: "Zip code" },
+    { label: "Country code" },
+    { label: "Code review notes" },
+    { label: "Passport number" },
+    { label: "Access level" },
+    { label: "Keyboard layout" },
+    { label: "Session name" },
+    { label: "Seedling count" },
+    { label: "License type" },
+    { label: "Boarding pass count" },
+    // "pass", "seed" and "credentials" name a secret only on their own: with another word they name something else.
+    { label: "Pass rate" },
+    { label: "Boarding pass" },
+    { label: "Random seed" },
+    { label: "Credentials provider" },
+    { type: "text", label: "Account phrase", wasPassword: false },
+  ];
+  for (const facts of ordinary) assert.equal(secretFieldKind(facts), null, JSON.stringify(facts));
+  // The same words as a parameter's name.
+  assertMasked("/login?user=bob&pass=letmein", "letmein");
+  assertMasked("/verify?smsCode=123456", "123456");
+  for (const kept of ["/stats?token_count=5", "/settings?otp_enabled=true", "/reports?pass_rate=0.9"]) assert.equal(redactSecrets(kept), kept, kept);
+});
+
+test("card numbers split by a slash or by a separator with spaces around it, and 12-digit Maestro cards, are redacted; dates and lists stay", () => {
+  const redacted: Array<[string, string]> = [
+    ["card 4111/1111/1111/1111 declined", "card [card number redacted] declined"],
+    ["card 4111 - 1111 - 1111 - 1111 declined", "card [card number redacted] declined"],
+    ["card 4111 / 1111 / 1111 / 1111 declined", "card [card number redacted] declined"],
+    ["card 4111  1111  1111  1111 declined", "card [card number redacted] declined"],
+    ["card 4111-1111 / 1111 1111 declined", "card [card number redacted] declined"],
+    ["Maestro 5018 1234 5673", "Maestro [card number redacted]"],
+    ["Maestro 675911111119", "Maestro [card number redacted]"],
+  ];
+  for (const [text, want] of redacted) {
+    assert.equal(redactPersonal(text), want, text);
+    assert.equal(redactSecrets(text), want, `redactSecrets applies it too: ${text}`);
+  }
+  for (const kept of [
+    "due 2026/10/16 and 10/16/2026",
+    "pages 4111/1111",
+    "years 2024 - 2025 - 2026 - 2027",
+    // Luhn-valid at 12 digits, but no network issues a 12-digit card from these prefixes.
+    "id 411111111117",
+    "id 5017 1234 5674",
+    "ratio 1/2/3/4",
+  ]) {
+    assert.equal(redactPersonal(kept), kept, kept);
+    assert.equal(redactSecrets(kept), kept, kept);
+  }
+});
+
+test("email addresses written with (at) and (dot), with a quoted local part or an IP literal are redacted; an scp-style git remote stays", () => {
+  const local = "jo.sample";
+  const host = "contoso-mail";
+  const redacted: Array<[string, string]> = [
+    [`write to ${local} (at) ${host} (dot) net`, "write to [email redacted]"],
+    [`write to ${local} [at] ${host} [dot] net today`, "write to [email redacted] today"],
+    [`write to ${local} at ${host} dot net today`, "write to [email redacted] today"],
+    [`write to ${local}(at)${host}.net`, "write to [email redacted]"],
+    [`from "jo sample"@${host}.net`, "from [email redacted]"],
+    [`from jo@[10.1.2.3] bounced`, "from [email redacted] bounced"],
+  ];
+  for (const [text, want] of redacted) {
+    assert.equal(redactPersonal(text), want, text);
+    assert.equal(redactSecrets(text), want, `redactSecrets applies it too: ${text}`);
+  }
+  for (const kept of [
+    // Built at run time, as the addresses above are: the hygiene suite flags an address on a real-looking domain.
+    `git clone ${["git", `git.${host}.net:team/widgets.git`].join("@")}`,
+    `remote ${["deploy", `${host}.net:~/widgets.git`].join("@")} fails`,
+    "look at the dot matrix printer",
+    "meet at noon",
+    `${local} (at) example (dot) com`,
+    "server at 10.1.2.3 refused",
+  ]) {
+    assert.equal(redactPersonal(kept), kept, kept);
+  }
+});
+
+test("a phone number after Call, WhatsApp, Contact, Ph or T is redacted; the same letters inside a word, or with no number shape, stay", () => {
+  const redacted: Array<[string, string]> = [
+    ["Call 030 123 45 67", "Call [phone redacted]"],
+    ["WhatsApp: +44 7700 900123", "WhatsApp: [phone redacted]"],
+    ["Contact +49 151 2345 6789", "Contact [phone redacted]"],
+    ["Ph: (555) 123-4567", "Ph: [phone redacted]"],
+    ["T: +44 20 7946 0958", "T: [phone redacted]"],
+    ["T. 030 123 45 67", "T. [phone redacted]"],
+  ];
+  for (const [text, want] of redacted) {
+    assert.equal(redactPersonal(text), want, text);
+    assert.equal(redactSecrets(text), want, `redactSecrets applies it too: ${text}`);
+  }
+  for (const kept of [
+    "recall 030 123 45 67",
+    "API call took 120 340 ms",
+    "Contact us 2024 2025",
+    "Part: 030 123 45 67",
+    "don't 0800 123 4567",
+    "graph 030 123 45 67",
+  ]) {
+    assert.equal(redactPersonal(kept), kept, kept);
+  }
 });
 
 test("a failed fill's error names the action but not the secret value Playwright's call log quotes", () => {
