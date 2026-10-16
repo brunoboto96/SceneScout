@@ -28,7 +28,16 @@ import {
 } from "../engine/guided.js";
 import { CONFIRM_SAYS } from "../engine/guided-words.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL } from "../playbook.js";
-import { livePrompt, loginPrompt, LOGIN_PROMPT, LIVE_PROMPT, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../prompts.js";
+import {
+  GUIDED_PROMPTS,
+  guidedPromptText,
+  livePrompt,
+  loginPrompt,
+  LOGIN_PROMPT,
+  LIVE_PROMPT,
+  LOGIN_PROMPT_ARGUMENTS,
+  LIVE_PROMPT_ARGUMENTS,
+} from "../prompts.js";
 
 import { PACKAGE_ROOT, server, errorText, guidedPlans, guidedRuns } from "../server-context.js";
 
@@ -280,8 +289,8 @@ export function registerGuideTools(): void {
   // Prompts, for clients that list server prompts as commands. Registered on the
   // protocol server directly: the SDK's prompt helper rejects a request that
   // carries no `arguments` object, which is exactly what a client sends when the
-  // person typed none. `explore` and `live` accept that; `login` then says the
-  // role is missing. None of them takes a password.
+  // person typed none. `explore`, `live` and the guided prompts accept that;
+  // `login` then says the role is missing. None of them takes a password.
   server.server.registerCapabilities({ prompts: {} });
 
   server.server.setRequestHandler(ListPromptsRequestSchema, () => ({
@@ -305,6 +314,8 @@ export function registerGuideTools(): void {
           "Call scout_login for a role and wait the way that tool waits. The person signs in in the window it opens. Takes the role, and the app URL when you have it. Never a password.",
         arguments: LOGIN_PROMPT_ARGUMENTS,
       },
+      // The chat's guided entry points (design 3.5), titled in the guided panel's words.
+      ...GUIDED_PROMPTS.map((p) => ({ name: p.name, title: p.title, description: p.description, arguments: p.arguments })),
     ],
   }));
 
@@ -315,6 +326,8 @@ export function registerGuideTools(): void {
       if (name === PLAYBOOK_PROMPT) message = explorePrompt(loadPlaybook(PACKAGE_ROOT), request.params.arguments);
       else if (name === LIVE_PROMPT) message = livePrompt(request.params.arguments);
       else if (name === LOGIN_PROMPT) message = loginPrompt(request.params.arguments);
+      // No care cap is passed: this server has no operator setting for one yet. guidedPromptText takes it as { maxCare }.
+      else if (GUIDED_PROMPTS.some((p) => p.name === name)) message = guidedPromptText(name, request.params.arguments);
       else throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${name}`);
     } catch (err) {
       if (err instanceof McpError) throw err;
