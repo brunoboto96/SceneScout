@@ -9,6 +9,7 @@
  *   npx tsx --test scripts/install-test.ts
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -606,13 +607,35 @@ test("the versioning step formats the files it rewrites", () => {
   assert.ok(steps[format].includes("desktop-extension/manifest.json"), "and over the desktop extension's manifest, which the sync rewrites too");
   assert.ok(steps[format].includes("mods/scenescout-mod/.claude-plugin/plugin.json"), "and over the mod's manifest, which the sync rewrites too");
   const syncScript = fs.readFileSync(path.join(root, "scripts", "sync-plugin-version.mjs"), "utf8");
-  assert.match(
-    syncScript,
-    /scenescout@\$\{pkg\.version\}|\$\{pkg\.name\}@\$\{pkg\.version\}/,
-    "the sync pins the plugin's server launch line to the same version",
-  );
   assert.match(syncScript, /path\.join\("desktop-extension", "manifest\.json"\)/, "the sync moves the desktop extension's version with the package");
   assert.match(syncScript, /path\.join\("mods", "scenescout-mod", "\.claude-plugin", "plugin\.json"\)/, "the sync moves the mod's version with the package");
+});
+
+test("the versioning step moves the plugin's pinned server with the package version", () => {
+  // Run the real sync script over a copy of the three manifests with a new
+  // package version: the plugin's launch line must follow it, or the version
+  // pull request ships a plugin that still starts the previous release.
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const work = tmp("sc-sync-");
+  const files = [
+    path.join(".claude-plugin", "plugin.json"),
+    path.join("mods", "scenescout-mod", ".claude-plugin", "plugin.json"),
+    path.join("desktop-extension", "manifest.json"),
+    path.join("scripts", "sync-plugin-version.mjs"),
+  ];
+  for (const relative of files) {
+    fs.mkdirSync(path.dirname(path.join(work, relative)), { recursive: true });
+    fs.copyFileSync(path.join(repo, relative), path.join(work, relative));
+  }
+  const pkg = JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8")) as { name: string; version: string };
+  fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ ...pkg, version: "99.1.2" }));
+  execFileSync(process.execPath, [path.join(work, "scripts", "sync-plugin-version.mjs")], { stdio: "pipe" });
+  const read = (relative: string) => JSON.parse(fs.readFileSync(path.join(work, relative), "utf8"));
+  const plugin = read(files[0]);
+  assert.equal(plugin.version, "99.1.2");
+  assert.deepEqual(plugin.mcpServers[pkg.name].args, ["-y", `${pkg.name}@99.1.2`, "serve"], "the launch line moves with the version");
+  assert.equal(read(files[1]).version, "99.1.2");
+  assert.equal(read(files[2]).version, "99.1.2");
 });
 
 // ── The desktop extension (.mcpb) ────────────────────────────────────────────
