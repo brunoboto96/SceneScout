@@ -50,8 +50,11 @@ async function recordProfile(baseUrl: string, project: string, query: string): P
   }
 }
 
-/** What a lane's page settles on: whether it is signed in, and whether its scripts, stylesheet, image and GETs all arrived. */
-async function settled(engine: BrowserEngine): Promise<{ signedIn: "in" | "out" | "pending"; loaded: "whole" | "incomplete" | "pending" }> {
+/**
+ * What a lane's page settles on: whether it is signed in, and whether its scripts, stylesheet, image and GETs all
+ * arrived. An incomplete page also gives its own line saying which of them did not, for the check's failure output.
+ */
+async function settled(engine: BrowserEngine): Promise<{ signedIn: "in" | "out" | "pending"; loaded: "whole" | "incomplete" | "pending"; missing?: string }> {
   let text = "";
   // Spaced out, since each look is a snapshot, and several lanes look at once. Twice the usual bound for that.
   await eventually(
@@ -62,9 +65,11 @@ async function settled(engine: BrowserEngine): Promise<{ signedIn: "in" | "out" 
     2 * WAIT_MS,
     100,
   );
+  const loaded = text.includes(LOADED) ? "whole" : text.includes(INCOMPLETE) ? "incomplete" : "pending";
   return {
     signedIn: text.includes(SIGNED_IN) ? "in" : text.includes(SIGNED_OUT) ? "out" : "pending",
-    loaded: text.includes(LOADED) ? "whole" : text.includes(INCOMPLETE) ? "incomplete" : "pending",
+    loaded,
+    ...(loaded === "incomplete" ? { missing: new RegExp(`${INCOMPLETE}[^"\\n]*`).exec(text)?.[0] ?? "" } : {}),
   };
 }
 

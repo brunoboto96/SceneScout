@@ -117,10 +117,14 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     // ---- A wrong code the app leaves in its field: reported at the timeout --------
     // Nothing on the page says the code was answered (the field is the same element, still holding it), so the run waits it
     // out and says the sign-in did not finish, quoting the page's error, not that the code was refused.
-    const kept = await signIn([`${url}?keep`, "--role", "kept", "--timeout", "5"], { ...user, SCENESCOUT_LOGIN_OTP_CODE: wrongCode });
+    // The timeout must leave room to reach the code: the page load, the 0.6 s before "Send code" enables and the 1.2 s
+    // the code takes to "send" all count against it. That took up to 5.6 s on a loaded machine, so 5 s timed out
+    // still waiting for the code field. The length of the timeout is not what is tested; what the run says at it is.
+    const keptTimeoutS = 10;
+    const kept = await signIn([`${url}?keep`, "--role", "kept", "--timeout", String(keptTimeoutS)], { ...user, SCENESCOUT_LOGIN_OTP_CODE: wrongCode });
     check(
       "a wrong code the app leaves in its field exits 1 at the timeout, saying the sign-in did not finish",
-      kept.code === 1 && kept.err.includes("the sign-in did not finish within 5s") && kept.err.includes("still shows it in the same field"),
+      kept.code === 1 && kept.err.includes(`the sign-in did not finish within ${keptTimeoutS}s`) && kept.err.includes("still shows it in the same field"),
       `${kept.code}\n${kept.err}`,
     );
     check("...quoting what the page said, the code in it redacted", kept.err.includes("The page says:") && kept.err.includes("[redacted]"), kept.err);
