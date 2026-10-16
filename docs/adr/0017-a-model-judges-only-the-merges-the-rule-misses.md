@@ -47,7 +47,11 @@ time inside `scout_finding`, and a new way to fail.
 - **Off by default everywhere else.** An agent's run dedups by the rule unless
   `SCENESCOUT_DEDUP=judge` or `scout_attach {dedup: "judge"}` asks for the
   judge, which then needs a key in the server's environment. An agent's run
-  sends nothing to a provider the user did not choose.
+  sends nothing to a provider the user did not choose. (Amended 2026-10-16:
+  `scout_attach {dedup: "judge"}` alone no longer switches it on; only
+  `SCENESCOUT_DEDUP=judge` in the server's environment does, or a client that
+  answers the judge itself, so an agent cannot choose a recipient for the
+  findings. `dedup: "rule"` still switches it off.)
 - **A judge that fails is the rule.** Each kind of fall-back is logged once,
   and three failed calls in a row switch the judge off for the rest of the run.
 

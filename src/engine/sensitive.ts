@@ -20,6 +20,12 @@ export interface SecretFieldFacts {
   placeholder?: string | null;
   /** The field's maxlength; 1 is a box of a code split into one box per character. */
   maxLength?: number | null;
+  /**
+   * Whether the field was type=password when the engine read it before. A
+   * show-password toggle turns it into type=text, and a field named by nothing
+   * else would then read as an ordinary one.
+   */
+  wasPassword?: boolean | null;
 }
 
 export type SecretKind = "password" | "one-time code" | "card" | "secret";
@@ -47,7 +53,7 @@ const AUTOCOMPLETE_KINDS: Record<string, SecretKind> = {
 const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; phrases: string[] }> = [
   {
     kind: "password",
-    whole: ["pwd", "senha", "haslo", "heslo", "пароль"],
+    whole: ["pwd", "pw", "pword", "senha", "haslo", "heslo", "пароль"],
     // German compounds put the head last, so a password's confirmation ends in "bestätigung", not in "passwort".
     suffix: [
       "password",
@@ -56,7 +62,7 @@ const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; p
       ...["passwort", "kennwort", "passwortbestatigung", "passwortbestaetigung", "kennwortbestatigung", "kennwortbestaetigung"],
       ...["passwortwiederholung", "contrasena", "wachtwoord", "losenord", "passord", "adgangskode", "salasana"],
     ],
-    phrases: ["mot de passe", "palavra passe"],
+    phrases: ["mot de passe", "palavra passe", "memorable word"],
   },
   {
     kind: "one-time code",
@@ -94,9 +100,12 @@ const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; p
   },
   {
     kind: "secret",
-    whole: ["token"],
+    whole: ["token", "bearer", "sessionid", "accesskey", "sshkey", "signingkey", "licensekey", "licencekey"],
     suffix: ["secret", "apikey"],
-    phrases: ["api key", "recovery code", "backup code", "private key", "seed phrase", "recovery phrase", "security answer"],
+    phrases: [
+      ...["api key", "recovery code", "backup code", "private key", "seed phrase", "recovery phrase", "security answer"],
+      ...["access key", "ssh key", "signing key", "license key", "licence key", "session id"],
+    ],
   },
 ];
 
@@ -125,17 +134,58 @@ function wordsOf(text: string): string[] {
     .filter((w) => w.length > 0);
 }
 
+/**
+ * Words that, after a secret's word and nothing else, make the name one about
+ * the secret rather than the secret: `token_count`, `otp_enabled`,
+ * `password_hint_enabled`, "Password strength", "Drop a pin on the map".
+ */
+const ABOUT_THE_SECRET = new Set([
+  ...["count", "hint", "hints", "enabled", "disabled", "enable", "disable", "length", "strength", "meter", "policy", "rule", "rules"],
+  ...["expiry", "expires", "expiration", "ttl", "visible", "visibility", "toggle", "type", "format", "map", "on", "the", "a"],
+]);
+
+/**
+ * The words that may stand beside "code" in the name of a field a sign-in code
+ * is typed into ("Code", "SMS code", "Enter the 6-digit code"). Any other word
+ * names another kind of code: a promo, postal, country or review one.
+ */
+const CODE_COMPANIONS = new Set([
+  ...["code", "enter", "your", "the", "a", "digit", "sms", "text", "email", "login", "sign", "in", "signin", "access", "auth"],
+  ...["confirm", "confirmation", "verify", "received", "sent"],
+]);
+
+/**
+ * Words that name a secret only as the whole name ("Pass", `seed`,
+ * "Credentials", perhaps after "Enter your"): with another word they name
+ * something else ("Pass rate", "Boarding pass", "Random seed").
+ */
+const ALONE_KINDS: Record<string, SecretKind> = { pass: "password", seed: "secret", credential: "secret", credentials: "secret" };
+const ALONE_FILLERS = new Set(["enter", "your", "the", "a"]);
+
+/** The kind a single word names on its own, by WORD_KINDS' whole words and suffixes. */
+function wordKind(word: string): SecretKind | null {
+  for (const { kind, whole, suffix } of WORD_KINDS) if (whole.includes(word) || suffix.some((s) => word.endsWith(s))) return kind;
+  return null;
+}
+
 /** Which kind of secret a field's name, label or placeholder names, if any. */
 export function secretWordKind(text: string): SecretKind | null {
   // "2FA" splits into "2" and "fa" below, so it is read before the split.
   if (/(?:^|[^\p{L}\p{N}])2fa(?![\p{L}\p{N}])/iu.test(text)) return "one-time code";
   const words = wordsOf(text);
   if (words.length === 0) return null;
+  // A secret's word followed only by words about it names a setting or a count, not the secret.
+  let tail = words.length;
+  while (tail > 0 && ABOUT_THE_SECRET.has(words[tail - 1])) tail -= 1;
+  const last = words[tail - 1];
+  if (tail > 0 && tail < words.length && (wordKind(last) || last === "code" || last in ALONE_KINDS)) return null;
   const joined = ` ${words.join(" ")} `;
-  for (const { kind, whole, suffix, phrases } of WORD_KINDS) {
-    if (words.some((w) => whole.includes(w) || suffix.some((s) => w.endsWith(s)))) return kind;
-    if (phrases.some((p) => joined.includes(` ${p} `))) return kind;
-  }
+  // A phrase is read before a single word, as it says more: "pass code" is a code, though "pass" alone is a password.
+  for (const { kind, phrases } of WORD_KINDS) if (phrases.some((p) => joined.includes(` ${p} `))) return kind;
+  for (const { kind, whole, suffix } of WORD_KINDS) if (words.some((w) => whole.includes(w) || suffix.some((s) => w.endsWith(s)))) return kind;
+  if (words.includes("code") && words.every((w) => CODE_COMPANIONS.has(w))) return "one-time code";
+  const named = words.filter((w) => !ALONE_FILLERS.has(w));
+  if (named.length === 1 && ALONE_KINDS[named[0]]) return ALONE_KINDS[named[0]];
   return null;
 }
 
@@ -144,7 +194,7 @@ const SINGLE_CHARACTER_TYPES = new Set(["", "text", "tel", "number", "password"]
 
 /** Whether what is typed into this field is a secret, and which kind; null for an ordinary field. */
 export function secretFieldKind(facts: SecretFieldFacts): SecretKind | null {
-  if ((facts.type ?? "").trim().toLowerCase() === "password") return "password";
+  if ((facts.type ?? "").trim().toLowerCase() === "password" || facts.wasPassword === true) return "password";
   for (const token of (facts.autocomplete ?? "").toLowerCase().split(/\s+/)) {
     const kind = AUTOCOMPLETE_KINDS[token];
     if (kind) return kind;
@@ -216,12 +266,44 @@ function decodedName(name: string): string {
   }
 }
 
+/**
+ * Parameter names whose value is a credential although no field would be
+ * named so: a sign-in callback's code, a signed link's signature, a key, a
+ * session or an auth value, a password under a short name. Read against the
+ * name's letters only, lower-cased (`X-Amz-Signature` is `xamzsignature`).
+ * guided.ts refuses an address carrying one, so the two lists are this one.
+ */
+export const SECRET_PARAM = /^(?:code|sig|signature|xamzsignature|xgoogsignature|key|session|sessionid|sid|auth|authorization|pass|nonce|jwt)$/;
+
+/** Whether a parameter's name names a secret: a field's word for one, or one of SECRET_PARAM. */
+export function secretParamName(name: string): boolean {
+  const decoded = decodedName(name);
+  return secretWordKind(decoded.replace(/[[\]]/g, " ")) !== null || SECRET_PARAM.test(decoded.toLowerCase().replace(/[^a-z]/g, ""));
+}
+
+/**
+ * Words that, set after a secret's name and a colon, name something about the
+ * field rather than its value ("Password: required", "Token: expired"). Shared
+ * by the redaction (redact.ts) and the guided choices' credential check.
+ */
+export const FIELD_WORDS: ReadonlySet<string> = new Set([
+  ...["label", "field", "box", "input", "placeholder", "hint", "required", "optional", "missing", "empty", "blank", "wrong", "invalid"],
+  ...["hidden", "masked", "shown", "visible", "error", "errors", "message", "too", "must", "should", "expired", "none", "null"],
+  ...["undefined", "true", "false", "yes", "no", "not", "accepted", "rejected", "unset", "set", "the", "a", "an", "is", "be"],
+  // A strength meter's verdict, and what happened to the secret.
+  ...["weak", "fair", "good", "strong", "expires", "revealed", "changed", "updated", "saved", "valid", "ok"],
+  // A validation message's or a log's verdict on the secret ("Password: incorrect", "Token: revoked").
+  ...["incorrect", "correct", "mismatch", "mismatched", "match", "matches", "matched", "present", "absent", "filled", "reset"],
+  ...["revoked", "refreshed", "rotated", "redacted", "removed", "deleted", "cleared", "unknown", "failed", "denied", "locked"],
+  ...["pending", "used", "unused", "ignored", "sent", "received", "generated", "created", "stored", "active", "inactive"],
+]);
+
 /** Mask the value of every parameter whose name names a secret (`pin=`, `otp=`, `password=`, `access_token=`), whatever its length. */
 export function maskSecretParams(text: string): { text: string; hits: number } {
   let hits = 0;
   const out = text.replace(PARAM_RE, (m, before: string, name: string, value: string) => {
     // A form's nested names (`user[password]`, `user%5Bpassword%5D`) name the field last; a value already masked stays.
-    if (value.startsWith("[") || !secretWordKind(decodedName(name).replace(/[[\]]/g, " "))) return m;
+    if (value.startsWith("[") || !secretParamName(name)) return m;
     hits += 1;
     return `${before}${name}=[redacted]`;
   });
@@ -249,8 +331,38 @@ export function maskFillCalls(message: string, values: readonly string[] = []): 
 const RESERVED_DOMAIN_RE = /^(?:[\p{L}\p{N}-]+\.)*(?:example\.(?:com|org|net)|example|test|invalid|localhost)$/iu;
 /** An image's pixel-density suffix (`@2x` before its extension), which reads like an address but is a file name. */
 const DENSITY_DOMAIN_RE = /^\d+(?:\.\d+)?x\./i;
-/** An address in any script, its @ written out or percent-encoded (`%40`), as a query string carries it. Group 1 is the domain. */
-const EMAIL_RE = /[\p{L}\p{N}._%+-]+(?:@|%40)([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:\p{L}{2,}|xn--[a-z0-9-]+))/giu;
+/**
+ * An address in any script, its @ written out or percent-encoded (`%40`), as a
+ * query string carries it, its local part plain or quoted (`"jo sample"@…`).
+ * Group 1 is the domain.
+ */
+const EMAIL_RE = /(?<![\p{L}\p{N}._%+-])(?:"[^"\n@]{1,64}"|[\p{L}\p{N}._%+-]+)(?:@|%40)([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:\p{L}{2,}|xn--[a-z0-9-]+))/giu;
+/** An address at an IP literal (`jo@[10.1.2.3]`, `jo@[IPv6:…]`). */
+const EMAIL_IP_RE = /(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+@\[(?:IPv6:[\dA-Fa-f:.]+|\d{1,3}(?:\.\d{1,3}){3})\]/gu;
+/** "at" and "dot" written out to hide an address from scrapers: bracketed, `(at)` `[dot]`, or bare between spaces. */
+const AT_WORD = String.raw`(?:\s*[([{]\s*at\s*[)\]}]\s*|\s+at\s+)`;
+const DOT_WORD = String.raw`(?:\s*[([{]\s*dot\s*[)\]}]\s*|\s+dot\s+|\.)`;
+/** An address with its @, and perhaps its dots, written as words. Group 1 is the domain as written. */
+const SPELLED_EMAIL_RE = new RegExp(
+  String.raw`(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+${AT_WORD}([\p{L}\p{N}-]+(?:${DOT_WORD}[\p{L}\p{N}-]+)+)(?![\p{L}\p{N}])`,
+  "giu",
+);
+/**
+ * The top-level domains a bare "x at y dot z" must end in to be read as an
+ * address: without a bracket, "look at the dot matrix" reads the same way.
+ */
+const BARE_SPELLED_TLDS = new Set(["com", "org", "net", "io", "co", "uk", "de", "fr", "es", "it", "nl", "eu", "edu", "gov", "info", "biz", "me", "dev", "app"]);
+
+function redactSpelledEmail(match: string, written: string): string {
+  const domain = written.replace(new RegExp(DOT_WORD, "giu"), ".");
+  const tld = domain.slice(domain.lastIndexOf(".") + 1).toLowerCase();
+  if (!/^\p{L}{2,}$/u.test(tld) || RESERVED_DOMAIN_RE.test(domain)) return match;
+  const bracketed = /[([{]\s*(?:at|dot)\s*[)\]}]/iu.test(match);
+  if (!bracketed && !BARE_SPELLED_TLDS.has(tld)) return match;
+  // Only the @ spelled out, the dots written as dots, is an address only when the at is bracketed: "meet at noon.today" is not one.
+  if (!bracketed && !/\sdot\s/iu.test(match)) return match;
+  return "[email redacted]";
+}
 /**
  * A run of digit groups split by single separators: a space, a non-breaking,
  * narrow non-breaking, thin or figure space (a formatted number, a French
@@ -259,7 +371,9 @@ const EMAIL_RE = /[\p{L}\p{N}._%+-]+(?:@|%40)([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)
  * reading as one. A run never starts at a decimal's fraction (`0.4111…`), but
  * does after a word's dot (`no.4111…`).
  */
-const DIGIT_SEPARATOR = "[ \\u00a0\\u2007\\u2009\\u202f.-]";
+const DIGIT_SPACE = "[ \\u00a0\\u2007\\u2009\\u202f]";
+/** One separator: one or two spaces, or a dot, hyphen or slash with up to two spaces either side (`4111 - 1111`, `4111/1111`). */
+const DIGIT_SEPARATOR = `(?:${DIGIT_SPACE}{0,2}[./-]${DIGIT_SPACE}{0,2}|${DIGIT_SPACE}{1,2})`;
 const DIGIT_RUN_RE = new RegExp(String.raw`(?<!\d)(?<!\d\.)\d+(?:${DIGIT_SEPARATOR}\d+)*`, "g");
 /**
  * The card networks' issuer prefixes (IIN ranges) and the lengths each
@@ -296,6 +410,14 @@ const CARD_NETWORKS: ReadonlyArray<{ from: string; to: string; lengths: readonly
   { from: "8600", to: "8600", lengths: [16] }, // UzCard
   { from: "9792", to: "9792", lengths: [16] }, // Troy
   { from: "9860", to: "9860", lengths: [16] }, // Humo
+  // Maestro's 12-digit cards, from the prefixes it issues them under only: a 12-digit id is common, so no wider range.
+  { from: "5018", to: "5018", lengths: [12] },
+  { from: "5020", to: "5020", lengths: [12] },
+  { from: "5038", to: "5038", lengths: [12] },
+  { from: "5893", to: "5893", lengths: [12] },
+  { from: "6304", to: "6304", lengths: [12] },
+  { from: "6759", to: "6759", lengths: [12] },
+  { from: "6761", to: "6763", lengths: [12] },
 ];
 
 /** Whether a network issues card numbers that start with these digits and are this long. */
@@ -334,7 +456,7 @@ function isCardNumber(digits: string): boolean {
  */
 function cardShaped(groups: readonly string[], seps: readonly string[], i: number, j: number): boolean {
   for (let k = i; k < j; k++) if (groups[k].length < 4) return false;
-  if (seps.slice(i, j).includes(".")) for (let k = i; k <= j; k++) if (groups[k].length > 6) return false;
+  if (seps.slice(i, j).some((s) => s.includes("."))) for (let k = i; k <= j; k++) if (groups[k].length > 6) return false;
   return true;
 }
 
@@ -377,7 +499,9 @@ function redactCardsInRun(run: string): string {
  */
 const PHONE_WORDS = [
   // Not "cell" (a table's) or "gsm" (a radio band): both are followed by lists of numbers more often than by a phone number.
-  ...["phone", "telephone", "tel", "tél", "mobile", "cellphone"],
+  ...["phone", "telephone", "tel", "tél", "mobile", "cellphone", "call", "whatsapp", "contact", "ph"],
+  // "T" for telephone only with its dot or colon ("T: +44 …"): "don't 0800 …" is not one.
+  "t(?=[.:])",
   ...["telefon", "telefone", "teléfono", "telefono", "téléphone", "telefoon", "telefonu", "móvil", "movil", "celular", "cellulare", "mobil"],
 ];
 /** What may stand between the word and the number: punctuation, the quotes and arrow of a typed value, and a word for "number". */
@@ -426,7 +550,14 @@ function redactPhone(match: string, number: string): string {
  */
 export function redactPersonal(text: string): string {
   return text
-    .replace(EMAIL_RE, (m, domain: string) => (RESERVED_DOMAIN_RE.test(domain) || DENSITY_DOMAIN_RE.test(domain) ? m : "[email redacted]"))
+    .replace(EMAIL_IP_RE, "[email redacted]")
+    .replace(EMAIL_RE, (m, domain: string, offset: number, whole: string) => {
+      if (RESERVED_DOMAIN_RE.test(domain) || DENSITY_DOMAIN_RE.test(domain)) return m;
+      // `git@host:team/repo.git` is a repository's address over SSH, not a person's: a path follows the colon.
+      if (/^:[\w~/.-]/.test(whole.slice(offset + m.length))) return m;
+      return "[email redacted]";
+    })
+    .replace(SPELLED_EMAIL_RE, redactSpelledEmail)
     .replace(PHONE_RE, redactPhone)
     .replace(DIGIT_RUN_RE, redactCardsInRun);
 }

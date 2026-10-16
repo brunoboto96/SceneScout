@@ -37,6 +37,8 @@ export interface ServerStats {
   writes: Record<string, number>;
   /** Requests for /api/held-body, whose body the server never finishes sending. */
   heldBodies: number;
+  /** Page loads that reached the server, as "GET /path" → count, for the paths under /things/ only: a refused destructive load must never arrive. */
+  loads: Record<string, number>;
 }
 
 /** How long the fixture server holds /slow-page back. */
@@ -321,7 +323,7 @@ function loopbackOrigin(value: string | null): string {
 
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
 export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => Promise<void> }> {
-  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {}, heldBodies: 0 };
+  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {}, heldBodies: 0, loads: {} };
   const board: string[] = [];
   let codeCounter = 0;
   const usedCodes = new Set<string>();
@@ -530,6 +532,7 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end();
       return;
     }
+    if (req.method === "GET" && urlPath.startsWith("/things/")) stats.loads[`GET ${urlPath}`] = (stats.loads[`GET ${urlPath}`] ?? 0) + 1;
     if (req.method && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
       const key = `${req.method} ${urlPath}`;
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;

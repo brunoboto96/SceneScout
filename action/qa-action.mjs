@@ -21,6 +21,7 @@
  * for the shots and the report, read the run's artifact.
  * The pure rules are exported and table-tested by qa-test.
  */
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -646,11 +647,62 @@ export function qaCommentMarkdown({ json, result, runUrl, artifactUrl, url, sha,
 
 // ---------------------------------------------------------------------------
 // GitHub's REST API, with a timeout on every call and a retry for a failure a retry can change.
+// A GET is retried freely. A write may have landed even when the answer never arrived (a reset
+// connection, a 502 after the work), so it is sent again only when the caller says repeating it is
+// harmless ({ idempotent: true }) or supplies a lookup ({ landed: async (get) => boolean }) that
+// shows whether it landed first. Otherwise it is sent once and the failure is reported.
+
+/**
+ * How far before the call the lookup for a comment that landed reaches: wide enough for a runner's clock
+ * minutes apart from GitHub's and for GitHub's whole-second times. A wide window cannot match another
+ * comment, because each post carries its own key.
+ */
+const LANDED_WINDOW_MS = 10 * 60_000;
+
+/**
+ * Post a comment once. The body carries a key of its own in an HTML comment, which GitHub does not show,
+ * so the retry after an ambiguous failure can look for this post and nothing else: a reply that did land
+ * is not posted a second time, and an identical reply an earlier command posted is never taken for it.
+ */
+export function postComment(call, repo, number, body) {
+  const since = new Date(Date.now() - LANDED_WINDOW_MS).toISOString();
+  const posted = `${body}${body.endsWith("\n") ? "" : "\n"}<!-- scenescout-qa-post ${randomUUID()} -->\n`;
+  return call(
+    "POST",
+    `/repos/${repo}/issues/${number}/comments`,
+    { body: posted },
+    {
+      landed: async (get) => {
+        const found = await get(`/repos/${repo}/issues/${number}/comments?since=${encodeURIComponent(since)}&per_page=100`);
+        return Array.isArray(found) && found.some((c) => c?.body === posted);
+      },
+    },
+  );
+}
+
+/**
+ * @typedef {{ idempotent?: boolean, landed?: (get: (route: string) => Promise<any>) => Promise<boolean> }} WriteCheck
+ */
 
 export function githubClient({ token, apiUrl, fetchImpl = fetch, timeoutMs = 15_000, retries = 2, wait = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   if (!token) throw new Error("no GitHub token: the github-token input is empty");
   const base = String(apiUrl || "https://api.github.com").replace(/\/+$/, "");
-  return async function call(method, route, body) {
+  /**
+   * @param {string} method
+   * @param {string} route
+   * @param {unknown} [body]
+   * @param {WriteCheck} [check]
+   * @returns {Promise<any>}
+   */
+  return async function call(method, route, body, { idempotent = false, landed } = {}) {
+    const mayRetry = method === "GET" || idempotent || typeof landed === "function";
+    const retryable = async (attempt) => {
+      if (!mayRetry || attempt >= retries) return false;
+      // The pause comes first: a write that landed may take a moment to show in a lookup.
+      await wait(1000 * 2 ** attempt + Math.floor(Math.random() * 250));
+      if (method !== "GET" && !idempotent && (await landed((r) => call("GET", r)))) return "landed";
+      return true;
+    };
     for (let attempt = 0; ; attempt++) {
       let res;
       try {
@@ -667,15 +719,15 @@ export function githubClient({ token, apiUrl, fetchImpl = fetch, timeoutMs = 15_
           signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (err) {
-        if (attempt < retries) {
-          await wait(1000 * 2 ** attempt + Math.floor(Math.random() * 250));
-          continue;
-        }
+        const again = await retryable(attempt);
+        if (again === "landed") return null;
+        if (again) continue;
         throw new Error(`${method} ${route} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-      if (res.status >= 500 && attempt < retries) {
-        await wait(1000 * 2 ** attempt + Math.floor(Math.random() * 250));
-        continue;
+      if (res.status >= 500) {
+        const again = await retryable(attempt);
+        if (again === "landed") return null;
+        if (again) continue;
       }
       if (!res.ok) {
         // GitHub's own words for a refusal (e.g. why a dispatch was refused), for the caller to classify; never part of the message.
@@ -767,8 +819,8 @@ export async function runGate({ env = process.env, inputs = inputsFromEnv(), fet
   });
   log(`${decision.run ? "Starting a QA run" : decision.check ? "Starting the project's check" : "No QA run"}: ${decision.reason}.`);
   if (decision.reaction && event.comment?.id)
-    await call("POST", `/repos/${repo}/issues/comments/${Number(event.comment.id)}/reactions`, { content: decision.reaction });
-  if (decision.reply) await call("POST", `/repos/${repo}/issues/${number}/comments`, { body: `${COMMENT_MARKER}\n${decision.reply}\n` });
+    await call("POST", `/repos/${repo}/issues/comments/${Number(event.comment.id)}/reactions`, { content: decision.reaction }, { idempotent: true });
+  if (decision.reply) await postComment(call, repo, number, `${COMMENT_MARKER}\n${decision.reply}\n`);
   const outputs = decision.run
     ? {
         ...none,
@@ -854,7 +906,7 @@ export async function runReport({ env = process.env, inputs = inputsFromEnv(), f
       return null;
     }
     const body = cancelledMarkdown({ runUrl });
-    await call("POST", `/repos/${repo}/issues/${pr}/comments`, { body });
+    await postComment(call, repo, pr, body);
     return body;
   }
   // The ci action uploads its output folder, so ci.json is at the top of the downloaded artifact.
@@ -883,7 +935,7 @@ export async function runReport({ env = process.env, inputs = inputsFromEnv(), f
     log(`The pictures cannot be linked: ${err instanceof Error ? err.message : String(err)}`);
   }
   const body = qaCommentMarkdown({ json, result, runUrl, artifactUrl, url: inputs.url, sha: inputs.sha, login: inputs.login, images });
-  await call("POST", `/repos/${repo}/issues/${pr}/comments`, { body });
+  await postComment(call, repo, pr, body);
   return body;
 }
 
@@ -917,7 +969,7 @@ export async function runShots({ env = process.env, inputs = inputsFromEnv(), fe
       path: `${runId}/${s.name}`,
       mode: "100644",
       type: "blob",
-      sha: (await call("POST", `/repos/${repo}/git/blobs`, { content: s.bytes.toString("base64"), encoding: "base64" })).sha,
+      sha: (await call("POST", `/repos/${repo}/git/blobs`, { content: s.bytes.toString("base64"), encoding: "base64" }, { idempotent: true })).sha,
     });
   const ref = `heads/${SHOTS_BRANCH}`;
   for (let attempt = 0; ; attempt++) {
@@ -928,15 +980,36 @@ export async function runShots({ env = process.env, inputs = inputsFromEnv(), fe
       if (!isNotFound(err)) throw err;
     }
     const baseTree = parent ? (await call("GET", `/repos/${repo}/git/commits/${parent}`)).tree.sha : undefined;
-    const tree = await call("POST", `/repos/${repo}/git/trees`, { ...(baseTree ? { base_tree: baseTree } : {}), tree: blobs });
-    const commit = await call("POST", `/repos/${repo}/git/commits`, {
-      message: `SceneScout QA pictures of run ${runId}`,
-      tree: tree.sha,
-      parents: parent ? [parent] : [],
-    });
+    const tree = await call("POST", `/repos/${repo}/git/trees`, { ...(baseTree ? { base_tree: baseTree } : {}), tree: blobs }, { idempotent: true });
+    const commit = await call(
+      "POST",
+      `/repos/${repo}/git/commits`,
+      {
+        message: `SceneScout QA pictures of run ${runId}`,
+        tree: tree.sha,
+        parents: parent ? [parent] : [],
+      },
+      { idempotent: true },
+    );
     try {
-      if (parent) await call("PATCH", `/repos/${repo}/git/refs/${ref}`, { sha: commit.sha, force: false });
-      else await call("POST", `/repos/${repo}/git/refs`, { ref: `refs/${ref}`, sha: commit.sha });
+      if (parent) await call("PATCH", `/repos/${repo}/git/refs/${ref}`, { sha: commit.sha, force: false }, { idempotent: true });
+      else
+        await call(
+          "POST",
+          `/repos/${repo}/git/refs`,
+          { ref: `refs/${ref}`, sha: commit.sha },
+          {
+            // No branch yet is the answer "it did not land", not a failure of the lookup.
+            landed: async (get) => {
+              try {
+                return (await get(`/repos/${repo}/git/ref/${ref}`))?.object?.sha === commit.sha;
+              } catch (err) {
+                if (isNotFound(err)) return false;
+                throw err;
+              }
+            },
+          },
+        );
       break;
     } catch (err) {
       if (!isConflict(err) || attempt >= retries) throw err;

@@ -3,7 +3,7 @@
  * persist or publish. memory.ts re-exports both functions, so importers that
  * reach them through the store are unchanged.
  */
-import { maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
+import { FIELD_WORDS, maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
 
 /**
  * Secrets an app leaks into its own error UI must not be re-published by the
@@ -13,6 +13,14 @@ import { maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensi
  * finding stays actionable, drop the rest.
  */
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
+  // A private key's whole block, or its start to the end of the text when the end is cut off.
+  [/-{5}BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-{5}[\s\S]*?(?:-{5}END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-{5}|$)/g, "[private key redacted]"],
+  // Providers' key shapes, each by its fixed prefix, so the prefix alone ("the sk-ant prefix") is prose.
+  [/\bsk-ant-[A-Za-z0-9_-]{10,}/g, "sk-ant-[redacted]"],
+  [/\b(xox[abeprs])-[A-Za-z0-9-]{10,}/g, "$1-[redacted]"],
+  [/\bAIza[0-9A-Za-z_-]{30,}/g, "AIza[redacted]"],
+  [/\bglpat-[A-Za-z0-9_-]{20,}/g, "glpat-[redacted]"],
+  [/\bnpm_[A-Za-z0-9]{36,}/g, "npm_[redacted]"],
   // Needs the environment marker (sk_live_…) or a digit in the tail, or it
   // eats ordinary identifiers: "pk_customer_identifier" became "pk_[redacted]".
   [/\b(sk|pk|rk)[-_](?:(?:live|test|proj)[-_][A-Za-z0-9]{8,}|(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{8,})/g, "$1_[redacted]"],
@@ -23,13 +31,53 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   // Same entropy requirement as the keyword rule: "Basic authentication-required"
   // is prose, and redacting it rewrote a sentence into nonsense.
   [/\b(Bearer|Basic)\s+(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{16,}/gi, "$1 [redacted]"],
+  // A bearer token of letters only is still a token when it is one unbroken run: prose joins its words with hyphens.
+  // Not Basic: "basic internationalization" is prose of the same shape.
+  [/\b(Bearer)\s+[A-Za-z._~+/=]{16,}(?![A-Za-z0-9._~+/=-])/gi, "$1 [redacted]"],
   [/\beyJ[A-Za-z0-9._-]{20,}/g, "eyJ[redacted-jwt]"],
   // Keyword-led values need an entropy signal — a digit AND a letter, no
   // internal word breaks. Without it this matched ordinary English: "Password
   // requirements are not enforced" became "Password [redacted] are not
   // enforced", and a mangled finding just reads as the agent writing nonsense.
   [/\b(api[-_]?key|secret|password|token)(["'\s:=]+)(?=[A-Za-z0-9._~+/=-]*\d)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])[A-Za-z0-9._~+/=]{12,}/gi, "$1$2[redacted]"],
+  // A PIN or a sign-in code written after its word: four to eight digits after "PIN" (or "PIN code"), six to eight
+  // after "code", "OTP" or "passcode", unless the code is an error, status, postal, product, coupon or invoice one.
+  [/\b(PIN(?:\s+(?:code|number))?)(\s*(?:is\s+|[:=#]\s*)?)\d{4,8}(?!\d|[-./]\d)/gi, "$1$2[redacted]"],
+  [
+    // Six to eight digits, or two groups of three as a text message spaces them ("482 913").
+    /(?<!\b(?:error|status|postal|zip|product|area|country|exit|reference|promo|order|tracking|response|http|reason|discount|coupon|voucher|gift|invoice|referral|invite|promotion|campaign)\s)\b((?:(?:verification|login|sign-in|security|one-time|otp|sms|2fa|mfa|auth|access|confirmation)\s+)?code|otp|passcode)(\s*(?:is\s+|[:=]\s*)?)(?:\d{6,8}|\d{3}[ -]\d{3})(?!\d|-\d)/gi,
+    "$1$2[redacted]",
+  ],
 ];
+
+/**
+ * A secret's name set against a value with a colon or an equals sign
+ * (`password: hunter2`, `"client_secret":"abc"`), whatever the value's length
+ * or letters. Group 1 is the name, 2 the separator, 3 the value. A value of
+ * letters only must end its clause and not be a word about the field, so
+ * "Password: required" and "Token: missing after refresh" stay.
+ */
+const SET_SECRET_RE =
+  /\b((?:[A-Za-z]+[-_]?)??(?:password|passwd|pwd|passphrase|secret|api[-_]?key|token))(\s*["']?\s*[:=：＝]\s*["']?)(?!\[)([^\s"',;)}\]]+)/gi;
+
+function maskSetSecrets(text: string): { text: string; hits: number } {
+  let hits = 0;
+  const out = text.replace(SET_SECRET_RE, (m, name: string, sep: string, raw: string, offset: number, whole: string) => {
+    // A sentence's full stop is not part of the value.
+    const stop = /\.+$/.exec(raw)?.[0] ?? "";
+    const value = raw.slice(0, raw.length - stop.length);
+    // Empty, or the dots or stars a masked value is shown as (the engine's own "•••• (masked: …)" included).
+    if (value === "" || /^[•●∙·*]+$/u.test(value)) return m;
+    if (/^\p{L}+$/u.test(value)) {
+      if (FIELD_WORDS.has(value.toLowerCase())) return m;
+      const after = stop + whole.slice(offset + m.length);
+      if (!/^(?:\s*$|\s*[,;)}\]"'\n]|\.(?:\s|$))/.test(after)) return m;
+    } else if (value.length < 3 && !/["']/.test(sep)) return m;
+    hits += 1;
+    return `${name}${sep}[redacted]${stop}`;
+  });
+  return { text: out, hits };
+}
 
 /**
  * Strip anything that looks like a credential from text we are about to
@@ -47,8 +95,9 @@ export function redactSecrets(text: string): string {
   const masked = maskSecretFieldValues(text);
   // A parameter named for a secret (`?pin=…` from a GET form) is masked whatever its value looks like.
   const params = maskSecretParams(masked.text);
-  let out = params.text;
-  let hits = masked.hits + params.hits;
+  const set = maskSetSecrets(params.text);
+  let out = set.text;
+  let hits = masked.hits + params.hits + set.hits;
   for (const [re, replacement] of SECRET_PATTERNS) {
     out = out.replace(re, (...args) => {
       hits += 1;

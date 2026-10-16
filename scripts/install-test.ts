@@ -2644,3 +2644,26 @@ test("ci action: the model key is blanked for every step except the one that run
     else assert.ok(blank, `${step.name ?? step.id} sees no model key`);
   }
 });
+
+test("example workflows: Dependabot reads their folder, and their third-party pins match the ones this repository's workflows use", () => {
+  const cfg = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "dependabot.yml"), "utf8")) as {
+    updates: Array<{ "package-ecosystem": string; directories?: string[] }>;
+  };
+  const dirs = cfg.updates.find((u) => u["package-ecosystem"] === "github-actions")?.directories ?? [];
+  assert.ok(dirs.includes("/examples/workflows"), "a copied example would otherwise keep a pin nothing updates");
+  const pins = (text: string) =>
+    new Map([...text.matchAll(/^\s*(?:-\s+)?uses:\s*([\w.-]+\/[\w./-]+)@([0-9a-f]{40})\s+#\s*(v\S+)/gm)].map((m) => [m[1], `${m[2]} ${m[3]}`]));
+  const own = new Map<string, string>();
+  const wfDir = path.join(repoRoot, ".github", "workflows");
+  for (const f of fs.readdirSync(wfDir)) for (const [k, v] of pins(fs.readFileSync(path.join(wfDir, f), "utf8"))) own.set(k, v);
+  const exDir = path.join(repoRoot, "examples", "workflows");
+  let checked = 0;
+  for (const f of fs.readdirSync(exDir)) {
+    for (const [action, pin] of pins(fs.readFileSync(path.join(exDir, f), "utf8"))) {
+      if (!own.has(action)) continue;
+      checked++;
+      assert.equal(pin, own.get(action), `${f}: ${action} is pinned to a release this repository's workflows have moved past`);
+    }
+  }
+  assert.ok(checked >= 2, `the scan found the shared pins: ${checked}`);
+});

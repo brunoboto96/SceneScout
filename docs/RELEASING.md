@@ -37,15 +37,19 @@ date, so merged changesets stay visible; only the publish step is skipped.
 
 The workflows in [examples/workflows/](../examples/workflows/) name SceneScout
 at one exact release (`@vX.Y.Z`), because the job that holds a model's key
-should run a reviewed version. Dependabot does not read `examples/`, so move
-them by hand after a release, all at once:
+should run a reviewed version. Dependabot reads that folder (it is listed in
+`.github/dependabot.yml`) and opens one grouped pull request that moves the
+SceneScout release and the pinned third-party actions together. To move the
+SceneScout release by hand instead, all at once:
 
 ```bash
 sed -i.bak -E 's#(brunoboto96/SceneScout(/[A-Za-z0-9_-]+)?)@v[0-9]+\.[0-9]+\.[0-9]+#\1@vX.Y.Z#' examples/workflows/*.yml && rm examples/workflows/*.bak
 ```
 
 `qa-test` fails when the examples name more than one release, a moving ref,
-or a release newer than `package.json`.
+or a release newer than `package.json`; `install-test` fails when an example
+pins a third-party action to a different commit than this repository's own
+workflows.
 
 ## Skipping a release run
 

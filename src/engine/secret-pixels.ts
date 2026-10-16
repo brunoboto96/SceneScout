@@ -70,6 +70,10 @@ export function masksToPaint(frames: ReadonlyArray<readonly SecretFieldFacts[] |
 function readFieldFacts(nodes: Element[]): SecretFieldFacts[] {
   return nodes.map((node) => {
     const n = node as HTMLInputElement;
+    // A field seen as type=password is remembered on the element, so a show-password toggle does not unmask it.
+    // browser.ts fillOrAppend reads and sets the same property.
+    const seen = n as unknown as Record<string, unknown>;
+    if ((n.getAttribute("type") ?? "").trim().toLowerCase() === "password") seen.__scenescoutWasPassword = true;
     const byIds = (ids: string | null): string =>
       (ids ?? "")
         .split(/\s+/)
@@ -82,6 +86,7 @@ function readFieldFacts(nodes: Element[]): SecretFieldFacts[] {
       id: n.id || null,
       placeholder: n.getAttribute("placeholder"),
       maxLength: typeof n.maxLength === "number" && n.maxLength >= 0 ? n.maxLength : null,
+      wasPassword: seen.__scenescoutWasPassword === true,
       label: [
         n.getAttribute("aria-label") ?? "",
         byIds(n.getAttribute("aria-labelledby")),
