@@ -243,7 +243,7 @@ A JSON file a team commits to set what SceneScout may do, which no agent can loo
 - A value from the environment, or a default, above the file's limit is lowered to it, and the attach or the command says so.
 - A key the file leaves out is as it is without a file.
 
-**A file that is not valid stops the server, or the command, as it starts,** naming the file and the key: an unknown key (a misspelt lock would look like a lock and do nothing), a value outside the ones below, or a list entry that is not one an argument could take.
+**A file that is not valid stops the server, or the command, as it starts,** naming the file and the key: an unknown key (a misspelt lock would look like a lock and do nothing), a key set twice (a reader would take the first value, and the second would apply), a value outside the ones below, or a list entry that is not one an argument could take. A file that is there but cannot be read, such as a directory or a link to a file that is missing, stops it too rather than counting as no file.
 
 ```json
 { "preset": "strict", "maxMode": "read-only" }
@@ -252,10 +252,10 @@ A JSON file a team commits to set what SceneScout may do, which no agent can loo
 | Key | Values | Unset | What it does |
 |---|---|---|---|
 | `preset` | `strict` | none | Starts from a preset (below). A key set beside it replaces the preset's value for that key |
-| `maxMode` | `observe`, `read-only`, `safe-write`, `destructive` | no limit | The loosest write mode any attach, `check`, `ci` or first look may run in. An attach or `--mode` above it is refused; an attach that names no mode, and a command with no `--mode`, start in it when the default `read-only` is above it |
+| `maxMode` | `observe`, `read-only`, `safe-write`, `destructive` | no limit | The loosest write mode any attach, `check`, `ci` or first look may run in. An attach or `--mode` above it is refused; an attach that names no mode, and a command with no `--mode`, start in it when the default `read-only` is above it. The guided intake form offers no care level above it, and `scout_guided_plan` refuses one |
 | `requireGuidedPlan` | `true`, `false` | `false` | Holds the guided gate from the server's start: an attach above `observe` needs an accepted guided plan's `planId`, and `readPosts` or `trustedEmbeds` from an attach are refused, as when a plan has been built ([Safety model](Safety-model.md#care-levels-in-a-guided-check)). `ci` drives its own server, which reads the same file, so a `ci` run above `observe` is refused at its attach |
 | `readPosts` | a list of `"POST /path"` or `"POST https://host/path"` entries, at most 20 | no limit | The only POST endpoints an attach may name as reads, and the ones it gets when it names none. `[]` allows none. `SCENESCOUT_READ_POSTS` may narrow it; entries it names outside the list are left out. `check`, `ci` and a first look get the same list |
-| `trustedEmbeds` | a list of `https://host` origins, at most 20 | no limit | The only embedded-frame origins an attach may trust, and the ones it gets when it names none. `[]` allows none |
+| `trustedEmbeds` | a list of `https://host` origins, at most 10 | no limit | The only embedded-frame origins an attach may trust, and the ones it gets when it names none. `[]` allows none |
 | `dedup` | `rule`, `judge` | no limit | The most the dedup setting may be. `rule` keeps the model judge off: `dedup: "judge"` and `--dedup judge` are refused, and `SCENESCOUT_DEDUP=judge` and `ci`'s default are turned down to `rule` |
 | `evidence` | `inline`, `file`, `off` | no limit | The most a finding's picture may do. `file` keeps pictures out of the conversation; `off` takes none. An attach's `evidence` above it is refused, and a default above it is lowered |
 

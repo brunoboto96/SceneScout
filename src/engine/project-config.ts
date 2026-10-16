@@ -28,7 +28,17 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { READ_POSTS_ENV, readPostEntries, readPostsSetting, stricterMode, trustedEmbedOrigins, type WriteMode, WRITE_MODES } from "./policy.js";
+import {
+  MAX_READ_POSTS,
+  MAX_TRUSTED_EMBEDS,
+  READ_POSTS_ENV,
+  readPostEntries,
+  readPostsSetting,
+  stricterMode,
+  trustedEmbedOrigins,
+  type WriteMode,
+  WRITE_MODES,
+} from "./policy.js";
 import { EVIDENCE_MODES, type EvidenceMode } from "./capture.js";
 import { DEDUP_ENV, DEDUP_MODES, type DedupMode } from "./ci.js";
 import { flagName } from "./args.js";
@@ -47,9 +57,6 @@ export type Preset = (typeof PRESETS)[number];
 /** The keys a config file may set; any other key is refused. */
 export const CONFIG_KEYS = ["preset", "maxMode", "requireGuidedPlan", "readPosts", "trustedEmbeds", "dedup", "evidence"] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
-
-/** The most entries a list setting may hold, as for the arguments it caps. */
-const MAX_LIST = 20;
 
 /**
  * What a config file sets, after its preset is expanded. A key that is
@@ -102,6 +109,37 @@ const below = <T>(order: readonly T[], a: T, b: T): T => (order.indexOf(a) <= or
 const quoted = (list: readonly string[]): string => list.map((v) => `"${v}"`).join(", ");
 
 /**
+ * The keys that appear more than once in one object of a JSON text that
+ * JSON.parse accepted, compared after their escapes are decoded. JSON.parse
+ * keeps the last one silently, so a reader of the file would take the first
+ * value for the lock while the second is the one applied.
+ */
+function duplicateKeys(text: string): string[] {
+  const dups = new Set<string>();
+  const open: Array<Set<string> | null> = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      const token = text.slice(i, j + 1);
+      i = j;
+      let k = j + 1;
+      while (k < text.length && /\s/.test(text[k])) k++;
+      const keys = open[open.length - 1];
+      if (keys && text[k] === ":") {
+        const key = JSON.parse(token) as string;
+        if (keys.has(key)) dups.add(key);
+        else keys.add(key);
+      }
+    } else if (c === "{") open.push(new Set());
+    else if (c === "[") open.push(null);
+    else if (c === "}" || c === "]") open.pop();
+  }
+  return [...dups];
+}
+
+/**
  * A config file's text, checked and with its preset expanded. Every problem
  * is an error naming the file and the key, so the person who wrote it can
  * fix it; an unknown key is refused rather than ignored, since a misspelt
@@ -116,6 +154,8 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
     return bad(`not valid JSON (${err instanceof Error ? err.message : String(err)})`);
   }
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return bad('must be a JSON object, such as {"preset": "strict"}');
+  const twice = duplicateKeys(text);
+  if (twice.length > 0) return bad(`${quoted(twice)} ${twice.length > 1 ? "are each" : "is"} set more than once: set each key once`);
   const obj = raw as Record<string, unknown>;
   const unknown = Object.keys(obj).filter((k) => !(CONFIG_KEYS as readonly string[]).includes(k));
   if (unknown.length > 0)
@@ -128,11 +168,11 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
       return bad(`"${key}" must be one of ${quoted(allowed)}, not ${JSON.stringify(v)}`);
     return { ok: true, value: v as T };
   };
-  const list = (key: ConfigKey, check: (entries: string[]) => string[]): { ok: true; value?: string[] } | { ok: false; error: string } => {
+  const list = (key: ConfigKey, max: number, check: (entries: string[]) => string[]): { ok: true; value?: string[] } | { ok: false; error: string } => {
     const v = obj[key];
     if (v === undefined) return { ok: true };
     if (!Array.isArray(v) || v.some((e) => typeof e !== "string")) return bad(`"${key}" must be a list of strings, such as [] for none`);
-    if (v.length > MAX_LIST) return bad(`"${key}" may hold at most ${MAX_LIST} entries`);
+    if (v.length > max) return bad(`"${key}" may hold at most ${max} entries`);
     const rejected = check(v as string[]);
     if (rejected.length > 0) return bad(`"${key}" has entries that are not valid: ${quoted(rejected)}`);
     return { ok: true, value: (v as string[]).map((e) => e.trim()) };
@@ -147,9 +187,9 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
   const evidence = oneOf("evidence", EVIDENCE_MODES);
   if (!evidence.ok) return evidence;
   if (obj.requireGuidedPlan !== undefined && typeof obj.requireGuidedPlan !== "boolean") return bad(`"requireGuidedPlan" must be true or false`);
-  const readPosts = list("readPosts", (entries) => readPostEntries(entries).rejected);
+  const readPosts = list("readPosts", MAX_READ_POSTS, (entries) => readPostEntries(entries).rejected);
   if (!readPosts.ok) return readPosts;
-  const trustedEmbeds = list("trustedEmbeds", (entries) => trustedEmbedOrigins(entries).rejected);
+  const trustedEmbeds = list("trustedEmbeds", MAX_TRUSTED_EMBEDS, (entries) => trustedEmbedOrigins(entries).rejected);
   if (!trustedEmbeds.ok) return trustedEmbeds;
 
   const base: Policy = preset.value ? structuredClone(PRESET_POLICY[preset.value]) : {};
@@ -210,7 +250,17 @@ export interface PolicyReader {
 
 /** The filesystem, for the server and the commands. */
 export const fsPolicyReader: PolicyReader = {
-  exists: (file) => fs.existsSync(file),
+  // Only "nothing there" is no file. A link whose target is missing, or a path that cannot be looked at,
+  // is a file that cannot be read: reading it fails and stops the start, where existsSync would skip the lock.
+  exists: (file) => {
+    try {
+      fs.lstatSync(file);
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return code !== "ENOENT" && code !== "ENOTDIR";
+    }
+  },
   read: (file) => fs.readFileSync(file, "utf8"),
   realpath: (file) => {
     try {
@@ -450,4 +500,29 @@ export function applyToCommand(
     readPosts: r.settings.readPosts,
     note: `Config: ${loaded.sources.join(", ")}${notes.length > 0 ? `; ${notes.join("; ")}` : ""}.`,
   };
+}
+
+/**
+ * The config for a command (`check`, `ci`, a first look), read and applied in
+ * one step: the launch file (CONFIG_ENV, else `launchDir`'s), joined with the
+ * project's own, then applyToCommand. `readPostsEnv` is what the command puts
+ * in READ_POSTS_ENV, since a command reads POST endpoints from there only;
+ * undefined leaves the environment as it is.
+ */
+export function configureCommand(
+  env: Record<string, string | undefined>,
+  launchDir: string,
+  projectDir: string,
+  args: readonly string[],
+  options: { mode: WriteMode; dedup?: DedupMode },
+  fsx: PolicyReader,
+): { ok: true; mode: WriteMode; dedup?: DedupMode; note: string; readPostsEnv?: string } | { ok: false; error: string } {
+  const launch = readLaunchPolicy(env, launchDir, fsx);
+  if (!launch.ok) return launch;
+  const loaded = withProjectPolicy(launch.loaded, projectDir, fsx);
+  if (!loaded.ok) return loaded;
+  const applied = applyToCommand(loaded.loaded, env, args, options);
+  if (!applied.ok) return applied;
+  const { readPosts, ...rest } = applied;
+  return readPosts === undefined ? rest : { ...rest, readPostsEnv: readPosts.join("\n") };
 }

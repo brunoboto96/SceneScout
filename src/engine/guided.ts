@@ -19,6 +19,7 @@
  * Design: docs/design/non-technical-assistant.md, sections 3.2 and 3.6.
  */
 import crypto from "node:crypto";
+import { stricterMode, type WriteMode } from "./policy.js";
 import { INTAKE_ROLE, SIGN_IN_HINT, type SignInAnswer } from "../intake.js";
 import {
   AREA_LABEL,
@@ -56,6 +57,16 @@ export const CARE_MODE: Record<Care, GuidedMode> = {
   "may-submit-forms": "read-only",
   "may-create-test-data": "safe-write",
 };
+
+/** What caps the care levels a person may choose: the SceneScout config's maxMode (engine/project-config.ts). */
+export interface CareLimit {
+  maxMode?: WriteMode;
+}
+
+/** The care levels whose mode is at or below `maxMode`, in the order they are offered; every one with no cap. Look only always is. */
+export function caresWithin(maxMode: WriteMode | undefined): Care[] {
+  return CARES.filter((c) => maxMode === undefined || stricterMode(CARE_MODE[c], maxMode) === CARE_MODE[c]);
+}
 
 export const CHECK_AREAS = ["sign-in", "forms", "broken-pages", "phone", "journey", "tickets"] as const;
 export type CheckArea = (typeof CHECK_AREAS)[number];
@@ -323,7 +334,7 @@ function oneOfOr<T extends string>(raw: unknown, list: readonly T[], fallback: T
  * journey with no "journey" area, or tickets with no "tickets" area, is a
  * contradiction and is refused rather than dropped or added.
  */
-export function checkGuidedChoices(input: unknown): { ok: true; choices: GuidedChoices } | { ok: false; error: string } {
+export function checkGuidedChoices(input: unknown, limit: CareLimit = {}): { ok: true; choices: GuidedChoices } | { ok: false; error: string } {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ok: false, error: "the choices must be an object" };
   const given = input as Record<string, unknown>;
   for (const key of Object.keys(given)) {
@@ -374,6 +385,12 @@ export function checkGuidedChoices(input: unknown): { ok: true; choices: GuidedC
   if (given.care === "destructive") return { ok: false, error: `that care level is not offered here. ${DESTRUCTIVE_NOT_OFFERED}` };
   const care = oneOfOr(given.care, CARES, "look-only", "care");
   if (!care.ok) return care;
+  const allowed = caresWithin(limit.maxMode);
+  if (!allowed.includes(care.value))
+    return {
+      ok: false,
+      error: `the SceneScout config set by whoever runs SceneScout allows no care level above ${CARE_LABEL[allowed[allowed.length - 1]]}, so ${CARE_LABEL[care.value]} is not offered here: choose ${allowed.map((c) => CARE_LABEL[c]).join(" or ")}`,
+    };
   choices.care = care.value;
   const thoroughness = oneOfOr(given.thoroughness, THOROUGHNESSES, "normal", "thoroughness");
   if (!thoroughness.ok) return thoroughness;
@@ -480,8 +497,8 @@ function guidedCalls(choices: GuidedChoices, mode: GuidedMode, objective: string
  * checkGuidedChoices refuses: an unknown care level would leave the attach
  * with no mode, and scout_attach reads a missing mode as read-only.
  */
-export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId()): GuidedPlan {
-  const checked = checkGuidedChoices(given);
+export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId(), limit: CareLimit = {}): GuidedPlan {
+  const checked = checkGuidedChoices(given, limit);
   if (!checked.ok) throw new Error(`buildGuidedPlan was given choices checkGuidedChoices refuses: ${checked.error}`);
   const choices = checked.choices;
   const mode = CARE_MODE[choices.care];
@@ -515,9 +532,9 @@ export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId
 }
 
 /** Choices to a plan in one step: the plan, or the sentence that says what to fix. */
-export function guidedPlan(input: unknown, planId?: string): { ok: true; plan: GuidedPlan } | { ok: false; error: string } {
-  const checked = checkGuidedChoices(input);
-  return checked.ok ? { ok: true, plan: buildGuidedPlan(checked.choices, planId) } : checked;
+export function guidedPlan(input: unknown, planId?: string, limit: CareLimit = {}): { ok: true; plan: GuidedPlan } | { ok: false; error: string } {
+  const checked = checkGuidedChoices(input, limit);
+  return checked.ok ? { ok: true, plan: buildGuidedPlan(checked.choices, planId, limit) } : checked;
 }
 
 // ---- The plans a server holds, the person's confirmation, and the gate on scout_attach ----

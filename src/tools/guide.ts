@@ -30,7 +30,7 @@ import { CONFIRM_SAYS } from "../engine/guided-words.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL } from "../playbook.js";
 import { livePrompt, loginPrompt, LOGIN_PROMPT, LIVE_PROMPT, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../prompts.js";
 
-import { PACKAGE_ROOT, server, errorText, guidedPlans } from "../server-context.js";
+import { PACKAGE_ROOT, server, errorText, guidedPlans, operatorPolicy } from "../server-context.js";
 
 // The guided start as one form, where the client can show one (MCP
 // elicitation, form mode); otherwise, or when the person declines or closes it,
@@ -163,10 +163,12 @@ export function registerGuideTools(): void {
     },
     async ({ url }: { url?: string }, extra) => {
       try {
-        const outcome = await askWithForm(INTAKE_FORM_MESSAGE, intakeFormSchema(url), extra, INTAKE_TOOL);
-        const reply = intakeFromForm(outcome as FormOutcome);
+        // The operator's config caps the care levels offered: one above its maxMode would only be refused at scout_attach.
+        const maxMode = operatorPolicy.policy.maxMode;
+        const outcome = await askWithForm(INTAKE_FORM_MESSAGE, intakeFormSchema(url, maxMode), extra, INTAKE_TOOL);
+        const reply = intakeFromForm(outcome as FormOutcome, maxMode);
         if (reply.kind !== "choices") return { content: [{ type: "text" as const, text: intakeReplyText(reply) }] };
-        const plan = guidedPlans.add(buildGuidedPlan(reply.choices));
+        const plan = guidedPlans.add(buildGuidedPlan(reply.choices, undefined, { maxMode }));
         // A care level that needs the person's confirmation asks for it now, in a second form, so the person answers both in one go.
         const confirmed = plan.confirm ? await confirmWithPerson(plan.planId, extra) : null;
         const now = guidedPlans.get(plan.planId)!;
@@ -201,7 +203,7 @@ export function registerGuideTools(): void {
         "Turn a person's guided choices into a plan in plain words: the write mode its care level is, what each area does and holds back, what to tell the person, the calls to make in order, and its time and page limits. " +
         "Pass `choices` to build a new plan, or `planId` to read one already built (a panel builds it and hands you only the id). " +
         "A plan whose care level writes on a site that is not on this computer, or that creates test data anywhere, is built unaccepted: scout_guided_confirm asks the person, and until they accept, scout_attach above observe is refused. " +
-        "Once any plan is built, every scout_attach above observe must name an accepted plan's planId. Touches no browser.",
+        "Once any plan is built, every scout_attach above observe must name an accepted plan's planId. A care level above the SceneScout config's maxMode is refused. Touches no browser.",
       inputSchema: {
         choices: z
           .object({
@@ -234,7 +236,7 @@ export function registerGuideTools(): void {
           if (!kept) throw new Error("this server holds no guided plan with that id: build one with choices");
           plan = kept;
         } else {
-          const built = guidedPlan(choices);
+          const built = guidedPlan(choices, undefined, { maxMode: operatorPolicy.policy.maxMode });
           if (!built.ok) throw new Error(built.error);
           plan = guidedPlans.add(built.plan);
         }

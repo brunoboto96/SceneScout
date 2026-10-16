@@ -10,10 +10,17 @@
  *   npx tsx --test --test-name-pattern "swapped" scripts/policy-test.ts
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { confirmVerdict, GuidedPlans, guidedAttachVerdict, guidedPlan, holdGuidedPlan } from "../src/engine/guided.ts";
 import {
   applyToCommand,
+  configureCommand,
+  fsPolicyReader,
   NO_POLICY,
   parsePolicy,
   PRESET_POLICY,
@@ -2138,4 +2145,148 @@ test("config: requireGuidedPlan opens the guided gate before any plan is built, 
   assert.equal(guidedAttachVerdict(required, { mode: "observe", url: REMOTE }).ok, true, "looking only needs no plan");
   const posts = guidedAttachVerdict(required, { mode: "observe", url: REMOTE, readPosts: ["POST /api/search"] });
   assert.ok(!posts.ok && /readPosts/.test(posts.why));
+});
+
+test("config: a key set twice is refused, however it is spelt, since the first value would read as the lock", () => {
+  for (const text of [
+    '{"maxMode": "observe", "maxMode": "destructive"}',
+    '{"maxMode": "observe", "max\\u004dode": "destructive"}',
+    '{"preset": "strict", "readPosts": [], "readPosts": ["POST /api/orders"]}',
+  ]) {
+    const r = parsePolicy(text, "config.json");
+    assert.ok(!r.ok && /is set more than once/.test(r.error), `${text}: ${JSON.stringify(r)}`);
+  }
+  // The contrast: the same strings as list entries, or once each as keys, are not duplicates.
+  assert.deepEqual(parsed('{"readPosts": ["POST /api/a", "POST /api/a"], "trustedEmbeds": []}'), {
+    readPosts: ["POST /api/a", "POST /api/a"],
+    trustedEmbeds: [],
+  });
+  assert.deepEqual(parsed('{"maxMode": "observe", "dedup": "rule"}'), { maxMode: "observe", dedup: "rule" });
+});
+
+test("config: prototype keys and other spellings of a key are unknown keys, never a way to set one", () => {
+  for (const [text, key] of [
+    ['{"__proto__": {"maxMode": "destructive"}}', "__proto__"],
+    ['{"constructor": {"maxMode": "destructive"}}', "constructor"],
+    ['{"MaxMode": "destructive"}', "MaxMode"],
+    ['{"maxmode": "destructive"}', "maxmode"],
+  ] as const) {
+    const r = parsePolicy(text, "config.json");
+    assert.ok(!r.ok && r.error.includes(`unknown key "${key}"`), `${text}: ${JSON.stringify(r)}`);
+  }
+  assert.equal(({} as Record<string, unknown>).maxMode, undefined, "nothing reached Object.prototype");
+});
+
+test("config: trustedEmbeds holds no more origins than an attach can trust", () => {
+  const origins = Array.from({ length: 11 }, (_, i) => `https://e${i}.example.com`);
+  const r = parsePolicy(JSON.stringify({ trustedEmbeds: origins }), "config.json");
+  assert.ok(!r.ok && /"trustedEmbeds" may hold at most 10 entries/.test(r.error), JSON.stringify(r));
+  assert.ok(parsePolicy(JSON.stringify({ trustedEmbeds: origins.slice(0, 10) }), "config.json").ok);
+});
+
+test("config: on the real filesystem, a config that is there but cannot be read stops the start instead of being skipped", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-config-"));
+  try {
+    const launch = path.join(dir, "launch");
+    const project = path.join(dir, "project");
+    for (const d of [launch, project]) fs.mkdirSync(path.join(d, ".scenescout"), { recursive: true });
+    // No file: no config, as before.
+    assert.deepEqual(readLaunchPolicy({}, launch, fsPolicyReader), { ok: true, loaded: NO_POLICY });
+    assert.deepEqual(withProjectPolicy(NO_POLICY, project, fsPolicyReader), { ok: true, loaded: NO_POLICY });
+    // A link whose target is missing (a shared config not mounted) is a config that cannot be read, not no config.
+    fs.symlinkSync(path.join(dir, "not-mounted.json"), path.join(launch, ".scenescout", "config.json"));
+    const dangling = readLaunchPolicy({}, launch, fsPolicyReader);
+    assert.ok(!dangling.ok && /could not be read/.test(dangling.error), JSON.stringify(dangling));
+    fs.symlinkSync(path.join(dir, "not-there.json"), path.join(project, ".scenescout", "config.json"));
+    const projectDangling = withProjectPolicy(NO_POLICY, project, fsPolicyReader);
+    assert.ok(!projectDangling.ok && /could not be read/.test(projectDangling.error), JSON.stringify(projectDangling));
+    // A link to a real file is read through.
+    fs.writeFileSync(path.join(dir, "not-mounted.json"), '{"maxMode": "observe"}');
+    const linked = readLaunchPolicy({}, launch, fsPolicyReader);
+    assert.ok(linked.ok && linked.loaded.policy.maxMode === "observe", JSON.stringify(linked));
+    // A directory, and an empty file, are not configs.
+    fs.mkdirSync(path.join(dir, "a-dir"));
+    const asDir = readLaunchPolicy({ SCENESCOUT_CONFIG: path.join(dir, "a-dir") }, launch, fsPolicyReader);
+    assert.ok(!asDir.ok && /could not be read/.test(asDir.error), JSON.stringify(asDir));
+    fs.writeFileSync(path.join(dir, "empty.json"), "");
+    const empty = readLaunchPolicy({ SCENESCOUT_CONFIG: path.join(dir, "empty.json") }, launch, fsPolicyReader);
+    assert.ok(!empty.ok && /not valid JSON/.test(empty.error), JSON.stringify(empty));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("config: a command reads the launch file, joins the project's, caps --mode and hands on the read POSTs the file allows", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-command-"));
+  try {
+    const launch = path.join(dir, "launch");
+    const project = path.join(dir, "project");
+    for (const d of [launch, project]) fs.mkdirSync(path.join(d, ".scenescout"), { recursive: true });
+    fs.writeFileSync(path.join(launch, ".scenescout", "config.json"), '{"maxMode": "observe", "readPosts": ["POST /api/search"]}');
+    // The project's file tries to loosen: it is joined, and loosens nothing.
+    fs.writeFileSync(path.join(project, ".scenescout", "config.json"), '{"maxMode": "destructive", "readPosts": ["POST /api/search", "POST /api/orders"]}');
+    const env = { SCENESCOUT_READ_POSTS: "POST /api/search, POST /api/orders" };
+    const capped = configureCommand(env, launch, project, ["http://localhost:3000"], { mode: "read-only" }, fsPolicyReader);
+    assert.ok(capped.ok, JSON.stringify(capped));
+    assert.equal(capped.mode, "observe");
+    assert.equal(capped.readPostsEnv, "POST /api/search", "the environment's entries outside the file's list are left out");
+    assert.match(capped.note, /left out: "POST \/api\/orders"/);
+    const flag = configureCommand(env, launch, project, ["http://localhost:3000", "--mode", "read-only"], { mode: "read-only" }, fsPolicyReader);
+    assert.ok(!flag.ok && /mode "read-only" is above the config's maxMode "observe"/.test(flag.error), JSON.stringify(flag));
+    assert.ok(!/Do not retry/.test(flag.ok ? "" : flag.error), "a person reads a command's refusal, not an agent");
+    // A project file that is not valid stops the command too.
+    fs.writeFileSync(path.join(project, ".scenescout", "config.json"), '{"maxmode": "observe"}');
+    const bad = configureCommand(env, launch, project, [], { mode: "observe" }, fsPolicyReader);
+    assert.ok(!bad.ok && /unknown key "maxmode"/.test(bad.error));
+    // No file anywhere: the options and the environment as they were.
+    const none = configureCommand(env, path.join(dir, "nowhere"), path.join(dir, "nowhere"), ["--mode", "read-only"], { mode: "read-only" }, fsPolicyReader);
+    assert.deepEqual(none, { ok: true, mode: "read-only", dedup: undefined, note: "" });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("config: check, ci and a first look stop with exit 2 on a --mode above the file, or a file that is not valid, before anything runs", () => {
+  const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-cli-config-"));
+  try {
+    const project = path.join(dir, "project");
+    fs.mkdirSync(path.join(dir, ".scenescout"), { recursive: true });
+    fs.mkdirSync(path.join(project, ".scenescout"), { recursive: true });
+    // The launch directory's file, and a project file that tries to loosen it.
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), '{"maxMode": "observe", "readPosts": ["POST /api/search"]}');
+    fs.writeFileSync(path.join(project, ".scenescout", "config.json"), '{"maxMode": "destructive"}');
+    const bad = path.join(dir, "bad.json");
+    fs.writeFileSync(bad, '{"maxMode": "observe", "maxMode": "destructive"}');
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !/^(SCENESCOUT_|ANTHROPIC_|OPENAI_)/.test(k)) env[k] = v;
+    const run = (args: string[], extra: Record<string, string> = {}) =>
+      spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), cli, ...args], {
+        cwd: dir,
+        env: { ...env, ...extra },
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+    const url = "http://127.0.0.1:9";
+    for (const [name, args] of [
+      ["check", ["check", url, "--mode", "read-only", "--project", project]],
+      ["ci", ["ci", url, "--mode", "read-only", "--project", project]],
+      ["a first look", [url, "--mode", "read-only"]],
+    ] as const) {
+      const r = run([...args]);
+      assert.equal(r.status, 2, `${name}: ${r.stderr}`);
+      assert.match(r.stderr, /refused by the SceneScout config \(.*config\.json\): mode "read-only" is above the config's maxMode "observe"/, name);
+      const invalid = run([...args], { SCENESCOUT_CONFIG: bad });
+      assert.equal(invalid.status, 2, `${name}, bad config: ${invalid.stderr}`);
+      assert.match(invalid.stderr, /"maxMode" is set more than once/, name);
+    }
+    // No --mode: ci starts in observe and drops the read POSTs the file does not list, saying both, then stops at the missing model key.
+    const lowered = run(["ci", url, "--project", project], { SCENESCOUT_READ_POSTS: "POST /api/search, POST /api/orders" });
+    assert.equal(lowered.status, 2, lowered.stderr);
+    assert.match(lowered.stderr, /^Config: .*config\.json.*mode "observe": the default "read-only" is above the config's maxMode/m);
+    assert.match(lowered.stderr, /SCENESCOUT_READ_POSTS entries the config does not list were left out: "POST \/api\/orders"/);
+    assert.doesNotMatch(lowered.stderr, /refused by the SceneScout config/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

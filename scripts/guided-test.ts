@@ -18,6 +18,7 @@ import {
   MAX_PLANS,
   newConfirmCode,
   CARES,
+  caresWithin,
   CHECK_AREAS,
   checkGuidedChoices,
   CONFIRM_NEEDS_CODE,
@@ -52,7 +53,7 @@ import {
   SAFETY_EXPLAINER,
   THOROUGHNESS_LABEL,
 } from "../src/engine/guided-words.ts";
-import { settingsFromAnswers } from "../src/intake.ts";
+import { careFieldDescription, intakeFormSchema, intakeFromForm, settingsFromAnswers } from "../src/intake.ts";
 import { allowsWrite } from "../src/engine/policy.ts";
 import { isReadMethod } from "../src/engine/unload.ts";
 import type { Finding } from "../src/engine/memory.ts";
@@ -778,4 +779,44 @@ test("card: the report's plain entry says exactly what the card says", () => {
     assert.ok(entry.includes(part), `the report carries "${part}"`);
   card.steps.forEach((s, i) => assert.ok(entry.includes(`${i + 1}. ${s}`), s));
   assert.ok(entry.includes(`](${card.picture!.file})`));
+});
+
+test("guided: a care level above the config's maxMode is never offered, and choosing one is refused saying the config set it", () => {
+  assert.deepEqual(caresWithin(undefined), [...CARES], "no config: every care level");
+  assert.deepEqual(caresWithin("destructive"), [...CARES]);
+  assert.deepEqual(caresWithin("safe-write"), [...CARES]);
+  assert.deepEqual(caresWithin("read-only"), ["look-only", "may-submit-forms"]);
+  assert.deepEqual(caresWithin("observe"), ["look-only"]);
+
+  const base = { address: "https://staging.example.com", areas: ["forms"] };
+  const above = checkGuidedChoices({ ...base, care: "may-create-test-data" }, { maxMode: "read-only" });
+  assert.ok(!above.ok && /the SceneScout config/.test(above.error) && /May create test data/i.test(above.error), JSON.stringify(above));
+  assert.ok(checkGuidedChoices({ ...base, care: "may-submit-forms" }, { maxMode: "read-only" }).ok, "at the cap");
+  assert.ok(!checkGuidedChoices({ ...base, care: "may-submit-forms" }, { maxMode: "observe" }).ok);
+  assert.ok(checkGuidedChoices({ ...base, care: "may-create-test-data" }).ok, "the contrast: no config, the same choice is taken");
+  const plan = guidedPlan({ ...base, care: "may-create-test-data" }, undefined, { maxMode: "observe" });
+  assert.equal(plan.ok, false, "no plan is built above the cap");
+  assert.throws(() =>
+    buildGuidedPlan({ ...base, areas: ["forms"], signIn: "none", care: "may-submit-forms", thoroughness: "normal" }, undefined, { maxMode: "observe" }),
+  );
+
+  // The intake form lists only the care levels the cap allows, and its words name only those.
+  const free = intakeFormSchema();
+  assert.deepEqual(
+    free.properties.care.oneOf.map((c) => c.const),
+    [...CARES],
+  );
+  const capped = intakeFormSchema(undefined, "observe");
+  assert.deepEqual(
+    capped.properties.care.oneOf.map((c) => c.const),
+    ["look-only"],
+  );
+  assert.equal(capped.properties.care.default, "look-only");
+  assert.ok(!careFieldDescription("observe").includes(CARE_LABEL["may-submit-forms"]));
+  assert.ok(careFieldDescription().includes(CARE_LABEL["may-submit-forms"]));
+  // A form answered with a care level it did not offer is sent back to fix, never built.
+  const content = { address: base.address, checkForms: true, signIn: "none", care: "may-submit-forms", thoroughness: "normal" };
+  const reply = intakeFromForm({ kind: "accepted", content }, "observe");
+  assert.ok(reply.kind === "fix" && /the SceneScout config/.test(reply.error), JSON.stringify(reply));
+  assert.equal(intakeFromForm({ kind: "accepted", content }).kind, "choices");
 });

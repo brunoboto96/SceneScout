@@ -59,7 +59,7 @@ import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
-import { applyToCommand, fsPolicyReader, readLaunchPolicy, withProjectPolicy } from "./engine/project-config.js";
+import { configureCommand, fsPolicyReader } from "./engine/project-config.js";
 import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
 import { VISUAL_DIRNAME } from "./engine/baseline.js";
 import { openOrSay } from "./engine/open.js";
@@ -642,15 +642,11 @@ function commandConfig(
     console.error(`scenescout${command ? ` ${command}` : ""}: ${error}`);
     process.exit(exitCode);
   };
-  const launch = readLaunchPolicy(process.env, process.cwd(), fsPolicyReader);
-  if (!launch.ok) return stop(launch.error);
-  const loaded = withProjectPolicy(launch.loaded, options.projectDir, fsPolicyReader);
-  if (!loaded.ok) return stop(loaded.error);
-  const applied = applyToCommand(loaded.loaded, process.env, args, options);
+  const applied = configureCommand(process.env, process.cwd(), options.projectDir, args, options, fsPolicyReader);
   if (!applied.ok) return stop(applied.error);
   if (applied.note) console.error(applied.note);
   // Commands read POST endpoints only from the environment (browser.ts), so the list the file allows is put there.
-  if (applied.readPosts !== undefined) process.env[READ_POSTS_ENV] = applied.readPosts.join("\n");
+  if (applied.readPostsEnv !== undefined) process.env[READ_POSTS_ENV] = applied.readPostsEnv;
   return applied;
 }
 

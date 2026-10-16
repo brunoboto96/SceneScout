@@ -1376,17 +1376,19 @@ async function configCheck(): Promise<void> {
   );
   const withServer = async (
     env: Record<string, string>,
-    use: (attach: (args: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>) => Promise<void>,
+    use: (
+      attach: (args: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>,
+      call: (name: string, args: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>,
+    ) => Promise<void>,
   ) => {
     const client = new Client({ name: "ft-check-config", version: "0.0.1" });
     await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env: { ...base, ...env }, cwd: dir }));
     try {
-      await use(async (args) => {
-        const r = (await client.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, ...args } })) as ToolText & {
-          isError?: boolean;
-        };
+      const call = async (name: string, args: Record<string, unknown>) => {
+        const r = (await client.callTool({ name, arguments: args })) as ToolText & { isError?: boolean };
         return { isError: r.isError === true, text: textOf(r) };
-      });
+      };
+      await use((args) => call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, ...args }), call);
       assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
     } finally {
       await client.close();
@@ -1435,6 +1437,21 @@ async function configCheck(): Promise<void> {
       if (!gated.isError || !/requires a guided plan/.test(gated.text))
         fail(`requireGuidedPlan in a project's own config did not hold the guided gate:\n${gated.text}`);
     });
+    // No SCENESCOUT_CONFIG: the file in the directory the server started in is the lock, and the folder the agent names
+    // as projectPath cannot loosen it. The guided plan offers no care level above it either.
+    fs.mkdirSync(path.join(dir, ".scenescout"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "observe" }));
+    fs.writeFileSync(path.join(projectDir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "destructive" }));
+    await withServer({}, async (attach, call) => {
+      const loosen = await attach({ mode: "read-only" });
+      if (!loosen.isError || !/refused by the SceneScout config/.test(loosen.text) || !/maxMode "observe"/.test(loosen.text))
+        fail(`a project's own config loosened the launch directory's, or the launch directory's was not read:\n${loosen.text}`);
+      const plan = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms"], care: "may-submit-forms" } });
+      if (!plan.isError || !/the SceneScout config/.test(plan.text)) fail(`scout_guided_plan built a plan above the config's maxMode:\n${plan.text}`);
+      const look = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms"], care: "look-only" } });
+      if (look.isError) fail(`scout_guided_plan refused Look only under maxMode observe:\n${look.text}`);
+    });
+    fs.rmSync(path.join(dir, ".scenescout"), { recursive: true });
     fs.rmSync(path.join(projectDir, ".scenescout", "config.json"));
     // A config that is not valid stops the server as it starts, naming the key.
     const bad = spawnSync(process.execPath, [serverPath], {
@@ -1446,7 +1463,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; a project's file tightens; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused; a bad config stops the server",
     );
   } finally {
     await fixture.close();
