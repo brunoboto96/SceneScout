@@ -244,6 +244,8 @@ The preview commands test a deployed preview, so the pull request's code never r
 | 🟡 `safe-write` | Creates records, and edits or deletes only the ones it created |
 | 🔴 `destructive` | Everything. Only when you say the data is disposable; the agent never picks it |
 
+A team can commit `.scenescout/config.json` to cap what any agent may choose, for example `{"preset": "strict"}` to keep every run to reads only ([the config file](docs/guide/Configuration-reference.md#the-config-file)).
+
 The policy sits on the network, so a blocked request never reaches your server. The page gets a refusal instead, which is how SceneScout catches a page that claims success anyway. A saved journey that creates something, like the order above, runs only when the check is told `--flow-writes allow`, against a test environment. Findings, memory and reports stay in a `.scenescout/` folder that keeps itself out of git.
 
 > [!IMPORTANT]

@@ -20,6 +20,7 @@
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { stricterMode, type WriteMode } from "./policy.js";
 import { INTAKE_ROLE, SIGN_IN_HINT, type SignInAnswer } from "../intake.js";
 import {
   AREA_LABEL,
@@ -62,6 +63,16 @@ export const CARE_MODE: Record<Care, GuidedMode> = {
   "may-submit-forms": "read-only",
   "may-create-test-data": "safe-write",
 };
+
+/** What caps the care levels a person may choose: the SceneScout config's maxMode (engine/project-config.ts). */
+export interface CareLimit {
+  maxMode?: WriteMode;
+}
+
+/** The care levels whose mode is at or below `maxMode`, in the order they are offered; every one with no cap. Look only always is. */
+export function caresWithin(maxMode: WriteMode | undefined): Care[] {
+  return CARES.filter((c) => maxMode === undefined || stricterMode(CARE_MODE[c], maxMode) === CARE_MODE[c]);
+}
 
 export const CHECK_AREAS = ["sign-in", "forms", "broken-pages", "phone", "journey", "tickets"] as const;
 export type CheckArea = (typeof CHECK_AREAS)[number];
@@ -344,7 +355,7 @@ function oneOfOr<T extends string>(raw: unknown, list: readonly T[], fallback: T
  * journey with no "journey" area, or tickets with no "tickets" area, is a
  * contradiction and is refused rather than dropped or added.
  */
-export function checkGuidedChoices(input: unknown): { ok: true; choices: GuidedChoices } | { ok: false; error: string } {
+export function checkGuidedChoices(input: unknown, limit: CareLimit = {}): { ok: true; choices: GuidedChoices } | { ok: false; error: string } {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ok: false, error: "the choices must be an object" };
   const given = input as Record<string, unknown>;
   for (const key of Object.keys(given)) {
@@ -395,6 +406,12 @@ export function checkGuidedChoices(input: unknown): { ok: true; choices: GuidedC
   if (given.care === "destructive") return { ok: false, error: `that care level is not offered here. ${DESTRUCTIVE_NOT_OFFERED}` };
   const care = oneOfOr(given.care, CARES, "look-only", "care");
   if (!care.ok) return care;
+  const allowed = caresWithin(limit.maxMode);
+  if (!allowed.includes(care.value))
+    return {
+      ok: false,
+      error: `the SceneScout config set by whoever runs SceneScout allows no care level above ${CARE_LABEL[allowed[allowed.length - 1]]}, so ${CARE_LABEL[care.value]} is not offered here: choose ${allowed.map((c) => CARE_LABEL[c]).join(" or ")}`,
+    };
   choices.care = care.value;
   const thoroughness = oneOfOr(given.thoroughness, THOROUGHNESSES, "normal", "thoroughness");
   if (!thoroughness.ok) return thoroughness;
@@ -501,8 +518,8 @@ function guidedCalls(choices: GuidedChoices, mode: GuidedMode, objective: string
  * checkGuidedChoices refuses: an unknown care level would leave the attach
  * with no mode, and scout_attach reads a missing mode as read-only.
  */
-export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId(), opts: { signInHealth?: SignInHealth } = {}): GuidedPlan {
-  const checked = checkGuidedChoices(given);
+export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId(), opts: CareLimit & { signInHealth?: SignInHealth } = {}): GuidedPlan {
+  const checked = checkGuidedChoices(given, opts);
   if (!checked.ok) throw new Error(`buildGuidedPlan was given choices checkGuidedChoices refuses: ${checked.error}`);
   const choices = checked.choices;
   const mode = CARE_MODE[choices.care];
@@ -619,12 +636,12 @@ export function withSignInHealth(plan: GuidedPlan, health: SignInHealth | undefi
 export function guidedPlan(
   input: unknown,
   planId?: string,
-  health?: (choices: GuidedChoices) => SignInHealth | undefined,
+  opts: CareLimit & { health?: (choices: GuidedChoices) => SignInHealth | undefined } = {},
 ): { ok: true; plan: GuidedPlan } | { ok: false; error: string } {
-  const checked = checkGuidedChoices(input);
+  const checked = checkGuidedChoices(input, opts);
   if (!checked.ok) return checked;
-  const signInHealth = health?.(checked.choices);
-  return { ok: true, plan: buildGuidedPlan(checked.choices, planId, signInHealth ? { signInHealth } : {}) };
+  const signInHealth = opts.health?.(checked.choices);
+  return { ok: true, plan: buildGuidedPlan(checked.choices, planId, { maxMode: opts.maxMode, ...(signInHealth ? { signInHealth } : {}) }) };
 }
 
 // ---- The plans a server holds, the person's confirmation, and the gate on scout_attach ----
@@ -651,6 +668,7 @@ export const MAX_PLANS = 50;
 export class GuidedPlans {
   private readonly plans = new Map<string, GuidedPlan>();
   private opened = false;
+  private required = false;
 
   /** Keeps a plan, which must be unaccepted, and opens the store. */
   add(plan: GuidedPlan): GuidedPlan {
@@ -668,9 +686,20 @@ export class GuidedPlans {
     return plan ? structuredClone(plan) : undefined;
   }
 
-  /** Whether a guided plan has been built in this server: from then on an attach above observe must name an accepted one. */
+  /** Whether a guided plan has been built in this server, or the config requires one: from then on an attach above observe must name an accepted one. */
   get open(): boolean {
     return this.opened;
+  }
+
+  /** Whether the SceneScout config opened the store as the server started (requireGuidedPlan, engine/project-config.ts). */
+  get requiredByConfig(): boolean {
+    return this.required;
+  }
+
+  /** Opens the store before any plan is built, for a config that sets requireGuidedPlan: the gate holds from the server's start. */
+  require(): void {
+    this.required = true;
+    this.opened = true;
   }
 
   /** Marks a kept plan's confirmation accepted. Called with a verdict that accepted it, and nothing else. */
@@ -849,7 +878,7 @@ function originOf(address: string): string | null {
  * neither is set and the attach reads its option and the environment as before.
  */
 export function guidedAttachVerdict(
-  plans: Pick<GuidedPlans, "open" | "get">,
+  plans: Pick<GuidedPlans, "open" | "get"> & { requiredByConfig?: boolean },
   input: { planId?: string; mode: AnyMode; url: string; readPosts?: readonly string[]; trustedEmbeds?: readonly string[] },
 ): { ok: true; plan?: GuidedPlan; readPosts?: string[]; operatorAuthPosts?: false } | { ok: false; why: string } {
   const verdict = attachVerdict(plans, input);
@@ -857,10 +886,11 @@ export function guidedAttachVerdict(
 }
 
 function attachVerdict(
-  plans: Pick<GuidedPlans, "open" | "get">,
+  plans: Pick<GuidedPlans, "open" | "get"> & { requiredByConfig?: boolean },
   input: { planId?: string; mode: AnyMode; url: string; readPosts?: readonly string[]; trustedEmbeds?: readonly string[] },
 ): { ok: true; plan?: GuidedPlan } | { ok: false; why: string } {
   const above = input.mode !== "observe";
+  const isOpen = plans.requiredByConfig ? "the SceneScout config requires a guided plan (requireGuidedPlan)" : "a guided plan is open in this server";
   // Developer settings no guided check takes (design 6.1): readPosts lets named POSTs out of observe, and
   // trustedEmbeds lets frames' writes out of safe-write, so either would loosen a care level the person chose.
   if (plans.open) {
@@ -868,14 +898,14 @@ function attachVerdict(
     if (named.length > 0)
       return {
         ok: false,
-        why: `a guided plan is open in this server, and ${named.join(" and ")} ${named.length > 1 ? "are developer settings" : "is a developer setting"} no guided check takes: attach without ${named.length > 1 ? "them" : "it"}. A developer who needs ${named.length > 1 ? "them" : "it"} sets ${named.length > 1 ? "them" : "it"} in a server with no guided plan.`,
+        why: `${isOpen}, and ${named.join(" and ")} ${named.length > 1 ? "are developer settings" : "is a developer setting"} no guided check takes: attach without ${named.length > 1 ? "them" : "it"}. A developer who needs ${named.length > 1 ? "them" : "it"} sets ${named.length > 1 ? "them" : "it"} in a server with no guided plan.`,
       };
   }
   if (input.planId === undefined) {
     if (above && plans.open)
       return {
         ok: false,
-        why: `a guided plan is open in this server, so an attach in "${input.mode}" must name it: pass the planId its scout_attach call lists. Without one, only mode "observe" is allowed.`,
+        why: `${isOpen}, so an attach in "${input.mode}" must name ${plans.requiredByConfig ? "an accepted plan: build one with scout_guided_plan, and pass" : "it: pass"} the planId its scout_attach call lists. Without one, only mode "observe" is allowed.`,
       };
     return { ok: true };
   }

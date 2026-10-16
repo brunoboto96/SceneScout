@@ -7,13 +7,14 @@
 | Section | What is in it |
 |---|---|
 | [Commands](#commands) | Every `scenescout` command and its options, and the check's rules |
+| [The config file](#the-config-file) | What a team commits to cap what an agent, or a command, may do |
 | [Environment variables](#environment-variables) | What the server and each command read from the environment |
 | [GitHub Action inputs](#github-action-inputs) | The inputs and outputs of the check, ci and qa actions |
 | [Repository variables and secrets](#repository-variables-and-secrets-for-scenescout-qa) | What the `/scenescout qa` workflows read |
 | [`scout_login`](#scout_login-options) and [`scout_attach`](#scout_attach-options) options | What an agent can pass when it signs in or attaches |
 | [MCP prompts](#mcp-prompts) and [mod settings](#claude-code-mod-settings) | The prompts a client lists, and the optional Claude Code mod's settings |
 
-Every command-line option, environment variable, GitHub Action input, `/scenescout qa` repository setting, `scout_attach` option and MCP prompt, with its default. A test (`guide-test`, and `mcp-check` for `scout_attach`, `scout_login` and the MCP prompts) compares these tables with the code, so an option added or removed in one place and not the other fails the build. `scenescout --help` prints the same options in short.
+Every config key, command-line option, environment variable, GitHub Action input, `/scenescout qa` repository setting, `scout_attach` option and MCP prompt, with its default. A test (`guide-test`, and `mcp-check` for `scout_attach`, `scout_login` and the MCP prompts) compares these tables with the code, so an option added or removed in one place and not the other fails the build. `scenescout --help` prints the same options in short.
 
 An option takes its value after a space or an equals sign: `--fail-on high` or `--fail-on=high`. Relative paths are resolved from the directory the command runs in.
 
@@ -230,10 +231,52 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 
 `refused-empty` is reported at medium instead when the empty state names something that no request on the page was for, since it may be about another section (see how-it-works).
 
+## The config file
+
+A JSON file a team commits to set what SceneScout may do, which no agent can loosen. Over MCP the agent chooses `scout_attach`'s arguments, and an argument wins over the environment; the config file is the one setting that wins over both. With no file, everything behaves as it always has ([Safety model](Safety-model.md#the-config-file-sets-the-limits-an-agent-cannot-loosen)).
+
+**Where it is read from.** The file `SCENESCOUT_CONFIG` names, else `.scenescout/config.json` in the directory the server or command was started in: for the MCP server, the folder the client starts it in (Claude Code starts it in the project you opened), and for `check`, `ci` and a first look (`scenescout <url>`), the directory they run in. The server reads it once, as it starts, so a change takes a restart. The project's own `.scenescout/config.json` (the attach's `projectPath`, or `--project`) is read too, and may only tighten what the first file allows: the agent chooses that folder, so a file there cannot be the lock on its own. `.scenescout/`'s own `.gitignore` leaves `config.json` out of what it ignores, so it is committed like saved flows.
+
+**What wins.** The file, then the environment, then an argument, where each may only tighten what came before:
+
+- An argument that asks for more than the file allows is refused, and the refusal names the file and the key. An attach is refused before any browser starts; `check`, `ci` and a first look exit 2.
+- A value from the environment, or a default, above the file's limit is lowered to it, and the attach or the command says so.
+- A key the file leaves out is as it is without a file.
+
+**A file that is not valid stops the server, or the command, as it starts,** naming the file and the key: an unknown key (a misspelt lock would look like a lock and do nothing), a key set twice (a reader would take the first value, and the second would apply), a value outside the ones below, or a list entry that is not one an argument could take. A file that is there but cannot be read, such as a directory or a link to a file that is missing, stops it too rather than counting as no file.
+
+```json
+{ "preset": "strict", "maxMode": "read-only" }
+```
+
+| Key | Values | Unset | What it does |
+|---|---|---|---|
+| `preset` | `strict` | none | Starts from a preset (below). A key set beside it replaces the preset's value for that key |
+| `maxMode` | `observe`, `read-only`, `safe-write`, `destructive` | no limit | The loosest write mode any attach, `check`, `ci` or first look may run in. An attach or `--mode` above it is refused; an attach that names no mode, and a command with no `--mode`, start in it when the default `read-only` is above it. The guided intake form and the chat's guided prompts offer no care level above it, and `scout_guided_plan` refuses one |
+| `requireGuidedPlan` | `true`, `false` | `false` | Holds the guided gate from the server's start: an attach above `observe` needs an accepted guided plan's `planId`, and `readPosts` or `trustedEmbeds` from an attach are refused, as when a plan has been built ([Safety model](Safety-model.md#care-levels-in-a-guided-check)). `ci` drives its own server, which reads the same file, so a `ci` run above `observe` is refused at its attach |
+| `readPosts` | a list of `"POST /path"` or `"POST https://host/path"` entries, at most 20 | no limit | The only POST endpoints an attach may name as reads, and the ones it gets when it names none. `[]` allows none. `SCENESCOUT_READ_POSTS` may narrow it; entries it names outside the list are left out. `check`, `ci` and a first look get the same list |
+| `trustedEmbeds` | a list of `https://host` origins, at most 10 | no limit | The only embedded-frame origins an attach may trust, and the ones it gets when it names none. `[]` allows none |
+| `dedup` | `rule`, `judge` | no limit | The most the dedup setting may be. `rule` keeps the model judge off: `dedup: "judge"` and `--dedup judge` are refused, and `SCENESCOUT_DEDUP=judge` and `ci`'s default are turned down to `rule` |
+| `evidence` | `inline`, `file`, `off` | no limit | The most a finding's picture may do. `file` keeps pictures out of the conversation; `off` takes none. An attach's `evidence` above it is refused, and a default above it is lowered |
+
+The presets:
+
+| Key | `strict` |
+|---|---|
+| `maxMode` | `"observe"` |
+| `requireGuidedPlan` | `true` |
+| `readPosts` | `[]` |
+| `trustedEmbeds` | `[]` |
+| `dedup` | `"rule"` |
+| `evidence` | `"file"` |
+
+`strict` is the one-line answer for a team that wants every agent to look only, with nothing named by an argument and nothing sent to a model but the agent's own conversation. A team that needs form submissions sets `"maxMode": "read-only"` beside it.
+
 ## Environment variables
 
 | Variable | Read by | |
 |---|---|---|
+| `SCENESCOUT_CONFIG` | the server, `check`, `ci`, a first look | The absolute path of the [config file](#the-config-file), read instead of `.scenescout/config.json` in the directory the server or command starts in. A path that is relative or not there stops the server or the command as it starts |
 | `SCENESCOUT_BROWSER` | the server, `check`, `ci`, `login`, `doctor` | The default browser: `chromium` (default), `firefox` or `webkit` |
 | `SCENESCOUT_BROWSER_DOWNLOAD` | the server | Whether an attach downloads the browser build it needs when it is missing: `auto` (default) downloads it once, except in CI, where `CI` or `GITHUB_ACTIONS` is set; `on` downloads in CI too; `off` never downloads and names the command to run instead |
 | `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
@@ -457,7 +500,7 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `projectPath` | the client's workspace folder, else a folder for the site | The project's absolute path; `.scenescout/` lives here. Given, it always wins. Left out, a client that offers a workspace folder gets that; otherwise each tested site gets its own folder under `SCENESCOUT_PROJECTS_DIR`, by default `Documents/SceneScout/<host>/` (`localhost-3000` for `http://localhost:3000`), created on first use and named in the attach's result. That default is refused when it would sit inside a git repository below your home folder; a home folder that is itself a repository does not count |
 | `role` | none | Sign in with the login saved for this role. Not with `storageStatePath` |
 | `storageStatePath` | none | A Playwright storage-state file inside the project, or one `SCENESCOUT_STORAGE_STATE_ALLOW` lists. Not with `role` |
-| `mode` | `read-only` | `observe`, `read-only`, `safe-write` or `destructive` ([Safety model](Safety-model.md)) |
+| `mode` | `read-only`, or the config's `maxMode` when that is stricter | `observe`, `read-only`, `safe-write` or `destructive` ([Safety model](Safety-model.md)). Above the [config file](#the-config-file)'s `maxMode`, the attach is refused |
 | `session` | `default` | The session's name, for several roles or lanes at once |
 | `browser` | `SCENESCOUT_BROWSER`, else `chromium` | `chromium`, `firefox` or `webkit` |
 | `headed` | `false` | Show the browser window |

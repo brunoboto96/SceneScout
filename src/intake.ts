@@ -19,7 +19,17 @@
  */
 import { AREA_LABEL, AREA_WHAT_HAPPENS, CARE_EXPLAIN, CARE_LABEL, DESTRUCTIVE_NOT_OFFERED, THOROUGHNESS_LABEL } from "./engine/guided-words.js";
 // guided.ts imports this module too; what is taken from it here is used only inside functions, so the cycle is safe.
-import { checkGuidedChoices, MAX_ADDRESS, MAX_JOURNEY, type Care, type CheckArea, type GuidedChoices, type Thoroughness } from "./engine/guided.js";
+import {
+  caresWithin,
+  checkGuidedChoices,
+  MAX_ADDRESS,
+  MAX_JOURNEY,
+  type Care,
+  type CheckArea,
+  type GuidedChoices,
+  type Thoroughness,
+} from "./engine/guided.js";
+import type { WriteMode } from "./engine/policy.js";
 
 /** The flags the skill reads. Any one given means the person chose settings themselves. */
 export const SKILL_FLAGS = ["url", "role", "focus", "level", "observe", "read-only", "safe-write", "allow-destructive"] as const;
@@ -241,8 +251,14 @@ export const INTAKE_FORM_MESSAGE =
   "Before SceneScout starts: the site, what to check, and how careful to be. It never asks for a password here: if the site needs one, a browser window opens later for you to sign in as you normally would.";
 
 /** The words under "How careful", one sentence per care level, so the choice is explained where it is made. */
-export function careFieldDescription(): string {
-  return ["How careful should I be?", ...FORM_CHOICES.care.map((c) => `${c.title}: ${CARE_EXPLAIN[c.const]}`), DESTRUCTIVE_NOT_OFFERED].join(" ");
+export function careFieldDescription(maxMode?: WriteMode): string {
+  return ["How careful should I be?", ...careChoices(maxMode).map((c) => `${c.title}: ${CARE_EXPLAIN[c.const]}`), DESTRUCTIVE_NOT_OFFERED].join(" ");
+}
+
+/** The care levels the form offers: those the SceneScout config's maxMode allows (all of them with no config). */
+function careChoices(maxMode?: WriteMode) {
+  const allowed = caresWithin(maxMode);
+  return FORM_CHOICES.care.filter((c) => allowed.includes(c.const));
 }
 
 /**
@@ -252,7 +268,7 @@ export function careFieldDescription(): string {
  * it. The care level starts at Look only and the thoroughness at Normal, the
  * least-harm defaults; how the person signs in has no default, so it is chosen.
  */
-export function intakeFormSchema(knownAddress?: string) {
+export function intakeFormSchema(knownAddress?: string, maxMode?: WriteMode) {
   const address = knownAddress?.trim();
   const areaFields = Object.fromEntries(
     AREA_FIELDS.map((f) => [f.field, { type: "boolean" as const, title: AREA_LABEL[f.area], description: AREA_WHAT_HAPPENS[f.area], default: f.default }]),
@@ -281,7 +297,7 @@ export function intakeFormSchema(knownAddress?: string) {
         description: "Optional: paste tickets to check, with a line of --- between them. Each acceptance criterion is answered.",
       },
       signIn: { type: "string" as const, title: "Sign-in", description: askOf("sign-in"), oneOf: [...FORM_CHOICES.signIn] },
-      care: { type: "string" as const, title: "How careful", description: careFieldDescription(), oneOf: [...FORM_CHOICES.care], default: "look-only" },
+      care: { type: "string" as const, title: "How careful", description: careFieldDescription(maxMode), oneOf: careChoices(maxMode), default: "look-only" },
       thoroughness: {
         type: "string" as const,
         title: "How thorough",
@@ -322,7 +338,7 @@ export type IntakeReply =
  * back as the one sentence that says what to fix, never as a guess. Anything
  * else asks the four plain questions in chat, as before.
  */
-export function intakeFromForm(outcome: FormOutcome): IntakeReply {
+export function intakeFromForm(outcome: FormOutcome, maxMode?: WriteMode): IntakeReply {
   const all = (why: string): IntakeReply => ({ kind: "ask", questions: [...INTAKE_QUESTIONS], known: [], why });
   if (outcome.kind === "unsupported") return all("this client cannot show a form");
   if (outcome.kind === "declined") return all("the person declined the form");
@@ -337,16 +353,19 @@ export function intakeFromForm(outcome: FormOutcome): IntakeReply {
   if (tickets.length > 0) areas.push("tickets");
   const signIn = oneOf(FORM_CHOICES.signIn, c.signIn);
   if (!signIn) return { kind: "fix", error: "choose how you sign in, or No sign-in" };
-  const checked = checkGuidedChoices({
-    address: c.address,
-    areas,
-    ...(journey ? { journey } : {}),
-    ...(tickets.length > 0 ? { tickets } : {}),
-    signIn,
-    // A care level or a thoroughness the form never offered is refused by name in checkGuidedChoices, not replaced by a default.
-    ...(c.care !== undefined ? { care: c.care } : {}),
-    ...(c.thoroughness !== undefined ? { thoroughness: c.thoroughness } : {}),
-  });
+  const checked = checkGuidedChoices(
+    {
+      address: c.address,
+      areas,
+      ...(journey ? { journey } : {}),
+      ...(tickets.length > 0 ? { tickets } : {}),
+      signIn,
+      // A care level or a thoroughness the form never offered is refused by name in checkGuidedChoices, not replaced by a default.
+      ...(c.care !== undefined ? { care: c.care } : {}),
+      ...(c.thoroughness !== undefined ? { thoroughness: c.thoroughness } : {}),
+    },
+    { maxMode },
+  );
   return checked.ok ? { kind: "choices", choices: checked.choices } : { kind: "fix", error: checked.error };
 }
 

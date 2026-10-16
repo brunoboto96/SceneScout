@@ -12,6 +12,8 @@ import { writeDocumentSync } from "./owner-file.js";
 export const MEMORY_DIRNAME = ".scenescout";
 /** The one directory under it that is committed rather than ignored: saved flows (flow.ts). */
 export const SELF_IGNORE_KEEP = "flows";
+/** The one file under it that is committed rather than ignored: the SceneScout config (project-config.ts). */
+export const CONFIG_FILE_NAME = "config.json";
 /** What the directory was called before the tool was renamed. */
 export const LEGACY_MEMORY_DIRNAME = ".scenecraft";
 
@@ -81,8 +83,8 @@ function liveOwnerPid(dir: string, isAlive: (pid: number) => boolean): number | 
  * `git status`. That gets the same result without editing a file we do not
  * own, and it disappears cleanly when someone deletes the directory.
  *
- * The one exception is `flows/`: saved flows are inputs a team commits so
- * CI replays them, not output. A file written before that exception existed
+ * The exceptions are `flows/` and `config.json`: saved flows and the
+ * SceneScout config are inputs a team commits, not output. A file written before that exception existed
  * is still left alone; docs/ci.md says which two lines to add to it.
  *
  * Best-effort and idempotent — a read-only checkout must never break attach,
@@ -99,7 +101,9 @@ export function writeSelfIgnore(dir: string): string | null {
         "*\n" +
         "# Except the flows `scenescout check` replays: they are written to be committed.\n" +
         `!${SELF_IGNORE_KEEP}/\n` +
-        `!${SELF_IGNORE_KEEP}/*.json\n`,
+        `!${SELF_IGNORE_KEEP}/*.json\n` +
+        "# And the config that sets what SceneScout may do here: it is written to be committed.\n" +
+        `!${CONFIG_FILE_NAME}\n`,
     );
     return `Wrote ${MEMORY_DIRNAME}/.gitignore so these test artifacts stay out of your commits.`;
   } catch {

@@ -25,6 +25,7 @@ import {
   MAX_PLANS,
   newConfirmCode,
   CARES,
+  caresWithin,
   CHECK_AREAS,
   checkGuidedChoices,
   CONFIRM_NEEDS_CODE,
@@ -100,11 +101,12 @@ import {
   type GuidedRun,
   type ProgressSession,
 } from "../src/engine/progress.ts";
-import { settingsFromAnswers } from "../src/intake.ts";
+import { careFieldDescription, intakeFormSchema, intakeFromForm, settingsFromAnswers } from "../src/intake.ts";
 import {
   CHECK_MY_SITE_PROMPT,
   FILE_TICKETS_PROMPT,
   GUIDED_PROMPTS,
+  guidedPromptOptions,
   guidedPromptText,
   IS_IT_SAFE_PROMPT,
   offeredCares,
@@ -113,7 +115,7 @@ import {
 } from "../src/prompts.ts";
 import { encodePng } from "../src/engine/png.ts";
 import { readInlinePicture } from "../src/engine/progress.ts";
-import { allowsWrite } from "../src/engine/policy.ts";
+import { allowsWrite, WRITE_MODES } from "../src/engine/policy.ts";
 import { isReadMethod } from "../src/engine/unload.ts";
 import { readyBrowser } from "../src/engine/launch.ts";
 import type { Finding } from "../src/engine/memory.ts";
@@ -841,6 +843,46 @@ test("card: the report's plain entry says exactly what the card says", () => {
   assert.ok(entry.includes(`](${card.picture!.file})`));
 });
 
+test("guided: a care level above the config's maxMode is never offered, and choosing one is refused saying the config set it", () => {
+  assert.deepEqual(caresWithin(undefined), [...CARES], "no config: every care level");
+  assert.deepEqual(caresWithin("destructive"), [...CARES]);
+  assert.deepEqual(caresWithin("safe-write"), [...CARES]);
+  assert.deepEqual(caresWithin("read-only"), ["look-only", "may-submit-forms"]);
+  assert.deepEqual(caresWithin("observe"), ["look-only"]);
+
+  const base = { address: "https://staging.example.com", areas: ["forms"] };
+  const above = checkGuidedChoices({ ...base, care: "may-create-test-data" }, { maxMode: "read-only" });
+  assert.ok(!above.ok && /the SceneScout config/.test(above.error) && /May create test data/i.test(above.error), JSON.stringify(above));
+  assert.ok(checkGuidedChoices({ ...base, care: "may-submit-forms" }, { maxMode: "read-only" }).ok, "at the cap");
+  assert.ok(!checkGuidedChoices({ ...base, care: "may-submit-forms" }, { maxMode: "observe" }).ok);
+  assert.ok(checkGuidedChoices({ ...base, care: "may-create-test-data" }).ok, "the contrast: no config, the same choice is taken");
+  const plan = guidedPlan({ ...base, care: "may-create-test-data" }, undefined, { maxMode: "observe" });
+  assert.equal(plan.ok, false, "no plan is built above the cap");
+  assert.throws(() =>
+    buildGuidedPlan({ ...base, areas: ["forms"], signIn: "none", care: "may-submit-forms", thoroughness: "normal" }, undefined, { maxMode: "observe" }),
+  );
+
+  // The intake form lists only the care levels the cap allows, and its words name only those.
+  const free = intakeFormSchema();
+  assert.deepEqual(
+    free.properties.care.oneOf.map((c) => c.const),
+    [...CARES],
+  );
+  const capped = intakeFormSchema(undefined, "observe");
+  assert.deepEqual(
+    capped.properties.care.oneOf.map((c) => c.const),
+    ["look-only"],
+  );
+  assert.equal(capped.properties.care.default, "look-only");
+  assert.ok(!careFieldDescription("observe").includes(CARE_LABEL["may-submit-forms"]));
+  assert.ok(careFieldDescription().includes(CARE_LABEL["may-submit-forms"]));
+  // A form answered with a care level it did not offer is sent back to fix, never built.
+  const content = { address: base.address, checkForms: true, signIn: "none", care: "may-submit-forms", thoroughness: "normal" };
+  const reply = intakeFromForm({ kind: "accepted", content }, "observe");
+  assert.ok(reply.kind === "fix" && /the SceneScout config/.test(reply.error), JSON.stringify(reply));
+  assert.equal(intakeFromForm({ kind: "accepted", content }).kind, "choices");
+});
+
 // ---- Sign-in health: whether the saved sign-in lasts the check ----
 
 test("sign-in health: each verdict on the saved profile is its state and sentence, and a missing one is none", () => {
@@ -894,10 +936,19 @@ test("sign-in health: only a saved sign-in certain to last the check skips the s
   assert.deepEqual(tools(none), ["scout_attach"]);
   // guidedPlan asks for health only with choices it accepts.
   let asked = 0;
-  assert.ok(!guidedPlan({ address: "ftp://x" }, undefined, () => (asked++, undefined)).ok);
+  assert.ok(!guidedPlan({ address: "ftp://x" }, undefined, { health: () => (asked++, undefined) }).ok);
   assert.equal(asked, 0);
-  const built = guidedPlan({ address: REMOTE, areas: ["forms"], signIn: "password" }, undefined, () => signInHealth({ kind: "ok" }, REMOTE, cmd));
+  const built = guidedPlan({ address: REMOTE, areas: ["forms"], signIn: "password" }, undefined, { health: () => signInHealth({ kind: "ok" }, REMOTE, cmd) });
   assert.ok(built.ok && built.plan.signInHealth?.state === "lasts");
+  // With the config's cap as well: a care level above it is refused before the sign-in is judged, and one within it keeps both.
+  asked = 0;
+  const lasting = () => (asked++, signInHealth({ kind: "ok" }, REMOTE, cmd));
+  const capped = { address: REMOTE, areas: ["forms"], signIn: "password" };
+  assert.ok(!guidedPlan({ ...capped, care: "may-submit-forms" }, undefined, { maxMode: "observe", health: lasting }).ok);
+  assert.equal(asked, 0);
+  const within = guidedPlan({ ...capped, care: "look-only" }, undefined, { maxMode: "observe", health: lasting });
+  assert.ok(within.ok && within.plan.signInHealth?.state === "lasts" && within.plan.mode === "observe", JSON.stringify(within));
+  assert.throws(() => buildGuidedPlan(ok({ ...capped, care: "may-submit-forms" }), undefined, { maxMode: "observe", signInHealth: lasting() }));
 });
 
 test("sign-in health: a plan read back to start is judged again, so a verdict from when it was built never skips the window after the sign-in ran out", () => {
@@ -1681,6 +1732,23 @@ test("prompts: an operator's cap on the care level is said, and no care level ab
   assert.ok(!guidedPromptText(IS_IT_SAFE_PROMPT, undefined).includes("allows no care level"));
   assert.deepEqual(offeredCares("may-submit-forms"), ["look-only", "may-submit-forms"]);
   assert.deepEqual(offeredCares(undefined), [...CARES]);
+});
+
+test("prompts: under the operator's maxMode a guided prompt never offers a care level above it, and says the cap", () => {
+  for (const maxMode of [undefined, ...WRITE_MODES]) {
+    const allowed = caresWithin(maxMode);
+    const opts = guidedPromptOptions(maxMode);
+    const check = guidedPromptText(CHECK_MY_SITE_PROMPT, undefined, opts);
+    for (const care of CARES.filter((c) => !allowed.includes(c)))
+      assert.ok(!check.includes(`"${CARE_LABEL[care]}"`), `maxMode ${maxMode}: Check my site offers "${CARE_LABEL[care]}"`);
+    const capped = allowed.length < CARES.length;
+    const loosest = allowed[allowed.length - 1];
+    assert.equal(check.includes(careCapSentence(loosest)), capped, `maxMode ${maxMode}: the cap is said only when one applies`);
+    assert.equal(guidedPromptText(IS_IT_SAFE_PROMPT, undefined, opts).endsWith(`\n\n${careCapSentence(loosest)}`), capped, `maxMode ${maxMode}: Is it safe?`);
+  }
+  assert.deepEqual(guidedPromptOptions(undefined), {}, "no config: no cap");
+  assert.deepEqual(guidedPromptOptions("observe"), { maxCare: "look-only" });
+  assert.deepEqual(guidedPromptOptions("read-only"), { maxCare: "may-submit-forms" });
 });
 
 test("prompts: every sentence the chat shows a person from them is plain", () => {
