@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { planUploadOptions, resolveDiskUpload } from "../src/engine/uploads.ts";
+import { allowedPathsFrom, UPLOAD_ALLOW_ENV } from "../src/engine/allow-paths.ts";
 import { matchOption, normaliseDateValue, type SelectOption } from "../src/engine/forms.ts";
 
 test("generatedUpload says honestly where the kind came from", () => {
@@ -177,6 +178,157 @@ test("a plan's upload value is a fixture kind, a path, or nothing", () => {
   assert.deepEqual(planUploadOptions("  "), {});
   assert.deepEqual(planUploadOptions("PDF"), { fixture: "pdf" });
   assert.deepEqual(planUploadOptions("fixtures/scan.pdf"), { filePath: "fixtures/scan.pdf" });
+});
+
+// ---------------------------------------------------------------------------
+// Disk uploads: secrets inside the fence. The fence is the attached project,
+// and the agent names the project, so the fence alone does not keep an SSH key
+// or a .env file out of a web form. Credential-shaped paths are refused by
+// name, on the path as given AND on its real path, unless the operator lists
+// the exact file in SCENESCOUT_UPLOAD_ALLOW.
+// ---------------------------------------------------------------------------
+
+/** A project that is a whole home folder: the case where the fence protects nothing. */
+function homeProject(): string {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ft-home-")));
+  const files: Record<string, string> = {
+    ".ssh/id_rsa": "PRIVATE KEY",
+    ".aws/credentials": "[default]",
+    "app/.env": "TOKEN=1",
+    "app/.env.local": "TOKEN=2",
+    "app/fixtures/avatar.png": "png",
+    "app/fixtures/id_card.png": "png",
+    "app/fixtures/env-sample.txt": "sample",
+    "app/certs/server.pem": "pem",
+    "app/certs/server.key": "key",
+    "app/certs/bundle.p12": "p12",
+    "app/certs/bundle.pfx": "pfx",
+    "app/vault.kdbx": "kdbx",
+    "app/.npmrc": "//registry/:_authToken=x",
+    ".netrc": "machine x",
+    ".pgpass": "*:*:*:*:pw",
+    "app/id_ed25519": "PRIVATE KEY",
+    "app/id_rsa_work.pub": "ssh-rsa",
+    ".config/gh/hosts.yml": "oauth_token: x",
+    ".kube/config": "token: x",
+    ".docker/config.json": "{}",
+    ".gnupg/secring.gpg": "gpg",
+    ".scenescout/fixtures/upload.csv": "a,b",
+    ".scenescout/fixtures/.git-credentials": "https://user:token@host",
+    ".scenescout/fixtures/cache/.hidden/token.txt": "token",
+    ".scenescout/auth/admin.json": "{}",
+    "app/id_rsa.bak": "PRIVATE KEY",
+    "app/certs/AuthKey.p8": "key",
+    "app/certs/putty.ppk": "key",
+    "app/certs/release.jks": "key",
+    "app/certs/release.keystore": "key",
+    "app/certs/private.asc": "key",
+  };
+  for (const [rel, body] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
+    fs.writeFileSync(path.join(home, rel), body);
+  }
+  return home;
+}
+
+const refusedAsSecret = (r: ReturnType<typeof resolveDiskUpload>): boolean => "refused" in r && /SCENESCOUT_UPLOAD_ALLOW/.test(r.refused);
+
+test("credential-shaped files inside the project are refused; ordinary files beside them are not", () => {
+  const home = homeProject();
+  const refused = [
+    ".ssh/id_rsa",
+    ".aws/credentials",
+    "app/.env",
+    "app/.env.local",
+    "app/certs/server.pem",
+    "app/certs/server.key",
+    "app/certs/bundle.p12",
+    "app/certs/bundle.pfx",
+    "app/vault.kdbx",
+    "app/.npmrc",
+    ".netrc",
+    ".pgpass",
+    "app/id_ed25519",
+    "app/id_rsa_work.pub",
+    ".config/gh/hosts.yml",
+    ".kube/config",
+    ".docker/config.json",
+    ".gnupg/secring.gpg",
+    ".scenescout/auth/admin.json",
+    "app/id_rsa.bak",
+    "app/certs/AuthKey.p8",
+    "app/certs/putty.ppk",
+    "app/certs/release.jks",
+    "app/certs/release.keystore",
+    "app/certs/private.asc",
+    // Windows opens these as the names without the trailing dot, space or stream suffix.
+    "app/certs/server.pem.",
+    "app/certs/server.pem ",
+    "app/certs/server.key::$DATA",
+    // .scenescout/fixtures/ is allowed as a folder; a dotfile or hidden folder inside it is still hidden.
+    ".scenescout/fixtures/.git-credentials",
+    ".scenescout/fixtures/cache/.hidden/token.txt",
+  ];
+  for (const rel of refused) assert.ok(refusedAsSecret(resolveDiskUpload({ projectDir: home }, rel)), `${rel} must be refused`);
+  // The contrastive half: same folders, names that only look nearby.
+  for (const rel of ["app/fixtures/avatar.png", "app/fixtures/id_card.png", "app/fixtures/env-sample.txt", ".scenescout/fixtures/upload.csv"]) {
+    const r = resolveDiskUpload({ projectDir: home }, rel);
+    assert.ok(!("refused" in r), `${rel} → ${JSON.stringify(r)}`);
+  }
+});
+
+test("a project that IS a secrets folder does not make its files ordinary", () => {
+  const home = homeProject();
+  assert.ok(refusedAsSecret(resolveDiskUpload({ projectDir: path.join(home, ".aws") }, "credentials")), "the folder name counts even when it is the project");
+  assert.ok(refusedAsSecret(resolveDiskUpload({ projectDir: path.join(home, ".ssh") }, "id_rsa")));
+  assert.ok(!("refused" in resolveDiskUpload({ projectDir: path.join(home, "app") }, "fixtures/avatar.png")));
+});
+
+test("a symlink into a secrets folder is refused; a symlink to an ordinary project file is not", () => {
+  const home = homeProject();
+  const link = path.join(home, "app", "fixtures", "photo.png");
+  fs.symlinkSync(path.join(home, ".ssh", "id_rsa"), link);
+  const viaLink = resolveDiskUpload({ projectDir: home }, "app/fixtures/photo.png");
+  assert.ok(refusedAsSecret(viaLink), `the real path decides: ${JSON.stringify(viaLink)}`);
+  const ok = path.join(home, "app", "fixtures", "photo2.png");
+  fs.symlinkSync(path.join(home, "app", "fixtures", "avatar.png"), ok);
+  assert.ok(!("refused" in resolveDiskUpload({ projectDir: home }, "app/fixtures/photo2.png")));
+  // The other direction: a name that looks like a secret is refused even when it links to an ordinary file.
+  fs.symlinkSync(path.join(home, "app", "fixtures", "avatar.png"), path.join(home, "app", "fixtures", ".env.png"));
+  assert.ok(refusedAsSecret(resolveDiskUpload({ projectDir: home }, "app/fixtures/.env.png")));
+});
+
+test("the operator's allow list lets exactly the files it names through, and nothing near them", () => {
+  const home = homeProject();
+  const envFile = path.join(home, "app", ".env");
+  const allowed = resolveDiskUpload({ projectDir: home, allow: [envFile] }, "app/.env");
+  assert.ok(!("refused" in allowed), JSON.stringify(allowed));
+  // A sibling, or the folder above, is not named by it.
+  assert.ok(refusedAsSecret(resolveDiskUpload({ projectDir: home, allow: [envFile] }, "app/.env.local")));
+  assert.ok(refusedAsSecret(resolveDiskUpload({ projectDir: home, allow: [path.join(home, "app")] }, "app/.env")));
+  // The list does not move the project fence.
+  const outside = path.join(path.dirname(home), "elsewhere.txt");
+  fs.writeFileSync(outside, "x");
+  const fenced = resolveDiskUpload({ projectDir: path.join(home, "app"), allow: [outside] }, outside);
+  assert.ok("refused" in fenced && /outside the attached project/.test(fenced.refused));
+});
+
+test("the allow list is absolute paths separated as PATH is, and anything else stops the server rather than being guessed at", () => {
+  const abs = path.resolve("/srv/fixtures/.env.test");
+  assert.deepEqual(allowedPathsFrom({ [UPLOAD_ALLOW_ENV]: ` ${abs}${path.delimiter}${path.delimiter}` }, UPLOAD_ALLOW_ENV), { paths: [abs] });
+  assert.deepEqual(allowedPathsFrom({}, UPLOAD_ALLOW_ENV), { paths: [] });
+  const relative = allowedPathsFrom({ [UPLOAD_ALLOW_ENV]: "fixtures/.env" }, UPLOAD_ALLOW_ENV);
+  assert.ok("error" in relative && /not an absolute path/.test(relative.error));
+  const tilde = allowedPathsFrom({ [UPLOAD_ALLOW_ENV]: "~/.env" }, UPLOAD_ALLOW_ENV);
+  assert.ok("error" in tilde && /~ is not expanded/.test(tilde.error));
+});
+
+test("the refusal says how to name the file deliberately, and never quotes it", () => {
+  const home = homeProject();
+  const r = resolveDiskUpload({ projectDir: home }, ".ssh/id_rsa") as { refused: string };
+  assert.match(r.refused, /SCENESCOUT_UPLOAD_ALLOW/);
+  assert.match(r.refused, /generated/);
+  assert.doesNotMatch(r.refused, /PRIVATE KEY/);
 });
 
 const severity: SelectOption[] = [

@@ -158,6 +158,19 @@ export async function run({ baseUrl, foreignBaseUrl }: SmokeContext): Promise<vo
       .catch((e: Error) => e.message);
     check("a missing storage-state file is refused", missingFile.includes("does not exist"), missingFile);
     check("...and leaves that session attached and signed in", laneB.attached && (await pageText(laneB)).includes(SIGNED_IN));
+    // A storage state outside the project is refused before it is read, and one inside that is not a storage state is refused without quoting it.
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-state-outside-"));
+    try {
+      fs.writeFileSync(path.join(outsideDir, "state.json"), JSON.stringify({ cookies: [], origins: [] }));
+      const outside = await refusal({ storageStatePath: path.join(outsideDir, "state.json") });
+      check("a storage state outside the project is refused", outside.includes("outside the attached project"), outside);
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+    fs.writeFileSync(path.join(project, "not-a-state.json"), "root:x:0:0:root:/root:/bin/bash\n");
+    const garbled = await refusal({ storageStatePath: path.join(project, "not-a-state.json") });
+    check("a file that is not a storage state is refused", garbled.includes("not a valid Playwright storage state"), garbled);
+    check("...without quoting the file", !garbled.includes("root:x"), garbled);
 
     check(`the fixture's cookie is the one saved (${SIGN_IN_COOKIE})`, profileBefore.includes(SIGN_IN_COOKIE));
 
