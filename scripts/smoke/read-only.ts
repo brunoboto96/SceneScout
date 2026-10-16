@@ -10,6 +10,7 @@ import { computeGaps, generateReport } from "../../dist/engine/report.js";
 import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
 import type { StyleRecord } from "../../dist/engine/design.js";
 import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
+import { DEFAULT_ACTION_TIMEOUT_MS } from "../../dist/engine/limits.js";
 import { BROWSER, check, eventually, settle, WAIT_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "read-only exploration";
@@ -410,8 +411,6 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     check("the same region scrolls back to its top", /at its top/.test(sideBack), sideBack);
     const noScroll = await engine.scroll("bottom", undefined, "testid=nav-home-link");
     check("a target with no scrollable ancestor says so rather than lying", noScroll.includes("no scrollable ancestor"), noScroll);
-    const missing = await engine.scroll("bottom", undefined, "testid=does-not-exist");
-    check("a missing scroll target is refused, not silently ignored", missing.includes("Scroll target not found"), missing);
 
     check(
       "out-of-flow escapes (fixed / absolute past a static wrapper) are NOT flagged UNREACHABLE",
@@ -865,37 +864,6 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     // happen; saying it "may have mutated" invites a false finding.
     check("a blocked write is not ALSO reported as a possible mutation", !roBlocked.includes("may have mutated"), roBlocked);
 
-    console.log("resilient click: forces past a real hit-test interception, not past a disabled control");
-    // "Fake switch" is a <span> thumb painted over a visually-hidden <input>,
-    // both under a <label for=...> — a real click on the thumb natively
-    // forwards to the input, but Playwright's own actionability check sees
-    // the span intercepting the input's hit-test point and times out. This
-    // is the exact false-"unclickable" bug the resilientClick fallback
-    // exists to fix — regression test for that fix.
-    const switchRef = roRefOf("Fake switch");
-    const switchClick = await engine.click(switchRef);
-    check("forced click on the intercepted switch still reports success", switchClick.startsWith("OK: click"), switchClick);
-    check("forced-click note explains the fallback was used", switchClick.includes("forced click was used instead"), switchClick);
-    check("...and names nothing as covering it: the thumb on top belongs to the switch's own label", !switchClick.includes("covered by"), switchClick);
-    // White-box: reach into the private `page` field rather than growing the
-    // public API just to verify this regression.
-    const switchChecked = await (engine as unknown as { page: import("playwright").Page }).page.locator("#fake-switch").isChecked();
-    check("the forced click actually toggled the input (native label-forwarding)", switchChecked === true);
-
-    // "Locked action" is a genuinely disabled <button> — force MUST NOT
-    // paper over a real actionability failure, or a truly dead control
-    // would be reported as successfully clicked.
-    await engine.navigate("/");
-    const roSnap2 = await engine.snapshot(true);
-    const lockedRef = roSnap2.match(/(e\d+) button "Locked action"/)?.[1];
-    if (!lockedRef) throw new Error(`ref not found for Locked action in:\n${roSnap2}`);
-    const lockedResult = await engine.click(lockedRef).then(
-      (r) => ({ threw: false, message: r }),
-      (err: unknown) => ({ threw: true, message: err instanceof Error ? err.message : String(err) }),
-    );
-    check("click on a disabled control still fails (not forced through)", lockedResult.threw, lockedResult.message);
-    check("failure names the real reason, not a generic timeout", /is not enabled/i.test(lockedResult.message), lockedResult.message);
-
     console.log("coverage: a dropdown's options are read before the choice");
     await engine.navigate("/dropdowns.html");
     const ddSnap = await engine.snapshot(true);
@@ -1167,9 +1135,68 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
   } finally {
     await engine.close().catch(() => {});
   }
+  await failuresAtTheActionLimit({ baseUrl, projectDir, stats } as SmokeContext);
   await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
   await readPosts({ baseUrl, projectDir, stats } as SmokeContext);
   await methodOverrides({ baseUrl, projectDir, stats } as SmokeContext);
+}
+
+/**
+ * The checks that wait out the action limit before they can say anything: a
+ * click past a hit-test interception (the strict click times out, then a
+ * forced one lands), a click on a disabled control (it must fail, not be
+ * forced through) and a scroll of a target the page does not have. They run
+ * on a session at the engine's default limit rather than the smoke runner's
+ * raised one, so each waits 5 s rather than 15 s.
+ */
+async function failuresAtTheActionLimit({ baseUrl, projectDir }: SmokeContext): Promise<void> {
+  const engine = new BrowserEngine();
+  try {
+    await engine.attach({ url: baseUrl, projectDir, mode: "read-only", actionTimeoutMs: DEFAULT_ACTION_TIMEOUT_MS });
+    const roSnap = await engine.snapshot(true);
+    const roRefOf = (label: string): string => {
+      const m = roSnap.match(new RegExp(`(e\\d+) [a-z]+ "${label}"`));
+      if (!m) throw new Error(`ref not found for ${label}`);
+      return m[1];
+    };
+
+    console.log("resilient click: forces past a real hit-test interception, not past a disabled control");
+    // "Fake switch" is a <span> thumb painted over a visually-hidden <input>,
+    // both under a <label for=...> — a real click on the thumb natively
+    // forwards to the input, but Playwright's own actionability check sees
+    // the span intercepting the input's hit-test point and times out. This
+    // is the exact false-"unclickable" bug the resilientClick fallback
+    // exists to fix — regression test for that fix.
+    const switchRef = roRefOf("Fake switch");
+    const switchClick = await engine.click(switchRef);
+    check("forced click on the intercepted switch still reports success", switchClick.startsWith("OK: click"), switchClick);
+    check("forced-click note explains the fallback was used", switchClick.includes("forced click was used instead"), switchClick);
+    check("...and names nothing as covering it: the thumb on top belongs to the switch's own label", !switchClick.includes("covered by"), switchClick);
+    // White-box: reach into the private `page` field rather than growing the
+    // public API just to verify this regression.
+    const switchChecked = await (engine as unknown as { page: import("playwright").Page }).page.locator("#fake-switch").isChecked();
+    check("the forced click actually toggled the input (native label-forwarding)", switchChecked === true);
+
+    // "Locked action" is a genuinely disabled <button> — force MUST NOT
+    // paper over a real actionability failure, or a truly dead control
+    // would be reported as successfully clicked.
+    await engine.navigate("/");
+    const roSnap2 = await engine.snapshot(true);
+    const lockedRef = roSnap2.match(/(e\d+) button "Locked action"/)?.[1];
+    if (!lockedRef) throw new Error(`ref not found for Locked action in:\n${roSnap2}`);
+    const lockedResult = await engine.click(lockedRef).then(
+      (r) => ({ threw: false, message: r }),
+      (err: unknown) => ({ threw: true, message: err instanceof Error ? err.message : String(err) }),
+    );
+    check("click on a disabled control still fails (not forced through)", lockedResult.threw, lockedResult.message);
+    check("failure names the real reason, not a generic timeout", /is not enabled/i.test(lockedResult.message), lockedResult.message);
+
+    console.log("scroll: a target the page does not have");
+    const missing = await engine.scroll("bottom", undefined, "testid=does-not-exist");
+    check("a missing scroll target is refused, not silently ignored", missing.includes("Scroll target not found"), missing);
+  } finally {
+    await engine.close().catch(() => {});
+  }
 }
 
 /**

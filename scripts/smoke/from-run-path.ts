@@ -31,6 +31,9 @@ async function session<T>(name: string, baseUrl: string, start: string, body: (e
   }
 }
 
+/** What a plan may take past the one wait on its missing target: the steps before it, settling and the failure's own bookkeeping, with room for a loaded runner (the old wait was over 60 s). */
+const PLAN_SLACK_MS = 5000;
+
 const ref = (snap: string, pattern: RegExp): string => pattern.exec(snap)?.[1] ?? "e0";
 
 export async function run({ baseUrl }: SmokeContext): Promise<void> {
@@ -89,13 +92,22 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     "/path-gated-start.html",
     async (engine) => {
       const changed = steps.map((s) => (s.action === "click" ? { ...s, target: 'role=button[name="Open file"]' } : s));
-      const outcome = prefixOutcome(await engine.runPlan(changed), changed.length, "/path-gated-detail.html");
+      const started = Date.now();
+      const transcript = await engine.runPlan(changed);
+      const tookMs = Date.now() - started;
+      const outcome = prefixOutcome(transcript, changed.length, "/path-gated-detail.html");
       // At the lower limit, a step before the click that ran out would also fail the path: the reason must be the click.
       const at = changed.findIndex((s) => s.action === "click") + 1;
       check(
         "a path the page changed under is reported as not repeated, at the click on the button it no longer has",
         !outcome.ok && new RegExp(`^${at} of ${changed.length} step\\(s\\) ran: ${at}\\. click role=button\\[name="Open file"\\] → FAILED`).test(outcome.why),
         JSON.stringify(outcome),
+      );
+      // The missing button is waited for once, at the action limit: no read of it may wait on Playwright's own 30 s.
+      check(
+        `...and the plan gives up on the missing button within the action limit (${DEFAULT_ACTION_TIMEOUT_MS / 1000}s) plus ${PLAN_SLACK_MS / 1000}s`,
+        tookMs <= DEFAULT_ACTION_TIMEOUT_MS + PLAN_SLACK_MS,
+        `took ${(tookMs / 1000).toFixed(1)}s`,
       );
     },
     DEFAULT_ACTION_TIMEOUT_MS,
