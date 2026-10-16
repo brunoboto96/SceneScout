@@ -569,6 +569,13 @@ function notes({ result, options }: FirstRunFacts, code: (s: string) => string):
       ),
     );
   }
+  // A page the protection answered is not the app's: not looked at, and not an issue (checkFindings).
+  const blocked = result.blocked?.length ?? 0;
+  if (blocked > 0) {
+    out.push(
+      `${plural(blocked, "page")} ${blocked === 1 ? "was" : "were"} answered by bot protection in the app's place, so ${blocked === 1 ? "it was" : "they were"} not looked at. Let the browser through the protection to cover ${blocked === 1 ? "it" : "them"}.`,
+    );
+  }
   const left = result.unvisited.length;
   switch (stopReason(result, options.maxRoutes)) {
     case "time":

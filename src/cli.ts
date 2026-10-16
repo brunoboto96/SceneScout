@@ -70,6 +70,7 @@ import {
   summarise,
   toSarif,
   toSummaryJson,
+  startPageRefusal,
   unmeasuredReason,
   type CheckResult,
 } from "./engine/check.js";
@@ -658,6 +659,12 @@ async function check(args: string[]): Promise<never> {
     console.error(`scenescout check: could not run: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(EXIT.error);
   }
+  // Before unmeasuredReason: a challenge page with few controls would otherwise read as an app that had not finished drawing.
+  const notTheApp = startPageRefusal(result.routes, !options.paths);
+  if (notTheApp) {
+    console.error(`scenescout check: could not run: ${notTheApp}`);
+    process.exit(EXIT.error);
+  }
   const unmeasured = unmeasuredReason(result.routes, !options.paths, result.unvisited);
   if (unmeasured) {
     console.error(`scenescout check: could not measure ${options.url}: ${unmeasured}`);
@@ -778,6 +785,8 @@ async function firstRun(args: string[]): Promise<never> {
   if (!result) return fail(`could not run: ${error}`);
   const unreachable = unreachableReason(result.routes);
   if (unreachable) return fail(`could not reach ${options.url}: ${unreachable}`);
+  const notTheApp = startPageRefusal(result.routes, true);
+  if (notTheApp) return fail(`could not run: ${notTheApp}`);
   const facts: FirstRunFacts = { result, options, elapsedMs: Date.now() - began };
   const files = {
     "report.md": formatFirstRun(facts),
