@@ -37,6 +37,8 @@ import {
   isPlanId,
   MAX_OBJECTIVE,
   newPlanId,
+  signInHealth,
+  withSignInHealth,
   THOROUGHNESSES,
   type GuidedChoices,
   type GuidedPlan,
@@ -65,8 +67,14 @@ import {
   AREA_NOT_REACHED,
   PHASE_NOW,
   SAFETY_EXPLAINER,
+  SIGN_IN_AGAIN,
+  SIGN_IN_HEALTH,
   STUCK_SENTENCE,
   THOROUGHNESS_LABEL,
+  ACTION_LABEL,
+  ERROR_HEADING,
+  ERROR_KINDS,
+  SCREEN_HEADING,
 } from "../src/engine/guided-words.ts";
 import {
   areaStates,
@@ -85,6 +93,11 @@ import {
   pushStory,
   selectCards,
   STORY_MAX,
+  stoppedByCap,
+  troubleOf,
+  troubleOfResult,
+  troubleTell,
+  type Trouble,
   type GuidedRun,
   type ProgressSession,
 } from "../src/engine/progress.ts";
@@ -104,6 +117,7 @@ import { encodePng } from "../src/engine/png.ts";
 import { readInlinePicture } from "../src/engine/progress.ts";
 import { allowsWrite, WRITE_MODES } from "../src/engine/policy.ts";
 import { isReadMethod } from "../src/engine/unload.ts";
+import { readyBrowser } from "../src/engine/launch.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import { IMPACT, PLAIN_WORDING, plainCard, plainFinding, plainSteps } from "../src/engine/plain.ts";
 
@@ -869,6 +883,95 @@ test("guided: a care level above the config's maxMode is never offered, and choo
   assert.equal(intakeFromForm({ kind: "accepted", content }).kind, "choices");
 });
 
+// ---- Sign-in health: whether the saved sign-in lasts the check ----
+
+test("sign-in health: each verdict on the saved profile is its state and sentence, and a missing one is none", () => {
+  const cmd = "scenescout login https://staging.example.com --role user";
+  const cases: Array<[Parameters<typeof signInHealth>[0], string]> = [
+    [{ kind: "ok" }, "lasts"],
+    [{ kind: "warn", message: "x" }, "may-run-out"],
+    [{ kind: "refuse", message: "x" }, "runs-out"],
+    [{ kind: "unknown", message: "x" }, "unknown"],
+    [null, "none"],
+    ["unreadable", "unknown"],
+  ];
+  for (const [verdict, state] of cases) {
+    const h = signInHealth(verdict, REMOTE, cmd);
+    assert.equal(h.state, state);
+    assert.equal(h.sentence, SIGN_IN_HEALTH[h.state]("staging.example.com"));
+    assert.deepEqual(h.signInAgain, { label: "Sign in again", prompt: SIGN_IN_AGAIN.prompt(REMOTE, "user"), command: cmd });
+  }
+  // "ok" with a credential that has no date is not certain to last.
+  assert.equal(signInHealth({ kind: "ok" }, REMOTE, cmd, false).state, "unknown");
+  for (const f of Object.values(SIGN_IN_HEALTH)) {
+    const said = f("staging.example.com");
+    assert.equal(said.match(/[.?!](\s|$)/g)?.length, 1, `one sentence: ${said}`);
+    assert.doesNotMatch(said, /scout_|cookie|token|JWT|expir/i, `plain: ${said}`);
+  }
+});
+
+test("sign-in health: only a saved sign-in certain to last the check skips the sign-in window, and the person is told either way", () => {
+  const cmd = "scenescout login https://staging.example.com --role user";
+  const choices = ok({ address: REMOTE, areas: ["forms"], signIn: "password" });
+  const tools = (p: GuidedPlan) => p.calls.map((c) => c.tool);
+  const lasts = buildGuidedPlan(choices, "gp-0123456789", { signInHealth: signInHealth({ kind: "ok" }, REMOTE, cmd) });
+  assert.deepEqual(tools(lasts), ["scout_attach"], "lasts: attach with the saved sign-in");
+  assert.equal(lasts.calls[0].args.role, "user", "and still as the role");
+  assert.ok(lasts.tellPerson.includes(SIGN_IN_HEALTH.lasts("staging.example.com")));
+  assert.ok(!lasts.tellPerson.some((t) => t.startsWith("A browser window will open")), "no window is promised");
+  assert.equal(lasts.signInHealth?.state, "lasts");
+  for (const verdict of [{ kind: "refuse", message: "x" }, { kind: "warn", message: "x" }, { kind: "unknown", message: "x" }, null] as const) {
+    const p = buildGuidedPlan(choices, "gp-0123456789", { signInHealth: signInHealth(verdict, REMOTE, cmd) });
+    assert.deepEqual(tools(p), ["scout_login", "scout_attach"], `${verdict?.kind ?? "none"}: the window opens first`);
+    const said = p.tellPerson.join("\n");
+    assert.ok(said.includes(p.signInHealth!.sentence) && /A browser window will open/.test(said));
+    assert.ok(p.tellPerson.indexOf(p.signInHealth!.sentence) < p.tellPerson.findIndex((t) => t.startsWith("A browser window")), "why, then what happens");
+  }
+  // No health known (a client with no folder to read): as before, the window opens.
+  assert.deepEqual(tools(buildGuidedPlan(choices, "gp-0123456789")), ["scout_login", "scout_attach"]);
+  assert.equal(buildGuidedPlan(choices, "gp-0123456789").signInHealth, undefined);
+  // A check with no sign-in carries no health, whatever is passed.
+  const none = buildGuidedPlan(ok({ address: REMOTE, areas: ["forms"] }), "gp-0123456789", { signInHealth: signInHealth({ kind: "ok" }, REMOTE, cmd) });
+  assert.equal(none.signInHealth, undefined);
+  assert.deepEqual(tools(none), ["scout_attach"]);
+  // guidedPlan asks for health only with choices it accepts.
+  let asked = 0;
+  assert.ok(!guidedPlan({ address: "ftp://x" }, undefined, { health: () => (asked++, undefined) }).ok);
+  assert.equal(asked, 0);
+  const built = guidedPlan({ address: REMOTE, areas: ["forms"], signIn: "password" }, undefined, { health: () => signInHealth({ kind: "ok" }, REMOTE, cmd) });
+  assert.ok(built.ok && built.plan.signInHealth?.state === "lasts");
+  // With the config's cap as well: a care level above it is refused before the sign-in is judged, and one within it keeps both.
+  asked = 0;
+  const lasting = () => (asked++, signInHealth({ kind: "ok" }, REMOTE, cmd));
+  const capped = { address: REMOTE, areas: ["forms"], signIn: "password" };
+  assert.ok(!guidedPlan({ ...capped, care: "may-submit-forms" }, undefined, { maxMode: "observe", health: lasting }).ok);
+  assert.equal(asked, 0);
+  const within = guidedPlan({ ...capped, care: "look-only" }, undefined, { maxMode: "observe", health: lasting });
+  assert.ok(within.ok && within.plan.signInHealth?.state === "lasts" && within.plan.mode === "observe", JSON.stringify(within));
+  assert.throws(() => buildGuidedPlan(ok({ ...capped, care: "may-submit-forms" }), undefined, { maxMode: "observe", signInHealth: lasting() }));
+});
+
+test("sign-in health: a plan read back to start is judged again, so a verdict from when it was built never skips the window after the sign-in ran out", () => {
+  const cmd = "scenescout login https://staging.example.com --role user";
+  const tools = (p: GuidedPlan) => p.calls.map((c) => c.tool);
+  const built = buildGuidedPlan(ok({ address: REMOTE, areas: ["forms"], signIn: "password", care: "may-submit-forms" }), "gp-0123456789", {
+    signInHealth: signInHealth({ kind: "ok" }, REMOTE, cmd),
+  });
+  assert.deepEqual(tools(built), ["scout_attach"]);
+  const accepted = { ...built, confirm: built.confirm ? { ...built.confirm, accepted: true } : null };
+  // By the time the person confirmed, the saved sign-in no longer lasts: the window opens first, and the plan stays the one confirmed.
+  const later = withSignInHealth(accepted, signInHealth({ kind: "refuse", message: "x" }, REMOTE, cmd));
+  assert.deepEqual(tools(later), ["scout_login", "scout_attach"]);
+  assert.equal(later.planId, built.planId);
+  assert.deepEqual(later.confirm, accepted.confirm, "the person's yes is kept");
+  assert.equal(later.signInHealth?.state, "runs-out");
+  assert.ok(later.tellPerson.includes(SIGN_IN_HEALTH["runs-out"]("staging.example.com")));
+  // Still lasting: the same plan.
+  assert.deepEqual(withSignInHealth(accepted, signInHealth({ kind: "ok" }, REMOTE, cmd)), accepted);
+  // Nothing known now (no folder to read): the window opens, as with no health at all.
+  assert.deepEqual(tools(withSignInHealth(accepted, undefined)), ["scout_login", "scout_attach"]);
+});
+
 // ---- Progress while a guided check runs (progress.ts) ----
 
 const AT = Date.parse("2026-01-01T10:00:00.000Z");
@@ -1128,6 +1231,218 @@ test("progress: before the start it asks for the confirmation, and once ended th
     stuck.next.map((a) => a.label),
     ["Stop"],
   );
+});
+
+// ---- The plain error screens (progress.ts): which failure becomes which screen, with one sentence and one button ----
+
+/** The messages readyBrowser throws, made by readyBrowser itself, so a change to its wording fails here. */
+async function downloadFailure(opts: { ok: boolean; env?: NodeJS.ProcessEnv; presentAfter?: boolean }): Promise<string> {
+  let calls = 0;
+  const present = async () => {
+    calls += 1;
+    const installed = calls > 1 && opts.presentAfter === true;
+    return {
+      chromium: { installed, path: null },
+      "chromium-headless-shell": { installed, path: null },
+      firefox: { installed, path: null },
+      webkit: { installed, path: null },
+    } as never;
+  };
+  try {
+    await readyBrowser(
+      { engine: "chromium", headed: false },
+      { env: opts.env ?? { SCENESCOUT_BROWSER_DOWNLOAD: "on" }, present, download: async () => ({ ok: opts.ok, detail: "exit code 1" }), say: () => {} },
+    );
+  } catch (err) {
+    return (err as Error).message;
+  }
+  throw new Error("readyBrowser did not throw");
+}
+
+test("error screens: each failure the engine words is read as its screen, and nothing else is", async () => {
+  const cases: Array<[string, string, string | null]> = [
+    [
+      "an attach whose first page did not load",
+      "Could not load https://staging.example.com — is the app running? (page.goto: net::ERR_CONNECTION_REFUSED at https://staging.example.com/)",
+      "address-unreachable",
+    ],
+    [
+      "the same, as the tool result says it",
+      "ERROR: Could not load http://localhost:3000 — is the app running? (page.goto: Timeout 20000ms exceeded.)",
+      "address-unreachable",
+    ],
+    ["a later page on a host that no longer resolves (Chromium)", "page.goto: net::ERR_NAME_NOT_RESOLVED at https://nowhere.example/", "address-unreachable"],
+    ["a refused connection (Firefox)", "page.goto: NS_ERROR_CONNECTION_REFUSED", "address-unreachable"],
+    ["an unknown host (WebKit)", "page.goto: A server with the specified hostname could not be found.", "address-unreachable"],
+    ["a refused connection (WebKit on macOS)", "page.goto: Could not connect to the server.", "address-unreachable"],
+    // WebKit on Linux, where CI runs it, words the network's failures in its own network library's words.
+    ["a refused connection (WebKit on Linux)", "page.goto: Could not connect: Connection refused", "address-unreachable"],
+    ["an unknown host (WebKit on Linux)", "page.goto: Error resolving \u201cnowhere.example\u201d: Name or service not known", "address-unreachable"],
+    ["a page that did not finish loading in time is not an address that does not open", "page.goto: Timeout 20000ms exceeded.", null],
+    ["the browser download failed", await downloadFailure({ ok: false }), "browser-download-failed"],
+    ["the download said it worked but the build is missing", await downloadFailure({ ok: true }), "browser-download-failed"],
+    // Near misses: the same words in another place, or a failure the person cannot fix with Try again.
+    ["a download the setting forbids is not a failed download", await downloadFailure({ ok: false, env: { SCENESCOUT_BROWSER_DOWNLOAD: "off" } }), null],
+    ["the words quoted later in another failure", 'Element e12 not found; the page says "Could not load https://x.example — is the app running?"', null],
+    ["a navigation the page itself aborted", "page.goto: net::ERR_ABORTED at https://staging.example.com/download", null],
+    ["a refused attach", "ERROR: scout_attach refused: this plan has not been confirmed by the person", null],
+    ["a sign-in window closed before saving", 'ERROR: nothing was saved for role "user": the window was closed', null],
+  ];
+  for (const [name, message, want] of cases) assert.equal(troubleOf(message), want, `${name}: ${message}`);
+});
+
+test("error screens: a result is read only when it failed, and a lost sign-in comes from the engine's flag, never the text", () => {
+  const said = (text: string, isError?: boolean) => ({ content: [{ type: "text", text }], ...(isError === undefined ? {} : { isError }) });
+  const unreachable = "ERROR: Could not load https://staging.example.com — is the app running? (page.goto: net::ERR_CONNECTION_REFUSED)";
+  assert.equal(troubleOfResult(said(unreachable, true), false), "address-unreachable");
+  assert.equal(troubleOfResult(said(unreachable), false), null, "the same words in a result that did not fail, such as a page's text in a snapshot");
+  assert.equal(troubleOfResult(said("Navigated to /orders", true), false), null, "a failure with no screen of its own");
+  assert.equal(
+    troubleOfResult(said("⚠ SESSION AUTH LOST — 3 consecutive navigations were redirected to a login page."), false),
+    null,
+    "the banner's words alone are not the flag: a page can show them",
+  );
+  // The engine's own flag says the sign-in is gone, whatever the result says.
+  assert.equal(troubleOfResult(said("Navigated to /login", false), true), "sign-in-expired");
+  assert.equal(troubleOfResult(said(unreachable, true), true), "sign-in-expired");
+});
+
+test("error screens: a plan keeps the latest call's trouble, says it once, and a call that goes well or a new start clears it", () => {
+  const runs = new GuidedRuns();
+  const plan = "gp-0123456789";
+  assert.equal(runs.trouble(plan), undefined);
+  assert.equal(runs.settle(plan, "main", "address-unreachable"), true, "new: the person is told");
+  assert.equal(runs.settle(plan, "main", "address-unreachable"), false, "the same again: not told twice");
+  assert.equal(runs.trouble(plan), "address-unreachable");
+  assert.equal(runs.settle(plan, "main", "sign-in-expired"), true, "another trouble is told");
+  assert.equal(runs.settle(plan, "main", null), false);
+  assert.equal(runs.trouble(plan), undefined, "a call that went well clears it");
+  runs.settle(plan, "main", "browser-download-failed");
+  runs.start(plan, AT, false, "main");
+  assert.equal(runs.trouble(plan), undefined, "the session attaching with the plan again clears it");
+});
+
+test("error screens: one session's trouble is not cleared by another session of the same check going well", () => {
+  // A check with the phone area runs a second browser beside the first. The
+  // first one's sign-in running out is not answered by the second one's
+  // snapshot working: the screen stays, and the person is not told it again.
+  const runs = new GuidedRuns();
+  const plan = "gp-0123456789";
+  runs.start(plan, AT, false, "main");
+  assert.equal(runs.settle(plan, "main", "sign-in-expired"), true);
+  runs.start(plan, AT + 1000, true, "phone");
+  assert.equal(runs.trouble(plan), "sign-in-expired", "the second browser attaching does not clear the first's trouble");
+  assert.equal(runs.settle(plan, "phone", null), false);
+  assert.equal(runs.trouble(plan), "sign-in-expired", "the second browser's call went well; the first's sign-in is still gone");
+  assert.equal(runs.settle(plan, "main", "sign-in-expired"), false, "the first browser's next call is not told again");
+  assert.equal(runs.settle(plan, "phone", "sign-in-expired"), false, "nor is the same trouble in the second browser");
+  runs.leave("main");
+  assert.equal(runs.trouble(plan), "sign-in-expired", "the second browser still has it");
+  runs.leave("phone");
+  assert.equal(runs.trouble(plan), undefined, "a closed session's trouble goes with it");
+});
+
+test("error screens: a new check of the plan starts with no screen, whichever session had the trouble", () => {
+  const runs = new GuidedRuns();
+  const plan = "gp-0123456789";
+  // An attach that failed leaves its trouble under a session that never went live.
+  runs.settle(plan, "default", "address-unreachable");
+  runs.start(plan, AT, false, "main");
+  assert.equal(runs.trouble(plan), undefined, "a new check, in another session, is not shown the old screen");
+  runs.settle(plan, "main", "sign-in-expired");
+  runs.start(plan, AT + 1000, true, "phone");
+  assert.equal(runs.trouble(plan), "sign-in-expired", "the same check going on in a second browser keeps it");
+});
+
+test("error screens: each trouble is one sentence and one button, and the same check without it shows no screen", () => {
+  const plan = planFor({ address: "https://staging.example.com", signIn: "password" });
+  const base = { nowMs: AT + 60_000, plan, run: runOf(), sessions: [sess()], coverage: null, findings: [] };
+  const clean = guidedProgress(base);
+  assert.equal(clean.phase, "exploring");
+  assert.equal(clean.needsYou, undefined);
+  const want: Record<Trouble, { label: string; text: string }> = {
+    "address-unreachable": { label: ACTION_LABEL.tryAgain, text: ACTION_PROMPT.retry(plan.planId) },
+    "browser-download-failed": { label: ACTION_LABEL.tryAgain, text: ACTION_PROMPT.retry(plan.planId) },
+    "sign-in-expired": { label: ACTION_LABEL.signInAgain, text: ACTION_PROMPT.signInAgain(plan.planId, "https://staging.example.com", "user") },
+  };
+  for (const trouble of Object.keys(want) as Trouble[]) {
+    for (const run of [runOf(), undefined]) {
+      const p = guidedProgress({ ...base, run, sessions: run ? base.sessions : [], trouble });
+      assert.equal(p.phase, "needs-you", trouble);
+      assert.equal(p.needsYou?.kind, trouble);
+      assert.equal(p.needsYou?.sentence, NEEDS_YOU_SENTENCE[trouble]("staging.example.com"));
+      assert.equal(p.now, p.needsYou?.sentence);
+      assert.deepEqual(p.next, [{ kind: "prompt", ...want[trouble] }], `${trouble}: one button`);
+    }
+  }
+  // The sign-in prompt names the window to open and the plan to carry on with.
+  assert.match(
+    ACTION_PROMPT.signInAgain("gp-0123456789", "https://staging.example.com", "user"),
+    /scout_login \{url: "https:\/\/staging\.example\.com", role: "user"\}.*gp-0123456789/,
+  );
+  // What the agent is told to say is the panel's sentence, word for word.
+  assert.equal(
+    troubleTell("address-unreachable", "https://staging.example.com/shop"),
+    `Tell the person, in these words: "${NEEDS_YOU_SENTENCE["address-unreachable"]("staging.example.com")}"`,
+  );
+});
+
+test("error screens: a check that stopped at its time limit says so with one button; one that stopped short of it, or wrote its report, does not", () => {
+  const plan = planFor({ thoroughness: "quick" }); // 10 minutes
+  const ended = (over: { lastActiveMin: number; reported?: boolean; pages?: number }) =>
+    guidedProgress({
+      nowMs: AT + 60 * 60_000,
+      plan,
+      run: runOf({ lastActiveMs: AT + over.lastActiveMin * 60_000, reported: over.reported ?? false }),
+      sessions: [],
+      coverage: { routesVisited: over.pages ?? 5, routesTotal: 400, elementsExercised: 0 },
+      findings: [],
+    });
+  const atLimit = ended({ lastActiveMin: 10 });
+  assert.equal(atLimit.phase, "stopped");
+  assert.equal(atLimit.needsYou?.kind, "stopped-by-cap");
+  assert.equal(atLimit.needsYou?.sentence, NEEDS_YOU_SENTENCE["stopped-by-cap"]("localhost:3000"));
+  assert.deepEqual(atLimit.next, [{ kind: "direct", label: ACTION_LABEL.seeAll, tool: "scout_cards", args: {} }]);
+  assert.equal(atLimit.now, PHASE_NOW.stopped, "the narrator says it stopped; the screen says why");
+  const short = ended({ lastActiveMin: 9 });
+  assert.equal(short.phase, "stopped");
+  assert.equal(short.needsYou, undefined, "stopped before its time was up: no limit screen");
+  // The project's page count is not this check's: a stop short of the time is not called a limit, however many pages the project has.
+  assert.equal(ended({ lastActiveMin: 9, pages: 300 }).needsYou, undefined);
+  const reported = ended({ lastActiveMin: 10, reported: true });
+  assert.equal(reported.phase, "done");
+  assert.equal(reported.needsYou, undefined, "a check that wrote its report at its limit finished");
+  assert.equal(stoppedByCap("exploring", { usedMs: 11 * 60_000, budgetMs: 10 * 60_000 }), false, "still running");
+});
+
+test("error screens: a trouble left by the last call does not outlive the check", () => {
+  const plan = planFor({ signIn: "password" });
+  const at = (sessions: ProgressSession[], reported: boolean) =>
+    guidedProgress({
+      nowMs: AT + 5 * 60_000,
+      plan,
+      run: runOf({ lastActiveMs: AT + 5 * 60_000, reported }),
+      sessions,
+      coverage: null,
+      findings: [],
+      trouble: "sign-in-expired",
+    });
+  assert.equal(at([sess()], false).phase, "needs-you", "while a session carries the plan");
+  const finished = at([], true);
+  assert.equal(finished.phase, "done", "reported and closed: done, not the sign-in screen");
+  assert.equal(finished.needsYou, undefined);
+  assert.equal(at([], false).phase, "stopped");
+});
+
+test("error screens: every error sentence is one plain sentence, and each kind has its heading", () => {
+  for (const kind of ERROR_KINDS) {
+    const s = NEEDS_YOU_SENTENCE[kind]("staging.example.com");
+    assert.equal(s.replace(/staging\.example\.com/g, "").match(/[.?!](\s|$)/g)?.length, 1, `one sentence: ${s}`);
+    assert.doesNotMatch(s, /scout_|ERROR|net::|NS_ERROR|Playwright|\bHTTP\b/, `plain: ${s}`);
+    assert.ok(ERROR_HEADING[kind] in SCREEN_HEADING);
+  }
+  assert.equal(ERROR_HEADING["sign-in-expired"], "needYou", "signing in again is a request, not a failure");
+  assert.equal(ERROR_HEADING["address-unreachable"], "wentWrong");
 });
 
 // ---- scout_cards and scout_feedback's rules ----

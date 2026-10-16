@@ -42,6 +42,22 @@ The server holds this, not the prompt. Once any guided plan has been built, `sco
 
 The person can mark a finding "not a bug" from its card (`scout_feedback`). That is a label, not a deletion: the finding stays in the project's memory with its id, a later check that finds the same problem adds to it rather than filing it again, and the cards and the status pane list it apart. Labels can be listed for a maintainer as candidates for the benchmark's answer key; they never change the key or the dedup by themselves.
 
+### Is it safe to run on my live site?
+
+This is the answer a guided check gives to that question, word for word: on the guided panel's **How it keeps your data safe** screen (also reached from **Is it safe on a live site?** beside the care levels) and wherever the chat answers it.
+
+> Look only, the default, opens pages and signs in. A search still runs, because all it does is open a page of results, but nothing that would save something is sent. Links are opened like any page, so a link that changes something just by being opened, such as an unsubscribe link, is not stopped. It is the safest choice for a live site.
+>
+> May submit forms sends forms, and presses buttons that send something. What it sends can create a record, or change one that was there, as it would for anyone who sent it; deletes are blocked. On a site that is not on this computer, it asks you first.
+>
+> May create test data creates the records it needs. What it sends can also change records that were there, but it deletes only what it created. It always asks you first, and is for a test copy only.
+>
+> Deleting data that was already there is never offered here.
+>
+> These limits are checked on every request your browser sends, not left to the AI's judgement. A request a care level does not allow never reaches your site. What a care level does allow, a form or a button, does on your site whatever it does for anyone who uses it.
+>
+> It never asks for your password. When your site needs one, a browser window opens for you to sign in as you normally would.
+
 ## The config file sets the limits an agent cannot loosen
 
 Over MCP the agent chooses `scout_attach`'s arguments, including the mode, and an argument wins over the server's environment. So nothing above sets a limit the agent cannot pass. The [config file](Configuration-reference.md#the-config-file) does: a JSON file a team commits as `.scenescout/config.json`, which wins over the environment and over every argument.

@@ -1,7 +1,8 @@
 /**
  * How long a saved sign-in profile will last, read from the profile itself:
  * each cookie's `expires`, and the `exp` claim of any JWT found in a cookie
- * value or a localStorage value. A JWT's payload is decoded to read `exp` and
+ * value, a localStorage value or a sessionStorage value (which a profile keeps
+ * beside the storage state). A JWT's payload is decoded to read `exp` and
  * nothing else; its signature is never checked (there is no key to check it
  * with, and nothing here trusts it), and no token value is ever returned,
  * printed or logged — only the name of the cookie or storage key it was in.
@@ -22,9 +23,10 @@
  */
 import fs from "node:fs";
 import { sayDuration } from "./pace.js";
+import { secretWordKind } from "./sensitive.js";
 
 /** Where a dated credential was found. */
-type CredentialSource = "cookie" | "cookie-jwt" | "local-storage-jwt";
+type CredentialSource = "cookie" | "cookie-jwt" | "local-storage-jwt" | "session-storage-jwt";
 
 /** One credential the profile holds, by name only. `expiresAt` is epoch ms, or null for a session cookie with no date. */
 interface Credential {
@@ -105,12 +107,12 @@ export function cookieMatchesHost(domain: string, host: string): boolean {
 
 /**
  * Read every credential a storage state holds. With `url`, only cookies sent
- * to its host and localStorage of its origin count: the rest belong to other
+ * to its host and localStorage and sessionStorage of its origin count: the rest belong to other
  * sites the sign-in passed through (an identity provider, say) and do not
  * sign the app in.
  */
 export function readLifetime(state: unknown, opts: { url?: string } = {}): ProfileLifetime {
-  const s = (state && typeof state === "object" ? state : {}) as { cookies?: unknown; origins?: unknown };
+  const s = (state && typeof state === "object" ? state : {}) as { cookies?: unknown; origins?: unknown; sessionStorage?: unknown };
   let target: URL | undefined;
   if (opts.url) {
     try {
@@ -145,22 +147,32 @@ export function readLifetime(state: unknown, opts: { url?: string } = {}): Profi
     }
   }
 
-  for (const o of Array.isArray(s.origins) ? s.origins : []) {
-    if (!o || typeof o !== "object") continue;
-    const origin = o as { origin?: unknown; localStorage?: unknown };
-    if (target && origin.origin !== target.origin) continue;
-    for (const item of Array.isArray(origin.localStorage) ? origin.localStorage : []) {
-      if (!item || typeof item !== "object") continue;
-      const entry = item as { name?: unknown; value?: unknown };
-      if (typeof entry.name !== "string" || typeof entry.value !== "string") continue;
-      // A localStorage entry with no token in it is not a credential this can
-      // date (most are preferences), so it is not counted at all.
-      const tokens = tokenExpiries(entry.value);
-      unreadableTokens += tokens.unreadable;
-      if (tokens.expiries.length > 0) credentials.push({ source: "local-storage-jwt", name: entry.name, expiresAt: Math.min(...tokens.expiries) });
-      // A token with no readable expiry (a refresh token often has none) may
-      // keep the sign-in alive past every dated one: undated, not ignored.
-      else if (tokens.unreadable > 0) credentials.push({ source: "local-storage-jwt", name: entry.name, expiresAt: null });
+  // localStorage is in the storage state's origins; sessionStorage is the
+  // list a profile keeps beside it (profiles.ts). Both are read alike.
+  const storages: { source: CredentialSource; origins: unknown; field: "localStorage" | "entries" }[] = [
+    { source: "local-storage-jwt", origins: s.origins, field: "localStorage" },
+    { source: "session-storage-jwt", origins: s.sessionStorage, field: "entries" },
+  ];
+  for (const { source, origins, field } of storages) {
+    for (const o of Array.isArray(origins) ? origins : []) {
+      if (!o || typeof o !== "object") continue;
+      const origin = o as { origin?: unknown; localStorage?: unknown; entries?: unknown };
+      if (target && origin.origin !== target.origin) continue;
+      const items = origin[field];
+      for (const item of Array.isArray(items) ? items : []) {
+        if (!item || typeof item !== "object") continue;
+        const entry = item as { name?: unknown; value?: unknown };
+        if (typeof entry.name !== "string" || typeof entry.value !== "string") continue;
+        const tokens = tokenExpiries(entry.value);
+        unreadableTokens += tokens.unreadable;
+        if (tokens.expiries.length > 0) credentials.push({ source, name: entry.name, expiresAt: Math.min(...tokens.expiries) });
+        // A token with no readable expiry (a refresh token often has none),
+        // or a value kept under a credential's name that holds no JWT (an
+        // opaque token), may end at any time or keep the sign-in alive past
+        // every dated one: undated, not ignored. Any other entry with no token
+        // in it is not a credential (most are preferences): not counted.
+        else if (tokens.unreadable > 0 || secretWordKind(entry.name) !== null) credentials.push({ source, name: entry.name, expiresAt: null });
+      }
     }
   }
 
@@ -175,7 +187,12 @@ function sayLifetime(ms: number): string {
 }
 
 function describeCredential(c: Credential): string {
-  const where = c.source === "cookie" ? "cookie" : c.source === "cookie-jwt" ? "token in cookie" : "token in localStorage";
+  const where = {
+    cookie: "cookie",
+    "cookie-jwt": "token in cookie",
+    "local-storage-jwt": "token in localStorage",
+    "session-storage-jwt": "token in sessionStorage",
+  }[c.source];
   return `${where} "${c.name.slice(0, 60)}"`;
 }
 

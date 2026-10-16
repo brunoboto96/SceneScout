@@ -4,12 +4,19 @@
  *
  * Registered by mcp-server.ts, in the order the tools have always been listed.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError, type ElicitRequestFormParams } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { formElicitationSupported, INTAKE_FORM_MESSAGE, INTAKE_TOOL, intakeFormSchema, intakeFromForm, intakeReplyText, type FormOutcome } from "../intake.js";
 import {
   buildGuidedPlan,
   CARES,
+  checkGuidedChoices,
+  savedSignInHealth,
+  withSignInHealth,
+  type GuidedChoices,
+  type SignInHealth,
   CHECK_AREAS,
   confirmForm,
   confirmVerdict,
@@ -41,6 +48,7 @@ import {
 } from "../prompts.js";
 
 import { PACKAGE_ROOT, server, errorText, guidedPlans, guidedRuns, operatorPolicy } from "../server-context.js";
+import { projectFolderFor } from "./sessions.js";
 
 // The guided start as one form, where the client can show one (MCP
 // elicitation, form mode); otherwise, or when the person declines or closes it,
@@ -103,6 +111,23 @@ function confirmedText(plan: GuidedPlan, verdict: ConfirmVerdict): string {
   return `${head}\nTell the person: "${verdict.tellPerson}"`;
 }
 
+/**
+ * Before a check with a sign-in starts: whether the sign-in saved in the
+ * folder its attach will use lasts the check (design section 5 item 6).
+ * A folder the attach would refuse has no saved sign-in to judge.
+ */
+async function signInHealthFor(choices: GuidedChoices): Promise<SignInHealth | undefined> {
+  if (choices.signIn === "none") return undefined;
+  const folder = await projectFolderFor(choices.address, undefined);
+  if ("refused" in folder) return undefined;
+  return savedSignInHealth(choices, path.resolve(folder.dir), { now: Date.now(), projectChosen: folder.source === "default", exists: fs.existsSync });
+}
+
+/** A kept plan as it is handed out to start: whether the saved sign-in lasts is judged now, not when the plan was built. */
+async function judgedNow(plan: GuidedPlan): Promise<GuidedPlan> {
+  return plan.choices.signIn === "none" ? plan : withSignInHealth(plan, await signInHealthFor(plan.choices));
+}
+
 const GUIDED_CALL_OUTPUT = z.object({ tool: z.enum(["scout_login", "scout_attach", "scout_tickets", "scout_session"]), args: z.record(z.unknown()) });
 
 /** A GuidedPlan, as scout_guided_plan's structuredContent. */
@@ -125,6 +150,13 @@ const GUIDED_PLAN_OUTPUT = {
   tellPerson: z.array(z.string()),
   calls: z.array(GUIDED_CALL_OUTPUT),
   budget: z.object({ minutes: z.number(), pages: z.number() }),
+  signInHealth: z
+    .object({
+      state: z.enum(["lasts", "may-run-out", "runs-out", "unknown", "none"]),
+      sentence: z.string(),
+      signInAgain: z.object({ label: z.string(), prompt: z.string(), command: z.string() }),
+    })
+    .optional(),
 };
 
 /** scout_guided_confirm's structuredContent. */
@@ -178,11 +210,12 @@ export function registerGuideTools(): void {
         const outcome = await askWithForm(INTAKE_FORM_MESSAGE, intakeFormSchema(url, maxMode), extra, INTAKE_TOOL);
         const reply = intakeFromForm(outcome as FormOutcome, maxMode);
         if (reply.kind !== "choices") return { content: [{ type: "text" as const, text: intakeReplyText(reply) }] };
-        const plan = guidedPlans.add(buildGuidedPlan(reply.choices, undefined, { maxMode }));
+        const signInHealth = await signInHealthFor(reply.choices);
+        const plan = guidedPlans.add(buildGuidedPlan(reply.choices, undefined, { maxMode, ...(signInHealth ? { signInHealth } : {}) }));
         guidedRuns.focus(plan.planId);
         // A care level that needs the person's confirmation asks for it now, in a second form, so the person answers both in one go.
         const confirmed = plan.confirm ? await confirmWithPerson(plan.planId, extra) : null;
-        const now = guidedPlans.get(plan.planId)!;
+        const now = await judgedNow(guidedPlans.get(plan.planId)!);
         // Turned down: the plan's steps would say to ask again and to attach in a mode the gate refuses, so only the offer of Look only is given.
         if (confirmed && !confirmed.accepted)
           return {
@@ -245,9 +278,12 @@ export function registerGuideTools(): void {
         if (planId !== undefined) {
           const kept = isPlanId(planId) ? guidedPlans.get(planId) : undefined;
           if (!kept) throw new Error("this server holds no guided plan with that id: build one with choices");
-          plan = kept;
+          plan = await judgedNow(kept);
         } else {
-          const built = guidedPlan(choices, undefined, { maxMode: operatorPolicy.policy.maxMode });
+          const maxMode = operatorPolicy.policy.maxMode;
+          const checked = checkGuidedChoices(choices, { maxMode });
+          const health = checked.ok ? await signInHealthFor(checked.choices) : undefined;
+          const built = guidedPlan(choices, undefined, { maxMode, health: () => health });
           if (!built.ok) throw new Error(built.error);
           plan = guidedPlans.add(built.plan);
           guidedRuns.focus(plan.planId);
@@ -278,7 +314,7 @@ export function registerGuideTools(): void {
         const plan = isPlanId(planId) ? guidedPlans.get(planId) : undefined;
         if (!plan) throw new Error("this server holds no guided plan with that id: build one with scout_guided_plan");
         const verdict = await confirmWithPerson(plan.planId, extra);
-        const now = guidedPlans.get(plan.planId)!;
+        const now = await judgedNow(guidedPlans.get(plan.planId)!);
         return {
           content: [{ type: "text" as const, text: confirmedText(now, verdict) }],
           structuredContent: { planId: now.planId, accepted: verdict.accepted, outcome: verdict.outcome, tellPerson: verdict.tellPerson, mode: now.mode },

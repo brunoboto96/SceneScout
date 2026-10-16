@@ -19,6 +19,7 @@
  * Design: docs/design/non-technical-assistant.md, sections 3.2 and 3.6.
  */
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { stricterMode, type WriteMode } from "./policy.js";
 import { INTAKE_ROLE, SIGN_IN_HINT, type SignInAnswer } from "../intake.js";
 import {
@@ -39,8 +40,13 @@ import {
   DESTRUCTIVE_NOT_OFFERED,
   HELD_BACK,
   PHONE_VIEWPORT,
+  SIGN_IN_AGAIN,
+  SIGN_IN_HEALTH,
+  type SignInHealthState,
   signInSentence,
 } from "./guided-words.js";
+import { DEFAULT_EXPIRY_MARGIN_MINUTES, judgeLifetime, readLifetime, type LifetimeVerdict } from "./expiry.js";
+import { loginCommand, profilePath } from "./profiles.js";
 import { redactSecrets } from "./redact.js";
 import { redactPersonal, secretWordKind } from "./sensitive.js";
 
@@ -136,6 +142,16 @@ export interface GuidedPlan {
   calls: GuidedCall[];
   /** Time and page caps, so progress can show "6m of 20m". */
   budget: { minutes: number; pages: number };
+  /** With a sign-in: whether the saved one lasts the check, said before it starts. */
+  signInHealth?: SignInHealth;
+}
+
+/** Whether the saved sign-in lasts a check, in the person's words, and how to sign in again anyway. */
+export interface SignInHealth {
+  state: SignInHealthState;
+  sentence: string;
+  /** The button's words, what it asks the agent, and the command that does the same from a terminal. */
+  signInAgain: { label: string; prompt: string; command: string };
 }
 
 export const MAX_ADDRESS = 2048;
@@ -466,10 +482,10 @@ export function guidedObjective(choices: Pick<GuidedChoices, "areas" | "journey"
  * a phone-sized browser when other areas share the first. Each attach names the
  * plan, which is what lets it above observe while a guided plan is open.
  */
-function guidedCalls(choices: GuidedChoices, mode: GuidedMode, objective: string, planId: string): GuidedCall[] {
+function guidedCalls(choices: GuidedChoices, mode: GuidedMode, objective: string, planId: string, signsIn: boolean): GuidedCall[] {
   const calls: GuidedCall[] = [];
   const role = choices.signIn === "none" ? {} : { role: INTAKE_ROLE };
-  if (choices.signIn !== "none") calls.push({ tool: "scout_login", args: { url: choices.address, ...role } });
+  if (signsIn) calls.push({ tool: "scout_login", args: { url: choices.address, ...role } });
   const phone = { viewportWidth: PHONE_VIEWPORT.width, viewportHeight: PHONE_VIEWPORT.height };
   const phoneOnly = choices.areas.length === 1 && choices.areas[0] === "phone";
   calls.push({ tool: "scout_attach", args: { url: choices.address, mode, ...role, objective, ...(phoneOnly ? phone : {}), planId } });
@@ -502,8 +518,8 @@ function guidedCalls(choices: GuidedChoices, mode: GuidedMode, objective: string
  * checkGuidedChoices refuses: an unknown care level would leave the attach
  * with no mode, and scout_attach reads a missing mode as read-only.
  */
-export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId(), limit: CareLimit = {}): GuidedPlan {
-  const checked = checkGuidedChoices(given, limit);
+export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId(), opts: CareLimit & { signInHealth?: SignInHealth } = {}): GuidedPlan {
+  const checked = checkGuidedChoices(given, opts);
   if (!checked.ok) throw new Error(`buildGuidedPlan was given choices checkGuidedChoices refuses: ${checked.error}`);
   const choices = checked.choices;
   const mode = CARE_MODE[choices.care];
@@ -515,10 +531,14 @@ export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId
   });
   const reason = confirmationReason(choices);
   const confirm = reason ? { reason, sentence: confirmSentence(reason, choices.address), accepted: false } : null;
+  // Only a saved sign-in certain to last the check is used as it is; otherwise the window opens first.
+  const health = choices.signIn === "none" ? undefined : opts.signInHealth;
+  const signsIn = choices.signIn !== "none" && health?.state !== "lasts";
   const tellPerson = [
     `${CARE_LABEL[choices.care]}: ${CARE_EXPLAIN[choices.care]}`,
     ...areas.filter((a) => a.heldBack).map((a) => `${a.label}: ${a.heldBack}`),
-    ...(choices.signIn === "none" ? [] : [signInSentence(SIGN_IN_HINT[choices.signIn])]),
+    ...(health ? [health.sentence] : []),
+    ...(signsIn && choices.signIn !== "none" ? [signInSentence(SIGN_IN_HINT[choices.signIn])] : []),
     budgetSentence(budget),
     ...(reason ? [CONFIRM_COMING[reason]] : []),
   ];
@@ -531,15 +551,97 @@ export function buildGuidedPlan(given: GuidedChoices, planId: string = newPlanId
     areas,
     confirm,
     tellPerson,
-    calls: guidedCalls(choices, mode, objective, planId),
+    calls: guidedCalls(choices, mode, objective, planId, signsIn),
     budget,
+    ...(health ? { signInHealth: health } : {}),
   };
 }
 
+/**
+ * Whether a saved sign-in lasts a check, from expiry.ts's verdict on it
+ * (null: none is saved). Certain to last is "lasts"; a dated part ending
+ * inside the check is "may-run-out"; certain to end first is "runs-out"; no
+ * date to go by, or a file that cannot be read, is "unknown". expiry.ts's
+ * "ok" means only that every dated credential outlives the check, so a
+ * profile that also holds an undated one (a session cookie) or one for
+ * another host is "unknown" unless `certain` says nothing of the kind is
+ * there.
+ */
+export function signInHealth(verdict: LifetimeVerdict | null | "unreadable", address: string, command: string, certain = true): SignInHealth {
+  const state: SignInHealthState =
+    verdict === null
+      ? "none"
+      : verdict === "unreadable"
+        ? "unknown"
+        : verdict.kind === "ok" && !certain
+          ? "unknown"
+          : ({ ok: "lasts", warn: "may-run-out", refuse: "runs-out", unknown: "unknown" } as const)[verdict.kind];
+  let where = address;
+  try {
+    where = new URL(address).host;
+  } catch {
+    // An address checkGuidedChoices accepted always parses; the address as given is the fallback.
+  }
+  return {
+    state,
+    sentence: SIGN_IN_HEALTH[state](where),
+    signInAgain: { label: SIGN_IN_AGAIN.label, prompt: SIGN_IN_AGAIN.prompt(address, INTAKE_ROLE), command },
+  };
+}
+
+/**
+ * The saved sign-in a guided check with a sign-in would use (the intake role's
+ * profile in `projectDir`), judged against the check's time limit plus the
+ * usual margin. `projectChosen`: SceneScout chose the folder, so the command
+ * names it.
+ */
+export function savedSignInHealth(
+  choices: Pick<GuidedChoices, "address" | "signIn" | "thoroughness">,
+  projectDir: string,
+  opts: { now: number; projectChosen?: boolean; exists: (p: string) => boolean; read?: (p: string) => string },
+): SignInHealth | undefined {
+  if (choices.signIn === "none") return undefined;
+  const file = profilePath(projectDir, INTAKE_ROLE);
+  const command = loginCommand(INTAKE_ROLE, choices.address, opts.projectChosen ? projectDir : undefined);
+  if (!opts.exists(file)) return signInHealth(null, choices.address, command);
+  let life: ReturnType<typeof readLifetime>;
+  try {
+    life = readLifetime(JSON.parse((opts.read ?? ((p: string) => fs.readFileSync(p, "utf8")))(file)) as unknown, { url: choices.address });
+  } catch {
+    // A profile that cannot be read or parsed would fail the attach too: sign in again. Its text is a live session, so none of it is kept.
+    return signInHealth("unreadable", choices.address, command);
+  }
+  const verdict = judgeLifetime(life, {
+    now: opts.now,
+    runMs: THOROUGHNESS_BUDGET[choices.thoroughness].minutes * 60_000,
+    marginMs: DEFAULT_EXPIRY_MARGIN_MINUTES * 60_000,
+    role: INTAKE_ROLE,
+    rerun: command,
+  });
+  return signInHealth(verdict, choices.address, command, life.undated === 0 && life.elsewhere === 0);
+}
+
+/**
+ * A kept plan with its sign-in judged again, as it is read back to start: a
+ * verdict from when it was built may have run out since (the person took a
+ * while to confirm, or the plan is run again later). The plan is rebuilt from
+ * its own choices and id, and the person's confirmation is kept.
+ */
+export function withSignInHealth(plan: GuidedPlan, health: SignInHealth | undefined): GuidedPlan {
+  const rebuilt = buildGuidedPlan(plan.choices, plan.planId, health ? { signInHealth: health } : {});
+  return { ...rebuilt, confirm: plan.confirm };
+}
+
 /** Choices to a plan in one step: the plan, or the sentence that says what to fix. */
-export function guidedPlan(input: unknown, planId?: string, limit: CareLimit = {}): { ok: true; plan: GuidedPlan } | { ok: false; error: string } {
-  const checked = checkGuidedChoices(input, limit);
-  return checked.ok ? { ok: true, plan: buildGuidedPlan(checked.choices, planId, limit) } : checked;
+export function guidedPlan(
+  input: unknown,
+  planId?: string,
+  opts: CareLimit & { health?: (choices: GuidedChoices) => SignInHealth | undefined } = {},
+): { ok: true; plan: GuidedPlan } | { ok: false; error: string } {
+  const checked = checkGuidedChoices(input, opts);
+  if (!checked.ok) return checked;
+  const signInHealth = opts.health?.(checked.choices);
+  return { ok: true, plan: buildGuidedPlan(checked.choices, planId, { maxMode: opts.maxMode, ...(signInHealth ? { signInHealth } : {}) }) };
 }
 
 // ---- The plans a server holds, the person's confirmation, and the gate on scout_attach ----
