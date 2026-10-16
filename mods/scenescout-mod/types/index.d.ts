@@ -26,6 +26,7 @@ export type ScenescoutModWizard = {
   cardId: string | null;
   lastChoices: Record<string, unknown> | null;
   tourPage: number;
+  returnTo: ScenescoutModWizard["step"] | null;
 };
 
 export type ScenescoutModStatus = {

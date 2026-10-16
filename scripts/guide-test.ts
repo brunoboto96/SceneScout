@@ -53,7 +53,7 @@ import {
   SKILL_FLAGS as INTAKE_FLAGS,
 } from "../src/intake.ts";
 import { CARES, CHECK_AREAS, THOROUGHNESSES, type GuidedChoices } from "../src/engine/guided.ts";
-import { AREA_LABEL, AREA_WHAT_HAPPENS, CARE_EXPLAIN, CARE_LABEL, DESTRUCTIVE_NOT_OFFERED } from "../src/engine/guided-words.ts";
+import { AREA_LABEL, AREA_WHAT_HAPPENS, CARE_EXPLAIN, CARE_LABEL, DESTRUCTIVE_NOT_OFFERED, SAFETY_EXPLAINER } from "../src/engine/guided-words.ts";
 import { asLf } from "./checkout.ts";
 import { GUIDE_DIR, toWikiPage } from "./guide-wiki.mjs";
 
@@ -1020,6 +1020,16 @@ test("the skill calls scout_intake first and keeps asking in chat as the fallbac
   const guide = section(pages.get("Ways-to-use-it.md")!, "### Plain questions instead of flags");
   assert.ok(guide.includes(`\`${INTAKE_TOOL}\``), "the guide names the tool");
   assert.match(guide, /never asks for a password/);
+});
+
+test("the Safety model page gives the safety explainer word for word, as the panel and the chat show it", () => {
+  const page = pages.get("Safety-model.md")!;
+  const at = page.indexOf("### Is it safe to run on my live site?");
+  assert.ok(at >= 0, "the page has the explainer's section");
+  const section = page.slice(at).split("\n").slice(1);
+  const end = section.findIndex((line) => /^#{1,3} /.test(line));
+  const quoted = (end < 0 ? section : section.slice(0, end)).filter((line) => line.startsWith("> ")).map((line) => line.slice(2));
+  assert.deepEqual(quoted, [...SAFETY_EXPLAINER], "the section's quote is the explainer, paragraph for paragraph, and nothing more");
 });
 
 test("the suite is wired into npm test and listed in AGENTS.md", () => {

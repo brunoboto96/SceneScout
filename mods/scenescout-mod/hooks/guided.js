@@ -147,7 +147,19 @@ export const SAFETY_EXPLAINER = [
   "It never asks for your password. When your site needs one, a browser window opens for you to sign in as you normally would.",
 ];
 
-export const SERVER_ERROR_SENTENCE = "I could not reach the SceneScout server. Is the scenescout plugin installed and turned on?";
+export const SERVER_ERROR_SENTENCE = "I could not reach the SceneScout server: check that the scenescout plugin is installed and turned on.";
+
+/** The heading over a screen for something that went wrong, and over one that waits on the person. */
+export const SCREEN_HEADING = { wentWrong: "Something went wrong", needYou: "I need you" };
+
+/** Which heading each error screen goes under, as guided-words.ts's ERROR_HEADING. */
+export const ERROR_HEADING = {
+  "server-error": "wentWrong",
+  "address-unreachable": "wentWrong",
+  "browser-download-failed": "wentWrong",
+  "sign-in-expired": "needYou",
+  "stopped-by-cap": "wentWrong",
+};
 
 export const STARTING_SENTENCE = "Getting ready to start.";
 
@@ -160,6 +172,8 @@ export const ACTION_LABEL = {
   notABug: "Not a bug",
   explain: "Explain more",
   again: "Check again",
+  tryAgain: "Try again",
+  signInAgain: "Sign in again",
 };
 
 export const ACTION_PROMPT = {
@@ -171,8 +185,7 @@ export const ACTION_PROMPT = {
   again: (/** @type {string} */ id) => `Check SceneScout finding ${id} again with scout_verify, and tell me whether it is still there.`,
 };
 
-/** Whether the saved sign-in lasts the check, as guided-words.ts's SIGN_IN_HEALTH; the plan carries the sentence, so only the button's words are copied. */
-export const SIGN_IN_AGAIN_LABEL = "Sign in again";
+/** Whether the saved sign-in lasts the check, as guided-words.ts's SIGN_IN_HEALTH; the plan carries the sentence, and the button's label is ACTION_LABEL.signInAgain, so only the command line is copied. */
 export const SIGN_IN_AGAIN_COMMAND = (/** @type {string} */ command) => `To sign in again from a terminal instead: ${command}`;
 
 // ---- The first-run tour: three panels, the panel's own words (the chat has no tour) ----
@@ -203,6 +216,7 @@ export const PANEL_WORDS = {
   skipTour: "Skip the tour",
   next: "Next",
   done: "Done",
+  isItSafe: "Is it safe on a live site?",
   following: "A check is going:",
   follow: "Follow it",
   lastCheck: "Your last check:",
@@ -233,9 +247,8 @@ export const PANEL_WORDS = {
   expected: "What was expected",
   happened: "What happened",
   technical: "Technical detail",
-  needYou: "I need you",
-  wentWrong: "Something went wrong",
-  tryAgain: "Try again",
+  tryAgain: ACTION_LABEL.tryAgain,
+  technicalDetail: "Technical detail",
   howToFix: "How to fix this",
   lookOnly: `Run it as "${CARE_LABEL["look-only"]}"`,
   waitingForm: "A form has opened for you to answer. The check starts only when you say yes there.",
@@ -268,6 +281,7 @@ export const IMPACT_MARK = { "Blocks users": "!", Annoying: "~", Cosmetic: ".", 
  *   cardId: string | null,
  *   lastChoices: any,
  *   tourPage: number,
+ *   returnTo: string | null,
  * }} Wizard
  */
 
@@ -298,6 +312,7 @@ export function initialWizard() {
     cardId: null,
     lastChoices: null,
     tourPage: 0,
+    returnTo: null,
   };
 }
 
@@ -349,6 +364,7 @@ export function wizardOf(value) {
     cardId: str(value.cardId) || null,
     lastChoices: isRecord(value.lastChoices) ? value.lastChoices : null,
     tourPage: Math.min(TOUR.length - 1, Math.max(0, Math.floor(num(value.tourPage)))),
+    returnTo: STEPS.includes(str(value.returnTo)) && str(value.returnTo) !== "safety" ? str(value.returnTo) : null,
   };
 }
 
@@ -365,6 +381,8 @@ export function reduce(w, action) {
   switch (action.type) {
     case "go":
       if (!STEPS.includes(action.step)) return w;
+      // The explainer goes back to where it was opened from: the welcome, or a check being set up, whose choices are kept.
+      if (action.step === "safety") return { ...w, step: "safety", returnTo: w.step === "safety" ? w.returnTo : w.step, notice: null, busy: null };
       return { ...w, step: action.step, notice: null, busy: null };
     case "newCheck":
       return { ...w, step: "configuring", draft: defaultDraft(), planId: null, plan: null, notice: null, busy: null };
@@ -799,10 +817,10 @@ export function renderGuided(els, w, ctx, act) {
     rows.push(
       column(
         [
-          heading(PANEL_WORDS.wentWrong),
+          heading(SCREEN_HEADING[ERROR_HEADING["server-error"]]),
           text(SERVER_ERROR_SENTENCE, { color: "red" }),
-          dim(str(ctx.status.error).slice(0, 300)),
           row([button("guided-error-retry", PANEL_WORDS.tryAgain, () => act("retry")), link(PANEL_WORDS.howToFix, TROUBLESHOOTING_URL)].filter(Boolean)),
+          dim(`${PANEL_WORDS.technicalDetail}: ${str(ctx.status.error).slice(0, 300)}`),
         ],
         { marginBottom: 1 },
       ),
@@ -846,7 +864,7 @@ export function renderGuided(els, w, ctx, act) {
     const out = [text(str(h.sentence), { color: str(h.state) === "lasts" ? "green" : "yellow" })];
     // Only a sign-in used as it is offers this: in every other case the check signs in first anyway.
     if (str(h.state) === "lasts" && str(again.prompt)) {
-      out.push(row([button("guided-signin-again", str(again.label) || SIGN_IN_AGAIN_LABEL, () => act("send", { text: str(again.prompt) }))]));
+      out.push(row([button("guided-signin-again", str(again.label) || ACTION_LABEL.signInAgain, () => act("send", { text: str(again.prompt) }))]));
       if (str(again.command)) out.push(dim(SIGN_IN_AGAIN_COMMAND(str(again.command))));
     }
     return out;
@@ -951,7 +969,12 @@ export function renderGuided(els, w, ctx, act) {
         ),
       ),
     );
-    out.push(text(PANEL_WORDS.careful, { bold: true }));
+    out.push(
+      row([
+        text(PANEL_WORDS.careful, { bold: true }),
+        button("guided-config-safety", PANEL_WORDS.isItSafe, () => act("go", { step: "safety" }), { plain: true }),
+      ]),
+    );
     for (const care of CARES) {
       out.push(
         button(
@@ -1040,10 +1063,16 @@ export function renderGuided(els, w, ctx, act) {
       );
     if (isRecord(g.saved)) out.push(dim(str(g.saved.sentence)));
     if (isRecord(g.needsYou)) {
+      const wentWrong = needsYouHeading(g.needsYou.kind) === SCREEN_HEADING.wentWrong;
       out.push(
-        column([heading(PANEL_WORDS.needYou), text(str(g.needsYou.sentence), { color: "yellow" }), row(actionButtons(g.needsYou.actions, "guided-needs"))], {
-          marginTop: 1,
-        }),
+        column(
+          [
+            heading(needsYouHeading(g.needsYou.kind)),
+            text(str(g.needsYou.sentence), { color: wentWrong ? "red" : "yellow" }),
+            row(actionButtons(g.needsYou.actions, "guided-needs")),
+          ],
+          { marginTop: 1 },
+        ),
       );
     }
     const live = link(PANEL_WORDS.watchLive, liveHref(ctx.status.data?.liveUrl));
@@ -1172,9 +1201,21 @@ export function renderGuided(els, w, ctx, act) {
     return [
       heading(PANEL_WORDS.safety),
       ...SAFETY_EXPLAINER.map((s) => text(s)),
-      row([button("guided-safety-back", PANEL_WORDS.back, () => act("go", { step: "welcome" }))]),
+      row([button("guided-safety-back", PANEL_WORDS.back, () => act("go", { step: w.returnTo ?? "welcome" }))]),
     ];
   }
+}
+
+/**
+ * The heading over what the engine says it needs of the person: an error
+ * screen's own heading, or "I need you" for a confirmation, a sign-in and a
+ * step that is stuck.
+ *
+ * @param {unknown} kind
+ */
+export function needsYouHeading(kind) {
+  const k = str(kind);
+  return SCREEN_HEADING[Object.hasOwn(ERROR_HEADING, k) ? ERROR_HEADING[/** @type {keyof typeof ERROR_HEADING} */ (k)] : "needYou"];
 }
 
 /**
@@ -1193,7 +1234,7 @@ export function guidedText(w, status) {
     lines.push(`${str(g.title)} (${timeLine(g.time)}). Now: ${str(g.now)}`, `${PANEL_WORDS.problemsSoFar} ${problemsLine(g.problems)}`);
     for (const card of Array.isArray(g.latest) ? g.latest.filter(isRecord) : [])
       lines.push(`- ${str(card.impact)}: ${str(card.title)} (${str(card.page)}, id ${str(card.id)})`);
-    if (isRecord(g.needsYou)) lines.push(`${PANEL_WORDS.needYou}: ${str(g.needsYou.sentence)}`);
+    if (isRecord(g.needsYou)) lines.push(`${needsYouHeading(g.needsYou.kind)}: ${str(g.needsYou.sentence)}`);
     lines.push(
       "",
       PANEL_WORDS.fallbackNext,

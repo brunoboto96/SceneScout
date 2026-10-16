@@ -72,7 +72,8 @@ function guidedPaneProgress(
       ...(held.area ? { area: held.area } : {}),
     });
   }
-  return guidedProgress({ nowMs, plan, run: guidedRuns.get(plan.planId), sessions, coverage, findings });
+  const trouble = guidedRuns.trouble(plan.planId);
+  return guidedProgress({ nowMs, plan, run: guidedRuns.get(plan.planId), sessions, coverage, findings, ...(trouble ? { trouble } : {}) });
 }
 
 function statusResult(): CallToolResult {
