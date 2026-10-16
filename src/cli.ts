@@ -509,7 +509,7 @@ async function install(flags: string[]): Promise<void> {
   });
   if (note) console.log(`· Note: ${note}`);
 
-  const launch = launchCommand({ packageRoot, nodePath: process.execPath, serverPath });
+  const launch = launchCommand({ packageRoot, nodePath: process.execPath, serverPath, version: packageVersion() });
   if (browserOnly) {
     // nothing to register
   } else if (flags.includes("--no-register")) {
