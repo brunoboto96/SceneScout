@@ -21,7 +21,7 @@
 import { createHash } from "node:crypto";
 import { archiveApp, classify, findingText, type AnswerKey, type KeyContextual, type KeyEntry, type RunArchive } from "./bench.js";
 import { MIN_FOR_A_VERDICT } from "./calibration.js";
-import { addUsage, dedupModeFromEnv, judgeKeyConfig, NO_USAGE, type DedupMode, type ResolvedProvider, type ToolSpec, type Usage } from "./ci.js";
+import { addUsage, DEDUP_ENV, dedupModeFromEnv, judgeKeyConfig, NO_USAGE, type DedupMode, type ResolvedProvider, type ToolSpec, type Usage } from "./ci.js";
 import { withWatchdog } from "./dispatch.js";
 import { findingId, isDuplicateFinding, titleSimilarity, type DuplicateJudge, type Finding, type FindingInput, type JudgeVerdict } from "./memory.js";
 import { obj, type ModelTurn, type ToolCall } from "./provider.js";
@@ -550,6 +550,21 @@ export type DedupPlan =
   | { mode: "judge"; via: "client"; label: string; note: string }
   | { mode: "judge"; via: "key"; resolved: ResolvedProvider; key: string; label: string; note: string }
   | { mode: "judge"; via: "off"; why: string; note: string };
+
+/**
+ * Why a tool argument asking for the judge is not applied, or null when it is.
+ *
+ * Switching the judge on sends finding text to a model provider, which is a
+ * decision for whoever runs the server, not for the agent calling a tool: the
+ * argument is honoured only when the server's environment already says
+ * `judge` (DEDUP_ENV), or when the client answers the judge itself (a
+ * `scenescout ci` run, whose model is already the recipient). Asking for
+ * `rule`, or for nothing, is always allowed.
+ */
+export function dedupArgumentRefusal(asked: DedupMode | undefined, env: Record<string, string | undefined>, caps: JudgeClientCaps | undefined): string | null {
+  if (asked !== "judge" || clientAnswersJudge(caps) || env[DEDUP_ENV] === "judge") return null;
+  return `dedup: "judge" was not applied: it sends finding text to a model provider, and a tool argument cannot switch that on. The person running the server turns it on with ${DEDUP_ENV}=judge in the server's environment. The rule decides duplicates.`;
+}
 
 /**
  * How the MCP server dedups for a run: what an attach of the run named, else

@@ -62,6 +62,7 @@ import {
   judgeSamplingParams,
   MAX_JUDGE_KICKOFF_CHARS,
   planDedup,
+  dedupArgumentRefusal,
   pairId,
   parseJudgement,
   ruleJudgement,
@@ -1597,4 +1598,17 @@ test("server's dedup plan: the rule unless asked; the judge through a client tha
   assert.throws(() => planDedup(undefined, { SCENESCOUT_DEDUP: "yes" }, undefined), /SCENESCOUT_DEDUP must be one of rule, judge/);
   assert.throws(() => planDedup("judge", { OPENAI_API_KEY: KEY, SCENESCOUT_DEDUP_PROVIDER: "other" }, undefined), /SCENESCOUT_DEDUP_PROVIDER must be one of/);
   assert.deepEqual(planDedup("rule", { SCENESCOUT_DEDUP: "yes" }, undefined), { mode: "rule", note: "" }, "a named mode does not read the variable");
+
+  // A tool argument alone cannot send findings to a provider: the team sets SCENESCOUT_DEDUP=judge for that.
+  const keyed = { OPENAI_API_KEY: KEY };
+  assert.match(
+    dedupArgumentRefusal("judge", keyed, undefined) ?? "",
+    /SCENESCOUT_DEDUP=judge in the server's environment/,
+    "the argument alone is refused, naming the setting",
+  );
+  assert.equal(dedupArgumentRefusal("judge", { ...keyed, SCENESCOUT_DEDUP: "judge" }, undefined), null, "the team's variable allows it");
+  assert.equal(dedupArgumentRefusal("judge", { ...keyed, SCENESCOUT_DEDUP: "rule" }, undefined) === null, false, "a team that says rule is not overridden");
+  assert.equal(dedupArgumentRefusal("judge", keyed, answers), null, "a CI run's own model is asked: no new recipient");
+  assert.equal(dedupArgumentRefusal("rule", { SCENESCOUT_DEDUP: "judge" }, undefined), null, "switching the judge off is always allowed");
+  assert.equal(dedupArgumentRefusal(undefined, keyed, undefined), null);
 });

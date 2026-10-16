@@ -120,7 +120,7 @@ SceneScout needs only a URL, but it does better from inside the app's repository
 - **Read the problems as cards.** "Show me what you found." The agent calls `scout_cards`: each problem as a plain card, worst first (how much it matters, the page, the steps, what was expected and what happened), with its picture where the client shows images. Say "that one is not a bug" and the agent records it with `scout_feedback {id, verdict: "not-a-bug", reason}`: the problem is kept and still recognised next time, and listed apart.
 - **Another browser.** "Run the same pass in WebKit." `scout_attach {browser: "webkit"}`; the first such attach downloads WebKit, once.
 - **A phone-sized viewport.** `scout_attach {viewportWidth: 390, viewportHeight: 844}`, then a design audit on the key pages.
-- **Fewer duplicate findings.** "Ask a model whether two findings are the same defect." That is `scout_attach {dedup: "judge"}`, or `SCENESCOUT_DEDUP=judge` in the server's environment, with `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` there too. A filing the rule keeps apart is then compared with the open findings on its page, and each pair's titles, categories and evidence, and the page's path, are sent to that provider. It is off by default.
+- **Fewer duplicate findings.** "Ask a model whether two findings are the same defect." That is `SCENESCOUT_DEDUP=judge` in the server's environment (the agent cannot switch it on with `scout_attach {dedup: "judge"}` alone), with `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` there too. A filing the rule keeps apart is then compared with the open findings on its page, and each pair's titles, categories and evidence, and the page's path, are sent to that provider. It is off by default.
 
 ## Parallel lanes
 
