@@ -14,6 +14,7 @@ import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
 import { readFlagValue } from "./args.js";
 import { MAX_LANES } from "./brief.js";
 import type { CaptureOutcome } from "./capture.js";
+import { START_PAGE_WARNING } from "./challenge.js";
 import { markdownCell } from "./check.js";
 import { parseLimitFlag } from "./limits.js";
 import { isWorthALook, redactSecrets, type Finding } from "./memory.js";
@@ -359,12 +360,16 @@ export function parseCiArgs(
 
 /**
  * Why scout_attach did not leave a session the run can use, or null when it
- * did: an error result, or a saved sign-in the app no longer accepts (the
- * attach succeeds, and says so on a line of its own).
+ * did: an error result, a saved sign-in the app no longer accepts, or a start
+ * page that is a bot challenge or a 4xx rather than the app (each attach
+ * succeeds, and says so on a line of its own).
  */
 export function attachFailure(r: { text: string; isError: boolean }): string | null {
   const authFailed = r.text.split("\n").find((l) => l.startsWith("⚠ AUTH FAILED"));
   if (authFailed) return authFailed;
+  // A bot challenge or a 4xx in the app's place: a run would explore the protection and report it as the app.
+  const notTheApp = r.text.split("\n").find((l) => l.startsWith(START_PAGE_WARNING));
+  if (notTheApp) return notTheApp;
   if (r.isError || /^ERROR:/.test(r.text)) return r.text.replace(/^ERROR:\s*/, "");
   return null;
 }

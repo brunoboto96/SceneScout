@@ -66,6 +66,8 @@ export interface RouteHealth {
   design: DesignDefect[];
   /** Why the design audit could not measure this page, when it could not. */
   auditError?: string;
+  /** The bot protection that answered in the app's place (challenge.ts botChallenge), when one did. */
+  challenge?: string;
 }
 
 /** A route that answered with a file, a feed or data rather than a page (crawl.ts isNonPageResource). */
@@ -463,6 +465,33 @@ export function issuesFromRoutes(
   signedIn = true,
 ): CheckIssue[] {
   return checkFindings(routes, origin, ignore, flows, null, ignorePaths, signedIn).issues;
+}
+
+/**
+ * Why a check must not give a verdict on what its start page answered, or
+ * null. A bot challenge in the app's place, or any 4xx on the start page,
+ * means nothing in the app was tested, and the check must not pass on the
+ * challenge's own checkbox and link. A 403 on a route inside an app that
+ * loaded is that route's finding, not this. With --paths there is no start
+ * page: only every loaded path being a challenge counts.
+ */
+export function startPageRefusal(routes: readonly RouteHealth[], startIsFirst: boolean): string | null {
+  const loaded = routes.filter((r) => r.loadError === undefined);
+  const start = startIsFirst ? routes[0] : undefined;
+  const blocked = startIsFirst
+    ? start?.challenge !== undefined
+      ? start
+      : undefined
+    : loaded.length > 0 && loaded.every((r) => r.challenge !== undefined)
+      ? loaded[0]
+      : undefined;
+  if (blocked)
+    return `blocked by bot protection (HTTP ${blocked.status ?? "no status"}): ${blocked.challenge} answered in the app's place, so nothing in the app was tested. Let the check's browser through the protection (an allowlisted address, or the vendor's bypass for automated tests), or check a deployment without it.`;
+  if (start && start.loadError === undefined && start.status !== null && start.status >= 400 && start.status < 500) {
+    const signIn = start.status === 401 || start.status === 403 ? " If the page needs a signed-in session, pass one with --storage-state." : "";
+    return `the start page answered HTTP ${start.status}, so nothing in the app was tested. Check the URL.${signIn}`;
+  }
+  return null;
 }
 
 /**

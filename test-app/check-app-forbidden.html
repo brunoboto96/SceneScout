@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Check: an app with one forbidden route</title></head>
+<body>
+  <!-- For `scenescout check`'s start-page guard, the contrast to check-challenge.html: the app's own start page loads,
+       and one route inside it answers 403 with the app's own page. That 403 is a finding, not a check that could not run. -->
+  <main>
+    <h1>Projects</h1>
+    <button type="button">New project</button>
+    <p><a href="/check-app-forbidden/admin">Admin</a></p>
+  </main>
+</body>
+</html>

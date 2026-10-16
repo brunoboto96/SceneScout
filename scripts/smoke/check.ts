@@ -55,6 +55,7 @@ export async function run({ baseUrl, foreignBaseUrl, stats }: SmokeContext): Pro
     await framedModalLock({ baseUrl, work });
     await flowsAndRetests({ baseUrl, stats, work });
     await startPageOnly({ baseUrl, work });
+    await startPageNotTheApp({ baseUrl, work });
     await flowWriteEdges({ baseUrl, foreignBaseUrl, stats, work });
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
@@ -509,6 +510,69 @@ async function startPageOnly({ baseUrl, work }: { baseUrl: string; work: string 
   );
   const drawn = await run("check-shell-drawn.html");
   check("...and the same page with two controls is measured and passes", drawn.status === 0, `${drawn.status} ${drawn.out.slice(-600)}`);
+}
+
+/**
+ * A start page that is a bot challenge is not the app, and a check must not pass on the challenge's checkbox and link.
+ * The contrast is an app whose start page loads and one route inside it answers 403 with the app's own page: that 403
+ * is a finding. A start page that answers 404 names its status. The challenge page has two controls, so the old guard
+ * (one control or fewer) never caught it, and the challenge's 403 alone filed only a medium issue the gate passed.
+ */
+async function startPageNotTheApp({ baseUrl, work }: { baseUrl: string; work: string }): Promise<void> {
+  console.log("check: a start page that is a bot challenge or a 4xx, against an app with one 403 inside it");
+  const run = (start: string) => {
+    const dir = path.join(work, `not-the-app${start.replace(/\//g, "-")}`);
+    fs.mkdirSync(dir, { recursive: true });
+    return { dir, done: runCli([`${baseUrl}${start}`, "--project", dir, "--out", path.join(dir, "out")]) };
+  };
+  const challenge = run("/check-challenge");
+  const app = run("/check-app-forbidden");
+  const missing = run("/check-missing-start");
+  const [blocked, inner, notFound] = await Promise.all([challenge.done, app.done, missing.done]);
+  check(
+    "a start page served as a bot challenge exits 2, saying the check could not run because bot protection blocked it, with the status",
+    blocked.status === 2 &&
+      /could not run: blocked by bot protection \(HTTP 403\): Cloudflare answered/.test(blocked.out) &&
+      !/may not have finished drawing/.test(blocked.out) &&
+      !fs.existsSync(path.join(challenge.dir, "out", "check.json")),
+    `${blocked.status} ${blocked.out.slice(-800)}`,
+  );
+  const summary = fs.existsSync(path.join(app.dir, "out", "check.json"))
+    ? (JSON.parse(fs.readFileSync(path.join(app.dir, "out", "check.json"), "utf8")) as Summary)
+    : null;
+  check(
+    "...while an app whose own route answers 403 is checked, and the 403 is that route's finding",
+    inner.status === 0 &&
+      !/could not run/.test(inner.out) &&
+      summary !== null &&
+      summary.issues.some((i) => i.rule === "route-client-error" && i.routes.includes("/check-app-forbidden/admin")),
+    `${inner.status} ${inner.out.slice(-800)} ${JSON.stringify(summary?.issues.map((i) => [i.rule, i.routes]))}`,
+  );
+  check(
+    "a start page that answers 404 exits 2 naming the status",
+    notFound.status === 2 && /could not run: the start page answered HTTP 404/.test(notFound.out),
+    `${notFound.status} ${notFound.out.slice(-800)}`,
+  );
+  // The attach an unattended run starts with says so too, on the line ci.ts attachFailure stops on.
+  const engine = new BrowserEngine();
+  try {
+    const attached = await engine.attach({ url: `${baseUrl}/check-challenge`, projectDir: path.join(work, "not-the-app-attach"), mode: "read-only" });
+    const byPage = await engine.attach({ url: `${baseUrl}/check-challenge-page`, projectDir: path.join(work, "not-the-app-attach"), mode: "read-only" });
+    const ordinary = await engine.attach({ url: `${baseUrl}/check-app-forbidden`, projectDir: path.join(work, "not-the-app-attach"), mode: "read-only" });
+    check(
+      "attaching to a challenge says the start page is blocked by bot protection, and attaching to the app does not",
+      /\n⚠ START PAGE BLOCKED — blocked by bot protection \(HTTP 403\): Cloudflare answered/.test(attached) && !/START PAGE/.test(ordinary),
+      `${attached}\n---\n${ordinary}`,
+    );
+    // Read from the page the browser received: a 503 whose only sign is the challenge script in it.
+    check(
+      "...and a challenge known only by the script in its page is named too",
+      /\n⚠ START PAGE BLOCKED — blocked by bot protection \(HTTP 503\): Cloudflare answered/.test(byPage),
+      byPage,
+    );
+  } finally {
+    await engine.close();
+  }
 }
 
 type FlowSummary = Summary & {
