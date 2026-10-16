@@ -52,14 +52,14 @@ export interface SnapshotElement extends InteractableInfo {
   coveredBy?: string | null;
   /** Set when a field's name is its placeholder, name attribute or type rather than a label. */
   nameFrom?: NameFrom | null;
-  /** Read by the geometry oracles (collector.ts GeometryElement). */
+  /** Read by the geometry oracles (geometry.ts GeometryElement). */
   focusable?: boolean;
   focusMoves?: boolean;
   passThrough?: boolean;
   fieldPad?: { l: number; r: number } | null;
   /** A user can act on it (collector isInteractive); false for what is listed only for its test id or its text. */
   interactive?: boolean;
-  /** For an element with no control role or native control: what alone makes it actionable (collector.ts affordanceFlags). */
+  /** For an element with no control role or native control: what alone makes it actionable (collector-elements.ts affordanceFlags). */
   affords?: Affordances | null;
   /** Inside an aria-hidden subtree. */
   ariaHidden?: boolean;
@@ -181,11 +181,11 @@ export class SnapshotCollector {
     elements: SnapshotElement[];
     truncated: boolean;
     forms: SeenForm[];
-    /** What past the element cap was left out (collector.ts cutSummary). */
+    /** What past the element cap was left out (collector-elements.ts cutSummary). */
     cut: CutElement[];
     /** The snapshot this collect's refs were carried over from, and how it relates to this page. */
     prev: PrevSnap | null;
-    /** For each element, its key in `prev`, or null when it is new since (collector.ts matchPrevious). */
+    /** For each element, its key in `prev`, or null when it is new since (collector-elements.ts matchPrevious). */
     matched: Array<string | null>;
     /** For each step between name rules, each listed key the rule before made differently, current → earlier (memory.ts KeyAliasSteps). */
     aliases: KeyAliasSteps;
@@ -205,13 +205,13 @@ export class SnapshotCollector {
       chrome?: boolean;
       coveredBy?: string | null;
       nameFrom?: NameFrom | null;
-      /** Its name under each earlier name rule, rule 1 first, when content named it (collector.ts PICK_NAME_SRC); not kept on the listed element. */
+      /** Its name under each earlier name rule, rule 1 first, when content named it (page-sources.ts PICK_NAME_SRC); not kept on the listed element. */
       priorNames?: string[];
       focusable?: boolean;
       focusMoves?: boolean;
       passThrough?: boolean;
       fieldPad?: { l: number; r: number } | null;
-      /** Read for the label policy only (collector.ts POLICY_TEXT_SRC); not kept on the listed element. */
+      /** Read for the label policy only (page-sources.ts POLICY_TEXT_SRC); not kept on the listed element. */
       ownText?: string;
       centre?: string[];
       interactive?: boolean;
@@ -249,7 +249,7 @@ export class SnapshotCollector {
     // disambiguated). When a key persists across snapshots of the same route,
     // its ref is REUSED — diffs stay meaningful and the agent's mental model
     // (and previously issued refs) survive re-snapshots. An element inside a
-    // frame carries the frame in its key (collector.ts frameElementKey).
+    // frame carries the frame in its key (frames.ts frameElementKey).
     const route = normalizePath(page.url());
     const prev = this.prevSnapFor(route);
     this.refs.clear();
