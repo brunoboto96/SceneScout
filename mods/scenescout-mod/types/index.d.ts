@@ -14,7 +14,7 @@ export type ScenescoutModDraft = {
 };
 
 export type ScenescoutModWizard = {
-  step: "welcome" | "configuring" | "confirm" | "running" | "results" | "card" | "safety";
+  step: "welcome" | "configuring" | "confirm" | "running" | "results" | "card" | "safety" | "tour";
   draft: ScenescoutModDraft;
   planId: string | null;
   plan: Record<string, unknown> | null;
@@ -25,6 +25,8 @@ export type ScenescoutModWizard = {
   pictureFiles: Record<string, string>;
   cardId: string | null;
   lastChoices: Record<string, unknown> | null;
+  tourPage: number;
+  returnTo: ScenescoutModWizard["step"] | null;
 };
 
 export type ScenescoutModStatus = {

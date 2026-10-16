@@ -9,6 +9,7 @@
  *   npx tsx --test scripts/install-test.ts
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,7 +34,8 @@ import {
   isEphemeralRoot,
   launchCommand,
   manualRegisterCommand,
-  NPX_SERVE_ARGS,
+  npxServeArgs,
+  isNpxServeArgs,
   parseRegistration,
   planCommand,
   registerMcp,
@@ -475,7 +477,8 @@ test("the plugin manifest ships the same version and starts the published server
   assert.equal(plugin.version, pkg.version);
   // The server entry must run the package that is actually published, through a bin it actually has.
   const server = plugin.mcpServers.scenescout;
-  assert.deepEqual([server.command, ...server.args], ["npx", "-y", pkg.name, "serve"]);
+  // Pinned to the release the plugin ships with: an unpinned `npx -y scenescout` would run whatever npm calls latest on every launch.
+  assert.deepEqual([server.command, ...server.args], ["npx", "-y", `${pkg.name}@${pkg.version}`, "serve"]);
   assert.ok("scenescout" in pkg.bin);
   // The install command in the README is `scenescout@<marketplace name>`; the
   // optional mod is listed after it as a plugin of its own.
@@ -606,6 +609,33 @@ test("the versioning step formats the files it rewrites", () => {
   const syncScript = fs.readFileSync(path.join(root, "scripts", "sync-plugin-version.mjs"), "utf8");
   assert.match(syncScript, /path\.join\("desktop-extension", "manifest\.json"\)/, "the sync moves the desktop extension's version with the package");
   assert.match(syncScript, /path\.join\("mods", "scenescout-mod", "\.claude-plugin", "plugin\.json"\)/, "the sync moves the mod's version with the package");
+});
+
+test("the versioning step moves the plugin's pinned server with the package version", () => {
+  // Run the real sync script over a copy of the three manifests with a new
+  // package version: the plugin's launch line must follow it, or the version
+  // pull request ships a plugin that still starts the previous release.
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const work = tmp("sc-sync-");
+  const files = [
+    path.join(".claude-plugin", "plugin.json"),
+    path.join("mods", "scenescout-mod", ".claude-plugin", "plugin.json"),
+    path.join("desktop-extension", "manifest.json"),
+    path.join("scripts", "sync-plugin-version.mjs"),
+  ];
+  for (const relative of files) {
+    fs.mkdirSync(path.dirname(path.join(work, relative)), { recursive: true });
+    fs.copyFileSync(path.join(repo, relative), path.join(work, relative));
+  }
+  const pkg = JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8")) as { name: string; version: string };
+  fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ ...pkg, version: "99.1.2" }));
+  execFileSync(process.execPath, [path.join(work, "scripts", "sync-plugin-version.mjs")], { stdio: "pipe" });
+  const read = (relative: string) => JSON.parse(fs.readFileSync(path.join(work, relative), "utf8"));
+  const plugin = read(files[0]);
+  assert.equal(plugin.version, "99.1.2");
+  assert.deepEqual(plugin.mcpServers[pkg.name].args, ["-y", `${pkg.name}@99.1.2`, "serve"], "the launch line moves with the version");
+  assert.equal(read(files[1]).version, "99.1.2");
+  assert.equal(read(files[2]).version, "99.1.2");
 });
 
 // ── The desktop extension (.mcpb) ────────────────────────────────────────────
@@ -984,17 +1014,28 @@ test("an install run through npx registers the npx launcher, never a path inside
   const bin = tmp("sc-nodebin-");
   const nodePath = path.join(bin, "node");
   fs.writeFileSync(path.join(bin, process.platform === "win32" ? "npx.cmd" : "npx"), "");
-  const launch = launchCommand({ packageRoot: cached, nodePath, serverPath: path.join(cached, "dist", "mcp-server.js") });
-  assert.deepEqual(launch.slice(1), NPX_SERVE_ARGS);
+  const launch = launchCommand({ packageRoot: cached, nodePath, serverPath: path.join(cached, "dist", "mcp-server.js"), version: "3.25.0" });
+  assert.deepEqual(
+    launch.slice(1),
+    ["-y", "scenescout@3.25.0", "serve"],
+    "the registration runs the version that registered it, not whatever npm calls latest",
+  );
+  assert.deepEqual(npxServeArgs("3.25.0"), launch.slice(1));
+  // A registration made before the pin (unpinned, or pinned to an older release) is still this launcher.
+  assert.equal(isNpxServeArgs("-y scenescout serve"), true);
+  assert.equal(isNpxServeArgs("-y scenescout@3.24.0 serve"), true);
+  assert.equal(isNpxServeArgs("-y scenescout@3.25.0 serve"), true);
+  assert.equal(isNpxServeArgs("-y other-pkg serve"), false);
+  assert.equal(isNpxServeArgs("-y scenescout@evil serve"), false);
   assert.ok(path.isAbsolute(launch[0]) && /npx(\.cmd)?$/.test(launch[0]), "an absolute npx beside the running node, so it starts under nvm too");
   assert.ok(!launch.join(" ").includes("_npx"), "nothing in the registration points into the cache");
   // A node that ships without npm: a bare npx on PATH beats an absolute path to nothing.
-  assert.equal(launchCommand({ packageRoot: cached, nodePath: path.join(tmp("sc-bare-"), "node"), serverPath: "x" })[0], "npx");
+  assert.equal(launchCommand({ packageRoot: cached, nodePath: path.join(tmp("sc-bare-"), "node"), serverPath: "x", version: "3.25.0" })[0], "npx");
 
   // A clone or a global install is stable: register the script directly.
   const stable = path.join(path.sep, "opt", "tools", "scenescout");
   const server = path.join(stable, "dist", "mcp-server.js");
-  assert.deepEqual(launchCommand({ packageRoot: stable, nodePath, serverPath: server }), [nodePath, server]);
+  assert.deepEqual(launchCommand({ packageRoot: stable, nodePath, serverPath: server, version: "3.25.0" }), [nodePath, server]);
 });
 
 test("diagnose accepts an npx registration and vets its launcher", () => {

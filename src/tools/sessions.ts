@@ -34,6 +34,7 @@ import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "../en
 import { RECORD_MAX_FRAMES } from "../engine/replay.js";
 import { describePace, normalizePace } from "../engine/settle.js";
 import { formatScan, scanProject } from "../scan.js";
+import { fsPolicyReader, policyNote, refusalText, resolveSettings, withProjectPolicy } from "../engine/project-config.js";
 import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, holdGuidedPlan, type CheckArea } from "../engine/guided.js";
 import { AREA_LABEL } from "../engine/guided-words.js";
 import { nowSentence } from "../engine/progress.js";
@@ -64,7 +65,9 @@ import {
   sessionQueue,
   guidedPlans,
   guidedRuns,
+  settleGuidedCall,
   guidedSessions,
+  operatorPolicy,
   callWork,
   CLOSE_WORK_WAIT_MS,
   flushAfterClose,
@@ -127,7 +130,7 @@ async function readyBrowserFor(need: LaunchNeed, extra?: RequestExtra): Promise<
  * projectPath given, else the client's workspace folder, else a folder per
  * tested site. Only a client that offers roots is asked for them.
  */
-async function projectFolderFor(url: string, given: string | undefined) {
+export async function projectFolderFor(url: string, given: string | undefined) {
   let workspace: string | null = null;
   if (given === undefined && server.server.getClientCapabilities()?.roots) {
     try {
@@ -235,8 +238,10 @@ export function registerSessionTools(): void {
           ),
         mode: z
           .enum(["observe", "read-only", "safe-write", "destructive"])
-          .default("read-only")
-          .describe("Write policy (see tool description). Never choose 'destructive' yourself — user opt-in only."),
+          .optional()
+          .describe(
+            "Write policy (see tool description). Default 'read-only', or the SceneScout config's maxMode when that is stricter; a mode above the config's maxMode is refused. Never choose 'destructive' yourself — user opt-in only.",
+          ),
         headed: z.boolean().default(false).describe("Show the browser window"),
         browser: z
           .enum(["chromium", "firefox", "webkit"])
@@ -402,13 +407,35 @@ export function registerSessionTools(): void {
         planId?: string;
       }) => {
         try {
-          // Before anything else: while a guided plan is open, nothing above observe starts without the person's confirmation (ADR 24).
-          const guided = guidedAttachVerdict(guidedPlans, { planId, mode: mode ?? "read-only", url, readPosts, trustedEmbeds });
-          if (!guided.ok) return errorText(new Error(`scout_attach refused: ${guided.why}`));
           // Settled first: a refusal leaves the default session as it was.
           const folder = await projectFolderFor(url, projectPath);
           if ("refused" in folder) return errorText(new Error(folder.refused));
           projectPath = folder.dir;
+          // Before anything starts: the operator's config, which the project's own file may only tighten (engine/project-config.ts).
+          const config = withProjectPolicy(operatorPolicy, projectPath, fsPolicyReader);
+          if (!config.ok) return errorText(new Error(`scout_attach refused: the project's SceneScout config is not valid: ${config.error}`));
+          const resolved = resolveSettings(
+            config.loaded,
+            process.env,
+            { mode, readPosts, trustedEmbeds, dedup, evidence },
+            // The default stays read-only while the guided gate is held, so an attach naming no plan is refused and told to name one (ADR 24).
+            { mode: "read-only", evidence: () => evidenceSettings(undefined, process.env).mode },
+          );
+          if (resolved.refused.length > 0) return errorText(new Error(`scout_attach ${refusalText(config.loaded, resolved.refused)}`));
+          const configNote = policyNote(config.loaded, resolved.notes);
+          mode = resolved.settings.mode;
+          // Then the guided gate: while a guided plan is open, nothing above observe starts without the person's confirmation (ADR 24).
+          // It judges what the agent passed, so readPosts and trustedEmbeds the config lists are not refused as the agent's.
+          const gate =
+            config.loaded.policy.requireGuidedPlan && !guidedPlans.requiredByConfig
+              ? { open: true, requiredByConfig: true, get: (id: string) => guidedPlans.get(id) }
+              : guidedPlans;
+          const guided = guidedAttachVerdict(gate, { planId, mode, url, readPosts, trustedEmbeds });
+          if (!guided.ok) return errorText(new Error(`scout_attach refused: ${guided.why}`));
+          readPosts = resolved.settings.readPosts;
+          trustedEmbeds = resolved.settings.trustedEmbeds;
+          dedup = resolved.settings.dedup;
+          evidence = resolved.settings.evidence;
           const target = session ?? activeName;
           if (session) {
             setActiveName(session);
@@ -521,8 +548,10 @@ export function registerSessionTools(): void {
           const carried = !!guided.plan && [...guidedSessions.values()].some((s) => s.planId === guided.plan!.planId);
           holdGuidedPlan(guidedSessions, guidedPlans, target, guided.plan?.planId);
           // The check starts with its first attach, and the status pane follows it from now on.
+          // A session attached without the plan it carried before: what went wrong in it there is not the plan's any more.
+          if (!guided.plan) guidedRuns.leave(target);
           if (guided.plan) {
-            guidedRuns.start(guided.plan.planId, Date.now(), carried);
+            guidedRuns.start(guided.plan.planId, Date.now(), carried, target);
             guidedRuns.step(guided.plan.planId, nowSentence("scout_attach", redactSecrets(eng.currentUrl)), Date.now());
           }
           // A new attach is a new count of pictures returned.
@@ -549,9 +578,10 @@ export function registerSessionTools(): void {
             pictures.mode !== "off" && eng.memory?.dir
               ? `\n📷 FINDING PICTURES: ${pictures.mode} (${pictures.source}): each scout_finding keeps a picture of what it names under ${path.join(eng.memory.dir, "recordings")}/ for report.html${pictures.mode === "inline" ? `, and returns the first ${pictures.inlineMax} in its result` : ""}.`
               : "";
-          return text(
+          const attached = text(
             browserNote +
               out +
+              configNote +
               (folder.note ? `\n\n${folder.note}` : "") +
               conflictNote +
               recordNote +
@@ -563,8 +593,14 @@ export function registerSessionTools(): void {
               openNote,
             target,
           );
+          // A saved sign-in that landed on a login page is the sign-in-expired screen (progress.ts).
+          settleGuidedCall(guided.plan?.planId, target, attached, eng.signInLost);
+          return attached;
         } catch (err) {
-          return errorText(err);
+          // An attach of a guided check that failed on the address or the browser download: the progress shows its screen.
+          const failed = errorText(err);
+          settleGuidedCall(planId && guidedPlans.get(planId) ? planId : undefined, session ?? activeName, failed, false);
+          return failed;
         }
       },
     ),
@@ -811,7 +847,10 @@ export function registerCloseTool(): void {
           for (const e of closing) flushAfterClose(e);
           for (const store of stores) store.endRun();
           sessionQueue.clear();
-          for (const name of [...guidedSessions.keys()]) holdGuidedPlan(guidedSessions, guidedPlans, name, null);
+          for (const name of [...guidedSessions.keys()]) {
+            holdGuidedPlan(guidedSessions, guidedPlans, name, null);
+            guidedRuns.leave(name);
+          }
           board.clear();
           laneLedger.clear();
           setLastWriter(null);
@@ -839,6 +878,7 @@ export function registerCloseTool(): void {
         if (eng.memory && ![...engines.values()].some((e) => e.memory === eng.memory)) eng.memory.endRun();
         sessionQueue.forget(name);
         holdGuidedPlan(guidedSessions, guidedPlans, name, null);
+        guidedRuns.leave(name);
         board.remove(name);
         laneLedger.forget(name);
         // The last session closing ends the run, and its lanes with it: a brief's

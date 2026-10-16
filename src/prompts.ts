@@ -14,8 +14,9 @@
  * The protocol server in tools/guide.ts lists them all; the SDK prompt helper
  * is not used, because it rejects a request that omits `arguments`.
  */
-import { CARES, checkAddress, type Care } from "./engine/guided.js";
+import { CARES, caresWithin, checkAddress, type Care } from "./engine/guided.js";
 import { ACTION_PROMPT, CARE_LABEL, careCapSentence, NOT_YET, PROMPT_TITLE, SAFETY_EXPLAINER } from "./engine/guided-words.js";
+import type { WriteMode } from "./engine/policy.js";
 import { validateRoleName } from "./engine/profiles.js";
 
 export const LIVE_PROMPT = "live";
@@ -192,6 +193,11 @@ export const GUIDED_PROMPTS: readonly ListedPrompt[] = [
     arguments: [],
   },
 ];
+
+/** The prompts' cap under the operator's config: the loosest care level its maxMode allows (engine/project-config.ts). No maxMode, no cap. */
+export function guidedPromptOptions(maxMode: WriteMode | undefined): GuidedPromptOptions {
+  return maxMode ? { maxCare: caresWithin(maxMode).at(-1) } : {};
+}
 
 /** The care levels a guided prompt may offer, loosest last, under a cap. */
 export function offeredCares(maxCare: Care | undefined): Care[] {

@@ -42,6 +42,33 @@ The server holds this, not the prompt. Once any guided plan has been built, `sco
 
 The person can mark a finding "not a bug" from its card (`scout_feedback`). That is a label, not a deletion: the finding stays in the project's memory with its id, a later check that finds the same problem adds to it rather than filing it again, and the cards and the status pane list it apart. Labels can be listed for a maintainer as candidates for the benchmark's answer key; they never change the key or the dedup by themselves.
 
+### Is it safe to run on my live site?
+
+This is the answer a guided check gives to that question, word for word: on the guided panel's **How it keeps your data safe** screen (also reached from **Is it safe on a live site?** beside the care levels) and wherever the chat answers it.
+
+> Look only, the default, opens pages and signs in. A search still runs, because all it does is open a page of results, but nothing that would save something is sent. Links are opened like any page, so a link that changes something just by being opened, such as an unsubscribe link, is not stopped. It is the safest choice for a live site.
+>
+> May submit forms sends forms, and presses buttons that send something. What it sends can create a record, or change one that was there, as it would for anyone who sent it; deletes are blocked. On a site that is not on this computer, it asks you first.
+>
+> May create test data creates the records it needs. What it sends can also change records that were there, but it deletes only what it created. It always asks you first, and is for a test copy only.
+>
+> Deleting data that was already there is never offered here.
+>
+> These limits are checked on every request your browser sends, not left to the AI's judgement. A request a care level does not allow never reaches your site. What a care level does allow, a form or a button, does on your site whatever it does for anyone who uses it.
+>
+> It never asks for your password. When your site needs one, a browser window opens for you to sign in as you normally would.
+
+## The config file sets the limits an agent cannot loosen
+
+Over MCP the agent chooses `scout_attach`'s arguments, including the mode, and an argument wins over the server's environment. So nothing above sets a limit the agent cannot pass. The [config file](Configuration-reference.md#the-config-file) does: a JSON file a team commits as `.scenescout/config.json`, which wins over the environment and over every argument.
+
+- **It caps, and the agent can only ask for less.** `maxMode` is the loosest mode any attach, `check`, `ci` or first look may use; an attach above it is refused before a browser starts, with the file named and the reason. `readPosts` and `trustedEmbeds` become the most an attach may name, `dedup: "rule"` keeps the model judge off, `evidence` caps what a finding's picture may do, and `requireGuidedPlan` holds the guided gate (above) from the server's start, so no attach goes above `observe` without the person's confirmation.
+- **The agent cannot choose where it comes from.** The server reads it from the directory it was started in, or from the file `SCENESCOUT_CONFIG` names, once, as it starts. The folder the agent names as `projectPath` may hold a config too, but that one can only tighten: a file the agent could point at is never the lock on its own.
+- **`strict` is the one-line setting** for a team that wants every agent to look only: `{"preset": "strict"}` sets `observe` as the most, requires a guided plan, allows no `readPosts` or `trustedEmbeds` from an argument, keeps the dedup judge off and keeps finding pictures out of the conversation.
+- **No file is today's behaviour,** and a file that is not valid stops the server as it starts rather than being half applied.
+
+What it does not do: it is a file in the repository and on the disk, so an agent with shell access could edit it, or start another server. Edited mid-run, it changes nothing until the server restarts. Review changes to it as you would a CI workflow, and keep the agent's own permissions from writing to it where your client allows that. The write policy's rules themselves are unchanged: the file chooses which mode they run in.
+
 ## What a refusal looks like
 
 ```mermaid

@@ -312,6 +312,8 @@ Which writes a flow may send, what happens when one is refused, and whether re-t
 !flows/*.json
 ```
 
+The [config file](guide/Configuration-reference.md#the-config-file), `.scenescout/config.json`, is committed too; a `.gitignore` SceneScout wrote before it existed needs `!config.json` as well.
+
 `--flows <dir>` replays another directory instead (the action's `flows` input, relative to `working-directory`), and `--flows off` replays none.
 
 ## Re-testing open findings

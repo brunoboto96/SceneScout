@@ -257,8 +257,15 @@ function quote(arg: string): string {
   return /^[A-Za-z0-9_\/.:=@-]+$/.test(arg) ? arg : `"${arg.replace(/(["\\$`])/g, "\\$1")}"`;
 }
 
-/** The arguments after `--` that start the published package through npx. */
-export const NPX_SERVE_ARGS = ["-y", "scenescout", "serve"];
+/** The arguments after `--` that start the published package through npx, pinned to `version` so a launch never runs a release the user has not installed. */
+export function npxServeArgs(version: string): string[] {
+  return ["-y", `${CLI_NAME}@${version}`, "serve"];
+}
+
+/** Whether a registered argument line is this package's npx launcher: unpinned (older installs) or pinned to any release. */
+export function isNpxServeArgs(args: string): boolean {
+  return /^-y scenescout(@\d+\.\d+\.\d+)? serve$/.test(args);
+}
 
 /**
  * The command Claude Code should run to start the server.
@@ -267,17 +274,17 @@ export const NPX_SERVE_ARGS = ["-y", "scenescout", "serve"];
  * plus the server script. From an npx run it must NOT be: the script then lives
  * in npm's cache, which npm may clear at any time, leaving a registration that
  * silently stops working. There the launcher is `npx -y scenescout serve`,
- * which fetches the package again if it has to.
+ * pinned to this version, which fetches the package again if it has to.
  *
  * Both use an ABSOLUTE binary path: Claude Code's launch environment often
  * lacks the shell PATH (nvm/fnm), and a bare "node" or "npx" fails to start.
  */
-export function launchCommand(opts: { packageRoot: string; nodePath: string; serverPath: string }): string[] {
+export function launchCommand(opts: { packageRoot: string; nodePath: string; serverPath: string; version: string }): string[] {
   if (!isEphemeralRoot(opts.packageRoot)) return [opts.nodePath, opts.serverPath];
   const npx = path.join(path.dirname(opts.nodePath), process.platform === "win32" ? "npx.cmd" : "npx");
   // Some Node installs ship without npm beside the binary; a bare "npx" that
   // resolves on PATH is better than an absolute path to nothing.
-  return [fs.existsSync(npx) ? npx : "npx", ...NPX_SERVE_ARGS];
+  return [fs.existsSync(npx) ? npx : "npx", ...npxServeArgs(opts.version)];
 }
 
 function mcpAddArgs(launch: string[]): string[] {
@@ -342,7 +349,7 @@ function describeOtherRegistration(opts: { launch: string[]; serverPath: string;
   const { command, serverPath: args } = parseRegistration(got.stdout + got.stderr);
   if (args === null) return null;
   const sameScript = samePath(args, opts.serverPath);
-  const sameNpx = args === NPX_SERVE_ARGS.join(" ");
+  const sameNpx = isNpxServeArgs(args);
   if (sameScript || sameNpx) return null;
   return `replaced an existing "${MCP_NAME}" registration that ran something else: ${[command, args].filter(Boolean).join(" ")} — re-register that one under a different name if you still need it`;
 }
@@ -594,7 +601,7 @@ export function diagnose(opts: {
         // An unreadable listing is not evidence of a wrong install; claiming so
         // would produce a failure that re-running install can never clear.
         checks.push({ name: "MCP server registered", ok: true, detail: "registered (could not read its path from `claude mcp get` to verify it)" });
-      } else if (serverPath === NPX_SERVE_ARGS.join(" ")) {
+      } else if (isNpxServeArgs(serverPath)) {
         // Registered through npx: there is no script path to compare, only the launcher to vet.
         const absolute = command !== null && path.isAbsolute(command);
         checks.push({

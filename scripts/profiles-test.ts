@@ -33,6 +33,7 @@ import {
   reloginCommand,
   resolveAttachAuth,
   roleLabel,
+  shellQuote,
   summarizeState,
   validateRoleName,
   writeProfile,
@@ -50,6 +51,7 @@ import {
   type SignInWatch,
 } from "../src/engine/signed-in.ts";
 import { cookieMatchesHost, describeLifetime, judgeLifetime, judgeProfileFile, jwtExpiry, readLifetime } from "../src/engine/expiry.ts";
+import { savedSignInHealth } from "../src/engine/guided.ts";
 
 const POSIX = process.platform !== "win32";
 const tempProject = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-profiles-"));
@@ -1006,4 +1008,97 @@ test("a scout_login window is waited on by every call for its role, and its outc
   await new Promise((r) => setImmediate(r));
   clock = 5000;
   assert.equal((await windows.get("p\0viewer", start)).window.id, 4);
+});
+
+test("a guided check's sign-in health: the saved profile against the check's time limit, each verdict as a pair either side of it", () => {
+  const dir = path.join(os.tmpdir(), "health-project");
+  const file = profilePath(dir, "user");
+  const health = (
+    state: unknown | null,
+    over: { thoroughness?: "quick" | "normal" | "thorough"; signIn?: "none" | "password"; projectChosen?: boolean } = {},
+  ) =>
+    savedSignInHealth({ address: APP, signIn: over.signIn ?? "password", thoroughness: over.thoroughness ?? "normal" }, dir, {
+      now: NOW,
+      projectChosen: over.projectChosen,
+      exists: (p) => p === file && state !== null,
+      read: () => (typeof state === "string" ? state : JSON.stringify(state)),
+    });
+  // A normal check is 20 minutes, and the profile must outlast it by the usual 10-minute margin: 30 minutes.
+  assert.equal(health(stateOf([cookie("sid", NOW + 31 * MIN)]))?.state, "lasts");
+  assert.equal(health(stateOf([cookie("sid", NOW + 29 * MIN)]))?.state, "runs-out", "a minute short of the check and its margin");
+  // The same profile is judged against the check's own limit: it lasts a quick look (10 + 10 minutes).
+  assert.equal(health(stateOf([cookie("sid", NOW + 29 * MIN)]), { thoroughness: "quick" })?.state, "lasts");
+  assert.equal(health(stateOf([cookie("sid", NOW - MIN)]))?.state, "runs-out", "already over");
+  assert.equal(health(stateOf([cookie("sid", -1)]))?.state, "unknown", "a session cookie has no date");
+  assert.equal(health(stateOf([cookie("csrf", NOW + 5 * MIN), cookie("sid", NOW + 2 * 86_400_000)]))?.state, "may-run-out", "one dated part ends inside it");
+  assert.equal(health(null)?.state, "none", "nothing saved yet");
+  assert.equal(health("{ not json")?.state, "unknown", "a profile that cannot be read is signed in again, without claiming it ran out");
+  // Every dated part outlives the check, but a session cookie with no date may end any time: not certain, so not "lasts".
+  assert.equal(health(stateOf([cookie("prefs", NOW + 2 * 365 * 86_400_000), cookie("sid", -1)]))?.state, "unknown");
+  assert.equal(health(stateOf([cookie("prefs", NOW + 2 * 365 * 86_400_000), cookie("sid", NOW + 31 * MIN)]))?.state, "lasts", "the same, every part dated");
+  // A cookie for another host may be what keeps the sign-in alive: not certain either.
+  assert.equal(health(stateOf([cookie("sid", NOW + 31 * MIN), cookie("idp", NOW + 31 * MIN, "v", "login.example.net")]))?.state, "unknown");
+  assert.equal(health(stateOf([cookie("sid", NOW + 31 * MIN)]), { signIn: "none" }), undefined, "a check with no sign-in has no health");
+  // The way to sign in again names the command, with the folder when SceneScout chose it.
+  const lasting = health(stateOf([cookie("sid", NOW + 31 * MIN)]))!;
+  assert.equal(lasting.signInAgain.command, `scenescout login ${APP} --role user`);
+  assert.equal(lasting.sentence, "Your saved sign-in to 127.0.0.1:3000 lasts the whole check, so you do not need to sign in again.");
+  // Quoted for this platform's shell: single quotes on POSIX, double quotes on Windows.
+  assert.ok(health(stateOf([cookie("sid", NOW + 31 * MIN)]), { projectChosen: true })!.signInAgain.command.endsWith(` --project ${shellQuote(dir)}`));
+  // Nothing of the profile's values reaches what the person or the agent reads.
+  for (const h of [lasting, health(stateOf([cookie("sid", NOW + 29 * MIN, "secret-session-value")]))!])
+    assert.ok(!JSON.stringify(h).includes("secret-session-value") && !JSON.stringify(h).includes("opaque-cookie-value"));
+});
+
+test("a guided check's sign-in health: a credential kept in sessionStorage or under a token's name counts, so it is never called lasting past it", () => {
+  const dir = path.join(os.tmpdir(), "health-storage-project");
+  const file = profilePath(dir, "user");
+  const health = (state: unknown) =>
+    savedSignInHealth({ address: APP, signIn: "password", thoroughness: "normal" }, dir, {
+      now: NOW,
+      exists: (p) => p === file,
+      read: () => JSON.stringify(state),
+    })?.state;
+  const longCookie = cookie("sid", NOW + 2 * 86_400_000);
+  const session = (origin: string, entries: { name: string; value: string }[]) => ({ ...stateOf([longCookie]), sessionStorage: [{ origin, entries }] });
+  // A token in sessionStorage that ends inside the check: the check would sign out half-way.
+  assert.equal(health(session(APP, [{ name: "accessToken", value: jwt(NOW + 5 * MIN) }])), "may-run-out");
+  assert.equal(health(session(APP, [{ name: "accessToken", value: jwt(NOW + 2 * 86_400_000) }])), "lasts", "the same token dated past the check");
+  // One with no expiry may end any time.
+  assert.equal(health(session(APP, [{ name: "accessToken", value: jwt() }])), "unknown");
+  // Another origin's sessionStorage does not sign this app in.
+  assert.equal(health(session("http://127.0.0.1:4000", [{ name: "accessToken", value: jwt(NOW + 5 * MIN) }])), "lasts");
+  // A value that is no JWT but is kept under a token's name is a credential with no date; a preference is not a credential.
+  assert.equal(health(stateOf([longCookie], [{ name: "authToken", value: "opaque-1234" }])), "unknown");
+  assert.equal(health(session(APP, [{ name: "access_token", value: "opaque-1234" }])), "unknown");
+  assert.equal(health(stateOf([longCookie], [{ name: "theme", value: "dark" }])), "lasts");
+  // readLifetime names it by its key only, as it does a localStorage one.
+  const life = readLifetime(session(APP, [{ name: "accessToken", value: jwt(NOW + 5 * MIN) }]), { url: APP });
+  assert.deepEqual(
+    life.dated.map((c) => [c.source, c.name]),
+    [
+      ["session-storage-jwt", "accessToken"],
+      ["cookie", "sid"],
+    ],
+  );
+});
+
+test("a guided check's sign-in again: the address is quoted for a shell and for the agent", () => {
+  const dir = path.join(os.tmpdir(), "health-quote-project");
+  const address = "http://127.0.0.1:3000/app?tab=1&view=$(id)";
+  const h = savedSignInHealth({ address, signIn: "password", thoroughness: "normal" }, dir, { now: NOW, exists: () => false })!;
+  assert.equal(h.signInAgain.command, `scenescout login ${shellQuote(address)} --role user`);
+  assert.equal(shellQuote(address, "linux"), `'${address}'`, "single quotes keep the shell from reading & and $( ) on POSIX");
+  assert.equal(shellQuote(address, "win32"), `"${address}"`, "double quotes on Windows");
+  assert.equal(h.signInAgain.prompt, `Sign me in to ${address} again for SceneScout: call scout_login {"url":"${address}","role":"user"}.`);
+  const quoted = savedSignInHealth({ address: 'http://127.0.0.1:3000/a"b', signIn: "password", thoroughness: "normal" }, dir, {
+    now: NOW,
+    exists: () => false,
+  })!;
+  assert.ok(quoted.signInAgain.prompt.includes('{"url":"http://127.0.0.1:3000/a\\"b","role":"user"}'), quoted.signInAgain.prompt);
+  // A plain address stays as it was.
+  assert.equal(
+    savedSignInHealth({ address: APP, signIn: "password", thoroughness: "normal" }, dir, { now: NOW, exists: () => false })!.signInAgain.command,
+    `scenescout login ${APP} --role user`,
+  );
 });

@@ -774,6 +774,8 @@ export class BrowserEngine {
 
   /** Login-bounce streak, the SESSION AUTH LOST verdict, and the per-call notice. */
   private readonly authLoss = new AuthLossTracker();
+  /** Whether the latest attach, given a saved sign-in, landed on a login page. */
+  private attachSignInFailed = false;
 
   /**
    * The refresh broker for a role session: the role's profile, and the
@@ -1457,6 +1459,11 @@ export class BrowserEngine {
     return reloginCommand({ role, url: this.baseUrl, ...this.loginProject });
   }
 
+  /** Whether this session's sign-in is gone: its attach landed on a login page, or its navigations have since (authloss.ts). */
+  get signInLost(): boolean {
+    return this.attachSignInFailed || this.authLoss.lost;
+  }
+
   get attached(): boolean {
     return this.page !== null;
   }
@@ -1909,6 +1916,7 @@ export class BrowserEngine {
     this.watchesForBounce = Boolean(storageStatePath);
     const landed = await this.stableUrl();
     const authFailed = Boolean(storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
+    this.attachSignInFailed = authFailed;
     // An earlier run may have written down how this app's login state is
     // regenerated. "Regenerate it" is advice the reader already had; the
     // command that worked last time is the part worth keeping.

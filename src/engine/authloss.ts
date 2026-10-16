@@ -164,6 +164,17 @@ export class AuthLossTracker {
     return { returnTo: this.awaiting.returnTo, retry: this.awaiting.retry };
   }
 
+  /**
+   * Whether the session's sign-in is gone now: the streak has reached the
+   * verdict and no re-attach is still to say otherwise. A navigation that
+   * lands signed in, a re-attach that recovers, and a new attach each end it.
+   * A session given no sign-in has none to lose: its bounces are the site's
+   * access rule, reported by the verdict's notice, not a sign-in that ran out.
+   */
+  get lost(): boolean {
+    return this.signIn !== "none" && this.streak >= AUTH_LOSS_STREAK && this.awaiting === null;
+  }
+
   /** Whether a re-attach was taken and the navigation that decides it has not been recorded. */
   get reattaching(): boolean {
     return this.awaiting !== null;

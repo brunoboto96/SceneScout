@@ -39,7 +39,8 @@ import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { SERVER_INSTRUCTIONS } from "./playbook.js";
 import { type EvidenceSettings } from "./engine/capture.js";
 import { GuidedPlans, type CheckArea } from "./engine/guided.js";
-import { GuidedRuns, nowSentence } from "./engine/progress.js";
+import { NO_POLICY, type LoadedPolicy } from "./engine/project-config.js";
+import { GuidedRuns, nowSentence, troubleOfResult, troubleTell } from "./engine/progress.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
 export const engines = new Map<string, BrowserEngine>();
@@ -528,6 +529,7 @@ export function serializedPerSession<A>(
         const work = fn(args, session);
         callWork.track(session, work);
         const out = await withWatchdog(label, work, watchdogMs, watchdogTimeout);
+        settleGuidedCall(guidedSessions.get(session)?.planId, session, out, engines.get(session)?.signInLost ?? false);
         // `activeName` is process-global and every scout_attach moves it. With
         // several sessions live — the multi-role runs this tool encourages —
         // an omitted `session` silently binds to whichever browser attached
@@ -634,6 +636,19 @@ export const guidedSessions = new Map<string, { planId?: string; area?: CheckAre
 export const guidedRuns = new GuidedRuns();
 
 /**
+ * A call of a guided check has settled: keep what went wrong in it for the
+ * progress (the plain error screens), and, the first time, end its result
+ * with the sentence the panel shows, for the agent to tell the person.
+ */
+export function settleGuidedCall(planId: string | undefined, session: string, result: ToolResult, signInLost: boolean): void {
+  if (!planId) return;
+  const trouble = troubleOfResult(result, signInLost);
+  const plan = guidedPlans.get(planId);
+  if (guidedRuns.settle(planId, session, trouble) && trouble && plan)
+    result.content.push({ type: "text", text: `\n${troubleTell(trouble, plan.choices.address)}` });
+}
+
+/**
  * The engine whose project the person is shown, for tools that read the
  * project without a session of their own (the status pane, scout_cards,
  * scout_feedback): a session carrying the guided plan on show, else the
@@ -644,6 +659,10 @@ export function projectEngine(): BrowserEngine | undefined {
   const carrying = focused ? [...guidedSessions.entries()].filter(([, s]) => s.planId === focused).map(([name]) => engines.get(name)) : [];
   return [...carrying, lastWriter ? engines.get(lastWriter.session) : undefined, ...engines.values()].find((e): e is BrowserEngine => !!e?.memory);
 }
+
+// The operator's SceneScout config, read once as the server starts (mcp-server.ts, engine/project-config.ts).
+// Nothing a tool is passed changes it: scout_attach applies it, and a project's own file may only tighten it.
+export let operatorPolicy: LoadedPolicy = NO_POLICY;
 
 // Assignments from the tool modules: an imported binding is read-only, so each
 // variable above that a tool sets has its setter here, one per variable.
@@ -661,4 +680,7 @@ export function setLiveOpened(opened: boolean): void {
 }
 export function setOpenWhySaid(said: boolean): void {
   openWhySaid = said;
+}
+export function setOperatorPolicy(loaded: LoadedPolicy): void {
+  operatorPolicy = loaded;
 }

@@ -184,7 +184,7 @@ npx -y scenescout doctor                       # every line should be a ✓
 Use SceneScout to test http://localhost:3000
 ```
 
-In Claude Code there is a command too: `/scenescout --url http://localhost:3000 --level medium`. On its own, `/scenescout` asks instead: where your client can show a form, one guided form (the address, what to check, how you sign in, how careful to be and how thorough), and otherwise four plain questions in chat. A care level that writes on a site that is not on your computer, or that creates test data, asks you to confirm it in a second form the agent cannot answer ([care levels](docs/guide/Safety-model.md#care-levels-in-a-guided-check)). While it runs, `scout_status` follows the check in plain words, and at the end the problems come back as cards you can mark "not a bug". Rather press buttons than write prompts? The optional mod's `/scenescout-guided` panel does the same from a form in the Claude Code CLI or the desktop Code tab ([the mod](docs/guide/Ways-to-use-it.md#the-claude-code-mod)).
+In Claude Code there is a command too: `/scenescout --url http://localhost:3000 --level medium`. On its own, `/scenescout` asks instead: where your client can show a form, one guided form (the address, what to check, how you sign in, how careful to be and how thorough), and otherwise four plain questions in chat. A care level that writes on a site that is not on your computer, or that creates test data, asks you to confirm it in a second form the agent cannot answer ([care levels](docs/guide/Safety-model.md#care-levels-in-a-guided-check)). While it runs, `scout_status` follows the check in plain words, says what went wrong in one sentence with one thing to do (the site does not open, the sign-in ran out, the check ran out of time), and at the end the problems come back as cards you can mark "not a bug". [Is it safe to run on my live site?](docs/guide/Safety-model.md#is-it-safe-to-run-on-my-live-site) Rather press buttons than write prompts? The optional mod's `/scenescout-guided` panel does the same from a form in the Claude Code CLI or the desktop Code tab ([the mod](docs/guide/Ways-to-use-it.md#the-claude-code-mod)).
 
 **3. Read the report** in `.scenescout/report.md`. It opens in plain words (each problem, its steps, what was expected and what happened), with the technical detail one click away. [A complete example](examples/report.md).
 
@@ -243,6 +243,8 @@ The preview commands test a deployed preview, so the pull request's code never r
 | 🟢 `read-only` | Reads and ordinary form posts; nothing existing is changed or deleted. The default for an agent's run on a local app |
 | 🟡 `safe-write` | Creates records, and edits or deletes only the ones it created |
 | 🔴 `destructive` | Everything. Only when you say the data is disposable; the agent never picks it |
+
+A team can commit `.scenescout/config.json` to cap what any agent may choose, for example `{"preset": "strict"}` to keep every run to reads only ([the config file](docs/guide/Configuration-reference.md#the-config-file)).
 
 The policy sits on the network, so a blocked request never reaches your server. The page gets a refusal instead, which is how SceneScout catches a page that claims success anyway. A saved journey that creates something, like the order above, runs only when the check is told `--flow-writes allow`, against a test environment. Findings, memory and reports stay in a `.scenescout/` folder that keeps itself out of git.
 

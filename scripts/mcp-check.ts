@@ -1476,6 +1476,135 @@ function ticketDirsStartupCheck(): void {
   );
 }
 
+/** A prompt's text, as the chat would show it. */
+function promptTextOf(result: { messages: Array<{ content: { type: string; text?: string } }> }): string {
+  return result.messages.map((m) => (m.content.type === "text" ? (m.content.text ?? "") : "")).join("\n");
+}
+
+/**
+ * The operator's config (engine/project-config.ts, issue #546), over the wire:
+ * a server started with a config refuses an attach that asks for more than it
+ * allows, before any browser starts, and says why; an attach that asks for
+ * nothing is lowered to it; a project's own file tightens a server that has
+ * none; and a config that is not valid stops the server as it starts.
+ */
+async function configCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-config-"));
+  const projectDir = path.join(dir, "project");
+  fs.mkdirSync(projectDir);
+  const configFile = (name: string, body: unknown): string => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, typeof body === "string" ? body : JSON.stringify(body));
+    return file;
+  };
+  const base = Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none" }).filter(
+      (e): e is [string, string] => typeof e[1] === "string" && e[0] !== "SCENESCOUT_CONFIG",
+    ),
+  );
+  const withServer = async (
+    env: Record<string, string>,
+    use: (
+      attach: (args: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>,
+      call: (name: string, args: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>,
+      client: Client,
+    ) => Promise<void>,
+  ) => {
+    const client = new Client({ name: "ft-check-config", version: "0.0.1" });
+    await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env: { ...base, ...env }, cwd: dir }));
+    try {
+      const call = async (name: string, args: Record<string, unknown>) => {
+        const r = (await client.callTool({ name, arguments: args })) as ToolText & { isError?: boolean };
+        return { isError: r.isError === true, text: textOf(r) };
+      };
+      await use((args) => call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, ...args }), call, client);
+      assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
+    } finally {
+      await client.close();
+    }
+  };
+  try {
+    const observeOnly = configFile("observe.json", { maxMode: "observe" });
+    await withServer({ SCENESCOUT_CONFIG: observeOnly }, async (attach) => {
+      const refused = await attach({ mode: "read-only" });
+      if (
+        !refused.isError ||
+        !refused.text.includes(`refused by the SceneScout config (${observeOnly}): mode "read-only" is above the config's maxMode "observe"`)
+      )
+        fail(`a server whose config sets maxMode observe did not refuse a read-only attach, naming the file:\n${refused.text}`);
+      const lowered = await attach({});
+      if (lowered.isError || !lowered.text.includes("🔒 CONFIG") || !/mode "observe": the default "read-only" is above the config's maxMode/.test(lowered.text))
+        fail(`an attach naming no mode under maxMode observe did not start in observe, saying so:\n${lowered.text}`);
+    });
+    const strict = configFile("strict.json", { preset: "strict" });
+    await withServer({ SCENESCOUT_CONFIG: strict }, async (attach) => {
+      const posts = await attach({ mode: "observe", readPosts: ["POST /api/search"] });
+      if (!posts.isError || !/the config allows no readPosts/.test(posts.text))
+        fail(`the strict preset did not refuse readPosts from an attach:\n${posts.text}`);
+      const above = await attach({ mode: "read-only" });
+      if (!above.isError || !/maxMode "observe"/.test(above.text)) fail(`the strict preset did not refuse a read-only attach:\n${above.text}`);
+    });
+    // requireGuidedPlan alone: the gate holds from the start, before any plan is built.
+    await withServer({ SCENESCOUT_CONFIG: configFile("guided.json", { requireGuidedPlan: true }) }, async (attach) => {
+      const r = await attach({ mode: "read-only" });
+      if (!r.isError || !/requires a guided plan \(requireGuidedPlan\)/.test(r.text))
+        fail(`requireGuidedPlan did not hold the guided gate from the server's start:\n${r.text}`);
+    });
+    // No operator config, a project file that sets one: the project's file tightens; the same attach without it goes ahead.
+    await withServer({}, async (attach) => {
+      const free = await attach({ session: "free" });
+      if (free.isError || free.text.includes("CONFIG") || !/read-only/.test(free.text))
+        fail(`with no config, an attach naming no mode did not start in read-only as it always has:\n${free.text}`);
+      fs.mkdirSync(path.join(projectDir, ".scenescout"), { recursive: true });
+      fs.writeFileSync(path.join(projectDir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "observe" }));
+      const tightened = await attach({ mode: "read-only", session: "tight" });
+      if (!tightened.isError || !/maxMode "observe"/.test(tightened.text))
+        fail(`a project's own config did not tighten a server with none:\n${tightened.text}`);
+      // requireGuidedPlan in the project's own file holds the gate too.
+      fs.writeFileSync(path.join(projectDir, ".scenescout", "config.json"), JSON.stringify({ requireGuidedPlan: true }));
+      const gated = await attach({ mode: "read-only", session: "gated" });
+      if (!gated.isError || !/requires a guided plan/.test(gated.text))
+        fail(`requireGuidedPlan in a project's own config did not hold the guided gate:\n${gated.text}`);
+    });
+    // No SCENESCOUT_CONFIG: the file in the directory the server started in is the lock, and the folder the agent names
+    // as projectPath cannot loosen it. The guided plan offers no care level above it either.
+    fs.mkdirSync(path.join(dir, ".scenescout"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "observe" }));
+    fs.writeFileSync(path.join(projectDir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "destructive" }));
+    await withServer({}, async (attach, call, client) => {
+      const loosen = await attach({ mode: "read-only" });
+      if (!loosen.isError || !/refused by the SceneScout config/.test(loosen.text) || !/maxMode "observe"/.test(loosen.text))
+        fail(`a project's own config loosened the launch directory's, or the launch directory's was not read:\n${loosen.text}`);
+      const plan = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms"], care: "may-submit-forms" } });
+      if (!plan.isError || !/the SceneScout config/.test(plan.text)) fail(`scout_guided_plan built a plan above the config's maxMode:\n${plan.text}`);
+      const look = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms"], care: "look-only" } });
+      if (look.isError) fail(`scout_guided_plan refused Look only under maxMode observe:\n${look.text}`);
+      // The chat's guided prompts offer no care level above it.
+      const prompt = promptTextOf(await client.getPrompt({ name: "check-my-site" }));
+      if (!prompt.includes('allows no care level above "Look only"') || prompt.includes('"May submit forms"'))
+        fail(`the Check my site prompt offered a care level above the config's maxMode observe:\n${prompt}`);
+    });
+    fs.rmSync(path.join(dir, ".scenescout"), { recursive: true });
+    fs.rmSync(path.join(projectDir, ".scenescout", "config.json"));
+    // A config that is not valid stops the server as it starts, naming the key.
+    const bad = spawnSync(process.execPath, [serverPath], {
+      input: "",
+      encoding: "utf8",
+      timeout: 30_000,
+      env: { ...base, SCENESCOUT_CONFIG: configFile("bad.json", { maxMode: "observe", egres: "none" }) },
+    });
+    if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
+      fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
+    console.log(
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+    );
+  } finally {
+    await fixture.close();
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 async function main(): Promise<void> {
   // On a desktop the server opens the live view and the report by default; a check opens nothing.
   const transport = new StdioClientTransport({ command: "node", args: [serverPath], env: { ...getDefaultEnvironment(), SCENESCOUT_OPEN: "none" } });
@@ -1561,8 +1690,6 @@ async function main(): Promise<void> {
     console.error(`MCP CHECK FAILED — an unknown level was not refused with the choices. Got: ${JSON.stringify(refused)}`);
     process.exit(1);
   }
-  const promptTextOf = (result: { messages: Array<{ content: { type: string; text?: string } }> }): string =>
-    result.messages.map((m) => (m.content.type === "text" ? (m.content.text ?? "") : "")).join("\n");
   const liveListed = prompts.find((p) => p.name === "live");
   const loginListed = prompts.find((p) => p.name === "login");
   const liveGot = await client.getPrompt({ name: "live" });
@@ -1800,6 +1927,7 @@ async function main(): Promise<void> {
   await openCheck();
   await intakeCheck();
   await guidedCheck();
+  await configCheck();
   await guidedCardsCheck();
   await abandonedCallCheck();
   ticketDirsStartupCheck();
