@@ -252,7 +252,7 @@ A JSON file a team commits to set what SceneScout may do, which no agent can loo
 | Key | Values | Unset | What it does |
 |---|---|---|---|
 | `preset` | `strict` | none | Starts from a preset (below). A key set beside it replaces the preset's value for that key |
-| `maxMode` | `observe`, `read-only`, `safe-write`, `destructive` | no limit | The loosest write mode any attach, `check`, `ci` or first look may run in. An attach or `--mode` above it is refused; an attach that names no mode, and a command with no `--mode`, start in it when the default `read-only` is above it. The guided intake form offers no care level above it, and `scout_guided_plan` refuses one |
+| `maxMode` | `observe`, `read-only`, `safe-write`, `destructive` | no limit | The loosest write mode any attach, `check`, `ci` or first look may run in. An attach or `--mode` above it is refused; an attach that names no mode, and a command with no `--mode`, start in it when the default `read-only` is above it. The guided intake form and the chat's guided prompts offer no care level above it, and `scout_guided_plan` refuses one |
 | `requireGuidedPlan` | `true`, `false` | `false` | Holds the guided gate from the server's start: an attach above `observe` needs an accepted guided plan's `planId`, and `readPosts` or `trustedEmbeds` from an attach are refused, as when a plan has been built ([Safety model](Safety-model.md#care-levels-in-a-guided-check)). `ci` drives its own server, which reads the same file, so a `ci` run above `observe` is refused at its attach |
 | `readPosts` | a list of `"POST /path"` or `"POST https://host/path"` entries, at most 20 | no limit | The only POST endpoints an attach may name as reads, and the ones it gets when it names none. `[]` allows none. `SCENESCOUT_READ_POSTS` may narrow it; entries it names outside the list are left out. `check`, `ci` and a first look get the same list |
 | `trustedEmbeds` | a list of `https://host` origins, at most 10 | no limit | The only embedded-frame origins an attach may trust, and the ones it gets when it names none. `[]` allows none |
@@ -528,6 +528,11 @@ Clients that list the server's prompts offer these as commands, beside `scout_pl
 | `explore` | `url` (optional), `level` (optional), `focus` (optional) | Start an exploratory session: load the method, and use whatever of the address, level and focus was given. With no arguments, ask the plain questions first |
 | `live` | none | Return the loopback live-view URL for the current session. Where the host can open a URL, it may open that address |
 | `login` | `role` (required), `url` (optional) | Call `scout_login` for that role and wait the way that tool waits. The person signs in in the window it opens. `url` is the app's address when you have it |
+| `check-my-site` | `url` (optional) | Shown as *Check my site*. Call `scout_intake` (with the address when given), follow the guided plan it returns, show progress with `scout_status`, and end with `scout_cards` and the follow-up prompts. Never choose a care level for the person. An address with a user name, password or token in it, or with a space, line break or hidden character, is refused without being repeated |
+| `recheck` | none | Shown as *Re-check after a fix*. Attach in `observe` only, list the open findings with `scout_verify`, re-test each and record its verdict, then show the cards that changed |
+| `team-report` | none | Shown as *Make a team report*. Say the shareable team report is coming in a later version, then write the plain report (`scout_report {report: "qa"}`) and say where `report.html` is |
+| `file-tickets` | `to` (optional) | Shown as *File problems as tickets*. `to` is `github` or `jira`. Files nothing from the chat: show the cards, then give the `scenescout export` command a developer runs (a dry run unless `--yes`), and never ask for a token |
+| `is-it-safe` | none | Shown as *Is it safe to run on my live site?*. Reply with the guided safety explainer word for word, calling no tool |
 
 ## Claude Code mod settings
 

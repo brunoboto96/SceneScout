@@ -1476,6 +1476,11 @@ function ticketDirsStartupCheck(): void {
   );
 }
 
+/** A prompt's text, as the chat would show it. */
+function promptTextOf(result: { messages: Array<{ content: { type: string; text?: string } }> }): string {
+  return result.messages.map((m) => (m.content.type === "text" ? (m.content.text ?? "") : "")).join("\n");
+}
+
 /**
  * The operator's config (engine/project-config.ts, issue #546), over the wire:
  * a server started with a config refuses an attach that asks for more than it
@@ -1503,6 +1508,7 @@ async function configCheck(): Promise<void> {
     use: (
       attach: (args: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>,
       call: (name: string, args: Record<string, unknown>) => Promise<{ isError: boolean; text: string }>,
+      client: Client,
     ) => Promise<void>,
   ) => {
     const client = new Client({ name: "ft-check-config", version: "0.0.1" });
@@ -1512,7 +1518,7 @@ async function configCheck(): Promise<void> {
         const r = (await client.callTool({ name, arguments: args })) as ToolText & { isError?: boolean };
         return { isError: r.isError === true, text: textOf(r) };
       };
-      await use((args) => call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, ...args }), call);
+      await use((args) => call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, ...args }), call, client);
       assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
     } finally {
       await client.close();
@@ -1566,7 +1572,7 @@ async function configCheck(): Promise<void> {
     fs.mkdirSync(path.join(dir, ".scenescout"), { recursive: true });
     fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "observe" }));
     fs.writeFileSync(path.join(projectDir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "destructive" }));
-    await withServer({}, async (attach, call) => {
+    await withServer({}, async (attach, call, client) => {
       const loosen = await attach({ mode: "read-only" });
       if (!loosen.isError || !/refused by the SceneScout config/.test(loosen.text) || !/maxMode "observe"/.test(loosen.text))
         fail(`a project's own config loosened the launch directory's, or the launch directory's was not read:\n${loosen.text}`);
@@ -1574,6 +1580,10 @@ async function configCheck(): Promise<void> {
       if (!plan.isError || !/the SceneScout config/.test(plan.text)) fail(`scout_guided_plan built a plan above the config's maxMode:\n${plan.text}`);
       const look = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms"], care: "look-only" } });
       if (look.isError) fail(`scout_guided_plan refused Look only under maxMode observe:\n${look.text}`);
+      // The chat's guided prompts offer no care level above it.
+      const prompt = promptTextOf(await client.getPrompt({ name: "check-my-site" }));
+      if (!prompt.includes('allows no care level above "Look only"') || prompt.includes('"May submit forms"'))
+        fail(`the Check my site prompt offered a care level above the config's maxMode observe:\n${prompt}`);
     });
     fs.rmSync(path.join(dir, ".scenescout"), { recursive: true });
     fs.rmSync(path.join(projectDir, ".scenescout", "config.json"));
@@ -1587,7 +1597,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();
@@ -1680,8 +1690,6 @@ async function main(): Promise<void> {
     console.error(`MCP CHECK FAILED — an unknown level was not refused with the choices. Got: ${JSON.stringify(refused)}`);
     process.exit(1);
   }
-  const promptTextOf = (result: { messages: Array<{ content: { type: string; text?: string } }> }): string =>
-    result.messages.map((m) => (m.content.type === "text" ? (m.content.text ?? "") : "")).join("\n");
   const liveListed = prompts.find((p) => p.name === "live");
   const loginListed = prompts.find((p) => p.name === "login");
   const liveGot = await client.getPrompt({ name: "live" });
@@ -1701,7 +1709,7 @@ async function main(): Promise<void> {
     prompts
       .map((p) => p.name)
       .sort()
-      .join(",") !== "explore,live,login" ||
+      .join(",") !== "check-my-site,explore,file-tickets,is-it-safe,live,login,recheck,team-report" ||
     (liveListed?.arguments ?? []).length !== 0 ||
     !liveText.includes("127.0.0.1") ||
     !/scout_session with no arguments/.test(liveText) ||
@@ -1723,6 +1731,45 @@ async function main(): Promise<void> {
   }
   console.log("✓ the method reaches a client through instructions, scout_playbook and the explore prompt");
   console.log("✓ live and login prompts are listed, name no password, and tell the model what to return or call");
+  // The guided prompts: listed with the panel's titles, one round trip with an address, and a refusal that repeats nothing.
+  const checkListed = prompts.find((p) => p.name === "check-my-site");
+  const checkGot = promptTextOf(await client.getPrompt({ name: "check-my-site", arguments: { url: "http://localhost:3000" } }));
+  const checkBare = promptTextOf(await client.getPrompt({ name: "check-my-site" }));
+  const checkSecret = await client.getPrompt({ name: "check-my-site", arguments: { url: "https://bob:hunter2pass@staging.example.com" } }).then(
+    () => "accepted",
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  const safeGot = promptTextOf(await client.getPrompt({ name: "is-it-safe" }));
+  const ticketsTo = await client.getPrompt({ name: "file-tickets", arguments: { to: "ghp_A1b2C3d4E5f6G7h8" } }).then(
+    () => "accepted",
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  const titles = Object.fromEntries(prompts.map((p) => [p.name, p.title]));
+  if (
+    checkListed?.title !== "Check my site" ||
+    titles["recheck"] !== "Re-check after a fix" ||
+    titles["team-report"] !== "Make a team report" ||
+    titles["file-tickets"] !== "File problems as tickets" ||
+    titles["is-it-safe"] !== "Is it safe to run on my live site?" ||
+    (checkListed.arguments ?? []).map((a) => `${a.name}:${a.required === true}`).join(",") !== "url:false" ||
+    !checkGot.includes('Call scout_intake with {"url":"http://localhost:3000"}') ||
+    !checkBare.includes("Call scout_intake with no arguments") ||
+    !/scout_cards/.test(checkGot) ||
+    checkSecret.includes("hunter2pass") ||
+    !/no user name or password in the address/.test(checkSecret) ||
+    !/word for word/.test(safeGot) ||
+    !safeGot.includes("It never asks for your password.") ||
+    ticketsTo.includes("ghp_") ||
+    !/to must be github or jira/.test(ticketsTo)
+  ) {
+    console.error(
+      `MCP CHECK FAILED — a guided prompt is missing, mistitled, or does not say what to call, or a refusal repeats what it refused.\n` +
+        `titles: ${JSON.stringify(titles)}\ncheck-my-site: ${JSON.stringify(checkGot.slice(0, 300))}\n` +
+        `credential url: ${JSON.stringify(checkSecret)}\nfile-tickets to: ${JSON.stringify(ticketsTo)}`,
+    );
+    process.exit(1);
+  }
+  console.log("✓ the guided prompts are listed with the panel's titles, check-my-site starts scout_intake with its address, and refusals repeat nothing");
 
   // The SKILL is the agent's entire methodology — a tool it never mentions is
   // effectively unshipped, however well the engine implements it. scout_scroll
@@ -1820,7 +1867,7 @@ async function main(): Promise<void> {
   }
   // Prompt names and arguments, held to prompts/list the same way tool options are held to their schemas.
   const promptSection = (reference.split("\n## MCP prompts\n")[1] ?? "").split("\n## ")[0];
-  const promptRows = [...promptSection.matchAll(/^\| `([a-z]+)` \| ([^|\n]+) \|/gm)];
+  const promptRows = [...promptSection.matchAll(/^\| `([a-z][a-z-]*)` \| ([^|\n]+) \|/gm)];
   const listedPrompts = new Map<string, Array<{ name: string; required: boolean }>>();
   if (!promptSection) guideGaps.push("Configuration-reference.md has no MCP prompts section");
   for (const row of promptRows) {
