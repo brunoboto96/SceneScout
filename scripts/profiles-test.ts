@@ -33,6 +33,7 @@ import {
   reloginCommand,
   resolveAttachAuth,
   roleLabel,
+  shellQuote,
   summarizeState,
   validateRoleName,
   writeProfile,
@@ -1042,7 +1043,8 @@ test("a guided check's sign-in health: the saved profile against the check's tim
   const lasting = health(stateOf([cookie("sid", NOW + 31 * MIN)]))!;
   assert.equal(lasting.signInAgain.command, `scenescout login ${APP} --role user`);
   assert.equal(lasting.sentence, "Your saved sign-in to 127.0.0.1:3000 lasts the whole check, so you do not need to sign in again.");
-  assert.match(health(stateOf([cookie("sid", NOW + 31 * MIN)]), { projectChosen: true })!.signInAgain.command, /--project '.*health-project'$/);
+  // Quoted for this platform's shell: single quotes on POSIX, double quotes on Windows.
+  assert.ok(health(stateOf([cookie("sid", NOW + 31 * MIN)]), { projectChosen: true })!.signInAgain.command.endsWith(` --project ${shellQuote(dir)}`));
   // Nothing of the profile's values reaches what the person or the agent reads.
   for (const h of [lasting, health(stateOf([cookie("sid", NOW + 29 * MIN, "secret-session-value")]))!])
     assert.ok(!JSON.stringify(h).includes("secret-session-value") && !JSON.stringify(h).includes("opaque-cookie-value"));
@@ -1085,7 +1087,9 @@ test("a guided check's sign-in again: the address is quoted for a shell and for 
   const dir = path.join(os.tmpdir(), "health-quote-project");
   const address = "http://127.0.0.1:3000/app?tab=1&view=$(id)";
   const h = savedSignInHealth({ address, signIn: "password", thoroughness: "normal" }, dir, { now: NOW, exists: () => false })!;
-  assert.equal(h.signInAgain.command, `scenescout login 'http://127.0.0.1:3000/app?tab=1&view=$(id)' --role user`);
+  assert.equal(h.signInAgain.command, `scenescout login ${shellQuote(address)} --role user`);
+  assert.equal(shellQuote(address, "linux"), `'${address}'`, "single quotes keep the shell from reading & and $( ) on POSIX");
+  assert.equal(shellQuote(address, "win32"), `"${address}"`, "double quotes on Windows");
   assert.equal(h.signInAgain.prompt, `Sign me in to ${address} again for SceneScout: call scout_login {"url":"${address}","role":"user"}.`);
   const quoted = savedSignInHealth({ address: 'http://127.0.0.1:3000/a"b', signIn: "password", thoroughness: "normal" }, dir, {
     now: NOW,
