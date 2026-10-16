@@ -400,6 +400,54 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     }
     // Routes that answer with something other than a page, at paths with no extension to give them away:
     // a feed, a plain-text file, and a feed that is missing.
+    // A bot-protection challenge in the app's place: every path under it answers 403 with the vendor's header.
+    if (urlPath === "/check-challenge" || urlPath.startsWith("/check-challenge/")) {
+      res.writeHead(403, { "content-type": "text/html; charset=utf-8", "cf-mitigated": "challenge", "cache-control": "no-store" });
+      res.end(fs.readFileSync(path.join(appDir, "check-challenge.html")));
+      return;
+    }
+    // The same challenge known only by its page: a 503 with the vendor's challenge script and no header.
+    if (urlPath === "/check-challenge-page") {
+      res.writeHead(503, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(
+        fs
+          .readFileSync(path.join(appDir, "check-challenge.html"), "utf8")
+          .replace("</head>", '<script>window._cf_chl_opt = { cType: "managed" };</script></head>'),
+      );
+      return;
+    }
+    // The contrast: an app's start page, and one route inside it that the app itself refuses with 403.
+    if (urlPath === "/check-app-forbidden") {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(fs.readFileSync(path.join(appDir, "check-app-forbidden.html")));
+      return;
+    }
+    if (urlPath === "/check-app-forbidden/admin") {
+      res.writeHead(403, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Forbidden</title></head><body><main><h1>Access Denied</h1><p>Only administrators can open this page.</p><a href="/check-app-forbidden">Back to projects</a></main></body></html>',
+      );
+      return;
+    }
+    // A route inside the same app that bot protection answers mid-crawl (rate limiting is the usual case): a 503 known
+    // only by the challenge script in its page. It is the protection's, so it is listed as blocked, not the app's 503.
+    if (urlPath === "/check-app-forbidden/reports") {
+      res.writeHead(503, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(
+        fs
+          .readFileSync(path.join(appDir, "check-challenge.html"), "utf8")
+          .replace("</head>", '<script>window._cf_chl_opt = { cType: "managed" };</script></head>'),
+      );
+      return;
+    }
+    // A start page that is missing, answered as a page with links, so only its status says it is not the app.
+    if (urlPath === "/check-missing-start") {
+      res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>Not found</title></head><body><main><h1>Page not found</h1><a href="/check-app-forbidden">Projects</a><button type="button">Search</button></main></body></html>',
+      );
+      return;
+    }
     if (urlPath === "/check-feed" || urlPath === "/check-feed-gone") {
       res.writeHead(urlPath === "/check-feed" ? 200 : 404, { "content-type": "application/rss+xml; charset=utf-8" });
       res.end('<?xml version="1.0"?><rss version="2.0"><channel><title>Updates</title><link>/</link><description>d</description></channel></rss>');
