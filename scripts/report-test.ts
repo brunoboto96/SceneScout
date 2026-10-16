@@ -907,3 +907,89 @@ test("team report: a folder that is not .scenescout/, a linked evidence folder a
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("team report: an earlier manifest naming a path that climbs out, or an absolute one, removes nothing outside", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "team-report-"));
+  try {
+    const dir = path.join(root, "project", ".scenescout");
+    fs.mkdirSync(path.join(dir, TEAM_EVIDENCE_DIR), { recursive: true });
+    const victim = path.join(root, "victim.txt");
+    fs.writeFileSync(victim, "keep me");
+    fs.writeFileSync(path.join(dir, "keep.txt"), "keep me too");
+    const named = [
+      "team-report/../../../victim.txt",
+      "team-report/../keep.txt",
+      victim,
+      "team-report/..\\..\\..\\victim.txt",
+      "C:\\victim.txt",
+      "../victim.txt",
+    ];
+    fs.writeFileSync(
+      path.join(dir, TEAM_EVIDENCE_DIR, TEAM_MANIFEST_FILE),
+      JSON.stringify({ generator: TEAM_REPORT_GENERATOR, files: named.map((file) => ({ file, bytes: 7, sha256: "0".repeat(64) })) }),
+    );
+    writeTeamReport(dir, teamReportData(teamSource({ findings: [] })));
+    assert.equal(fs.readFileSync(victim, "utf8"), "keep me");
+    assert.equal(fs.readFileSync(path.join(dir, "keep.txt"), "utf8"), "keep me too");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("team report: only pictures are copied into the evidence, never another file a finding's picture path names", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "team-report-"));
+  try {
+    const dir = path.join(root, "project", ".scenescout");
+    fs.mkdirSync(path.join(dir, "auth"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "auth", "admin.json"), '{"cookies":[{"name":"session","value":"live"}]}');
+    fs.writeFileSync(path.join(dir, "report.md"), "an older report");
+    const data = teamReportData(
+      teamSource({
+        findings: [
+          finding("a1a1a1a1a1", { picture: "auth/admin.json" } as Partial<Finding>),
+          finding("b2b2b2b2b2", { picture: "report.md" } as Partial<Finding>),
+          finding("c3c3c3c3c3", { picture: "manifest.json" } as Partial<Finding>),
+        ],
+      }),
+    );
+    const report = writeTeamReport(dir, data);
+    assert.ok(!fs.existsSync(path.join(dir, TEAM_EVIDENCE_DIR, "auth")), "a saved sign-in is never copied into the folder made for sharing");
+    const files = report.manifest.map((m) => m.file);
+    assert.equal(new Set(files).size, files.length, `each file is listed once: ${files.join(", ")}`);
+    // Every hash the manifest lists is the file on disk.
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, TEAM_EVIDENCE_DIR, TEAM_MANIFEST_FILE), "utf8")) as { files: TeamEvidenceEntry[] };
+    for (const e of manifest.files)
+      if (e.sha256 !== null)
+        assert.equal(
+          createHash("sha256")
+            .update(fs.readFileSync(path.join(dir, e.file)))
+            .digest("hex"),
+          e.sha256,
+          e.file,
+        );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("team report: the site's address is shown without a user name, password or token in it", () => {
+  const address = "https://bob:hunter2@staging.example.com/app?access_token=abcdef123456&tab=1";
+  const data = teamReportData(teamSource({ address }));
+  const html = teamReportHtml(data, TEAM_EVIDENCE);
+  const md = teamReportMarkdown(data, new Set());
+  for (const out of [html, md, data.address]) {
+    assert.ok(!out.includes("hunter2"), "no password");
+    assert.ok(!out.includes("bob:"), "no user name");
+    assert.ok(!out.includes("abcdef123456"), "no token");
+  }
+  assert.ok(data.address.startsWith("https://staging.example.com/app?"), data.address);
+  assert.ok(data.address.includes("tab=1"), "the rest of the address is kept");
+  assert.equal(teamReportData(teamSource({ address: "https://staging.example.com" })).address, "https://staging.example.com", "a plain address is unchanged");
+});
+
+test("team report: the sign-off table fits a phone's width", () => {
+  const html = teamReportHtml(teamReportData(teamSource()), TEAM_EVIDENCE);
+  // Three blank columns at 9em each are wider than a phone: the page scrolled sideways and the role was broken a letter per line.
+  assert.match(html, /@media \(max-width: ?600px\) \{[^}]*table\.sign td\.blank \{ ?min-width: ?0/);
+  assert.match(html, /table\.sign td:first-child \{ ?white-space: ?nowrap/);
+});

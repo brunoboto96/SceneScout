@@ -35,6 +35,7 @@ import type { OracleViolation } from "./oracles.js";
 import { writeDocumentSync } from "./owner-file.js";
 import { IMPACT, isSafeRelativePath, plainCard, plainSummary, type CardImpact, type PlainCard } from "./plain.js";
 import type { WriteMode } from "./policy.js";
+import { redactRoute } from "./redact.js";
 import { escapeHtml } from "./replay.js";
 
 /** The page, in the project's .scenescout/ folder. */
@@ -95,6 +96,30 @@ export interface TeamReportSource {
   generatedAt: string;
 }
 
+/**
+ * The site's address as the report shows it: no user name or password, and
+ * what redaction masks in a route (a token or code in the query) masked. The
+ * plain report never prints the address; this one puts it on the cover, in
+ * the page's title and in the manifest, all of which are handed round.
+ */
+export function shownAddress(address: string): string {
+  if (!address) return "";
+  let out = address;
+  try {
+    const u = new URL(address);
+    if (u.username || u.password) {
+      u.username = "";
+      u.password = "";
+      out = u.toString();
+      // URL adds a "/" to a bare origin; keep the address as it was given.
+      if (!/^[a-z][a-z0-9+.-]*:\/\/[^/]+\//i.test(address) && out.endsWith("/")) out = out.slice(0, -1);
+    }
+  } catch {
+    // Not an address URL can read: only the redaction below applies.
+  }
+  return redactRoute(out);
+}
+
 const IMPACT_RANK: Record<CardImpact, number> = { [IMPACT.high]: 0, [IMPACT.medium]: 1, [IMPACT.low]: 2, "Worth a look": 3 };
 
 /** Worst first, then newest first: the order the cards are listed in everywhere. */
@@ -133,7 +158,7 @@ export function teamReportData(src: TeamReportSource): TeamReportData {
       ? pagesChecked(src.routes.visited, src.routes.total)
       : W.everything;
   return {
-    address: src.address,
+    address: shownAddress(src.address),
     startedAt: src.sessionStart,
     generatedAt: src.generatedAt,
     version: src.version,
@@ -161,12 +186,15 @@ export function evidencePathOf(picture: string): string {
   return `${TEAM_EVIDENCE_DIR}/${picture}`;
 }
 
-/** The pictures the report shows, each once, in the order the cards show them. Only safe relative paths are taken. */
+/** The kinds of file a picture is kept as. Memory is read back without a schema, so a picture path naming anything else (a saved sign-in, the report's own Markdown) is never copied into the folder made for sharing. */
+const PICTURE_FILE = /\.(png|jpe?g|webp)$/i;
+
+/** The pictures the report shows, each once, in the order the cards show them. Only safe relative paths to picture files are taken. */
 export function reportPictures(data: Pick<TeamReportData, "cards">): string[] {
   const out: string[] = [];
   for (const c of data.cards) {
     const file = c.picture?.file;
-    if (file && isSafeRelativePath(file) && !out.includes(file)) out.push(file);
+    if (file && isSafeRelativePath(file) && PICTURE_FILE.test(file) && !out.includes(file)) out.push(file);
   }
   return out;
 }
@@ -310,8 +338,10 @@ details summary { cursor:pointer; color:var(--muted); font-size:13px; margin-top
 .tech, td.hash, td.path { font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
 .bytes { white-space:nowrap; }
 table.sign td.blank { height:2.8em; min-width:9em; }
+table.sign td:first-child { white-space:nowrap; }
 .none { color:var(--muted); font-style:italic; }
 footer { margin-top:40px; color:var(--muted); font-size:13px; }
+@media (max-width:600px) { table.sign td.blank { min-width:0; } th, td { padding:6px 5px; } }
 @media print { main { max-width:none; padding:0; } a { color:inherit; text-decoration:none; } details { display:none; } article.card, tr { break-inside:avoid; } }
 `;
 

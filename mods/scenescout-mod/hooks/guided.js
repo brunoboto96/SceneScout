@@ -369,10 +369,7 @@ export function wizardOf(value) {
     cards: Array.isArray(value.cards) ? value.cards.filter(isRecord) : null,
     cardsTotal: num(value.cardsTotal),
     pictureFiles: isRecord(value.pictureFiles) ? /** @type {Record<string, string>} */ (value.pictureFiles) : {},
-    teamReport:
-      isRecord(value.teamReport) && fileHref(value.teamReport.path) && fileHref(value.teamReport.folder)
-        ? { path: str(value.teamReport.path), folder: str(value.teamReport.folder) }
-        : null,
+    teamReport: isRecord(value.teamReport) ? teamReportPlace(value.teamReport.path, value.teamReport.folder) : null,
     cardId: str(value.cardId) || null,
     lastChoices: isRecord(value.lastChoices) ? value.lastChoices : null,
     tourPage: Math.min(TOUR.length - 1, Math.max(0, Math.floor(num(value.tourPage)))),
@@ -625,11 +622,26 @@ export function isOwnPicture(file, relative) {
 export function readTeamReport(result) {
   const s = isRecord(result) && isRecord(result.structuredContent) ? result.structuredContent : null;
   if (!s || result.isError === true) return { ok: false, error: errorSentence(result) };
-  const page = str(s.path).replace(/\\/g, "/");
-  const folder = str(s.folder).replace(/\\/g, "/");
-  if (!fileHref(s.path) || !fileHref(s.folder) || !page.endsWith("/.scenescout/team-report.html") || folder !== page.replace(/\.html$/, ""))
-    return { ok: false, error: "The SceneScout server did not say where it wrote the team report." };
-  return { ok: true, path: str(s.path), folder: str(s.folder), said: resultText(result).split("\n")[0] };
+  const place = teamReportPlace(s.path, s.folder);
+  if (!place) return { ok: false, error: "The SceneScout server did not say where it wrote the team report." };
+  return { ok: true, ...place, said: resultText(result).split("\n")[0] };
+}
+
+/**
+ * The team report's page and folder, when they are absolute paths of a page
+ * named team-report.html inside a `.scenescout/` folder and that page's own
+ * folder; else null. The server's answer and the saved panel state are both
+ * held to it, so nothing else is ever offered as a link.
+ *
+ * @param {unknown} pagePath
+ * @param {unknown} folderPath
+ * @returns {{ path: string, folder: string } | null}
+ */
+export function teamReportPlace(pagePath, folderPath) {
+  const page = str(pagePath).replace(/\\/g, "/");
+  const folder = str(folderPath).replace(/\\/g, "/");
+  if (!fileHref(pagePath) || !fileHref(folderPath) || !page.endsWith("/.scenescout/team-report.html") || folder !== page.replace(/\.html$/, "")) return null;
+  return { path: str(pagePath), folder: str(folderPath) };
 }
 
 /** A `file:` address for a picture on disk, or null for anything that is not an absolute path. */
@@ -1147,11 +1159,12 @@ export function renderGuided(els, w, ctx, act) {
     const where = str(w.plan?.choices?.address) || str(w.lastChoices?.address);
     const out = [heading(`${PANEL_WORDS.results}${where ? `: ${where}` : ""} · ${w.cardsTotal} problem${w.cardsTotal === 1 ? "" : "s"}`)];
     if (w.busy === "cards") out.push(dim("Reading the problems..."));
+    else if (cards.length === 0) out.push(dim(PANEL_WORDS.noCards));
     if (w.busy === "team-report") out.push(dim(PANEL_WORDS.writingTeamReport));
     else if (w.teamReport) {
       const made = [link(PANEL_WORDS.openReport, fileHref(w.teamReport.path)), link(PANEL_WORDS.showFolder, fileHref(w.teamReport.folder))].filter(Boolean);
       if (made.length) out.push(row(made));
-    } else if (cards.length === 0) out.push(dim(PANEL_WORDS.noCards));
+    }
     for (const card of cards) {
       out.push(
         column([
@@ -1168,7 +1181,8 @@ export function renderGuided(els, w, ctx, act) {
       row([
         button("guided-results-recheck", ACTION_LABEL.recheck, () => act("send", { text: ACTION_PROMPT.recheck })),
         button("guided-results-report", ACTION_LABEL.plainReport, () => act("send", { text: ACTION_PROMPT.plainReport })),
-        button("guided-results-team-report", ACTION_LABEL.teamReport, () => act("teamReport")),
+        // Hidden while one is being written, so a second press cannot start another; Back clears a stuck one.
+        ...(w.busy === "team-report" ? [] : [button("guided-results-team-report", ACTION_LABEL.teamReport, () => act("teamReport"))]),
         ...(w.lastChoices ? [button("guided-results-again", PANEL_WORDS.runAgain, () => act("runAgain"))] : []),
         ...(canType ? [button("guided-results-new", PANEL_WORDS.newCheck, () => act("newCheck"))] : []),
         button("guided-results-back", PANEL_WORDS.back, () => act("go", { step: w.planId ? "running" : "welcome" })),

@@ -2999,6 +2999,27 @@ test("the results screen makes the team report with no turn for Claude, then off
   assert.deepEqual(guided.wizardOf({ teamReport: { path: page, folder } }).teamReport, { path: page, folder });
 });
 
+test("the team report button cannot be pressed twice while the report is written, and reading the problems still says so", () => {
+  const writing = drawGuided("desktop", wizard({ step: "results", cards: [], busy: "team-report" }), STATUS_IDLE);
+  assert.ok(!elementsOf(writing.tree).some((e) => e.props.key === "guided-results-team-report"), "no second press while the first is being written");
+  const idle = drawGuided("desktop", wizard({ step: "results", cards: [] }), STATUS_IDLE);
+  assert.ok(elementsOf(idle.tree).some((e) => e.props.key === "guided-results-team-report"));
+  // While the problems are being read, the screen says that, not that there are none.
+  const reading = drawGuided("desktop", wizard({ step: "results", cards: [], busy: "cards" }), STATUS_IDLE);
+  assert.ok(reading.text.includes("Reading the problems..."));
+  assert.ok(!reading.text.includes(guided.PANEL_WORDS.noCards), reading.text);
+  // A report already made does not hide that this check found nothing.
+  const made = drawGuided(
+    "desktop",
+    wizard({ step: "results", cards: [], teamReport: { path: "/home/u/site/.scenescout/team-report.html", folder: "/home/u/site/.scenescout/team-report" } }),
+    STATUS_IDLE,
+  );
+  assert.ok(made.text.includes(guided.PANEL_WORDS.noCards), made.text);
+  assert.ok(made.text.includes(guided.PANEL_WORDS.openReport));
+  // A saved state is held to the same rule as the server's answer: only the team report page in a .scenescout/ folder is ever a link.
+  assert.equal(guided.wizardOf({ teamReport: { path: "/home/u/Downloads/run-me.command", folder: "/home/u/Downloads" } }).teamReport, null);
+});
+
 test("the cards, their pictures on disk, and the picture probe are read from what the server sends", () => {
   const withPicture = { ...cardFixture("0a1b2c3d4e"), picture: { file: "shots/0a.png", width: 800, height: 600, what: "the page" } };
   const without = cardFixture("1b2c3d4e5f", { severity: "low" });
