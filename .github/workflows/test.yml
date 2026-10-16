@@ -68,15 +68,17 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
+          # The file names come from the pull request, so the delimiter is one no file name can match.
+          delimiter="EOF_$(openssl rand -hex 16)"
           {
             # --no-renames lists a moved file under its old path too, so moving code into docs/ is not docs-only.
-            echo "files<<EOF_FILES"
+            echo "files<<$delimiter"
             git diff --name-only --no-renames HEAD^1 HEAD
-            echo "EOF_FILES"
+            echo "$delimiter"
             # Read now rather than from the event, so adding the label and re-running the workflow is enough.
-            echo "labels<<EOF_LABELS"
-            gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name'
-            echo "EOF_LABELS"
+            echo "labels<<$delimiter"
+            gh api --paginate "repos/$REPO/issues/$PR/labels" --jq '.[].name'
+            echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
       - name: Plan
         id: plan

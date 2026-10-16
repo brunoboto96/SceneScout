@@ -2079,6 +2079,12 @@ test("test plan: the required check passes only when every planned job passed an
       NEEDS("", false, { docs: "skipped", suite: "skipped", "cross-browser": "skipped", "check-action": "skipped", "ci-action": "skipped" }, "failure"),
     ],
     ["the plan wrote no kind", { ...NEEDS("code", false, prRun), plan: { result: "success", outputs: {} } }],
+    // Outputs a step wrote before the job was cancelled or failed are still in needs: the result decides, not the outputs.
+    [
+      "the plan was cancelled after writing its outputs",
+      { ...NEEDS("code", false, prRun), plan: { result: "cancelled", outputs: { kind: "code", full: "false" } } },
+    ],
+    ["the plan failed after writing its outputs", { ...NEEDS("code", false, prRun), plan: { result: "failure", outputs: { kind: "code", full: "false" } } }],
   ];
   for (const [what, needs] of cases) assert.notDeepEqual(verdict(needs), [], what);
 });
@@ -2123,6 +2129,29 @@ test("test plan: test.yml runs each job when the plan says, and the required che
     "the pull request's change is the merge commit against its base, with a moved file listed under its old path too",
   );
   assert.deepEqual(Object.keys(jobs.plan.outputs ?? {}).sort(), ["full", "kind", "platforms"]);
+  // The diff needs the merge commit's first parent; one commit of history would fail the plan on every pull request.
+  const planCheckout = planSteps.find((s) => (s.uses ?? "").startsWith("actions/checkout@"));
+  assert.equal(planCheckout?.with?.["fetch-depth"], "${{ github.event_name == 'pull_request' && 2 || 1 }}");
+  // The plan reads what the diff step listed: a broken wire would drop the label, and the cells it asks for, without a failure.
+  const diffStep = planSteps.find((s) => s.id === "diff");
+  assert.equal(diffStep?.if, "github.event_name == 'pull_request'");
+  const planStep = planSteps.find((s) => s.id === "plan");
+  assert.deepEqual(planStep?.env, {
+    EVENT: "${{ github.event_name }}",
+    FILES: "${{ steps.diff.outputs.files }}",
+    LABELS: "${{ steps.diff.outputs.labels }}",
+  });
+  const diffRun = diffStep?.run ?? "";
+  // Every label, not the first page of thirty.
+  assert.match(diffRun, /gh api --paginate "repos\/\$REPO\/issues\/\$PR\/labels" --jq '\.\[\]\.name'/);
+  // File names come from the pull request, so the multi-line outputs' delimiter must be one a file name cannot guess:
+  // a file named after a fixed delimiter would end the list early and could leave a code change off it.
+  for (const name of ["files", "labels"]) {
+    const opener = new RegExp(`echo "${name}<<(\\$[A-Za-z_{][A-Za-z_}]*)"`).exec(diffRun);
+    assert.ok(opener, `${name} is written with a delimiter held in a variable`);
+    assert.ok(diffRun.includes(`echo "${opener[1]}"`), `${name}'s delimiter closes it`);
+  }
+  assert.match(diffRun, /openssl rand -hex 16/, "the delimiter is random per run");
   // Each job's condition, held to expectedJobs: the same rule decides what runs and what the check expects.
   const conditions: Record<string, string> = {
     docs: "needs.plan.outputs.kind == 'docs'",
@@ -2221,7 +2250,7 @@ test("the same place matches with either separator and, on Windows, either case"
   assert.equal(samePlace("posix", "/work/app", "/work/other"), false);
 });
 
-type WorkflowStep = { uses?: string; run?: string; if?: string; env?: Record<string, string>; with?: Record<string, string> };
+type WorkflowStep = { id?: string; uses?: string; run?: string; if?: string; env?: Record<string, string>; with?: Record<string, string> };
 type WorkflowJob = {
   permissions?: Record<string, string>;
   needs?: string | string[];
