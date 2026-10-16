@@ -11,18 +11,19 @@ import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { buildRunRecord, prefixOutcome, prefixPlan } from "../../dist/engine/from-run.js";
+import { DEFAULT_ACTION_TIMEOUT_MS } from "../../dist/engine/limits.js";
 import { check, type SmokeContext } from "./harness.ts";
 
 export const title = "a continued run's path to a page";
 
 const pathOf = (engine: BrowserEngine): string => new URL(engine.currentUrl || "about:blank").pathname;
 
-async function session<T>(name: string, baseUrl: string, start: string, body: (engine: BrowserEngine) => Promise<T>): Promise<T> {
+async function session<T>(name: string, baseUrl: string, start: string, body: (engine: BrowserEngine) => Promise<T>, actionTimeoutMs?: number): Promise<T> {
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), `ft-path-${name}-`));
   const engine = new BrowserEngine();
   engine.sessionKey = name;
   try {
-    await engine.attach({ url: `${baseUrl}${start}`, projectDir, mode: "read-only" });
+    await engine.attach({ url: `${baseUrl}${start}`, projectDir, mode: "read-only", actionTimeoutMs });
     return await body(engine);
   } finally {
     await engine.close();
@@ -80,12 +81,19 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       engine.currentUrl,
     );
   });
-  // A path whose button the page no longer has fails, and says so: the run then navigates instead.
-  await session("later-changed", baseUrl, "/path-gated-start.html", async (engine) => {
-    const changed = steps.map((s) => (s.action === "click" ? { ...s, target: 'role=button[name="Open file"]' } : s));
-    const outcome = prefixOutcome(await engine.runPlan(changed), changed.length, "/path-gated-detail.html");
-    check("a path the page changed under is reported as not repeated", !outcome.ok, JSON.stringify(outcome));
-  });
+  // A path whose button the page no longer has fails, and says so: the run then navigates instead. The click waits out
+  // the action limit, so this session runs at the engine's default rather than the smoke runner's raised one.
+  await session(
+    "later-changed",
+    baseUrl,
+    "/path-gated-start.html",
+    async (engine) => {
+      const changed = steps.map((s) => (s.action === "click" ? { ...s, target: 'role=button[name="Open file"]' } : s));
+      const outcome = prefixOutcome(await engine.runPlan(changed), changed.length, "/path-gated-detail.html");
+      check("a path the page changed under is reported as not repeated", !outcome.ok, JSON.stringify(outcome));
+    },
+    DEFAULT_ACTION_TIMEOUT_MS,
+  );
 
   // ── the contrastive twin: the same detail page, linked directly ──
   const open = await session("earlier-open", baseUrl, "/path-open-start.html", async (engine) => {
