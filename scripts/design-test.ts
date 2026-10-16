@@ -674,7 +674,7 @@ test("an unnamed control hidden from assistive technology needs no name; the sam
 });
 
 test("an icon button the snapshot names by its image's alt text is not listed; the same button with an empty alt is", () => {
-  // The audit reads the snapshot's name (collector.ts PICK_NAME_SRC), which names a control by its image content.
+  // The audit reads the snapshot's name (page-sources.ts PICK_NAME_SRC), which names a control by its image content.
   const page = (name: string) =>
     analyzeDesign(payload([rec({ text: "Notice" }), button("", { name, bg: "rgb(255, 255, 255)", color: "rgb(30, 30, 30)" })]), VIEWPORT);
   const search = page("Search");

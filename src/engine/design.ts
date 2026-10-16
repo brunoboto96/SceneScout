@@ -65,7 +65,7 @@ export interface StyleRecord {
   /**
    * An interactive element's accessible name and, for a field, where it came
    * from when that is not a label: computed by the snapshot's own rule
-   * (collector.ts NAME_SRC), so the audit and the snapshot name a control
+   * (page-sources.ts NAME_SRC), so the audit and the snapshot name a control
    * alike. Absent on non-interactive records, which are named by their text.
    */
   name?: string;
@@ -700,7 +700,7 @@ const GRAY_STEP = 4;
 /**
  * The page's controls a screen-reader user cannot tell apart: fields and
  * controls with no name, and fields whose only label is the placeholder. The
- * snapshot's own predicates (collector.ts), over the snapshot's own name, so
+ * snapshot's own predicates (collector-elements.ts), over the snapshot's own name, so
  * the audit and the snapshot agree on a page. Records with no name read are
  * left out rather than guessed.
  */
