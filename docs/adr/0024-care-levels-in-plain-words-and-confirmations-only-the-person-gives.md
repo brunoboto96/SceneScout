@@ -105,7 +105,11 @@ a writing mode.
   plan's mode, or on another site than the plan's, so leaving the id out is
   not a way round the confirmation. While a plan is open, `readPosts` and
   `trustedEmbeds` are refused on any attach, as developer settings that let
-  out writes a care level holds back. A yes covers one check: once no session
+  out writes a care level holds back, and the `SCENESCOUT_READ_POSTS`
+  environment variable is not read, so a server started with it cannot
+  loosen a Look only check either. Sessions attached before the first plan
+  was built keep the mode they were attached in: the gate covers the checks
+  started once a guided plan exists. A yes covers one check: once no session
   carries the plan, it is unaccepted again. `policy-test` holds that gate, and
   `guided-test` holds that a wrong or missing code, or a declined, closed or
   failed form, accepts nothing.

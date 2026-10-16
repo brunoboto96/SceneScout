@@ -731,8 +731,23 @@ function originOf(address: string): string | null {
  *   than the plan's: no.
  * - readPosts or trustedEmbeds, once any plan has been built: no, in any mode.
  *   Both loosen a mode, and no guided check takes them (design 6.1).
+ *
+ * Once a plan has been built, an attach that goes ahead carries `readPosts:
+ * []`, which the attach passes on in place of its own: an option, even an
+ * empty one, wins over the SCENESCOUT_READ_POSTS environment variable
+ * (policy.ts readPostsSetting), so a server started with it cannot loosen a
+ * guided check's observe either. With no plan, `readPosts` is absent and the
+ * attach reads its option and the environment as before.
  */
 export function guidedAttachVerdict(
+  plans: Pick<GuidedPlans, "open" | "get">,
+  input: { planId?: string; mode: AnyMode; url: string; readPosts?: readonly string[]; trustedEmbeds?: readonly string[] },
+): { ok: true; plan?: GuidedPlan; readPosts?: string[] } | { ok: false; why: string } {
+  const verdict = attachVerdict(plans, input);
+  return verdict.ok && plans.open ? { ...verdict, readPosts: [] } : verdict;
+}
+
+function attachVerdict(
   plans: Pick<GuidedPlans, "open" | "get">,
   input: { planId?: string; mode: AnyMode; url: string; readPosts?: readonly string[]; trustedEmbeds?: readonly string[] },
 ): { ok: true; plan?: GuidedPlan } | { ok: false; why: string } {
