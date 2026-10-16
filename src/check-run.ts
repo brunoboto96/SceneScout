@@ -148,6 +148,32 @@ export function readCheckInputs(options: CheckOptions): CheckInputs {
   return { ...read, findings: wellFormedFindings((findings as unknown[] | undefined) ?? []) };
 }
 
+/** What every step of a check shares: its options, its browsers, its scratch memory and where it writes. */
+interface CheckRun {
+  options: CheckOptions;
+  log: (line: string) => void;
+  engine: BrowserEngine;
+  /** One browser per role a flow runs as, each attached once, on first use, and closed with the check's own. */
+  roleEngines: Map<string, BrowserEngine>;
+  scratch: string;
+  store: MemoryStore;
+  start: URL;
+  startedAt: string;
+  record: boolean;
+  video: boolean;
+  frameCap: number | undefined;
+  outDir: string;
+}
+
+/** What the flows left: each one's run, and on a recorded or filmed check its frames and its video. */
+interface FlowReplays {
+  flowRuns: FlowRun[];
+  /** On a recorded check, the frames each flow's steps left, beside the flow. */
+  flowFrames: Array<ReadonlyArray<StepShot>>;
+  /** On a check with --video, each flow's video beside the report (relative to it), or null where none was saved. */
+  flowVideos: Array<string | null>;
+}
+
 export async function runCheck(
   options: CheckOptions,
   log: (line: string) => void = () => {},
@@ -160,6 +186,53 @@ export async function runCheck(
   // Also on an exit the finally below never reaches, such as Ctrl+C, which the browser's driver answers with process.exit.
   const removeScratch = (): void => fs.rmSync(scratch, { recursive: true, force: true });
   process.once("exit", removeScratch);
+  const { runFlows, envValues } = resolveRunFlows(options, inputs);
+  const run = checkRunOf(options, log, scratch);
+  // From the start of the run, browser launch included: the budget is wall-clock time a person waits.
+  const deadline = options.timeBudgetMs !== undefined ? Date.now() + options.timeBudgetMs : undefined;
+  const pastDeadline = (): boolean => deadline !== undefined && Date.now() >= deadline;
+  try {
+    await attachCheckEngine(run);
+    const { routes, timeLimitReached } = await crawlRoutes(run, deadline, pastDeadline);
+    // Pages of open findings the crawl did not load exactly: loaded now, so each re-test has its own measurement.
+    const plan = inputs.findings ? checkRetestPlan(inputs.findings) : null;
+    const retestPages = plan && !options.paths ? await loadRetestPages(run, plan, routes) : [];
+    const baselines = await pictureBaselines(run, inputs, routes);
+    const { flowRuns, flowFrames, flowVideos } = await replayFlows(run, runFlows);
+    const retest = plan ? retestOf(plan, routes, retestPages) : null;
+    const replay =
+      run.record || run.video
+        ? recordReplay({
+            options,
+            startedAt: run.startedAt,
+            ownRole: run.engine.role,
+            log: run.store.actionLog,
+            visited: [...routes, ...retestPages],
+            flows: runFlows
+              .slice(0, flowRuns.length)
+              .map((flow, i) => ({ flow, outcome: flowRuns[i].outcome, frames: flowFrames[i], video: flowVideos[i] ?? null })),
+            scratch,
+            say: log,
+            ...(run.frameCap !== undefined ? { frameCap: run.frameCap } : {}),
+          })
+        : null;
+    if (replay) log(`  kept ${replayFrames(replay).length} frame(s) and ${replayVideos(replay).length} video(s) for ${REPLAY_FILE}`);
+    const result = checkResultOf(run, inputs, { routes, timeLimitReached, flowRuns, baselines, retest, replay });
+    // A value taken from the environment (a code, a password) is never written, wherever the page echoed it.
+    return envValues.size > 0 ? (JSON.parse(maskEnvValues(JSON.stringify(result), envValues)) as CheckResult) : result;
+  } finally {
+    await closeCheckEngines(run);
+    process.off("exit", removeScratch);
+    removeScratch();
+  }
+}
+
+/**
+ * The flows as they will run, each `${env:NAME}` in their values taken from the
+ * environment, and the values taken. Refuses, before anything starts, a flow
+ * whose role has no saved sign-in or whose environment name is unset.
+ */
+function resolveRunFlows(options: CheckOptions, inputs: CheckInputs): { runFlows: Flow[]; envValues: Map<string, string> } {
   // A flow that names a role whose sign-in is not saved would only fail after the crawl: refuse before anything starts,
   // naming the command that saves it.
   for (const role of flowRoles(inputs.flows)) resolveAttachAuth({ projectDir: options.projectDir, url: options.url, role });
@@ -174,8 +247,12 @@ export async function runCheck(
     for (const [name, value] of resolved.values) envValues.set(name, value);
     return resolved.flow;
   });
+  return { runFlows, envValues };
+}
+
+/** The check's browser (not yet attached), its scratch memory and where it writes; the default output folder's .gitignore is written here. */
+function checkRunOf(options: CheckOptions, log: (line: string) => void, scratch: string): CheckRun {
   const engine = new BrowserEngine();
-  /** One browser per role a flow runs as, each attached once, on first use, and closed with the check's own. */
   const roleEngines = new Map<string, BrowserEngine>();
   // --record: every browser keeps a frame after each step, under its own session name, in its own memory folder.
   const record = options.record === true;
@@ -193,208 +270,231 @@ export async function runCheck(
     writeSelfIgnore(scenescoutDir);
   }
   const start = new URL(options.url);
-  // From the start of the run, browser launch included: the budget is wall-clock time a person waits.
-  const deadline = options.timeBudgetMs !== undefined ? Date.now() + options.timeBudgetMs : undefined;
-  const pastDeadline = (): boolean => deadline !== undefined && Date.now() >= deadline;
-  try {
-    // Attached at the origin: the engine joins every crawled path onto the URL
-    // it attached to, so attaching to a start page with a path would double it.
-    const attached = await engine.attach({
-      url: start.origin,
-      projectDir: options.projectDir,
-      memoryStore: store,
-      mode: options.mode,
-      storageStatePath: options.storageStatePath,
-      // Named by whoever ran the command, so it is read wherever it is (a runner's temporary folder, say).
-      ...(options.storageStatePath ? { storageStateAllow: [options.storageStatePath] } : {}),
-      ...(record ? { record: true, ...(frameCap !== undefined ? { maxFrames: frameCap } : {}) } : {}),
-      ...(options.browser ? { browser: options.browser } : {}),
-      actionTimeoutMs: options.actionTimeoutMs,
-      navTimeoutMs: options.navTimeoutMs,
-      // Named rather than left to attach's defaults: a baseline is only comparable with a picture taken in the same window, at the same scale.
-      ...(options.baseline !== "off" ? { viewport: BASELINE_CAPTURE.viewport, deviceScaleFactor: BASELINE_CAPTURE.deviceScaleFactor } : {}),
-      objective: "Deterministic check: visit every route and measure it",
-      task: "Checking every route",
-    });
-    // A saved session that no longer signs in would check the sign-in page and call it the app.
-    const authFailed = attached.split("\n").find((line) => line.startsWith("⚠ AUTH FAILED"));
-    if (authFailed) throw new Error(authFailed.replace(/ Continuing now tests a logged-out app\.$/, "").replace(/re-attach/, "run the check again"));
-    const routes: RouteHealth[] = [];
-    // A feed or a file the crawl followed is not a page, so it does not use up --max-routes.
-    const pagesSoFar = (): number => routes.filter((r) => !isNonPageResource(r)).length;
-    const crawl = async (paths: string[] | undefined, limit: number, deadline?: number): Promise<void> => {
-      await engine.crawl(paths, { inspect: true, limit, deadline });
-      routes.push(...engine.lastCrawlHealth);
-    };
-    if (options.paths) {
-      await crawl(options.paths.slice(0, options.maxRoutes), options.maxRoutes);
-    } else {
-      // The start page first, whatever else is known: it is the one route the user named. The
-      // time budget does not apply to it, so a run always measures at least the page it was given.
-      await crawl([`${start.pathname}${start.search}${start.hash}`], 1);
-      for (let round = 0; round < MAX_DISCOVERY_ROUNDS && pagesSoFar() < options.maxRoutes; round++) {
-        if (engine.crawlableRoutes().length === 0 || pastDeadline()) break;
-        await crawl(undefined, options.maxRoutes - pagesSoFar(), deadline);
-        log(`  ${pagesSoFar()} route(s) checked`);
-      }
+  return { options, log, engine, roleEngines, scratch, store, start, startedAt, record, video, frameCap, outDir };
+}
+
+/** Attach the check's own browser at the start page's origin, and stop when a saved session no longer signs in. */
+async function attachCheckEngine({ options, engine, store, start, record, frameCap }: CheckRun): Promise<void> {
+  // Attached at the origin: the engine joins every crawled path onto the URL
+  // it attached to, so attaching to a start page with a path would double it.
+  const attached = await engine.attach({
+    url: start.origin,
+    projectDir: options.projectDir,
+    memoryStore: store,
+    mode: options.mode,
+    storageStatePath: options.storageStatePath,
+    // Named by whoever ran the command, so it is read wherever it is (a runner's temporary folder, say).
+    ...(options.storageStatePath ? { storageStateAllow: [options.storageStatePath] } : {}),
+    ...(record ? { record: true, ...(frameCap !== undefined ? { maxFrames: frameCap } : {}) } : {}),
+    ...(options.browser ? { browser: options.browser } : {}),
+    actionTimeoutMs: options.actionTimeoutMs,
+    navTimeoutMs: options.navTimeoutMs,
+    // Named rather than left to attach's defaults: a baseline is only comparable with a picture taken in the same window, at the same scale.
+    ...(options.baseline !== "off" ? { viewport: BASELINE_CAPTURE.viewport, deviceScaleFactor: BASELINE_CAPTURE.deviceScaleFactor } : {}),
+    objective: "Deterministic check: visit every route and measure it",
+    task: "Checking every route",
+  });
+  // A saved session that no longer signs in would check the sign-in page and call it the app.
+  const authFailed = attached.split("\n").find((line) => line.startsWith("⚠ AUTH FAILED"));
+  if (authFailed) throw new Error(authFailed.replace(/ Continuing now tests a logged-out app\.$/, "").replace(/re-attach/, "run the check again"));
+}
+
+/** Crawl the given paths, or the start page and then whatever the engine finds, up to --max-routes and the time budget. */
+async function crawlRoutes(
+  { options, log, engine, start }: CheckRun,
+  deadline: number | undefined,
+  pastDeadline: () => boolean,
+): Promise<{ routes: RouteHealth[]; timeLimitReached: boolean }> {
+  const routes: RouteHealth[] = [];
+  // A feed or a file the crawl followed is not a page, so it does not use up --max-routes.
+  const pagesSoFar = (): number => routes.filter((r) => !isNonPageResource(r)).length;
+  const crawl = async (paths: string[] | undefined, limit: number, deadline?: number): Promise<void> => {
+    await engine.crawl(paths, { inspect: true, limit, deadline });
+    routes.push(...engine.lastCrawlHealth);
+  };
+  if (options.paths) {
+    await crawl(options.paths.slice(0, options.maxRoutes), options.maxRoutes);
+  } else {
+    // The start page first, whatever else is known: it is the one route the user named. The
+    // time budget does not apply to it, so a run always measures at least the page it was given.
+    await crawl([`${start.pathname}${start.search}${start.hash}`], 1);
+    for (let round = 0; round < MAX_DISCOVERY_ROUNDS && pagesSoFar() < options.maxRoutes; round++) {
+      if (engine.crawlableRoutes().length === 0 || pastDeadline()) break;
+      await crawl(undefined, options.maxRoutes - pagesSoFar(), deadline);
+      log(`  ${pagesSoFar()} route(s) checked`);
     }
-    // Out of time with routes still to visit; a cap of routes reached first is --max-routes's to report.
-    const timeLimitReached = pastDeadline() && pagesSoFar() < options.maxRoutes && engine.crawlableRoutes().length > 0;
-    // Pages of open findings the crawl did not load exactly: loaded now, so each re-test has its own measurement.
-    // Kept apart from `routes`: they are measured only to re-test, never checked against the page rules, and do not count
-    // towards --max-routes. With --paths the check stays on the paths it was given.
-    const plan = inputs.findings ? checkRetestPlan(inputs.findings) : null;
-    const retestPages: RouteHealth[] = [];
-    if (plan && !options.paths) {
-      const missing = [...new Set(plan.candidates.map((c) => c.path))].filter((p) => !routes.some((r) => r.path === p));
-      if (missing.length > 0) {
-        await engine.crawl(missing, { limit: missing.length, measureOnly: true });
-        retestPages.push(...engine.lastCrawlHealth);
-        log(`  ${missing.length} page(s) of open findings loaded only to re-test them`);
-      }
-    }
-    // Before the flows, so a picture is of the page as a visit finds it, not as a flow left it. Not when the crawl
-    // reached only sign-in pages: the check has no verdict then, and an update would write sign-in pages as baselines.
-    if (options.baseline !== "off" && !inputs.baselineTargets)
-      throw new Error(`--baseline ${options.baseline} was given no targets: read them with readCheckInputs`);
-    const baselines =
-      options.baseline !== "off" &&
-      inputs.baselineTargets &&
-      startPageRefusal(routes, !options.paths) === null &&
-      unmeasuredReason(routes, !options.paths, options.paths ? [] : engine.crawlableRoutes()) === null
-        ? await takeBaselines(engine, options, options.baseline, inputs.baselineTargets, log)
-        : null;
-    const flowRuns: FlowRun[] = [];
-    // A flow that names a role runs in that role's own browser, so the check's session (and what its crawl found) is
-    // left as it was.
-    const engineFor = async (role: string | undefined): Promise<BrowserEngine> => {
-      if (role === undefined) return engine;
-      const known = roleEngines.get(role);
-      if (known) return known;
-      const roleEngine = new BrowserEngine();
-      roleEngines.set(role, roleEngine);
-      if (record) roleEngine.sessionKey = replaySessionKey(role);
-      const roleDir = path.join(scratch, `role-${role}`);
-      fs.mkdirSync(roleDir, { recursive: true });
-      const attachedAs = await roleEngine.attach({
-        url: start.origin,
-        projectDir: options.projectDir,
-        memoryStore: new MemoryStore(roleDir),
-        mode: options.mode,
-        role,
-        ...(record ? { record: true, ...(frameCap !== undefined ? { maxFrames: frameCap } : {}) } : {}),
-        ...(options.browser ? { browser: options.browser } : {}),
-        actionTimeoutMs: options.actionTimeoutMs,
-        navTimeoutMs: options.navTimeoutMs,
-        objective: `Deterministic check: replay the saved flows that run as ${role}`,
-        task: `Replaying flows as ${role}`,
-      });
-      const lost = attachedAs.split("\n").find((line) => line.startsWith("⚠ AUTH FAILED"));
-      if (lost) throw new Error(`the saved sign-in for role "${role}" no longer signs in: ${lost.replace(/ Continuing now tests a logged-out app\.$/, "")}`);
-      return roleEngine;
-    };
-    /** On a recorded check, the frames each flow's steps left, beside the flow. */
-    const flowFrames: Array<ReadonlyArray<StepShot>> = [];
-    /** On a check with --video, each flow's video beside the report (relative to it), or null where none was saved. */
-    const flowVideos: Array<string | null> = [];
-    for (const flow of runFlows) {
-      const runner = await engineFor(flow.role);
-      // --flow-writes never: observe's rule, whatever --mode lets the crawl do.
-      const walk = () => runner.replayFlow(flow.steps, options.flowWrites === "never" ? "observe" : options.mode);
-      let walked: Awaited<ReturnType<typeof walk>>;
-      if (video) {
-        // Filmed on the session's own page, so the flow runs exactly as it would unfilmed and the video holds it alone.
-        const rel = journeyVideoPath(flowRuns.length + 1, flow.file);
-        const own = await runner.filming(path.join(outDir, ...rel.split("/")), walk);
-        walked = own.value;
-        flowVideos.push(own.video ? rel : null);
-        if (own.videoError) log(`  flow ${flow.name}: its video could not be saved (${own.videoError})`);
-      } else {
-        walked = await walk();
-      }
-      const { frames, ...replay } = walked;
-      flowFrames.push(frames ?? []);
-      flowRuns.push({ name: flow.name, file: flow.file, steps: flow.steps.length, ...(flow.role === undefined ? {} : { role: flow.role }), ...replay });
-      log(
-        `  flow ${flow.name}${flow.role === undefined ? "" : ` (as ${flow.role})`}: ${replay.outcome.status}${replay.outcome.status === "passed" ? "" : ` at step ${replay.outcome.step}`}`,
-      );
-      // --on-refused-step stop: nothing after a refused step runs, and the check ends without a verdict.
-      if (replay.outcome.status === "refused" && options.onRefusedStep === "stop") break;
-    }
-    const retest = plan
-      ? {
-          open: plan.open,
-          extraPages: retestPages.length,
-          results: retestResults(
-            plan.candidates,
-            [...routes, ...retestPages].map((r) => ({
-              path: r.path,
-              status: r.status,
-              ...(r.loadError !== undefined ? { loadError: r.loadError } : {}),
-              loginRedirect: r.loginRedirect,
-              ...(r.challenge !== undefined ? { challenge: r.challenge } : {}),
-              httpErrors: withoutOwnResponse(r)
-                .violations.filter((v) => v.kind === "http_error")
-                .map((v) => v.detail),
-            })),
-          ),
-        }
-      : null;
-    const replay =
-      record || video
-        ? recordReplay({
-            options,
-            startedAt,
-            ownRole: engine.role,
-            log: store.actionLog,
-            visited: [...routes, ...retestPages],
-            flows: runFlows
-              .slice(0, flowRuns.length)
-              .map((flow, i) => ({ flow, outcome: flowRuns[i].outcome, frames: flowFrames[i], video: flowVideos[i] ?? null })),
-            scratch,
-            say: log,
-            ...(frameCap !== undefined ? { frameCap } : {}),
-          })
-        : null;
-    if (replay) log(`  kept ${replayFrames(replay).length} frame(s) and ${replayVideos(replay).length} video(s) for ${REPLAY_FILE}`);
-    const { pages: measured, resources } = splitResources(redactRoutes(routes.map(withoutOwnResponse)));
-    const flows = redactFlowRuns(flowRuns);
-    const pictured = baselines ? redactBaselineRun(baselines) : null;
-    // Signed in only when given a session: with none, a route that sends the browser to sign-in needs one, and is not a lost session.
-    const signedIn = options.storageStatePath !== undefined;
-    const { issues, worthALook, needsSignIn, blocked } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths, signedIn);
-    const result: CheckResult = {
-      url: redactRoute(options.url),
-      generatedAt: new Date().toISOString(),
-      mode: options.mode,
-      failOn: options.failOn,
-      routes: measured,
-      resources,
-      issues,
-      worthALook,
-      ...(signedIn ? {} : { needsSignIn }),
-      ...(blocked.length > 0 ? { blocked } : {}),
-      // Routes that failed to load are issues already; "not visited" is only what --max-routes (or the time budget) left out.
-      unvisited: options.paths ? [] : engine.crawlableRoutes().map(redactRoute),
-      ...(options.timeBudgetMs !== undefined ? { timeBudget: { ms: options.timeBudgetMs, reached: timeLimitReached } } : {}),
-      ignored: options.ignore,
-      ignoredPaths: options.ignorePaths,
-      flows,
-      skippedFlows: inputs.skippedFlows ?? [],
-      retest,
-      settings: settingsOf(options),
-      baselines: pictured,
-      ...(replay ? { replay } : {}),
-    };
-    // A value taken from the environment (a code, a password) is never written, wherever the page echoed it.
-    return envValues.size > 0 ? (JSON.parse(maskEnvValues(JSON.stringify(result), envValues)) as CheckResult) : result;
-  } finally {
-    for (const [role, roleEngine] of roleEngines)
-      await roleEngine.close().catch((err: unknown) => log(`closing the browser for role ${role} failed: ${err instanceof Error ? err.message : String(err)}`));
-    await engine.close().catch((err: unknown) => log(`closing the browser failed: ${err instanceof Error ? err.message : String(err)}`));
-    process.off("exit", removeScratch);
-    removeScratch();
   }
+  // Out of time with routes still to visit; a cap of routes reached first is --max-routes's to report.
+  const timeLimitReached = pastDeadline() && pagesSoFar() < options.maxRoutes && engine.crawlableRoutes().length > 0;
+  return { routes, timeLimitReached };
+}
+
+/**
+ * Load the pages of open findings the crawl did not load exactly. Kept apart from the crawl's routes: they are measured
+ * only to re-test, never checked against the page rules, and do not count towards --max-routes. Not called with --paths,
+ * where the check stays on the paths it was given.
+ */
+async function loadRetestPages({ log, engine }: CheckRun, plan: ReturnType<typeof checkRetestPlan>, routes: readonly RouteHealth[]): Promise<RouteHealth[]> {
+  const retestPages: RouteHealth[] = [];
+  const missing = [...new Set(plan.candidates.map((c) => c.path))].filter((p) => !routes.some((r) => r.path === p));
+  if (missing.length > 0) {
+    await engine.crawl(missing, { limit: missing.length, measureOnly: true });
+    retestPages.push(...engine.lastCrawlHealth);
+    log(`  ${missing.length} page(s) of open findings loaded only to re-test them`);
+  }
+  return retestPages;
+}
+
+/** --baseline compare|update: picture the targets, or null with --baseline off or when the check will have no verdict. Throws when --baseline is on and no targets were read. */
+async function pictureBaselines({ options, log, engine }: CheckRun, inputs: CheckInputs, routes: RouteHealth[]): Promise<BaselineRun | null> {
+  // Before the flows, so a picture is of the page as a visit finds it, not as a flow left it. Not when the crawl
+  // reached only sign-in pages: the check has no verdict then, and an update would write sign-in pages as baselines.
+  if (options.baseline !== "off" && !inputs.baselineTargets)
+    throw new Error(`--baseline ${options.baseline} was given no targets: read them with readCheckInputs`);
+  return options.baseline !== "off" &&
+    inputs.baselineTargets &&
+    startPageRefusal(routes, !options.paths) === null &&
+    unmeasuredReason(routes, !options.paths, options.paths ? [] : engine.crawlableRoutes()) === null
+    ? await takeBaselines(engine, options, options.baseline, inputs.baselineTargets, log)
+    : null;
+}
+
+/**
+ * The browser a flow runs in. A flow that names a role runs in that role's own browser, so the check's session (and
+ * what its crawl found) is left as it was. Each role's browser is attached on first use and stops the check when its
+ * saved sign-in no longer signs in.
+ */
+async function engineFor({ options, engine, roleEngines, scratch, start, record, frameCap }: CheckRun, role: string | undefined): Promise<BrowserEngine> {
+  if (role === undefined) return engine;
+  const known = roleEngines.get(role);
+  if (known) return known;
+  const roleEngine = new BrowserEngine();
+  roleEngines.set(role, roleEngine);
+  if (record) roleEngine.sessionKey = replaySessionKey(role);
+  const roleDir = path.join(scratch, `role-${role}`);
+  fs.mkdirSync(roleDir, { recursive: true });
+  const attachedAs = await roleEngine.attach({
+    url: start.origin,
+    projectDir: options.projectDir,
+    memoryStore: new MemoryStore(roleDir),
+    mode: options.mode,
+    role,
+    ...(record ? { record: true, ...(frameCap !== undefined ? { maxFrames: frameCap } : {}) } : {}),
+    ...(options.browser ? { browser: options.browser } : {}),
+    actionTimeoutMs: options.actionTimeoutMs,
+    navTimeoutMs: options.navTimeoutMs,
+    objective: `Deterministic check: replay the saved flows that run as ${role}`,
+    task: `Replaying flows as ${role}`,
+  });
+  const lost = attachedAs.split("\n").find((line) => line.startsWith("⚠ AUTH FAILED"));
+  if (lost) throw new Error(`the saved sign-in for role "${role}" no longer signs in: ${lost.replace(/ Continuing now tests a logged-out app\.$/, "")}`);
+  return roleEngine;
+}
+
+/** Replay the saved flows in order, each filmed with --video, and stop after a refused step with --on-refused-step stop. */
+async function replayFlows(run: CheckRun, runFlows: readonly Flow[]): Promise<FlowReplays> {
+  const { options, log, video, outDir } = run;
+  const flowRuns: FlowRun[] = [];
+  const flowFrames: Array<ReadonlyArray<StepShot>> = [];
+  const flowVideos: Array<string | null> = [];
+  for (const flow of runFlows) {
+    const runner = await engineFor(run, flow.role);
+    // --flow-writes never: observe's rule, whatever --mode lets the crawl do.
+    const walk = () => runner.replayFlow(flow.steps, options.flowWrites === "never" ? "observe" : options.mode);
+    let walked: Awaited<ReturnType<typeof walk>>;
+    if (video) {
+      // Filmed on the session's own page, so the flow runs exactly as it would unfilmed and the video holds it alone.
+      const rel = journeyVideoPath(flowRuns.length + 1, flow.file);
+      const own = await runner.filming(path.join(outDir, ...rel.split("/")), walk);
+      walked = own.value;
+      flowVideos.push(own.video ? rel : null);
+      if (own.videoError) log(`  flow ${flow.name}: its video could not be saved (${own.videoError})`);
+    } else {
+      walked = await walk();
+    }
+    const { frames, ...replay } = walked;
+    flowFrames.push(frames ?? []);
+    flowRuns.push({ name: flow.name, file: flow.file, steps: flow.steps.length, ...(flow.role === undefined ? {} : { role: flow.role }), ...replay });
+    log(
+      `  flow ${flow.name}${flow.role === undefined ? "" : ` (as ${flow.role})`}: ${replay.outcome.status}${replay.outcome.status === "passed" ? "" : ` at step ${replay.outcome.step}`}`,
+    );
+    // --on-refused-step stop: nothing after a refused step runs, and the check ends without a verdict.
+    if (replay.outcome.status === "refused" && options.onRefusedStep === "stop") break;
+  }
+  return { flowRuns, flowFrames, flowVideos };
+}
+
+/** The re-test of the open findings, against the crawl's routes and the pages loaded only to re-test. */
+function retestOf(plan: ReturnType<typeof checkRetestPlan>, routes: readonly RouteHealth[], retestPages: readonly RouteHealth[]): CheckResult["retest"] {
+  return {
+    open: plan.open,
+    extraPages: retestPages.length,
+    results: retestResults(
+      plan.candidates,
+      [...routes, ...retestPages].map((r) => ({
+        path: r.path,
+        status: r.status,
+        ...(r.loadError !== undefined ? { loadError: r.loadError } : {}),
+        loginRedirect: r.loginRedirect,
+        ...(r.challenge !== undefined ? { challenge: r.challenge } : {}),
+        httpErrors: withoutOwnResponse(r)
+          .violations.filter((v) => v.kind === "http_error")
+          .map((v) => v.detail),
+      })),
+    ),
+  };
+}
+
+/** The check's result, redacted, with its issues judged from what was measured, replayed and pictured. */
+function checkResultOf(
+  { options, engine, start }: CheckRun,
+  inputs: CheckInputs,
+  ran: {
+    routes: RouteHealth[];
+    timeLimitReached: boolean;
+    flowRuns: FlowRun[];
+    baselines: BaselineRun | null;
+    retest: CheckResult["retest"];
+    replay: CheckReplay | null;
+  },
+): CheckResult {
+  const { routes, timeLimitReached, flowRuns, baselines, retest, replay } = ran;
+  const { pages: measured, resources } = splitResources(redactRoutes(routes.map(withoutOwnResponse)));
+  const flows = redactFlowRuns(flowRuns);
+  const pictured = baselines ? redactBaselineRun(baselines) : null;
+  // Signed in only when given a session: with none, a route that sends the browser to sign-in needs one, and is not a lost session.
+  const signedIn = options.storageStatePath !== undefined;
+  const { issues, worthALook, needsSignIn, blocked } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths, signedIn);
+  return {
+    url: redactRoute(options.url),
+    generatedAt: new Date().toISOString(),
+    mode: options.mode,
+    failOn: options.failOn,
+    routes: measured,
+    resources,
+    issues,
+    worthALook,
+    ...(signedIn ? {} : { needsSignIn }),
+    ...(blocked.length > 0 ? { blocked } : {}),
+    // Routes that failed to load are issues already; "not visited" is only what --max-routes (or the time budget) left out.
+    unvisited: options.paths ? [] : engine.crawlableRoutes().map(redactRoute),
+    ...(options.timeBudgetMs !== undefined ? { timeBudget: { ms: options.timeBudgetMs, reached: timeLimitReached } } : {}),
+    ignored: options.ignore,
+    ignoredPaths: options.ignorePaths,
+    flows,
+    skippedFlows: inputs.skippedFlows ?? [],
+    retest,
+    settings: settingsOf(options),
+    baselines: pictured,
+    ...(replay ? { replay } : {}),
+  };
+}
+
+/** Close every role's browser, then the check's own; a failure to close is logged, never thrown over the check's own error. */
+async function closeCheckEngines({ log, engine, roleEngines }: CheckRun): Promise<void> {
+  for (const [role, roleEngine] of roleEngines)
+    await roleEngine.close().catch((err: unknown) => log(`closing the browser for role ${role} failed: ${err instanceof Error ? err.message : String(err)}`));
+  await engine.close().catch((err: unknown) => log(`closing the browser failed: ${err instanceof Error ? err.message : String(err)}`));
 }
 
 /** Where a check writes when not told: beside the project's other SceneScout output, which is already ignored by git. */
