@@ -31,6 +31,8 @@ import {
   FOREIGN_FRAME_SANDBOX,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
+  authPostsSetting,
+  AUTH_POSTS_ENV,
   isDestructive,
   isDestructiveWire,
   BlockNotices,
@@ -764,6 +766,144 @@ test("in observe mode only the requests a login itself needs are exempt", () => 
   ]) {
     assert.equal(exempt(p), false, `${p} must be blocked in observe`);
   }
+});
+
+test("in observe, refresh, token, session, callback and authorize are sign-in only on an auth path, not on a record or another resource (#549)", () => {
+  const exempt = (p: string): boolean => isAuthExempt("observe", "POST", p, false);
+  // A session still has to be able to exist and be renewed.
+  for (const p of [
+    "/api/auth/refresh",
+    "/oauth/token",
+    "/auth/token/refresh",
+    "/api/token/refresh",
+    "/api/v1/auth/session",
+    "/api/session",
+    "/session",
+    "/refresh",
+    "/connect/token",
+    "/oauth2/v1/token",
+    "/realms/acme/protocol/openid-connect/token",
+    "/api/auth/callback/credentials",
+    "/sso/callback",
+    "/oauth/authorize",
+    "/.auth/refresh",
+    // Identity providers whose tenant, realm or server id comes before the auth path.
+    "/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/token",
+    "/oauth2/aus1a2b3c4d5e6f7g8h9/v1/token",
+    "/b2c_1_signin/oauth2/v2.0/token",
+    "/realms/tenant2024prod/protocol/openid-connect/token",
+    // A provider's callback: /auth/:provider/callback.
+    "/auth/github/callback",
+    "/users/auth/google_oauth2/callback",
+    "/.auth/login/aad/callback",
+    // An auth service named for itself.
+    "/rt-auth/token",
+  ])
+    assert.equal(exempt(p), true, `${p} should be let through`);
+  // The same words acting on a record, or naming another resource's action, are writes.
+  for (const p of [
+    "/api/reports/refresh",
+    "/api/cache/refresh",
+    "/api/devices/4/refresh",
+    "/api/users/7/token",
+    "/api/carts/9/session",
+    "/api/payments/callback",
+    "/api/integrations/slack/authorize",
+    "/api/auth/sessions/0f8e2c1a-4b5d-4e6f-8a9b-0c1d2e3f4a5b/refresh",
+    "/api/payments/callback/stripe",
+    "/api/auth/session/extend",
+    // The word second to last, with an action after it.
+    "/api/refresh/reports",
+    "/api/token/mint",
+    "/api/callback/run",
+    "/api/v1/authorize/grant",
+    "/api/integrations/slack/callback",
+  ])
+    assert.equal(exempt(p), false, `${p} must be refused in observe`);
+  // Outside observe the broad auth rule is unchanged.
+  assert.equal(isAuthExempt("read-only", "POST", "/api/carts/9/session", false), true);
+});
+
+test("in observe, an auth path that belongs to a record or an integration is not a sign-in (#549)", () => {
+  const exempt = (p: string): boolean => isAuthExempt("observe", "POST", p, false);
+  // Each pair differs in the one fact that flips the verdict.
+  const pairs: Array<[signIn: string, write: string, why: string]> = [
+    ["/api/auth/refresh", "/api/devices/7/auth/refresh", "a device's auth credentials, not the session's"],
+    ["/api/v1/auth/token", "/api/apps/42/auth/token", "an app record's token"],
+    ["/api/auth/token", "/api/orgs/5f9c2b1e8a7d6c5b4a3f2e1d/auth/token", "a record whose id is hex"],
+    [
+      "/realms/12345/protocol/openid-connect/token",
+      "/api/projects/12345/openid-connect/token",
+      "a realm is an identity provider's scope; a project is a record",
+    ],
+    ["/auth/github/callback", "/api/sessions/7/callback", "a session record, not a provider"],
+    ["/auth/github/callback", "/auth/7/callback", "a provider has a name, not an id"],
+    ["/connect/token", "/api/stripe-connect/callback", "connect inside a longer segment names an integration"],
+    ["/auth/github/callback", "/api/connect/stripe/callback", "a provider callback under connect links an integration"],
+    ["/oauth/github/callback", "/api/tokens/github/callback", "tokens is not where a provider's callback lands"],
+    // A tenant's sign-in policy follows the tenant, and is not a record of it.
+    ["/tenant.example.com/B2C_1_signupsignin/oauth2/v2.0/token", "/api/projects/B2C_1_signupsignin/oauth2/v2.0/token", "a policy after a tenant"],
+    ["/tfp/tenant.example.com/B2C_1A_signin/oauth2/v2.0/token", "/api/devices/7/oauth2/v2.0/token", "a policy after tfp's tenant"],
+    [
+      "/72f988bf-86f1-41af-91ab-2d7cd011db47/B2C_1_signin/oauth2/v2.0/token",
+      "/devices/7/auth/refresh",
+      "a policy after a tenant's id; a record with no API prefix",
+    ],
+  ];
+  for (const [signIn, write, why] of pairs) {
+    assert.equal(exempt(signIn), true, `${signIn} should be let through`);
+    assert.equal(exempt(write), false, `${write} must be refused in observe: ${why}`);
+  }
+});
+
+test("in observe, sign-in steps that frameworks spell their own way are let through, and their look-alikes are not (#549)", () => {
+  const exempt = (p: string): boolean => isAuthExempt("observe", "POST", p, false);
+  const pairs: Array<[signIn: string, write: string]> = [
+    ["/users/sign_in", "/users/sign_up"], // underscores, as some frameworks spell it
+    ["/sign_in", "/users/password"], // a password reset request
+    ["/users/sign_out", "/users/confirmation"],
+    ["/api/v1/authn", "/api/v1/authn/recovery/password"], // a sign-in transaction, and a password reset in the same API
+    ["/u/login/password", "/account/password"], // the password step of signing in, and changing one
+    ["/login/password", "/api/users/7/password"],
+    ["/u/login/password", "/api/users/7/login/password"], // a user record's password
+  ];
+  for (const [signIn, write] of pairs) {
+    assert.equal(exempt(signIn), true, `${signIn} should be let through`);
+    assert.equal(exempt(write), false, `${write} must be refused in observe`);
+  }
+  // GraphQL carries every operation on one path, so a sign-in mutation is not told apart by its path: refused, and named in SCENESCOUT_AUTH_POSTS only knowingly.
+  assert.equal(exempt("/graphql"), false);
+  assert.equal(exempt("/api/graphql"), false);
+});
+
+test("an auth allowlist (SCENESCOUT_AUTH_POSTS) replaces the path rule: only the listed sign-in POSTs are exempt (#549)", () => {
+  assert.equal(AUTH_POSTS_ENV, "SCENESCOUT_AUTH_POSTS");
+  assert.equal(authPostsSetting(undefined), null, "unset: the path rule");
+  assert.equal(authPostsSetting("  "), null, "empty: the path rule");
+  const setting = authPostsSetting("POST /api/login, POST https://idp.example.com/oauth/token\nGET /x");
+  assert.ok(setting);
+  assert.deepEqual(
+    setting.entries.map((e) => e.entry),
+    ["POST /api/login", "POST https://idp.example.com/oauth/token"],
+  );
+  assert.deepEqual(setting.rejected, ["GET /x"]);
+  const app = "https://app.example.com";
+  const list = (url: string) => ({ entries: setting.entries, appUrl: app, url });
+  const exempt = (mode: (typeof WRITE_MODES)[number], url: string, destructive = false) =>
+    isAuthExempt(mode, "POST", new URL(url).pathname, destructive, list(url));
+  assert.equal(exempt("observe", `${app}/api/login`), true, "listed");
+  assert.equal(exempt("observe", "https://idp.example.com/oauth/token"), true, "listed on another origin");
+  assert.equal(exempt("observe", `${app}/api/auth/refresh`), false, "the path rule would let it out; the list does not name it");
+  assert.equal(exempt("observe", `${app}/oauth/token`), false, "an entry with an origin matches that origin only");
+  assert.equal(exempt("observe", `${app}/api/login`, true), false, "never a destructive one");
+  assert.equal(exempt("read-only", `${app}/api/auth/login`), false, "in every mode, the list is the exemption");
+  // A list whose every entry was rejected still replaces the path rule: no POST counts as signing in.
+  const none = authPostsSetting("/api/login");
+  assert.ok(none);
+  assert.deepEqual(none.entries, []);
+  assert.equal(isAuthExempt("observe", "POST", "/api/auth/login", false, { entries: none.entries, appUrl: app, url: `${app}/api/auth/login` }), false);
+  // Without a list, the path rule.
+  assert.equal(isAuthExempt("observe", "POST", "/api/auth/refresh", false, null), true);
 });
 
 test("a blocked script request is answered with a refusal; a blocked navigation is dropped", () => {
@@ -1612,7 +1752,13 @@ test("pathnameOf reads a request URL's path, and keeps what does not parse", () 
 type GuardCall = string;
 function guardRig(
   rule: (typeof WRITE_MODES)[number],
-  opts: { foreign?: string | null; owned?: (pathname: string) => boolean; readPost?: string; frameDoc?: "foreign" | "app" | null } = {},
+  opts: {
+    foreign?: string | null;
+    owned?: (pathname: string) => boolean;
+    readPost?: string;
+    frameDoc?: "foreign" | "app" | null;
+    authPosts?: string[];
+  } = {},
 ) {
   const calls: GuardCall[] = [];
   const owned = new Set<string>();
@@ -1640,6 +1786,7 @@ function guardRig(
     recordCreation: async (res) => {
       owned.add(String((res as unknown as { created: string }).created));
     },
+    authPosts: () => (opts.authPosts ? readPostEntries(opts.authPosts).entries : null),
   };
   const guard = new RouteGuard(host);
   const send = (
@@ -1732,6 +1879,37 @@ test("RouteGuard: each verdict is applied to the request, and a refusal is recor
       assert.equal(guard.refused(theirs.request), true);
     }
   }
+});
+
+test("RouteGuard: observe's sign-in exemption, by the path rule and by an operator's allowlist (#549)", async () => {
+  {
+    const { send } = guardRig("observe");
+    assert.equal(await send("POST", "/api/auth/refresh", { body: "{}" }).done, "fallback", "a token refresh goes out");
+    assert.equal(await send("POST", "/api/reports/refresh", { body: "{}" }).done, "fulfill 403", "refreshing a report is a write");
+    assert.equal(await send("POST", "/api/devices/4/refresh", { body: "{}" }).done, "fulfill 403", "so is an action on a record");
+  }
+  {
+    const { send } = guardRig("observe", { authPosts: ["POST /api/login"] });
+    assert.equal(await send("POST", "/api/login", { body: "{}" }).done, "fallback", "the listed sign-in goes out");
+    assert.equal(await send("POST", "/api/auth/refresh", { body: "{}" }).done, "fulfill 403", "an auth path the operator did not list is refused");
+  }
+  // The browser-level interception applies the same list.
+  const unseen = async (authPosts: string[] | undefined, path: string) => {
+    const { guard } = guardRig("observe", { authPosts });
+    const sent: string[] = [];
+    await (guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+      { send: async (cmd: string) => void sent.push(cmd) },
+      {
+        requestId: "1",
+        resourceType: "Ping",
+        request: { url: `https://app.example.com${path}`, method: "POST", headers: { Origin: "https://app.example.com" }, postData: "{}" },
+      },
+    );
+    return sent[0];
+  };
+  assert.equal(await unseen(undefined, "/api/auth/logout"), "Fetch.continueRequest");
+  assert.equal(await unseen(["POST /api/login"], "/api/auth/logout"), "Fetch.failRequest");
+  assert.equal(await unseen(["POST /api/login"], "/api/login"), "Fetch.continueRequest");
 });
 
 test("RouteGuard: a safe-write PUT right after the POST that created its record waits for the creation to be recorded", async () => {
@@ -1847,6 +2025,21 @@ test("guided gate: while a guided plan is open, the environment's read POSTs are
     assert.ok(r.ok, `${planId} ${mode}`);
     assert.deepEqual(readPostsSetting(r.readPosts, ENV), [], `${planId} ${mode}: the environment's list is not read`);
   }
+});
+
+test("guided gate: while a guided plan is open, the operator's sign-in list is not read, so it cannot loosen observe (#549)", () => {
+  const plans = new GuidedPlans();
+  assert.equal(
+    "operatorAuthPosts" in guidedAttachVerdict(plans, { mode: "observe", url: "https://staging.example.com" }),
+    false,
+    "no plan: the attach reads it",
+  );
+  const built = guidedPlan({ address: "https://staging.example.com", areas: ["forms"], care: "look-only" });
+  assert.ok(built.ok);
+  const p = plans.add(built.plan);
+  const verdict = guidedAttachVerdict(plans, { planId: p.planId, mode: "observe", url: "https://staging.example.com" });
+  assert.ok(verdict.ok);
+  assert.equal(verdict.operatorAuthPosts, false);
 });
 
 test("guided gate: an accepted plan is spent when no session carries it any more, so a later check asks again", () => {

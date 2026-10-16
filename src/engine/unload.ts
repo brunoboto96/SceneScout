@@ -18,7 +18,16 @@
  * wiring to the browser lives in `browser.ts`.
  */
 import { createHash } from "node:crypto";
-import { allowsForeignWriteOnSignIn, allowsWrite, foreignWrite, isAuthExempt, offAppPageWrite, trustsForeignWrite, type WriteMode } from "./policy.js";
+import {
+  allowsForeignWriteOnSignIn,
+  allowsWrite,
+  foreignWrite,
+  isAuthExempt,
+  offAppPageWrite,
+  trustsForeignWrite,
+  type AuthPostList,
+  type WriteMode,
+} from "./policy.js";
 
 /** Whether a method sends nothing the write policy judges. */
 export function isReadMethod(method: string): boolean {
@@ -90,11 +99,13 @@ export function judgeUnseenWrite(input: {
   owned: boolean;
   /** policy.ts readPostAllowed: a POST the user named as a read, let out of observe. */
   readPost?: boolean;
+  /** The operator's sign-in allowlist for this request, when one is set (policy.ts isAuthExempt). */
+  authList?: AuthPostList | null;
 }): UnseenWriteVerdict {
   const { mode, method, pathname, destructiveWire } = input;
   if (mode === "destructive" || isReadMethod(method)) return { allow: true };
   if (input.foreign) return { allow: false, why: `sent from a frame of ${input.foreign}` };
-  const authExempt = isAuthExempt(mode, method, pathname, destructiveWire);
+  const authExempt = isAuthExempt(mode, method, pathname, destructiveWire, input.authList);
   if (input.offApp && !authExempt) return { allow: false, why: `sent from a page of ${input.offApp}, outside the app` };
   if (authExempt || input.readPost) return { allow: true };
   return allowsWrite(mode, method, destructiveWire, input.owned) ? { allow: true } : { allow: false };
