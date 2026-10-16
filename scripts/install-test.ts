@@ -527,12 +527,36 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   const register = fs.readFileSync(path.join(dir, "hooks", "register.js"), "utf8");
   // A hooks module may import only its own files by relative path, and the bare `claude-code`.
   const imports = [...register.matchAll(/^import[^"']*["']([^"']+)["']/gm)].map((m) => m[1]);
-  assert.deepEqual(imports, ["./pane.js"], "register.js imports only its own rules, by relative path");
+  assert.deepEqual(imports, ["./pane.js", "./guided.js"], "register.js imports only its own rules, by relative path");
+  // The mod presents itself in plain words, with somewhere to ask for help and to read what it reaches.
+  const shown = read(path.join(entry.source, ".claude-plugin", "plugin.json")) as Record<string, unknown>;
+  assert.equal(typeof shown.displayName, "string");
+  assert.match(String(shown.description), /\/scenescout-guided/);
+  assert.ok(fs.existsSync(path.join(dir, String(shown.icon))), "the icon the manifest names is in the mod");
+  for (const key of ["supportUrl", "privacyPolicyUrl", "homepage"]) assert.match(String(shown[key]), /^https:\/\/github\.com\/brunoboto96\/SceneScout\//, key);
+  assert.match(String(shown.privacyPolicyUrl), /#what-it-reaches$/, "the privacy link lands on the What it reaches table");
+  // Claude Code refuses a mod whose name takes a reserved prefix.
+  assert.doesNotMatch(mod.name, /^(claude-|anthropic-|cc-plugin-)/);
+  // Its $.state values are declared in the contract the manifest names.
+  assert.equal(shown.types, "./types/index.d.ts");
+  const contract = fs.readFileSync(path.join(dir, "types", "index.d.ts"), "utf8");
+  for (const key of ["wizard", "status", "picture", "confirmed"]) {
+    assert.match(contract, new RegExp(`\\b${key}: `), `the contract declares ${key}`);
+    assert.ok(register.includes(`{ plugin: "scenescout-mod", key: "${key}" }`), `register.js keeps ${key} in $.state`);
+  }
+  // The rules modules use no mods API, so live-test can run them in Node.
+  for (const file of ["pane.js", "guided.js"]) {
+    const code = fs
+      .readFileSync(path.join(dir, "hooks", file), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    assert.doesNotMatch(code, /\$\.|from "claude-code"/, file);
+  }
   // Nothing in the main plugin's default component directories comes from the mod.
   assert.ok(!fs.existsSync(path.join(root, "hooks")), "the main plugin carries no hooks of its own, so blocking mods costs it nothing");
 });
 
-test("the mod registers its hooks as the settings say: the pane always, the spawn hook only with a lane model", async () => {
+test("the mod registers its hooks as the settings say: the panel and its guard always, the spawn hook only with a lane model", async () => {
   // Calls the module's own register with a stand-in `on`, so what is checked is what Claude Code would be handed.
   const { register } = (await import("../mods/scenescout-mod/hooks/register.js")) as { register: (on: unknown, options: unknown) => void };
   const { COMMAND, PANE_ID } = (await import("../mods/scenescout-mod/hooks/pane.js")) as { COMMAND: string; PANE_ID: string };
@@ -544,13 +568,20 @@ test("the mod registers its hooks as the settings say: the pane always, the spaw
     }, options);
     return seen;
   };
+  const { GUIDED_COMMAND } = (await import("../mods/scenescout-mod/hooks/guided.js")) as { GUIDED_COMMAND: string };
   const pane: Array<[string, unknown]> = [
     ["session.start", null],
+    ["command.run", { command: GUIDED_COMMAND }],
     ["command.run", { command: COMMAND }],
     ["ui.close", null],
+    ["turn.start", null],
+    ["turn.complete", null],
     ["ui.render", { component: "Pane" }],
+    // The question before Claude's own SceneScout call that would send things to a site.
+    ["tool.call", null],
   ];
   assert.equal(COMMAND, "scenescout-pane");
+  assert.equal(GUIDED_COMMAND, "scenescout-guided");
   assert.match(PANE_ID, /^[A-Za-z0-9_-]{1,64}$/);
   assert.deepEqual(hooksFor({ lane_model: "", mcp_server: "" }), pane, "the default: no spawn hook");
   assert.deepEqual(hooksFor({}), pane, "settings absent: no spawn hook");
@@ -2406,4 +2437,70 @@ test("a valued option takes the next argument or its =value, and refuses a missi
   assert.deepEqual(readFlagValue(["--limit", "-1"], 0), { ok: true, name: "limit", value: "-1", last: 1 });
   assert.deepEqual(readFlagValue(["--from", "-"], 0), { ok: true, name: "from", value: "-", last: 1 });
   assert.deepEqual(readFlagValue(["--limit=--other"], 0), { ok: true, name: "limit", value: "--other", last: 0 });
+});
+
+// The Playwright hold (#487) is a published range, not only this repository's lockfile: a caret
+// range lets `npx scenescout` and every global install resolve the release the hold is about.
+// The hold is recorded in AGENTS.md's "Pinned dependencies", and this test holds the two equal,
+// so lifting it means editing both.
+const HELD_PLAYWRIGHT_MINOR = "1.63";
+
+/** Whether a range this package might publish (`~X.Y.Z`, `^X.Y.Z`, `>=X.Y.Z <A.B.C` or `X.Y.Z`) admits `version`. */
+function rangeAdmits(range: string, version: string): boolean {
+  const parse = (v: string): number[] => {
+    const parts = v.split(".").map(Number);
+    assert.ok(parts.length === 3 && parts.every(Number.isInteger), `${v} is not a plain X.Y.Z version`);
+    return parts;
+  };
+  const cmp = (a: number[], b: number[]): number => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+  const v = parse(version);
+  const bounded = /^>=\s*(\S+)\s+<\s*(\S+)$/.exec(range.trim());
+  if (bounded) return cmp(v, parse(bounded[1])) >= 0 && cmp(v, parse(bounded[2])) < 0;
+  const op = /^[~^]/.exec(range)?.[0] ?? "";
+  const lo = parse(range.slice(op.length));
+  if (op === "") return cmp(v, lo) === 0;
+  const hi = op === "~" ? [lo[0], lo[1] + 1, 0] : lo[0] > 0 ? [lo[0] + 1, 0, 0] : lo[1] > 0 ? [0, lo[1] + 1, 0] : [0, 0, lo[2] + 1];
+  return cmp(v, lo) >= 0 && cmp(v, hi) < 0;
+}
+
+test("rangeAdmits reads the range shapes package.json may publish", () => {
+  assert.equal(rangeAdmits("^1.63.0", "1.64.1"), true, "a caret range admits the next minor");
+  assert.equal(rangeAdmits("~1.63.0", "1.63.9"), true);
+  assert.equal(rangeAdmits("~1.63.0", "1.64.0"), false, "a tilde range stops at the next minor");
+  assert.equal(rangeAdmits(">=1.63.0 <1.64.0", "1.63.2"), true);
+  assert.equal(rangeAdmits(">=1.63.0 <1.64.0", "1.64.0"), false);
+  assert.equal(rangeAdmits("1.63.0", "1.63.1"), false);
+  assert.equal(rangeAdmits("~1.63.1", "1.63.0"), false);
+  assert.equal(rangeAdmits("^0.2.1", "0.3.0"), false);
+  assert.equal(rangeAdmits("^0.0.3", "0.0.4"), false);
+});
+
+test("while AGENTS.md records the Playwright hold, the published range admits no 1.64", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { dependencies: Record<string, string> };
+  const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8")) as {
+    packages: Record<string, { version?: string; dependencies?: Record<string, string> }>;
+  };
+  const range = pkg.dependencies.playwright;
+  assert.ok(range, "playwright is a runtime dependency");
+  assert.equal(lock.packages[""]?.dependencies?.playwright, range, "the lockfile records the range package.json publishes");
+  const locked = lock.packages["node_modules/playwright"]?.version;
+  assert.ok(locked && rangeAdmits(range, locked), `the locked playwright ${locked} is inside ${range}`);
+
+  const agents = fs.readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8");
+  const hold = agents.split("\n").find((line) => line.startsWith(`- **playwright stays on ${HELD_PLAYWRIGHT_MINOR}.**`));
+  const next = `${HELD_PLAYWRIGHT_MINOR.split(".")[0]}.${Number(HELD_PLAYWRIGHT_MINOR.split(".")[1]) + 1}.0`;
+  if (hold) {
+    assert.equal(
+      rangeAdmits(range, next),
+      false,
+      `AGENTS.md holds Playwright on ${HELD_PLAYWRIGHT_MINOR}, so the published range ${range} must not admit ${next}`,
+    );
+    assert.ok(hold.includes(`\`${range}\``), `AGENTS.md's hold names the published range ${range}`);
+  } else {
+    // Lifted: the range moved past the held minor, whether it still admits it (^1.63.0) or starts later (~1.65.0).
+    const floor = /(\d+)\.(\d+)\.\d+/.exec(range);
+    const startsLater =
+      floor !== null && (Number(floor[1]) > Number(next.split(".")[0]) || (floor[1] === next.split(".")[0] && Number(floor[2]) >= Number(next.split(".")[1])));
+    assert.ok(rangeAdmits(range, next) || startsLater, `AGENTS.md no longer records the Playwright hold, so widen the range ${range} (or restore the line)`);
+  }
 });

@@ -353,6 +353,14 @@ test("the server's environment has no key in it, no live view, and opens nothing
   assert.equal(childEnv({ SCENESCOUT_EVIDENCE: " " }).SCENESCOUT_EVIDENCE, "file");
 });
 
+test("the server may read the storage state --storage-state named, and only that one, wherever it is", () => {
+  const delim = path.delimiter;
+  assert.equal(childEnv({}, { storageState: "/runner/tmp/auth/user.json" }).SCENESCOUT_STORAGE_STATE_ALLOW, "/runner/tmp/auth/user.json");
+  // A job's own list is kept, and the flag's file added to it.
+  assert.equal(childEnv({ SCENESCOUT_STORAGE_STATE_ALLOW: "/a.json" }, { storageState: "/b.json" }).SCENESCOUT_STORAGE_STATE_ALLOW, `/a.json${delim}/b.json`);
+  assert.equal(childEnv({}).SCENESCOUT_STORAGE_STATE_ALLOW, undefined, "no flag, nothing listed");
+});
+
 // ── redaction ───────────────────────────────────────────────────────────────
 
 test("redaction: every key value and every key-shaped string goes; ordinary text stays", () => {

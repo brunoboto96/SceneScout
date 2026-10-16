@@ -205,6 +205,8 @@ export async function runCheck(
       memoryStore: store,
       mode: options.mode,
       storageStatePath: options.storageStatePath,
+      // Named by whoever ran the command, so it is read wherever it is (a runner's temporary folder, say).
+      ...(options.storageStatePath ? { storageStateAllow: [options.storageStatePath] } : {}),
       ...(record ? { record: true, ...(frameCap !== undefined ? { maxFrames: frameCap } : {}) } : {}),
       ...(options.browser ? { browser: options.browser } : {}),
       actionTimeoutMs: options.actionTimeoutMs,

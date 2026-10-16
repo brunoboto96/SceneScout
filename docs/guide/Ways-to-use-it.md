@@ -44,7 +44,7 @@ Use SceneScout to test http://localhost:3000 as the admin role, focusing on chec
 |---|---|
 | `--level minimal`, `medium` or `extensive` | The completion contract ([levels](Start-here.md#levels)) |
 | `--url <app>` | Where the app runs |
-| `--role <name or path>` | Who to test as: a login saved with `scenescout login`, a storage state the scan found, or a path to a Playwright storage-state file ([Signing in](Signing-in.md)) |
+| `--role <name or path>` | Who to test as: a login saved with `scenescout login`, a storage state the scan found, or a path to a Playwright storage-state file inside the project ([Signing in](Signing-in.md)) |
 | `--focus <text>` | What to check: a ticket or a sentence. It becomes the session's objective |
 | `--observe`, `--read-only`, `--safe-write`, `--allow-destructive` | The write mode, in place of the one the agent would choose ([Safety model](Safety-model.md)) |
 
@@ -149,19 +149,38 @@ Practical limits:
 
 ## The Claude Code mod
 
-An optional extra for Claude Code, installed as a second plugin from the same marketplace. It adds only what an MCP server cannot do in Claude Code, which draws no MCP Apps: a run pane beside the transcript, and a choice of model for lane agents. The `scenescout` plugin, its skill, its server, the `scout_status` text and the `live` and `login` prompts work the same without it, so an organisation that blocks mods loses nothing.
+An optional extra for Claude Code, installed as a second plugin from the same marketplace. It adds only what an MCP server cannot do in Claude Code, which draws no MCP Apps: a guided panel beside the transcript that starts a check, follows it and shows what it found with buttons rather than prompts, a question before Claude starts a check that may send things to your site, and a choice of model for lane agents. The `scenescout` plugin, its skill, its server, the `scout_status` text and the `live` and `login` prompts work the same without it, so an organisation that blocks mods loses nothing.
 
 ```text
 /plugin install scenescout@scenescout-marketplace
 /plugin install scenescout-mod@scenescout-marketplace
 ```
 
-- **Where it runs.** The Claude Code CLI and the Code tab of the Claude Desktop app, with Claude Code v2.1.287 or later. It does not run in the chat tab or in other clients, and draws nothing in the VS Code extension's chat panel or in `claude -p`, where `/scenescout-pane` prints the server's status text instead.
-- **The pane.** `/scenescout-pane` opens it. Every 2.5 seconds it asks the SceneScout server for the same data the `scout_status` pane shows: each session with its task and objective, open findings by severity, coverage, and a link to the live view. It has no image and no text field, and asks for no password. Esc closes it, and it stops polling once closed.
+- **Where it runs.** The Claude Code CLI and the Code tab of the Claude Desktop app, with Claude Code v2.1.287 or later. The Desktop app carries its own Claude Code, which can be older than your CLI: on a build without the question dialog or without a way to send to a running turn, the panel still works and those two parts are left out, and the server's own confirmation form still decides. It does not run in the chat tab or in other clients, and draws nothing in the VS Code extension's chat panel or in `claude -p`, where `/scenescout-guided` prints where the check stands and what to say to Claude next, and `/scenescout-pane` prints the server's status text.
+- **The guided panel.** `/scenescout-guided` opens it, and `/scenescout-pane` opens the same panel. It starts on a welcome screen with **Check a site** and **How it keeps your data safe**. A new check asks for the address, what to check (sign-up and sign-in, forms, broken pages and links, how it looks on a phone, a journey in a sentence), whether you sign in, how careful to be ([care levels](Safety-model.md#care-levels-in-a-guided-check)) and how thorough, and says under your choice what that care level holds back. **Start** builds the plan on the SceneScout server and hands Claude only its id.
+- **Before a check that writes.** For *May create test data*, or *May submit forms* on a site that is not on your computer, the panel first shows what that care level may and may not do there. **Yes** then asks the server, which shows you its own confirmation form (with a code to type for test data). Only your answer in that form starts the check: the panel previews, it does not accept. If you go back or the form cannot be shown, the panel offers the same check as *Look only*.
+- **While it runs.** The panel shows what is happening now in one sentence and the few before it, each area with a tick, pages checked, time used out of time allowed, problems so far by impact, the newest problems, and an estimate of the clicking it saved with what the estimate is based on. **Watch it live** opens the live view; **Stop** asks Claude to finish and write what it has. A press while Claude is working goes into its running turn; otherwise it starts a turn of its own, marked as sent by the mod. The sessions, open findings and coverage the earlier run pane showed are listed below, and the panel polls the server every 2.5 seconds while it is open. Esc closes it.
+- **Results and one problem.** **See all problems** lists the findings as cards, worst first. A card shows the impact, what kind of problem it is, the page, the steps to repeat it, what was expected and what happened. **Not a bug** labels it through `scout_feedback` and keeps it; **Explain more** and **Check again** ask Claude. **See picture** opens the saved picture in your viewer, and **See it in the live view** opens the live view. In the desktop Code tab the panel also tries to draw the picture itself; if nothing shows, the links are the way to it. **Run again** repeats your last check, asking for its confirmation again where one applies.
+- **On a phone.** The mobile app draws no text field, so its panel has buttons alone: **Check a site** starts a message for you to finish with the address, and Claude asks the rest with the start form. Results, cards and **Run again** work as on the desktop.
+- **The question before Claude's own calls.** When Claude, not the panel, is about to call `scout_attach` in a mode that sends things to a site (`read-only`, `safe-write` or `destructive`), Claude Code asks you first; **Stop it**, or closing the question, refuses the call and tells Claude not to retry. A check you started or confirmed from the panel is not asked about twice. In `claude -p` there is nobody to ask, so such a call is refused there.
 - **Lane agents' model.** Set `lane_model` (`/plugin configure scenescout-mod@scenescout-marketplace`, or the `/config` row) to an alias such as `sonnet` or a full model id, and a subagent whose prompt names `scout_attach` or `scout_lane_report` starts on that model, over the one the planner chose. A fork keeps its parent's model. Left empty, which is the default, the mod does not handle subagents at all.
-- **Finding the server.** The pane calls the server named `scenescout` (how `scenescout install` registers it) or `plugin:scenescout:scenescout` (how the plugin starts it). If yours is named otherwise, set `mcp_server` to the name `/mcp` lists.
+- **Finding the server.** The panel calls the server named `scenescout` (how `scenescout install` registers it) or `plugin:scenescout:scenescout` (how the plugin starts it). If yours is named otherwise, set `mcp_server` to the name `/mcp` lists.
 
-**Trust.** A mod is JavaScript that runs inside Claude Code with your permissions, unsandboxed: it could read your files and environment and see your session. This one only calls the SceneScout server's status tool, draws the pane, and changes a lane's model when you set one; `claude plugin validate` on its directory lists every event it handles and every call it makes. Install it only if you are comfortable running it, and leave it out where your organisation's policy says no.
+### What it reaches
+
+The mod's row of the disclosure [issue #544](https://github.com/brunoboto96/SceneScout/issues/544) asks for; the plugin's and the desktop extension's rows are that issue's.
+
+| | The Claude Code mod |
+|---|---|
+| Network | None of its own. It calls the SceneScout MCP server through Claude Code's own connection: the status poll, building and confirming a plan, the cards and a card's label |
+| Processes | None |
+| Files | Reads and writes none. Its picture links point at files the server saved in the project's `.scenescout/` folder |
+| What it keeps | The panel's state for the session, in Claude Code's memory. Nothing across sessions |
+| Model calls | None of its own. **Start**, **Stop**, **Explain more**, **Check again**, **Run again** and the report buttons send a message to Claude in your session, marked as sent by the mod |
+| Data sent anywhere | Nothing leaves the machine through the mod |
+| Asks you | Before Claude's own `scout_attach` in a mode that writes; your no refuses the call |
+
+**Trust.** A mod is JavaScript that runs inside Claude Code with your permissions, unsandboxed: it could read your files and environment and see your session. This one does only what the table says; `claude plugin validate` on its directory lists every event it handles and every call it makes, and `claude plugin test` on it mounts the panel on every surface. Install it only if you are comfortable running it, and leave it out where your organisation's policy says no.
 
 ## `scenescout check`: a gate in CI
 
