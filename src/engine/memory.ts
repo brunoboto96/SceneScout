@@ -48,7 +48,7 @@ export interface StateRecord {
  * no text is named by its image content (an <img>'s alt text, an <svg>'s
  * aria-label or <title>) before its title attribute. 3: that content also
  * counts a descendant's aria-label and an <img>'s title when its alt is empty
- * (collector.ts CONTENT_SAYS_SRC).
+ * (page-sources.ts CONTENT_SAYS_SRC).
  */
 export const NAME_RULE = 3;
 
@@ -550,7 +550,7 @@ export interface MemoryFile {
   laneRoutes?: Record<string, string[]>;
   /**
    * Element keys a control had under name rule 1: route → rule-1 key → its
-   * rule-2 key, learned from snapshots that list both (collector.ts
+   * rule-2 key, learned from snapshots that list both (page-sources.ts
    * PICK_NAME_SRC `priors`). Coverage reads a state written under an earlier
    * rule through these and ruleKeyAliases, so a control that gained a name
    * keeps what was recorded for it, and its earlier key is not left behind as
@@ -651,7 +651,7 @@ export function renormalizeRoutes(map: Record<string, string>): Record<string, s
 
 /**
  * Whether a coverage key belongs to a control inside another site's frame:
- * those keys carry the frame's origin (collector.ts frameElementKey), where
+ * those keys carry the frame's origin (frames.ts frameElementKey), where
  * the app's own frames carry a path. Not the app's to cover.
  */
 export function isEmbedKey(key: string): boolean {

@@ -18,6 +18,7 @@ import {
   answersWithRefusal,
   ESCAPE_REFUSAL,
   isAuthExempt,
+  type AuthPostList,
   isDestructiveWire,
   offAppPageWrite,
   policyRefusal,
@@ -106,6 +107,8 @@ export interface RouteGuardHost {
   isOwnedResource(pathname: string): boolean;
   /** Record what a successful POST created (safe-write ownership). */
   recordCreation(res: Response): Promise<void>;
+  /** The sign-in POSTs the operator listed (SCENESCOUT_AUTH_POSTS), or null for the path rule (policy.ts isAuthExempt). */
+  authPosts(): readonly ReadPost[] | null;
 }
 
 /** What the route handler does with a write it sees, short of the ownership rule. */
@@ -135,10 +138,12 @@ export function routedWriteVerdict(input: {
   foreign: string | null;
   offApp: string | null;
   readPost: boolean;
+  /** The operator's sign-in allowlist for this request, when one is set. */
+  authList?: AuthPostList | null;
 }): RoutedWriteVerdict {
   const { rule, method, pathname, destructiveWire } = input;
   if (input.foreign) return { kind: "refuse", why: `sent from a frame of ${input.foreign}` };
-  const authExempt = isAuthExempt(rule, method, pathname, destructiveWire);
+  const authExempt = isAuthExempt(rule, method, pathname, destructiveWire, input.authList);
   if (input.offApp && !authExempt) return { kind: "refuse", why: `sent from a page of ${input.offApp}, outside the app` };
   if (authExempt) return { kind: "auth" };
   if (input.readPost) return { kind: "read-post" };
@@ -159,14 +164,15 @@ export function marksRouteExercised(input: {
   destructiveWire: boolean;
   foreign: () => string | null;
   offApp: () => string | null;
+  authList?: AuthPostList | null;
 }): boolean {
   const { rule, method, pathname, destructiveWire } = input;
   // Same test the route handler uses: in observe only an exempt auth request goes out.
-  if (rule === "observe" && !isAuthExempt(rule, method, pathname, destructiveWire)) return false;
+  if (rule === "observe" && !isAuthExempt(rule, method, pathname, destructiveWire, input.authList)) return false;
   if ((rule === "read-only" || rule === "observe") && destructiveWire) return false;
   // A foreign frame's write is refused in every mode the route handler runs in.
   if (rule !== "destructive" && input.foreign()) return false;
-  if (rule !== "destructive" && input.offApp() && !isAuthExempt(rule, method, pathname, destructiveWire)) return false;
+  if (rule !== "destructive" && input.offApp() && !isAuthExempt(rule, method, pathname, destructiveWire, input.authList)) return false;
   return true;
 }
 
@@ -205,6 +211,12 @@ export class RouteGuard {
   private pendingCreations = new Set<Promise<unknown>>();
 
   constructor(private readonly host: RouteGuardHost) {}
+
+  /** The operator's sign-in allowlist as one request is judged against it, or null when none is set. */
+  authListFor(url: string): AuthPostList | null {
+    const entries = this.host.authPosts();
+    return entries ? { entries, appUrl: this.host.appUrl(), url } : null;
+  }
 
   /** Whether the write policy stopped this request, at the route handler or at the browser level. */
   refused(req: Request): boolean {
@@ -367,6 +379,7 @@ export class RouteGuard {
       // An embed moved the session's page off the app: its writes out are not the app's, a sign-in excepted.
       offApp: offAppPageWrite(this.host.appUrl(), this.host.pageUrl(), url, this.host.movedByEmbed()),
       readPost: readPost !== null,
+      authList: this.authListFor(url),
     });
     if (verdict.kind === "refuse") return refuse(verdict.why);
     // Auth/session flows must work in every mode — but never a destructive
@@ -491,6 +504,7 @@ export class RouteGuard {
           offApp,
           owned: this.host.isOwnedResource(pathname),
           readPost: readPost !== null,
+          authList: this.authListFor(url),
         });
         if (readPost && verdict.allow)
           this.host.logAction({
