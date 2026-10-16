@@ -292,6 +292,10 @@ export const FIELD_WORDS: ReadonlySet<string> = new Set([
   ...["undefined", "true", "false", "yes", "no", "not", "accepted", "rejected", "unset", "set", "the", "a", "an", "is", "be"],
   // A strength meter's verdict, and what happened to the secret.
   ...["weak", "fair", "good", "strong", "expires", "revealed", "changed", "updated", "saved", "valid", "ok"],
+  // A validation message's or a log's verdict on the secret ("Password: incorrect", "Token: revoked").
+  ...["incorrect", "correct", "mismatch", "mismatched", "match", "matches", "matched", "present", "absent", "filled", "reset"],
+  ...["revoked", "refreshed", "rotated", "redacted", "removed", "deleted", "cleared", "unknown", "failed", "denied", "locked"],
+  ...["pending", "used", "unused", "ignored", "sent", "received", "generated", "created", "stored", "active", "inactive"],
 ]);
 
 /** Mask the value of every parameter whose name names a secret (`pin=`, `otp=`, `password=`, `access_token=`), whatever its length. */

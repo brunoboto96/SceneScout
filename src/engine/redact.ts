@@ -14,7 +14,7 @@ import { FIELD_WORDS, maskSecretFieldValues, maskSecretParams, redactPersonal } 
  */
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
   // A private key's whole block, or its start to the end of the text when the end is cut off.
-  [/-{5}BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-{5}[\s\S]*?(?:-{5}END (?:[A-Z0-9]+ )*PRIVATE KEY-{5}|$)/g, "[private key redacted]"],
+  [/-{5}BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-{5}[\s\S]*?(?:-{5}END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-{5}|$)/g, "[private key redacted]"],
   // Providers' key shapes, each by its fixed prefix, so the prefix alone ("the sk-ant prefix") is prose.
   [/\bsk-ant-[A-Za-z0-9_-]{10,}/g, "sk-ant-[redacted]"],
   [/\b(xox[abeprs])-[A-Za-z0-9-]{10,}/g, "$1-[redacted]"],
@@ -40,11 +40,12 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   // requirements are not enforced" became "Password [redacted] are not
   // enforced", and a mangled finding just reads as the agent writing nonsense.
   [/\b(api[-_]?key|secret|password|token)(["'\s:=]+)(?=[A-Za-z0-9._~+/=-]*\d)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])[A-Za-z0-9._~+/=]{12,}/gi, "$1$2[redacted]"],
-  // A PIN or a sign-in code written after its word: four to eight digits after "PIN", six to eight after "code",
-  // unless the code is an error, status, postal or product one.
-  [/\b(PIN)(\s*(?:is\s+|[:=#]\s*)?)\d{4,8}(?!\d|[-./]\d)/gi, "$1$2[redacted]"],
+  // A PIN or a sign-in code written after its word: four to eight digits after "PIN" (or "PIN code"), six to eight
+  // after "code", "OTP" or "passcode", unless the code is an error, status, postal, product, coupon or invoice one.
+  [/\b(PIN(?:\s+(?:code|number))?)(\s*(?:is\s+|[:=#]\s*)?)\d{4,8}(?!\d|[-./]\d)/gi, "$1$2[redacted]"],
   [
-    /(?<!\b(?:error|status|postal|zip|product|area|country|exit|reference|promo|order|tracking|response|http|reason|discount)\s)\b((?:(?:verification|login|sign-in|security|one-time|otp|sms|2fa|mfa|auth|access|confirmation)\s+)?code)(\s*(?:is\s+|[:=]\s*)?)\d{6,8}(?!\d)/gi,
+    // Six to eight digits, or two groups of three as a text message spaces them ("482 913").
+    /(?<!\b(?:error|status|postal|zip|product|area|country|exit|reference|promo|order|tracking|response|http|reason|discount|coupon|voucher|gift|invoice|referral|invite|promotion|campaign)\s)\b((?:(?:verification|login|sign-in|security|one-time|otp|sms|2fa|mfa|auth|access|confirmation)\s+)?code|otp|passcode)(\s*(?:is\s+|[:=]\s*)?)(?:\d{6,8}|\d{3}[ -]\d{3})(?!\d|-\d)/gi,
     "$1$2[redacted]",
   ],
 ];
@@ -56,7 +57,8 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
  * letters only must end its clause and not be a word about the field, so
  * "Password: required" and "Token: missing after refresh" stay.
  */
-const SET_SECRET_RE = /\b((?:[A-Za-z]+[-_]?)??(?:password|passwd|pwd|passphrase|secret|api[-_]?key|token))(\s*["']?\s*[:=]\s*["']?)(?!\[)([^\s"',;)}\]]+)/gi;
+const SET_SECRET_RE =
+  /\b((?:[A-Za-z]+[-_]?)??(?:password|passwd|pwd|passphrase|secret|api[-_]?key|token))(\s*["']?\s*[:=：＝]\s*["']?)(?!\[)([^\s"',;)}\]]+)/gi;
 
 function maskSetSecrets(text: string): { text: string; hits: number } {
   let hits = 0;
@@ -64,7 +66,8 @@ function maskSetSecrets(text: string): { text: string; hits: number } {
     // A sentence's full stop is not part of the value.
     const stop = /\.+$/.exec(raw)?.[0] ?? "";
     const value = raw.slice(0, raw.length - stop.length);
-    if (value === "") return m;
+    // Empty, or the dots or stars a masked value is shown as (the engine's own "•••• (masked: …)" included).
+    if (value === "" || /^[•●∙·*]+$/u.test(value)) return m;
     if (/^\p{L}+$/u.test(value)) {
       if (FIELD_WORDS.has(value.toLowerCase())) return m;
       const after = stop + whole.slice(offset + m.length);

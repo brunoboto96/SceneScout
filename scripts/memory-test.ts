@@ -2149,6 +2149,56 @@ test("redactSecrets masks a PIN or a sign-in code written after its word; an err
     assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
 });
 
+test("a sign-in code led by OTP, after PIN code, or written in two groups of three is masked; a coupon's, an invoice's or a gift card's code stays", () => {
+  const masked: Array<[string, string]> = [
+    ["Your OTP is 482913", "482913"],
+    ["otp: 482913", "482913"],
+    ["passcode 48291355", "48291355"],
+    ["PIN code 4821 was echoed", "4821"],
+    ["PIN number: 4821", "4821"],
+    ["verification code: 482 913", "482 913"],
+    ["sign-in code 482-913 shown in the toast", "482-913"],
+  ];
+  for (const [text, secret] of masked) assertMasked(text, secret);
+  for (const kept of [
+    // Contrastive with "code 482913": the word before names a kind of code that is not a sign-in one.
+    "coupon code 123456 was not applied",
+    "voucher code 123456 expired",
+    "gift code 123456 expired",
+    "Invoice code: 20240115 is missing",
+    "referral code 123456 rejected",
+    "OTP length 6 is not enforced",
+    "PIN code required",
+  ])
+    assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
+});
+
+test("a private key block in PGP's armour is masked; a public key block stays", () => {
+  assertMasked(`${"-----BEGIN"} PGP PRIVATE KEY BLOCK-----\nlQOYBGabcdefgh\n-----END PGP PRIVATE KEY BLOCK-----`, "lQOYBGabcdefgh");
+  const pub = `${"-----BEGIN"} PGP PUBLIC KEY BLOCK-----\nmQINBGabcdefgh\n-----END PGP PUBLIC KEY BLOCK-----`;
+  assert.equal(redactSecrets(pub), pub);
+});
+
+test("a secret's name set against a status word or the engine's own mask stays readable; the same name against a value is masked", () => {
+  // Contrastive with "Password: letmein": each value is a word a validation message or a log uses about the secret.
+  for (const kept of [
+    "Password: incorrect",
+    "Password: Incorrect.",
+    "Password: mismatch",
+    "password: reset",
+    "Password: present",
+    "Token: revoked",
+    "Token: absent",
+    "Token: refreshed",
+    "secret: redacted",
+    "Password: •••• (masked: password field)",
+    "password: ********",
+  ])
+    assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
+  assertMasked("Password: letmein", "letmein");
+  assertMasked("password：hunter2", "hunter2");
+});
+
 test("a field named by a short or uncommon word for a secret is secret; a field about the secret is not", () => {
   const secret: Array<[SecretFieldFacts, string]> = [
     [{ name: "pass" }, "password"],
