@@ -64,13 +64,16 @@ import {
   CONFIRM_PREVIEW_HEADING,
   CONFIRM_SAYS,
   DESTRUCTIVE_NOT_OFFERED,
+  ERROR_HEADING,
+  ERROR_KINDS,
   HELD_BACK,
   NEEDS_YOU_SENTENCE,
+  SCREEN_HEADING,
   PHASE_NOW,
   SAFETY_EXPLAINER,
   THOROUGHNESS_LABEL,
 } from "../src/engine/guided-words.ts";
-import { CARD_IMPACTS, cardActions as engineCardActions, cardText, guidedProgress, nextActions } from "../src/engine/progress.ts";
+import { CARD_IMPACTS, cardActions as engineCardActions, cardText, errorAction, guidedProgress, nextActions } from "../src/engine/progress.ts";
 import { plainCard } from "../src/engine/plain.ts";
 import { AREA_FIELDS, FORM_CHOICES } from "../src/intake.ts";
 import type { Finding } from "../src/engine/memory.ts";
@@ -2330,6 +2333,9 @@ test("the panel's words are the engine's, word for word", () => {
   assert.equal(guided.CONFIRM_PREVIEW_HEADING, CONFIRM_PREVIEW_HEADING);
   assert.deepEqual(guided.SAFETY_EXPLAINER, [...SAFETY_EXPLAINER]);
   assert.equal(guided.SERVER_ERROR_SENTENCE, NEEDS_YOU_SENTENCE["server-error"]("x"));
+  assert.deepEqual(guided.SCREEN_HEADING, SCREEN_HEADING);
+  assert.deepEqual(guided.ERROR_HEADING, ERROR_HEADING);
+  assert.deepEqual(Object.keys(guided.ERROR_HEADING), [...ERROR_KINDS]);
   assert.equal(guided.STARTING_SENTENCE, PHASE_NOW.starting);
   assert.deepEqual(guided.ACTION_LABEL, ACTION_LABEL);
   for (const k of ["stop", "recheck", "plainReport"] as const) assert.equal(guided.ACTION_PROMPT[k], ACTION_PROMPT[k]);
@@ -2627,6 +2633,92 @@ test("each button asks for what it says: the server, Claude, or another step", (
   assert.deepEqual(results.press("guided-results-again"), { type: "runAgain", payload: undefined });
   assert.ok(!elementsOf(results.tree).some((e) => e.props.key === "guided-results-new"), "mobile cannot type a new address");
   assert.deepEqual(drawGuided("terminal", wizard(), STATUS_DOWN).press("guided-error-retry"), { type: "retry", payload: undefined });
+});
+
+test("an error screen is one sentence and one button, under its own heading; a request of the person keeps its own", () => {
+  const plan = planFor({ address: "https://staging.example.com", areas: ["forms"], signIn: "password" });
+  const screen = (kind: (typeof ERROR_KINDS)[number] | "stuck") => {
+    const actions =
+      kind === "stuck"
+        ? [{ kind: "prompt", label: ACTION_LABEL.stop, text: ACTION_PROMPT.stop }]
+        : kind === "server-error"
+          ? []
+          : [errorAction(kind, plan as never)];
+    return statusWith({
+      phase: kind === "stopped-by-cap" ? "stopped" : "needs-you",
+      needsYou: { kind, sentence: kind === "stuck" ? "A step is stuck." : NEEDS_YOU_SENTENCE[kind]("staging.example.com"), actions },
+      next: actions,
+    });
+  };
+  const cases: Array<[(typeof ERROR_KINDS)[number], string, string, Acted]> = [
+    ["address-unreachable", SCREEN_HEADING.wentWrong, "guided-needs-try-again", { type: "send", payload: { text: ACTION_PROMPT.retry(GUIDED_PLAN_ID) } }],
+    ["browser-download-failed", SCREEN_HEADING.wentWrong, "guided-needs-try-again", { type: "send", payload: { text: ACTION_PROMPT.retry(GUIDED_PLAN_ID) } }],
+    [
+      "sign-in-expired",
+      SCREEN_HEADING.needYou,
+      "guided-needs-sign-in-again",
+      { type: "send", payload: { text: ACTION_PROMPT.signInAgain(GUIDED_PLAN_ID, "https://staging.example.com", "user") } },
+    ],
+    ["stopped-by-cap", SCREEN_HEADING.wentWrong, "guided-needs-see-all-problems", { type: "cards", payload: undefined }],
+  ];
+  for (const [kind, heading, key, pressed] of cases)
+    for (const surface of SURFACES) {
+      const drawn = drawGuided(surface, wizard({ step: "running", planId: GUIDED_PLAN_ID }), screen(kind));
+      assertDrawable(drawn.tree, surface, kind);
+      const lines = drawn.text.split("\n");
+      const at = lines.indexOf(heading);
+      assert.ok(
+        at >= 0 && lines[at + 1] === NEEDS_YOU_SENTENCE[kind]("staging.example.com"),
+        `${kind} on ${surface}: the heading, then the sentence:\n${drawn.text}`,
+      );
+      const own = elementsOf(drawn.tree).filter((e) => e.type === "Button" && String(e.props.key).startsWith("guided-needs-"));
+      assert.deepEqual(
+        own.map((e) => e.props.key),
+        [key],
+        `${kind}: one button`,
+      );
+      assert.deepEqual(drawn.press(key), pressed);
+      assert.equal(guided.needsYouHeading(kind), heading);
+    }
+  // A request that is not a failure keeps "I need you", in the panel and where nothing draws.
+  const stuck = drawGuided("desktop", wizard({ step: "running", planId: GUIDED_PLAN_ID }), screen("stuck"));
+  assert.ok(stuck.text.includes(`${SCREEN_HEADING.needYou}\nA step is stuck.`), stuck.text);
+  assert.ok(!stuck.text.includes(SCREEN_HEADING.wentWrong));
+  assert.match(
+    guided.guidedText(wizard({ planId: GUIDED_PLAN_ID }), screen("address-unreachable")),
+    /^Something went wrong: I could not open staging\.example\.com/m,
+  );
+  // The server not answering: its sentence and one button, Try again, with a link to the fix.
+  const down = drawGuided("desktop", wizard(), STATUS_DOWN);
+  const lines = down.text.split("\n");
+  assert.equal(lines[lines.indexOf(SCREEN_HEADING.wentWrong) + 1], guided.SERVER_ERROR_SENTENCE);
+  assert.deepEqual(
+    elementsOf(down.tree)
+      .filter((e) => e.type === "Button" && String(e.props.key).startsWith("guided-error-"))
+      .map((e) => e.props.key),
+    ["guided-error-retry"],
+  );
+});
+
+test("the safety explainer opens from the welcome and from a check being set up, and goes back to where it was opened", () => {
+  const draft = { ...guided.defaultDraft(), address: "https://staging.example.com", areas: ["forms"], care: "may-submit-forms" as const };
+  const setting = wizard({ step: "configuring", draft });
+  const config = drawGuided("desktop", setting, STATUS_IDLE);
+  assert.deepEqual(config.press("guided-config-safety"), { type: "go", payload: { step: "safety" } });
+  const opened = guided.reduce(setting, { type: "go", step: "safety" });
+  assert.equal(opened.step, "safety");
+  const explainer = drawGuided("desktop", opened, STATUS_IDLE);
+  for (const s of SAFETY_EXPLAINER) assert.ok(explainer.text.includes(s), s);
+  const back = explainer.press("guided-safety-back");
+  assert.deepEqual(back, { type: "go", payload: { step: "configuring" } }, "back to the check being set up");
+  assert.deepEqual(guided.reduce(opened, back.payload as never).draft, draft, "with its choices kept");
+  // From the welcome, back goes to the welcome.
+  const fromWelcome = guided.reduce(wizard(), { type: "go", step: "safety" });
+  assert.deepEqual(drawGuided("terminal", fromWelcome, STATUS_IDLE).press("guided-safety-back"), { type: "go", payload: { step: "welcome" } });
+  // Where it goes back to survives a reload of the mod, and nothing else gets in.
+  assert.equal(guided.wizardOf(JSON.parse(JSON.stringify(opened))).returnTo, "configuring");
+  assert.equal(guided.wizardOf({ ...opened, returnTo: "nowhere" }).returnTo, null);
+  assert.equal(guided.wizardOf({ ...opened, returnTo: "safety" }).returnTo, null);
 });
 
 test("an engine action becomes a server call only for the three tools a button may call", () => {

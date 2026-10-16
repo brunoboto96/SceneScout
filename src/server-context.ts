@@ -39,7 +39,7 @@ import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { SERVER_INSTRUCTIONS } from "./playbook.js";
 import { type EvidenceSettings } from "./engine/capture.js";
 import { GuidedPlans, type CheckArea } from "./engine/guided.js";
-import { GuidedRuns, nowSentence } from "./engine/progress.js";
+import { GuidedRuns, nowSentence, troubleOfResult, troubleTell } from "./engine/progress.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
 export const engines = new Map<string, BrowserEngine>();
@@ -528,6 +528,7 @@ export function serializedPerSession<A>(
         const work = fn(args, session);
         callWork.track(session, work);
         const out = await withWatchdog(label, work, watchdogMs, watchdogTimeout);
+        settleGuidedCall(guidedSessions.get(session)?.planId, out, engines.get(session)?.signInLost ?? false);
         // `activeName` is process-global and every scout_attach moves it. With
         // several sessions live — the multi-role runs this tool encourages —
         // an omitted `session` silently binds to whichever browser attached
@@ -632,6 +633,18 @@ export const guidedPlans = new GuidedPlans();
 export const guidedSessions = new Map<string, { planId?: string; area?: CheckArea }>();
 // What each guided check has done so far, for the progress the status pane shows (progress.ts).
 export const guidedRuns = new GuidedRuns();
+
+/**
+ * A call of a guided check has settled: keep what went wrong in it for the
+ * progress (the plain error screens), and, the first time, end its result
+ * with the sentence the panel shows, for the agent to tell the person.
+ */
+export function settleGuidedCall(planId: string | undefined, result: ToolResult, signInLost: boolean): void {
+  if (!planId) return;
+  const trouble = troubleOfResult(result, signInLost);
+  const plan = guidedPlans.get(planId);
+  if (guidedRuns.settle(planId, trouble) && trouble && plan) result.content.push({ type: "text", text: `\n${troubleTell(trouble, plan.choices.address)}` });
+}
 
 /**
  * The engine whose project the person is shown, for tools that read the

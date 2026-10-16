@@ -145,16 +145,42 @@ export const SAFETY_EXPLAINER: readonly string[] = [
   "It never asks for your password. When your site needs one, a browser window opens for you to sign in as you normally would.",
 ];
 
-/** When a check needs the person, in one sentence each. `where` is the site's host. */
+/**
+ * When a check needs the person, in one sentence each. `where` is the site's
+ * host. The ones for something that went wrong (the plain error screens,
+ * design section 5 item 4) each come with one button: ERROR_ACTION.
+ */
 export const NEEDS_YOU_SENTENCE = {
   "sign-in": (where: string) => `${where} needs you to sign in before I can go on.`,
-  "sign-in-expired": (where: string) => `Your sign-in to ${where} has run out.`,
+  "sign-in-expired": (where: string) => `Your sign-in to ${where} has run out, so the pages after it would only show the sign-in page.`,
   confirm: (_where: string) => "I need you to confirm the care level before I start.",
-  "browser-download-failed": (_where: string) => "I could not download the test browser. Check your internet connection and try again.",
-  "server-error": (_where: string) => "I could not reach the SceneScout server. Is the scenescout plugin installed and turned on?",
-  "address-unreachable": (where: string) => `I could not open ${where}. Check the address, and that the site is running.`,
+  "browser-download-failed": (_where: string) => "I could not download the test browser: check your internet connection, then try again.",
+  "server-error": (_where: string) => "I could not reach the SceneScout server: check that the scenescout plugin is installed and turned on.",
+  "address-unreachable": (where: string) => `I could not open ${where}: check the address, and that the site is running.`,
+  "stopped-by-cap": (where: string) => `The check of ${where} reached its time limit and stopped before it wrote up what it found.`,
   stuck: (_where: string) => STUCK_SENTENCE,
 } as const;
+
+/** What goes wrong often enough to have a screen of its own: one sentence (NEEDS_YOU_SENTENCE) and one button each. */
+export const ERROR_KINDS = ["server-error", "address-unreachable", "browser-download-failed", "sign-in-expired", "stopped-by-cap"] as const;
+export type ErrorKind = (typeof ERROR_KINDS)[number];
+
+/** The heading over a screen for something that went wrong, and over one that waits on the person. */
+export const SCREEN_HEADING = { wentWrong: "Something went wrong", needYou: "I need you" } as const;
+
+/** Which of the two headings an error screen goes under: signing in again is a request, the rest went wrong. */
+export const ERROR_HEADING: Record<ErrorKind, keyof typeof SCREEN_HEADING> = {
+  "server-error": "wentWrong",
+  "address-unreachable": "wentWrong",
+  "browser-download-failed": "wentWrong",
+  "sign-in-expired": "needYou",
+  "stopped-by-cap": "wentWrong",
+};
+
+/** What the agent is told to say when a call of a guided check failed in a way the person can fix, word for word. */
+export function tellPersonLine(sentence: string): string {
+  return `Tell the person, in these words: "${sentence}"`;
+}
 
 /** What the confirmation form says above its fields when it also asks for a code. */
 export function confirmCodeLine(code: string): string {
@@ -272,6 +298,8 @@ export const ACTION_LABEL = {
   notABug: "Not a bug",
   explain: "Explain more",
   again: "Check again",
+  tryAgain: "Try again",
+  signInAgain: "Sign in again",
 } as const;
 
 /** What a button that starts a turn for the agent says, word for word. */
@@ -282,6 +310,9 @@ export const ACTION_PROMPT = {
   explain: (id: string) =>
     `Explain SceneScout finding ${id} to me in more detail, in plain words, from its evidence and steps only (scout_cards {ids: ["${id}"]}).`,
   again: (id: string) => `Check SceneScout finding ${id} again with scout_verify, and tell me whether it is still there.`,
+  retry: (planId: string) => `Try the SceneScout guided plan ${planId} again: call scout_guided_plan {planId: "${planId}"} and follow it.`,
+  signInAgain: (planId: string, address: string, role: string) =>
+    `Sign me in again for the SceneScout guided plan ${planId}: call scout_login {url: "${address}", role: "${role}"}, then scout_guided_plan {planId: "${planId}"}, attach again as it says and carry on.`,
 } as const;
 
 /** How a card reads as text, where nothing draws it. */

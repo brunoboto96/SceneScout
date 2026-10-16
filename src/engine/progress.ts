@@ -23,11 +23,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { type CheckArea, type GuidedPlan, MAX_PLANS, PHONE_SESSION } from "./guided.js";
+import { INTAKE_ROLE } from "../intake.js";
 import {
   ACTION_LABEL,
   ACTION_PROMPT,
   AREA_NOT_REACHED,
   CARD_SAYS,
+  type ErrorKind,
   checkingTitle,
   NEEDS_YOU_SENTENCE,
   NOW_OTHER,
@@ -36,6 +38,7 @@ import {
   PHASE_NOW,
   savedBasis,
   savedSentence,
+  tellPersonLine,
 } from "./guided-words.js";
 import { isNotABug, isWorthALook, knownFeedback, type Finding } from "./memory.js";
 import { decodePng, fitPicture, isPng } from "./png.js";
@@ -51,7 +54,7 @@ export type Phase =
 export type GuidedAction = { kind: "direct"; label: string; tool: string; args: Record<string, unknown> } | { kind: "prompt"; label: string; text: string };
 
 export interface NeedsYou {
-  kind: "sign-in" | "sign-in-expired" | "confirm" | "browser-download-failed" | "server-error" | "address-unreachable" | "stuck";
+  kind: "sign-in" | "confirm" | "stuck" | ErrorKind;
   sentence: string;
   actions: GuidedAction[];
 }
@@ -112,6 +115,68 @@ export function pushStory(story: readonly string[], sentence: string): string[] 
   return [...story, sentence].slice(-STORY_MAX);
 }
 
+// ---- The plain error screens: what went wrong in a guided check's own calls ----
+
+/**
+ * What can go wrong in a guided check's calls that the person can do
+ * something about. The server not answering is not here: when it does not
+ * answer, nothing it holds can be read, so the panel says that itself.
+ */
+export type Trouble = "address-unreachable" | "browser-download-failed" | "sign-in-expired";
+
+/**
+ * The engine's own wording of each failure, as it starts the message.
+ * Each pattern is anchored to the start, so a page's text quoted later in a
+ * message cannot raise a screen. The network codes are the browsers' own:
+ * Chromium's net::ERR_*, Firefox's NS_ERROR_*, and WebKit's sentences.
+ */
+const TROUBLE_PATTERNS: ReadonlyArray<[Trouble, RegExp]> = [
+  // browser.ts, when the first page of an attach does not load.
+  ["address-unreachable", /^Could not load \S+ — is the app running\?/],
+  // A later navigation to a site that stopped answering, as Playwright words it.
+  [
+    "address-unreachable",
+    /^(?:page\.goto|page\.reload|page\.goBack): (?:net::ERR_(?:NAME_NOT_RESOLVED|NAME_RESOLUTION_FAILED|CONNECTION_REFUSED|CONNECTION_RESET|CONNECTION_TIMED_OUT|ADDRESS_UNREACHABLE|INTERNET_DISCONNECTED)|NS_ERROR_(?:UNKNOWN_HOST|CONNECTION_REFUSED|NET_TIMEOUT|NET_RESET)|Could not connect to (?:the )?server|A server with the specified hostname could not be found)/,
+  ],
+  // launch.ts, when the first attach's download of the test browser fails.
+  ["browser-download-failed", /^The test browser could not be downloaded\b/],
+  ["browser-download-failed", /^The download finished, but the \S+ build is still not where Playwright looks for it\./],
+];
+
+/** Which screen a failed call's message calls for, or null when it is none of them. */
+export function troubleOf(message: string): Trouble | null {
+  const text = message.replace(/^\s*(?:ERROR:\s*)?/, "");
+  for (const [trouble, pattern] of TROUBLE_PATTERNS) if (pattern.test(text)) return trouble;
+  return null;
+}
+
+/**
+ * What a guided session's call came to: its sign-in run out (the engine's
+ * own flag, never read from the text, which can quote the page), a failure
+ * with a screen of its own, or nothing to show. Only a failed call's first
+ * text is read.
+ */
+export function troubleOfResult(result: { content: ReadonlyArray<{ type: string; text?: string }>; isError?: boolean }, signInLost: boolean): Trouble | null {
+  if (signInLost) return "sign-in-expired";
+  if (result.isError !== true) return null;
+  const first = result.content.find((b) => b.type === "text" && typeof b.text === "string");
+  return first ? troubleOf(first.text!) : null;
+}
+
+/** The line a failed guided call's result ends with, so the agent tells the person what the panel shows, in the same words. */
+export function troubleTell(trouble: Trouble, address: string): string {
+  return tellPersonLine(NEEDS_YOU_SENTENCE[trouble](hostOf(address)));
+}
+
+/** A site's host for a sentence, or the address as given when it cannot be read. */
+function hostOf(address: string): string {
+  try {
+    return new URL(address).host;
+  } catch {
+    return address;
+  }
+}
+
 /**
  * The guided checks this server has started, by plan id, and the plan a
  * person is shown: the one built or attached with last. Held in the server
@@ -119,7 +184,28 @@ export function pushStory(story: readonly string[], sentence: string): string[] 
  */
 export class GuidedRuns {
   private readonly runs = new Map<string, GuidedRun>();
+  /** What went wrong in each plan's latest call, kept apart from the runs: an attach that fails never starts one. */
+  private readonly troubles = new Map<string, Trouble>();
   private shown: string | null = null;
+
+  /**
+   * A call of the plan's settled: what went wrong in it, or null, which clears
+   * what went wrong before. True when this is a trouble the plan did not
+   * already have, so the person is told once, not on every call after.
+   */
+  settle(planId: string, trouble: Trouble | null): boolean {
+    const before = this.troubles.get(planId);
+    this.troubles.delete(planId);
+    if (!trouble) return false;
+    this.troubles.set(planId, trouble);
+    while (this.troubles.size > MAX_PLANS) this.troubles.delete(this.troubles.keys().next().value!);
+    return trouble !== before;
+  }
+
+  /** What went wrong in the plan's latest call, if anything. */
+  trouble(planId: string): Trouble | undefined {
+    return this.troubles.get(planId);
+  }
 
   /** The plan to show: called when a plan is built, and when a session attaches with one. */
   focus(planId: string): void {
@@ -138,6 +224,7 @@ export class GuidedRuns {
    */
   start(planId: string, nowMs: number, carried = false): void {
     this.focus(planId);
+    this.troubles.delete(planId);
     if (carried && this.runs.has(planId)) return;
     this.runs.delete(planId);
     this.runs.set(planId, { startedMs: nowMs, lastActiveMs: nowMs, story: [], areasStarted: [], reported: false });
@@ -210,6 +297,9 @@ export interface ProgressSession {
 /**
  * The phase, from the sessions carrying the plan and the run so far:
  *
+ * - something went wrong in the plan's latest call that the person can fix
+ *   (a site that does not answer, the browser download, a sign-in that ran
+ *   out), while a session still carries the plan or before any has: needs-you;
  * - not started: needs-you while the plan waits for the person's
  *   confirmation, else starting;
  * - started, and no session carries the plan any more: done when the report
@@ -219,7 +309,9 @@ export interface ProgressSession {
  *   writing the report, the phone session, done once the report is written
  *   and nothing is running, or exploring.
  */
-export function guidedPhase(plan: Pick<GuidedPlan, "confirm">, run: GuidedRun | undefined, sessions: readonly ProgressSession[]): Phase {
+export function guidedPhase(plan: Pick<GuidedPlan, "confirm">, run: GuidedRun | undefined, sessions: readonly ProgressSession[], trouble?: Trouble): Phase {
+  // Only while the check is still going: once every session has left, it ended as it ended.
+  if (trouble && (!run || sessions.length > 0)) return "needs-you";
   if (!run) return plan.confirm && !plan.confirm.accepted ? "needs-you" : "starting";
   if (sessions.length === 0) return run.reported ? "done" : "stopped";
   if (sessions.some((s) => s.state === "stuck")) return "needs-you";
@@ -305,9 +397,37 @@ export function nextActions(phase: Phase): GuidedAction[] {
   }
 }
 
+/**
+ * The one button on each error screen: try the plan again, sign in again, or
+ * see what the check found before it stopped. The server not answering is the
+ * panel's own screen (its button polls again), so it has none here.
+ */
+export function errorAction(kind: Exclude<ErrorKind, "server-error">, plan: Pick<GuidedPlan, "planId" | "choices">): GuidedAction {
+  switch (kind) {
+    case "sign-in-expired":
+      return { kind: "prompt", label: ACTION_LABEL.signInAgain, text: ACTION_PROMPT.signInAgain(plan.planId, plan.choices.address, INTAKE_ROLE) };
+    case "stopped-by-cap":
+      return SEE_ALL;
+    default:
+      return { kind: "prompt", label: ACTION_LABEL.tryAgain, text: ACTION_PROMPT.retry(plan.planId) };
+  }
+}
+
+/**
+ * Whether a check that stopped did so at its time limit: it ended without
+ * the report, having used its time. Its page limit is not judged here: the
+ * pages a status poll can count are the project's, not this check's, and
+ * none are counted once its sessions have closed.
+ */
+export function stoppedByCap(phase: Phase, time: GuidedProgress["time"]): boolean {
+  return phase === "stopped" && time.usedMs >= time.budgetMs;
+}
+
 /** What the person is asked for, when the check needs them. */
-function needsYouFor(phase: Phase, run: GuidedRun | undefined, planId: string, where: string): NeedsYou | undefined {
+function needsYouFor(phase: Phase, run: GuidedRun | undefined, plan: GuidedPlan, where: string, trouble: Trouble | undefined): NeedsYou | undefined {
+  const planId = plan.planId;
   if (phase !== "needs-you") return undefined;
+  if (trouble) return { kind: trouble, sentence: NEEDS_YOU_SENTENCE[trouble](where), actions: [errorAction(trouble, plan)] };
   if (!run)
     return {
       kind: "confirm",
@@ -338,6 +458,8 @@ export interface ProgressInput {
   run: GuidedRun | undefined;
   /** The board's entries for the sessions carrying the plan now. */
   sessions: readonly ProgressSession[];
+  /** What went wrong in the plan's latest call, if anything (GuidedRuns.trouble). */
+  trouble?: Trouble;
   /** Pages checked and found, and controls exercised; null before a project is open. */
   coverage: { routesVisited: number; routesTotal: number; elementsExercised: number } | null;
   /** The project's findings. */
@@ -348,17 +470,21 @@ export interface ProgressInput {
 /** The whole progress for one plan. Pure: the server gathers the input on each poll. */
 export function guidedProgress(input: ProgressInput): GuidedProgress {
   const { plan, run, sessions } = input;
-  let where: string;
-  try {
-    where = new URL(plan.choices.address).host;
-  } catch {
-    where = plan.choices.address;
-  }
-  const phase = guidedPhase(plan, run, sessions);
-  const needsYou = needsYouFor(phase, run, plan.planId, where);
+  const where = hostOf(plan.choices.address);
+  const phase = guidedPhase(plan, run, sessions, input.trouble);
+  const c = input.coverage;
+  const pages = { checked: c?.routesVisited ?? 0, found: c?.routesTotal ?? 0 };
+  const time = {
+    usedMs: run ? Math.max(0, (sessions.length > 0 ? input.nowMs : run.lastActiveMs) - run.startedMs) : 0,
+    budgetMs: plan.budget.minutes * 60_000,
+  };
+  // A check that ended at its limit has a screen of its own, though it needs nothing more of the person than a look at what it found.
+  const needsYou: NeedsYou | undefined = stoppedByCap(phase, time)
+    ? { kind: "stopped-by-cap", sentence: NEEDS_YOU_SENTENCE["stopped-by-cap"](where), actions: [errorAction("stopped-by-cap", plan)] }
+    : needsYouFor(phase, run, plan, where, input.trouble);
   const lead = leadSession(sessions);
   const now =
-    needsYou?.sentence ??
+    (phase === "needs-you" ? needsYou?.sentence : undefined) ??
     (phase === "starting" || phase === "done" || phase === "stopped"
       ? PHASE_NOW[phase]
       : lead
@@ -372,7 +498,6 @@ export function guidedProgress(input: ProgressInput): GuidedProgress {
     .sort((a, b) => (a.foundAt < b.foundAt ? 1 : a.foundAt > b.foundAt ? -1 : 0))
     .slice(0, LATEST_MAX)
     .map((f): GuidedCard => ({ ...plainCard(f), actions: cardActions(f.id) }));
-  const c = input.coverage;
   const progress: GuidedProgress = {
     planId: plan.planId,
     title: checkingTitle(where),
@@ -380,11 +505,8 @@ export function guidedProgress(input: ProgressInput): GuidedProgress {
     now,
     story,
     areas: areaStates(plan, run, sessions, phase),
-    pages: { checked: c?.routesVisited ?? 0, found: c?.routesTotal ?? 0 },
-    time: {
-      usedMs: run ? Math.max(0, (sessions.length > 0 ? input.nowMs : run.lastActiveMs) - run.startedMs) : 0,
-      budgetMs: plan.budget.minutes * 60_000,
-    },
+    pages,
+    time,
     problems,
     latest,
     saved: run && c ? clickingSaved(c.routesVisited, c.elementsExercised, input.rates) : null,

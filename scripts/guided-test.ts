@@ -63,6 +63,10 @@ import {
   SAFETY_EXPLAINER,
   STUCK_SENTENCE,
   THOROUGHNESS_LABEL,
+  ACTION_LABEL,
+  ERROR_HEADING,
+  ERROR_KINDS,
+  SCREEN_HEADING,
 } from "../src/engine/guided-words.ts";
 import {
   areaStates,
@@ -81,6 +85,11 @@ import {
   pushStory,
   selectCards,
   STORY_MAX,
+  stoppedByCap,
+  troubleOf,
+  troubleOfResult,
+  troubleTell,
+  type Trouble,
   type GuidedRun,
   type ProgressSession,
 } from "../src/engine/progress.ts";
@@ -89,6 +98,7 @@ import { encodePng } from "../src/engine/png.ts";
 import { readInlinePicture } from "../src/engine/progress.ts";
 import { allowsWrite } from "../src/engine/policy.ts";
 import { isReadMethod } from "../src/engine/unload.ts";
+import { readyBrowser } from "../src/engine/launch.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import { IMPACT, PLAIN_WORDING, plainCard, plainFinding, plainSteps } from "../src/engine/plain.ts";
 
@@ -1073,6 +1083,180 @@ test("progress: before the start it asks for the confirmation, and once ended th
     stuck.next.map((a) => a.label),
     ["Stop"],
   );
+});
+
+// ---- The plain error screens (progress.ts): which failure becomes which screen, with one sentence and one button ----
+
+/** The messages readyBrowser throws, made by readyBrowser itself, so a change to its wording fails here. */
+async function downloadFailure(opts: { ok: boolean; env?: NodeJS.ProcessEnv; presentAfter?: boolean }): Promise<string> {
+  let calls = 0;
+  const present = async () => {
+    calls += 1;
+    const installed = calls > 1 && opts.presentAfter === true;
+    return {
+      chromium: { installed, path: null },
+      "chromium-headless-shell": { installed, path: null },
+      firefox: { installed, path: null },
+      webkit: { installed, path: null },
+    } as never;
+  };
+  try {
+    await readyBrowser(
+      { engine: "chromium", headed: false },
+      { env: opts.env ?? { SCENESCOUT_BROWSER_DOWNLOAD: "on" }, present, download: async () => ({ ok: opts.ok, detail: "exit code 1" }), say: () => {} },
+    );
+  } catch (err) {
+    return (err as Error).message;
+  }
+  throw new Error("readyBrowser did not throw");
+}
+
+test("error screens: each failure the engine words is read as its screen, and nothing else is", async () => {
+  const cases: Array<[string, string, string | null]> = [
+    [
+      "an attach whose first page did not load",
+      "Could not load https://staging.example.com — is the app running? (page.goto: net::ERR_CONNECTION_REFUSED at https://staging.example.com/)",
+      "address-unreachable",
+    ],
+    [
+      "the same, as the tool result says it",
+      "ERROR: Could not load http://localhost:3000 — is the app running? (page.goto: Timeout 20000ms exceeded.)",
+      "address-unreachable",
+    ],
+    ["a later page on a host that no longer resolves (Chromium)", "page.goto: net::ERR_NAME_NOT_RESOLVED at https://nowhere.example/", "address-unreachable"],
+    ["a refused connection (Firefox)", "page.goto: NS_ERROR_CONNECTION_REFUSED", "address-unreachable"],
+    ["an unknown host (WebKit)", "page.goto: A server with the specified hostname could not be found.", "address-unreachable"],
+    ["the browser download failed", await downloadFailure({ ok: false }), "browser-download-failed"],
+    ["the download said it worked but the build is missing", await downloadFailure({ ok: true }), "browser-download-failed"],
+    // Near misses: the same words in another place, or a failure the person cannot fix with Try again.
+    ["a download the setting forbids is not a failed download", await downloadFailure({ ok: false, env: { SCENESCOUT_BROWSER_DOWNLOAD: "off" } }), null],
+    ["the words quoted later in another failure", 'Element e12 not found; the page says "Could not load https://x.example — is the app running?"', null],
+    ["a navigation the page itself aborted", "page.goto: net::ERR_ABORTED at https://staging.example.com/download", null],
+    ["a refused attach", "ERROR: scout_attach refused: this plan has not been confirmed by the person", null],
+    ["a sign-in window closed before saving", 'ERROR: nothing was saved for role "user": the window was closed', null],
+  ];
+  for (const [name, message, want] of cases) assert.equal(troubleOf(message), want, `${name}: ${message}`);
+});
+
+test("error screens: a result is read only when it failed, and a lost sign-in comes from the engine's flag, never the text", () => {
+  const said = (text: string, isError?: boolean) => ({ content: [{ type: "text", text }], ...(isError === undefined ? {} : { isError }) });
+  const unreachable = "ERROR: Could not load https://staging.example.com — is the app running? (page.goto: net::ERR_CONNECTION_REFUSED)";
+  assert.equal(troubleOfResult(said(unreachable, true), false), "address-unreachable");
+  assert.equal(troubleOfResult(said(unreachable), false), null, "the same words in a result that did not fail, such as a page's text in a snapshot");
+  assert.equal(troubleOfResult(said("Navigated to /orders", true), false), null, "a failure with no screen of its own");
+  assert.equal(
+    troubleOfResult(said("⚠ SESSION AUTH LOST — 3 consecutive navigations were redirected to a login page."), false),
+    null,
+    "the banner's words alone are not the flag: a page can show them",
+  );
+  // The engine's own flag says the sign-in is gone, whatever the result says.
+  assert.equal(troubleOfResult(said("Navigated to /login", false), true), "sign-in-expired");
+  assert.equal(troubleOfResult(said(unreachable, true), true), "sign-in-expired");
+});
+
+test("error screens: a plan keeps the latest call's trouble, says it once, and a call that goes well or a new start clears it", () => {
+  const runs = new GuidedRuns();
+  assert.equal(runs.trouble("gp-0123456789"), undefined);
+  assert.equal(runs.settle("gp-0123456789", "address-unreachable"), true, "new: the person is told");
+  assert.equal(runs.settle("gp-0123456789", "address-unreachable"), false, "the same again: not told twice");
+  assert.equal(runs.trouble("gp-0123456789"), "address-unreachable");
+  assert.equal(runs.settle("gp-0123456789", "sign-in-expired"), true, "another trouble is told");
+  assert.equal(runs.settle("gp-0123456789", null), false);
+  assert.equal(runs.trouble("gp-0123456789"), undefined, "a call that went well clears it");
+  runs.settle("gp-0123456789", "browser-download-failed");
+  runs.start("gp-0123456789", AT);
+  assert.equal(runs.trouble("gp-0123456789"), undefined, "a session attaching with the plan clears it");
+});
+
+test("error screens: each trouble is one sentence and one button, and the same check without it shows no screen", () => {
+  const plan = planFor({ address: "https://staging.example.com", signIn: "password" });
+  const base = { nowMs: AT + 60_000, plan, run: runOf(), sessions: [sess()], coverage: null, findings: [] };
+  const clean = guidedProgress(base);
+  assert.equal(clean.phase, "exploring");
+  assert.equal(clean.needsYou, undefined);
+  const want: Record<Trouble, { label: string; text: string }> = {
+    "address-unreachable": { label: ACTION_LABEL.tryAgain, text: ACTION_PROMPT.retry(plan.planId) },
+    "browser-download-failed": { label: ACTION_LABEL.tryAgain, text: ACTION_PROMPT.retry(plan.planId) },
+    "sign-in-expired": { label: ACTION_LABEL.signInAgain, text: ACTION_PROMPT.signInAgain(plan.planId, "https://staging.example.com", "user") },
+  };
+  for (const trouble of Object.keys(want) as Trouble[]) {
+    for (const run of [runOf(), undefined]) {
+      const p = guidedProgress({ ...base, run, sessions: run ? base.sessions : [], trouble });
+      assert.equal(p.phase, "needs-you", trouble);
+      assert.equal(p.needsYou?.kind, trouble);
+      assert.equal(p.needsYou?.sentence, NEEDS_YOU_SENTENCE[trouble]("staging.example.com"));
+      assert.equal(p.now, p.needsYou?.sentence);
+      assert.deepEqual(p.next, [{ kind: "prompt", ...want[trouble] }], `${trouble}: one button`);
+    }
+  }
+  // The sign-in prompt names the window to open and the plan to carry on with.
+  assert.match(
+    ACTION_PROMPT.signInAgain("gp-0123456789", "https://staging.example.com", "user"),
+    /scout_login \{url: "https:\/\/staging\.example\.com", role: "user"\}.*gp-0123456789/,
+  );
+  // What the agent is told to say is the panel's sentence, word for word.
+  assert.equal(
+    troubleTell("address-unreachable", "https://staging.example.com/shop"),
+    `Tell the person, in these words: "${NEEDS_YOU_SENTENCE["address-unreachable"]("staging.example.com")}"`,
+  );
+});
+
+test("error screens: a check that stopped at its time limit says so with one button; one that stopped short of it, or wrote its report, does not", () => {
+  const plan = planFor({ thoroughness: "quick" }); // 10 minutes
+  const ended = (over: { lastActiveMin: number; reported?: boolean; pages?: number }) =>
+    guidedProgress({
+      nowMs: AT + 60 * 60_000,
+      plan,
+      run: runOf({ lastActiveMs: AT + over.lastActiveMin * 60_000, reported: over.reported ?? false }),
+      sessions: [],
+      coverage: { routesVisited: over.pages ?? 5, routesTotal: 400, elementsExercised: 0 },
+      findings: [],
+    });
+  const atLimit = ended({ lastActiveMin: 10 });
+  assert.equal(atLimit.phase, "stopped");
+  assert.equal(atLimit.needsYou?.kind, "stopped-by-cap");
+  assert.equal(atLimit.needsYou?.sentence, NEEDS_YOU_SENTENCE["stopped-by-cap"]("localhost:3000"));
+  assert.deepEqual(atLimit.next, [{ kind: "direct", label: ACTION_LABEL.seeAll, tool: "scout_cards", args: {} }]);
+  assert.equal(atLimit.now, PHASE_NOW.stopped, "the narrator says it stopped; the screen says why");
+  const short = ended({ lastActiveMin: 9 });
+  assert.equal(short.phase, "stopped");
+  assert.equal(short.needsYou, undefined, "stopped before its time was up: no limit screen");
+  // The project's page count is not this check's: a stop short of the time is not called a limit, however many pages the project has.
+  assert.equal(ended({ lastActiveMin: 9, pages: 300 }).needsYou, undefined);
+  const reported = ended({ lastActiveMin: 10, reported: true });
+  assert.equal(reported.phase, "done");
+  assert.equal(reported.needsYou, undefined, "a check that wrote its report at its limit finished");
+  assert.equal(stoppedByCap("exploring", { usedMs: 11 * 60_000, budgetMs: 10 * 60_000 }), false, "still running");
+});
+
+test("error screens: a trouble left by the last call does not outlive the check", () => {
+  const plan = planFor({ signIn: "password" });
+  const at = (sessions: ProgressSession[], reported: boolean) =>
+    guidedProgress({
+      nowMs: AT + 5 * 60_000,
+      plan,
+      run: runOf({ lastActiveMs: AT + 5 * 60_000, reported }),
+      sessions,
+      coverage: null,
+      findings: [],
+      trouble: "sign-in-expired",
+    });
+  assert.equal(at([sess()], false).phase, "needs-you", "while a session carries the plan");
+  const finished = at([], true);
+  assert.equal(finished.phase, "done", "reported and closed: done, not the sign-in screen");
+  assert.equal(finished.needsYou, undefined);
+  assert.equal(at([], false).phase, "stopped");
+});
+
+test("error screens: every error sentence is one plain sentence, and each kind has its heading", () => {
+  for (const kind of ERROR_KINDS) {
+    const s = NEEDS_YOU_SENTENCE[kind]("staging.example.com");
+    assert.equal(s.replace(/staging\.example\.com/g, "").match(/[.?!](\s|$)/g)?.length, 1, `one sentence: ${s}`);
+    assert.doesNotMatch(s, /scout_|ERROR|net::|NS_ERROR|Playwright|\bHTTP\b/, `plain: ${s}`);
+    assert.ok(ERROR_HEADING[kind] in SCREEN_HEADING);
+  }
+  assert.equal(ERROR_HEADING["sign-in-expired"], "needYou", "signing in again is a request, not a failure");
+  assert.equal(ERROR_HEADING["address-unreachable"], "wentWrong");
 });
 
 // ---- scout_cards and scout_feedback's rules ----

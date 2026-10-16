@@ -64,6 +64,7 @@ import {
   sessionQueue,
   guidedPlans,
   guidedRuns,
+  settleGuidedCall,
   guidedSessions,
   callWork,
   CLOSE_WORK_WAIT_MS,
@@ -547,7 +548,7 @@ export function registerSessionTools(): void {
             pictures.mode !== "off" && eng.memory?.dir
               ? `\n📷 FINDING PICTURES: ${pictures.mode} (${pictures.source}): each scout_finding keeps a picture of what it names under ${path.join(eng.memory.dir, "recordings")}/ for report.html${pictures.mode === "inline" ? `, and returns the first ${pictures.inlineMax} in its result` : ""}.`
               : "";
-          return text(
+          const attached = text(
             browserNote +
               out +
               (folder.note ? `\n\n${folder.note}` : "") +
@@ -561,8 +562,14 @@ export function registerSessionTools(): void {
               openNote,
             target,
           );
+          // A saved sign-in that landed on a login page is the sign-in-expired screen (progress.ts).
+          settleGuidedCall(guided.plan?.planId, attached, eng.signInLost);
+          return attached;
         } catch (err) {
-          return errorText(err);
+          // An attach of a guided check that failed on the address or the browser download: the progress shows its screen.
+          const failed = errorText(err);
+          settleGuidedCall(planId && guidedPlans.get(planId) ? planId : undefined, failed, false);
+          return failed;
         }
       },
     ),
