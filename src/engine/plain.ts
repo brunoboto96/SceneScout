@@ -223,8 +223,8 @@ function joinAnd(parts: string[]): string {
   return parts.length <= 1 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
 
-/** The short summary that opens the plain section. */
-function plainSummary(input: PlainInput): string[] {
+/** The short summary that opens the plain section, and the team report's summary (team-report.ts). */
+export function plainSummary(input: PlainInput): string[] {
   const lines: string[] = [];
   const { current } = input;
   const by = (s: Finding["severity"]): number => current.filter((f) => f.severity === s).length;

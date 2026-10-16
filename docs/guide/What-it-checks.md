@@ -36,6 +36,7 @@ Every tool that acts on the page returns, with its result, whatever went wrong w
 | Split the work | `scout_lane_brief` `scout_lane_report` | Divide the app between parallel agents by whole module; fold what each hands back, and name any defect it judged but never filed |
 | Watch | `scout_status` | Each session's objective, task and findings so far; in a client that renders MCP Apps, a pane that refreshes itself. In a guided check, the check's progress in plain words and its newest cards |
 | Read the findings | `scout_cards` `scout_feedback` | Show findings as plain cards, worst first, with their pictures; record the person's own "not a bug" or "confirmed" on one, which keeps the finding, and list those labels for a maintainer |
+| Share | `scout_team_report` | Write the team report: a page with a cover, the check's problems as cards with pictures, what was not checked and blank sign-off lines, and an evidence folder with the pictures, the report as Markdown and a manifest of every file's SHA-256 |
 | Close | `scout_close` | Close one session or all of them |
 
 A few do more than their name suggests:

@@ -1,12 +1,14 @@
 /**
- * Reading and closing out a run: scout_coverage, scout_report, scout_resolve, scout_verify, scout_tickets and scout_criterion.
+ * Reading and closing out a run: scout_coverage, scout_report, scout_resolve, scout_verify, scout_tickets, scout_criterion,
+ * scout_cards, scout_feedback and scout_team_report.
  *
  * Registered by mcp-server.ts, in the order the tools have always been listed.
  */
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { computeGaps, coverageView, formatRouteCoverage, generateReport, runRecordOf } from "../engine/report.js";
+import { computeGaps, coverageView, formatRouteCoverage, generateReport, lastFrames, runRecordOf } from "../engine/report.js";
+import { teamReportData, teamReportText, writeTeamReport } from "../engine/team-report.js";
 import { DEFAULT_REPORT_AUDIENCE, REPORT_AUDIENCES, type ReportAudience } from "../engine/plain.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "../engine/verify.js";
 import {
@@ -58,7 +60,9 @@ import {
   logLine,
   guidedRuns,
   guidedSessions,
+  guidedPlans,
   projectEngine,
+  PKG_VERSION,
 } from "../server-context.js";
 
 /** A PlainCard, as scout_cards' structuredContent carries it. */
@@ -109,6 +113,18 @@ const FEEDBACK_OUTPUT = {
       }),
     )
     .optional(),
+};
+
+/** What scout_team_report's structuredContent carries (design 3.2's TeamReport, with the page's and the folder's absolute paths). */
+const TEAM_REPORT_OUTPUT = {
+  file: z.string(),
+  evidenceDir: z.string(),
+  manifest: z.array(z.object({ file: z.string(), sha256: z.string() })),
+  problems: z.number(),
+  pictures: z.number(),
+  missingPictures: z.number(),
+  path: z.string(),
+  folder: z.string(),
 };
 
 export function registerResultTools(): void {
@@ -598,6 +614,57 @@ export function registerResultTools(): void {
           content: [{ type: "text" as const, text: `${f.title} (${f.id}): ${FEEDBACK_SAYS[verdict]}` }],
           structuredContent: { findingId: f.id, verdict },
         };
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  );
+  server.registerTool(
+    "scout_team_report",
+    {
+      title: "Make a team report",
+      description:
+        "Write the team report: the plain report made for sharing, as one page that opens in any browser. It has a cover (the site, the date, what was checked, the care level and how thorough), a short summary, each problem this check found as a plain card with its picture, the ones the person marked not a bug listed apart, what the check did not test, and blank sign-off lines. " +
+        "Beside it, an evidence folder holds the pictures, the report as Markdown and manifest.json with every file's SHA-256, the SceneScout version and the check's times. " +
+        "Writes only inside the project's .scenescout/ folder (team-report.html and team-report/), replacing the last team report; sends nothing anywhere and touches no browser. Tell the person where the page is.",
+      inputSchema: {},
+      outputSchema: TEAM_REPORT_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async () => {
+      try {
+        const eng = projectEngine();
+        const memory = eng?.memory;
+        if (!eng || !memory) throw new Error("No project is open yet: the report is made from the project a session attached to, so attach first.");
+        const unvisited = eng.unvisitedKnownRoutes();
+        const all = eng.allKnownRoutes();
+        const gaps = computeGaps(memory, {
+          routesVisited: all.length - unvisited.length,
+          routesTotal: all.length,
+          designAudits: memory.auditsThisRun,
+          unvisitedRoutes: unvisited,
+          knownRoutes: all,
+          mode: eng.mode,
+        });
+        // A guided check on show, carried by this project's session: its address, areas and thoroughness go on the cover.
+        const focused = guidedRuns.focused;
+        const carried = focused && [...guidedSessions.entries()].some(([name, s]) => s.planId === focused && engines.get(name) === eng);
+        const plan = carried ? guidedPlans.get(focused) : undefined;
+        const data = teamReportData({
+          findings: memory.findings,
+          sessionStart: memory.sessionStart,
+          lastFrames: lastFrames(memory),
+          violations: eng.oracleLog.all.filter((v) => !v.embed),
+          routes: all.length > 0 ? { visited: all.length - unvisited.length, total: all.length } : undefined,
+          gaps,
+          mode: eng.mode,
+          address: plan?.choices.address ?? eng.baseUrl,
+          ...(plan ? { guided: { areas: plan.choices.areas, thoroughness: plan.choices.thoroughness } } : {}),
+          version: PKG_VERSION,
+          generatedAt: new Date().toISOString(),
+        });
+        const report = writeTeamReport(memory.dir, data);
+        return { content: [{ type: "text" as const, text: teamReportText(report) }], structuredContent: { ...report } };
       } catch (err) {
         return errorText(err);
       }

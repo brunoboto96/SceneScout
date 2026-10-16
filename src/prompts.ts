@@ -273,11 +273,10 @@ const OPEN_FIRST =
 
 function teamReport(): string {
   return [
-    `The person picked ${quoted(PROMPT_TITLE[TEAM_REPORT_PROMPT])}. Tell them first, in these words: ${quoted(NOT_YET["team-report"])}`,
+    `The person picked ${quoted(PROMPT_TITLE[TEAM_REPORT_PROMPT])}.`,
     "",
-    `Then: ${ACTION_PROMPT.plainReport} Use the level of the check that ran in this conversation. ${OPEN_FIRST} If nothing has been checked there yet, say so and offer ${quoted(PROMPT_TITLE[CHECK_MY_SITE_PROMPT])} instead.`,
-    "If the report comes back NOT GENERATED because parts of the site were not reached, tell the person in plain words what was not reached, and ask whether to check those first or write the report now. Call scout_report again with force: true only when the person says to write it now.",
-    "Tell them where it is: report.html, a page that opens in any browser, with report.md beside it, in the folder SceneScout keeps its notes in, which the result names. It stays on this computer; nothing is sent anywhere.",
+    `Call scout_team_report with no arguments. ${OPEN_FIRST} A report lists the problems of the check that ran in this conversation: if none ran, say so and offer ${quoted(PROMPT_TITLE[CHECK_MY_SITE_PROMPT])} first.`,
+    "Tell them where it is: the page the result names (team-report.html, which opens in any browser), with the evidence folder beside it holding the pictures, the report as Markdown and a manifest of every file's SHA-256. Say it has a cover, each problem as a card, what was not checked and lines to sign off, and that it stays on this computer: nothing is sent anywhere.",
   ].join("\n");
 }
 

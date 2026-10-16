@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; script-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="scenescout-team-report">
+<title>Team report: https://staging.example.com</title>
+<style>
+:root { color-scheme: light; --line:#c9ced6; --text:#15181d; --muted:#5d6673; --head:#eef0f3; --high:#b91c1c; --high-bg:#fee2e2; --medium:#b45309; --medium-bg:#fef3c7; --low:#1d4ed8; --low-bg:#dbeafe; --look:#5d6673; --look-bg:#eef0f3; }
+* { box-sizing:border-box; }
+body { margin:0; background:#fff; color:var(--text); font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+main { max-width:900px; margin:0 auto; padding:32px 16px 64px; }
+header.cover { border-bottom:3px solid var(--text); padding-bottom:16px; margin-bottom:8px; }
+header.cover h1 { font-size:28px; margin:0 0 12px; }
+h2 { font-size:19px; margin:32px 0 10px; border-bottom:1px solid var(--line); padding-bottom:4px; }
+h3 { font-size:16px; margin:0 0 6px; }
+h4 { font-size:13px; margin:12px 0 2px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+p { margin:4px 0; }
+table { border-collapse:collapse; width:100%; margin:8px 0; }
+th, td { border:1px solid var(--line); padding:6px 8px; text-align:left; vertical-align:top; overflow-wrap:anywhere; }
+thead th, table.facts th { background:var(--head); }
+table.facts { width:auto; min-width:60%; }
+article.card { border:1px solid var(--line); border-left:6px solid var(--look); border-radius:6px; padding:12px 16px; margin:14px 0; break-inside:avoid; }
+article.card.high { border-left-color:var(--high); } article.card.medium { border-left-color:var(--medium); } article.card.low { border-left-color:var(--low); }
+.impact { display:inline-block; padding:0 8px; border-radius:4px; font-weight:700; font-size:13px; margin-right:4px; color:var(--look); background:var(--look-bg); }
+.high .impact { color:var(--high); background:var(--high-bg); } .medium .impact { color:var(--medium); background:var(--medium-bg); } .low .impact { color:var(--low); background:var(--low-bg); }
+.where { color:var(--muted); }
+.n { color:var(--muted); }
+a.picture { display:block; margin:10px 0; }
+a.picture img { display:block; max-width:100%; height:auto; max-height:420px; object-fit:contain; object-position:left top; border:1px solid var(--line); }
+details summary { cursor:pointer; color:var(--muted); font-size:13px; margin-top:10px; }
+.tech, td.hash, td.path { font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
+.bytes { white-space:nowrap; }
+table.sign td.blank { height:2.8em; min-width:9em; }
+.none { color:var(--muted); font-style:italic; }
+footer { margin-top:40px; color:var(--muted); font-size:13px; }
+@media print { main { max-width:none; padding:0; } a { color:inherit; text-decoration:none; } details { display:none; } article.card, tr { break-inside:avoid; } }
+</style>
+</head>
+<body>
+<main>
+<header class="cover" data-section="cover">
+<h1 data-testid="team-report-title">Team report</h1>
+<table class="facts"><tr><th scope="row">Site</th><td>https://staging.example.com</td></tr><tr><th scope="row">Date</th><td>2026-10-16 10:00 UTC</td></tr><tr><th scope="row">What was checked</th><td>Forms, Broken pages and links</td></tr><tr><th scope="row">Care level</th><td>Look only</td></tr><tr><th scope="row">How thorough</th><td>Normal</td></tr></table>
+</header>
+<section class="summary" data-section="summary"><h2>Summary</h2><p>This run found 3 problems: 1 blocks users, 1 is annoying and 1 is cosmetic. It went to 7 of the 9 pages it knew about.</p><p>1 problem found by earlier runs was not checked again this time.</p><p>1 observation is a problem only if your project follows a particular convention, so it is not counted here.</p><p>While it worked, the automatic checks noticed:</p><ul><li>The server refused or failed a request (2 times)</li></ul><p>The check left 2 things untested.</p></section>
+<section class="problems" data-section="problems"><h2>Problems found</h2>
+<article class="card high" id="problem-1" data-finding="a1a1a1a1a1"><h3><span class="n">1.</span> Saving an order says it worked when the server refused it</h3><p class="where"><span class="impact">Blocks users</span> The page said something worked when the server had refused it · on /orders/new, also seen on /orders/edit</p><a class="picture" href="team-report/recordings/main/finding-a1a1a1a1a1.png" target="_blank" rel="noreferrer" data-testid="team-report-picture-open"><img loading="lazy" src="team-report/recordings/main/finding-a1a1a1a1a1.png" alt="640×400, &quot;Save&quot; and around it" width="640" height="400"></a><h4>What was done</h4><ol><li>Go to https://staging.example.com/orders/new</li><li>Click the &quot;Save&quot; button</li></ol><h4>What was expected</h4><p>The page reports only what really happened.</p><h4>What happened</h4><p>The page showed Order saved, and the server answered 422.</p><details data-testid="team-report-technical-toggle"><summary>Technical detail</summary><p class="tech">id a1a1a1a1a1 · false_success · high · /orders/new#form</p></details></article>
+<article class="card medium" id="problem-2" data-finding="b2b2b2b2b2"><h3><span class="n">2.</span> The date field has no label</h3><p class="where"><span class="impact">Annoying</span> Some people cannot use this part · on /orders/new</p><h4>What was done</h4><ol><li>Go to https://staging.example.com/orders/new</li><li>Click the &quot;Save&quot; button</li></ol><h4>What was expected</h4><p>Everyone can use it, including with a keyboard or a screen reader.</p><h4>What happened</h4><p>A screen reader announces it as edit text.</p><details data-testid="team-report-technical-toggle"><summary>Technical detail</summary><p class="tech">id b2b2b2b2b2 · a11y · medium · /orders/new#form</p></details></article>
+<article class="card low" id="problem-3" data-finding="c3c3c3c3c3"><h3><span class="n">3.</span> The footer overlaps the last row</h3><p class="where"><span class="impact">Cosmetic</span> Something looks wrong on screen · on /orders</p><h4>What was expected</h4><p>Everything is visible, readable and in its place.</p><h4>What happened</h4><p>The page showed Order saved, and the server answered 422.</p><details data-testid="team-report-technical-toggle"><summary>Technical detail</summary><p class="tech">id c3c3c3c3c3 · visual · low · /orders#list</p></details></article>
+</section>
+<section class="not-a-bug" data-section="not-a-bug"><h2>Marked not a bug</h2><p>Someone marked these not a bug. They are kept, and listed here apart from the problems.</p><ul><li data-finding="d4d4d4d4d4">The banner flickers (/orders/new): &quot;It is an animation&quot;</li></ul></section>
+<section class="not-checked" data-section="not-checked"><h2>What was not checked</h2><p>These are the parts the check knew about and did not test. A problem there would not be in this report.</p><ul><li>2 known route(s) never visited: /admin, /reports</li><li>single-role run (user) — permission boundaries and role capability gaps are untested</li></ul></section>
+<section class="signoff" data-section="signoff"><h2>Sign-off</h2><p>Sign once the problems above have been read and a decision made about each.</p><table class="sign"><thead><tr><th scope="col">Role</th><th scope="col">Name</th><th scope="col">Signature</th><th scope="col">Date</th></tr></thead><tbody><tr class="signature"><td>Checked by</td><td class="blank"></td><td class="blank"></td><td class="blank"></td></tr><tr class="signature"><td>Reviewed by</td><td class="blank"></td><td class="blank"></td><td class="blank"></td></tr><tr class="signature"><td>Approved by</td><td class="blank"></td><td class="blank"></td><td class="blank"></td></tr></tbody></table></section>
+<section class="evidence" data-section="evidence"><h2>Evidence</h2><p>The pictures, and this report as Markdown, are in the folder beside this page. The SHA-256 of each file lets anyone confirm it is the one this report was made with. manifest.json in that folder lists them all, this page included.</p><table class="grid"><thead><tr><th scope="col">File</th><th scope="col" class="bytes">Bytes</th><th scope="col">SHA-256</th></tr></thead><tbody><tr data-testid="team-report-manifest-entry"><td class="path">team-report/report.md</td><td class="bytes">2048</td><td class="hash">1111111111111111111111111111111111111111111111111111111111111111</td></tr><tr data-testid="team-report-manifest-entry"><td class="path">team-report/recordings/main/finding-a1a1a1a1a1.png</td><td class="bytes">5120</td><td class="hash">2222222222222222222222222222222222222222222222222222222222222222</td></tr></tbody></table></section>
+<footer>Made by SceneScout 9.9.9. It stays on this computer until you share it.</footer>
+</main>
+</body>
+</html>

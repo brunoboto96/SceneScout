@@ -238,6 +238,15 @@ The level is a contract that `scout_report` enforces for what the engine can see
 
 When the run was given tickets, the plain section answers them before listing the problems: for each ticket, every acceptance criterion as passed, failed or not tested. A failed criterion names the problems that show it, with their pictures; one not tested says why (the account used could not reach it, the run was only allowed to look, or it was outside what the run could check). A verdict the agent was not sure of is marked unsure.
 
+### The team report
+
+When the report is for other people, ask for the team report: say "make a team report", pick *Make a team report* in the chat's prompt menu, or press **Make a team report** on the guided panel's results. `scout_team_report` writes, inside `.scenescout/` and nowhere else:
+
+- `team-report.html`, one page that opens in any browser and prints cleanly: a cover (the site, the date, what was checked, the care level and how thorough), the plain summary, each problem this check found as a card with its picture, the ones marked "not a bug" listed apart, what the check did not test (the gap ledger) and blank lines for who checked, reviewed and approved it;
+- `team-report/`, the evidence folder beside it: the pictures, the same report as `report.md`, and `manifest.json` with every file's SHA-256, the SceneScout version and the check's times. The page lists the hashes of the pictures and the Markdown, so a reader can tell the files are the ones the report was made with.
+
+Making it again replaces the last team report, and removes only the evidence files the last one listed. Nothing is sent anywhere. The layout is built in for now: a template like `scenescout check --template` uses for a recorded check is not read for it.
+
 `scout_report {report}` chooses which parts a report carries: `both` (default) the plain section and then the technical report, `qa` the plain section alone, `dev` the technical report alone. It applies to the files `scout_report` writes; the live view's report always shows both.
 
 ### The technical report

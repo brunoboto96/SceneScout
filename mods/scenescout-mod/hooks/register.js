@@ -21,6 +21,7 @@ import {
   PANEL_WORDS,
   PLAN_TOOL,
   RESULTS_LIMIT,
+  TEAM_REPORT_TOOL,
   afterConfirm,
   afterPlan,
   choicesFromDraft,
@@ -30,6 +31,7 @@ import {
   guidedText,
   pictureSvg,
   readCards,
+  readTeamReport,
   reduce,
   renderGuided,
   resultText,
@@ -314,6 +316,16 @@ async function perform($, servers, type, payload) {
     }
     case "send":
       return sendToClaude($, String(payload.text ?? ""));
+    case "teamReport": {
+      // Written by the server with no turn for Claude; the panel then offers the page and its folder.
+      await updateWizard($, (w) => ({ ...w, busy: "team-report", notice: null }));
+      const read = readTeamReport(await callServer($, servers, TEAM_REPORT_TOOL, {}));
+      return updateWizard($, (w) =>
+        read.ok
+          ? { ...w, busy: null, teamReport: { path: read.path, folder: read.folder }, notice: { tone: "info", text: read.said } }
+          : { ...w, busy: null, notice: { tone: "error", text: read.error } },
+      );
+    }
     case "call": {
       // An engine action from the progress: only the three tools a button may call.
       if (!DIRECT_TOOLS.includes(String(payload.tool))) return;

@@ -5,6 +5,11 @@
  * deterministic page (a golden file), deviations, the evidence manifest and
  * escaping. The browser half is in scripts/smoke/check.ts.
  *
+ * Also the team report (scout_team_report, src/engine/team-report.ts): which
+ * problems it lists and how, the page against scripts/golden/team-report.html,
+ * escaping, the manifest's hashes, and that nothing is written outside the
+ * project's .scenescout/ folder.
+ *
  *   npx tsx --test scripts/report-test.ts
  *   UPDATE_GOLDEN=1 npx tsx --test scripts/report-test.ts   # rewrite the golden file after an intended change
  */
@@ -38,6 +43,21 @@ import {
 } from "../src/engine/check-report.ts";
 import { parseFlow, type Flow, type FlowOutcome } from "../src/engine/flow.ts";
 import { assertSavedPagePolicy, pagePolicy } from "./saved-page-csp.ts";
+import type { Finding } from "../src/engine/memory.ts";
+import { MODE_CARE_LABEL, TEAM_REPORT_WORDS } from "../src/engine/guided-words.ts";
+import {
+  TEAM_EVIDENCE_DIR,
+  TEAM_MANIFEST_FILE,
+  TEAM_REPORT_FILE,
+  TEAM_REPORT_GENERATOR,
+  teamReportData,
+  teamReportHtml,
+  teamReportMarkdown,
+  teamReportText,
+  writeTeamReport,
+  type TeamEvidenceEntry,
+  type TeamReportSource,
+} from "../src/engine/team-report.ts";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXAMPLE = path.join(ROOT, "examples", "report-template.json");
@@ -579,4 +599,311 @@ test("action: the template input is forwarded, the report is the one check.json 
   assert.match(action.outputs["test-report"].value, /steps\.run\.outputs\.test-report/);
   const upload = (action.runs.steps as Array<{ name: string; with?: { path?: string } }>).find((s) => s.name === "Keep the results")!;
   assert.match(upload.with!.path!, /steps\.run\.outputs\.test-report \}\}/);
+});
+
+// ── the team report ─────────────────────────────────────────────────────────
+
+const TEAM_GOLDEN = path.join(ROOT, "scripts", "golden", "team-report.html");
+const CHECK_START = "2026-10-16T09:00:00.000Z";
+
+function finding(id: string, over: Partial<Finding> = {}): Finding {
+  return {
+    id,
+    severity: "high",
+    category: "false_success",
+    title: "Saving an order says it worked when the server refused it",
+    detail: "The page showed Order saved, and the server answered 422.",
+    url: "https://staging.example.com/orders/new",
+    state: "/orders/new#form",
+    repro: ["navigate /orders/new @ https://staging.example.com/orders/new", 'click button "Save" @ https://staging.example.com/orders/new'],
+    foundAt: "2026-10-16T09:10:00.000Z",
+    runs: 1,
+    ...over,
+  };
+}
+
+/** A check with one of everything the report sorts: problems of each impact, one marked not a bug, a worth-a-look, an earlier one and a fixed one. */
+function teamSource(over: Partial<TeamReportSource> = {}): TeamReportSource {
+  return {
+    findings: [
+      finding("c3c3c3c3c3", {
+        severity: "low",
+        category: "visual",
+        title: "The footer overlaps the last row",
+        url: "https://staging.example.com/orders",
+        state: "/orders#list",
+        repro: [],
+      }),
+      finding("a1a1a1a1a1", {
+        picture: "recordings/main/finding-a1a1a1a1a1.png",
+        pictureShot: { width: 640, height: 400, frame: "element", label: "Save", at: "2026-10-16T09:10:00.000Z" },
+        seenOn: ["/orders/edit"],
+      } as Partial<Finding>),
+      finding("b2b2b2b2b2", {
+        severity: "medium",
+        category: "a11y",
+        title: "The date field has no label",
+        detail: "A screen reader announces it as edit text.",
+      }),
+      finding("d4d4d4d4d4", {
+        severity: "medium",
+        title: "The banner flickers",
+        feedback: { verdict: "not-a-bug", reason: "It is an animation", at: "2026-10-16T09:20:00.000Z" },
+      } as Partial<Finding>),
+      finding("e5e5e5e5e5", { severity: "low", tier: "worth_a_look", title: "A link has no test id" }),
+      finding("f6f6f6f6f6", { title: "Found by an earlier check", foundAt: "2026-10-01T09:00:00.000Z" }),
+      finding("0a0a0a0a0a", { title: "Fixed already", status: "resolved" }),
+    ],
+    sessionStart: CHECK_START,
+    violations: [{ kind: "http_error" }, { kind: "http_error" }],
+    routes: { visited: 7, total: 9 },
+    gaps: ["2 known route(s) never visited: /admin, /reports", "single-role run (user) — permission boundaries and role capability gaps are untested"],
+    mode: "observe",
+    address: "https://staging.example.com",
+    guided: { areas: ["forms", "broken-pages"], thoroughness: "normal" },
+    version: "9.9.9",
+    generatedAt: "2026-10-16T10:00:00.000Z",
+    ...over,
+  };
+}
+
+/** Fixed evidence, so the golden page depends on nothing on disk. */
+const TEAM_EVIDENCE: TeamEvidenceEntry[] = [
+  { file: "team-report/report.md", bytes: 2048, sha256: "1".repeat(64) },
+  { file: "team-report/recordings/main/finding-a1a1a1a1a1.png", bytes: 5120, sha256: "2".repeat(64) },
+];
+
+test("team report: this check's problems worst first, not-a-bug apart, the rest counted, and the cover from the guided choices", () => {
+  const data = teamReportData(teamSource());
+  assert.deepEqual(
+    data.cards.map((c) => c.id),
+    ["a1a1a1a1a1", "b2b2b2b2b2", "c3c3c3c3c3"],
+    "open defects this check found, worst first; no worth-a-look, earlier, fixed or not-a-bug one",
+  );
+  assert.deepEqual(
+    data.notABug.map((c) => c.id),
+    ["d4d4d4d4d4"],
+    "a problem marked not a bug is listed apart, never dropped",
+  );
+  const summary = data.summary.join("\n");
+  assert.match(summary, /^This run found 3 problems: 1 blocks users, 1 is annoying and 1 is cosmetic\. It went to 7 of the 9 pages/);
+  assert.match(summary, /1 problem found by earlier runs was not checked again/);
+  assert.match(summary, /1 observation is a problem only if your project follows a particular convention/);
+  assert.match(summary, /The check left 2 things untested\./);
+  assert.ok(!summary.includes("/admin"), "the not-checked list is its own section, not repeated in the summary");
+  assert.equal(data.checked, "Forms, Broken pages and links");
+  assert.equal(data.care, "Look only");
+  assert.equal(data.thoroughness, "Normal");
+
+  // Not a guided check: the cover says how much of the site it reached, and that nobody chose how thorough.
+  const plain = teamReportData(teamSource({ guided: undefined, mode: "safe-write" }));
+  assert.equal(plain.checked, "7 of the 9 pages it knew about");
+  assert.equal(plain.thoroughness, TEAM_REPORT_WORDS.notGiven);
+  assert.equal(plain.care, "May create test data");
+  assert.equal(teamReportData(teamSource({ guided: undefined, routes: undefined })).checked, TEAM_REPORT_WORDS.everything);
+  assert.deepEqual(MODE_CARE_LABEL, {
+    observe: "Look only",
+    "read-only": "May submit forms",
+    "safe-write": "May create test data",
+    destructive: "May delete data (a developer's choice)",
+  });
+
+  // Nothing found: the page says so, and still carries its not-checked list and sign-off.
+  const empty = teamReportData(teamSource({ findings: [] }));
+  const html = teamReportHtml(empty, []);
+  assert.ok(html.includes(TEAM_REPORT_WORDS.noProblems) && html.includes(TEAM_REPORT_WORDS.noEvidence));
+  assert.ok(html.includes("/admin, /reports") && html.includes(TEAM_REPORT_WORDS.signoff));
+});
+
+test("golden: the same check and evidence always render the same team report", () => {
+  const html = teamReportHtml(teamReportData(teamSource()), TEAM_EVIDENCE);
+  if (process.env.UPDATE_GOLDEN === "1") {
+    fs.mkdirSync(path.dirname(TEAM_GOLDEN), { recursive: true });
+    fs.writeFileSync(TEAM_GOLDEN, html);
+  }
+  assert.equal(html, readText(TEAM_GOLDEN), "the team report changed: if that was intended, run UPDATE_GOLDEN=1 npm run report-test and review the diff");
+  // The parts the design asks for, in order: cover, summary, cards, not a bug, not checked, sign-off, evidence.
+  const order = ["cover", "summary", "problems", "not-a-bug", "not-checked", "signoff", "evidence"].map((s) => html.indexOf(`data-section="${s}"`));
+  assert.ok(
+    order.every((at, i) => at > 0 && (i === 0 || at > order[i - 1])),
+    `sections out of order: ${order.join(",")}`,
+  );
+  assert.equal((html.match(/<tr class="signature">/g) ?? []).length, TEAM_REPORT_WORDS.signRoles.length, "a blank line for each who signs");
+  assert.equal((html.match(/<td class="blank"><\/td>/g) ?? []).length, TEAM_REPORT_WORDS.signRoles.length * 3, "name, signature and date are left blank");
+  assert.ok(html.includes('src="team-report/recordings/main/finding-a1a1a1a1a1.png"'), "the picture is the evidence folder's copy");
+  assertSavedPagePolicy(html, "team report");
+});
+
+test("team report: every word the app supplied is escaped, and the page runs nothing", () => {
+  const hostile = '<img src=x onerror="alert(1)"><script>alert(2)</script>';
+  const data = teamReportData(
+    teamSource({
+      address: `https://staging.example.com/?q=${hostile}`,
+      gaps: [`a route ${hostile} never visited`],
+      findings: [
+        finding("a1a1a1a1a1", {
+          title: `Title ${hostile}`,
+          detail: `Detail ${hostile}`,
+          url: `https://staging.example.com/${hostile}`,
+          evidence: `POST /api/${hostile} 500`,
+          repro: [`click button "${hostile}" @ https://staging.example.com/x`],
+          seenOn: [`/also/${hostile}`],
+        }),
+        finding("d4d4d4d4d4", { title: `Not a bug ${hostile}`, feedback: { verdict: "not-a-bug", reason: hostile, at: CHECK_START } } as Partial<Finding>),
+      ],
+    }),
+  );
+  const html = teamReportHtml(data, [{ file: `team-report/${hostile}`, bytes: null, sha256: null }]);
+  assert.ok(!/<script>alert|<img src=x|onerror="/i.test(html), "no markup from the app survives as markup");
+  assert.ok(html.includes("&lt;script&gt;alert(2)&lt;/script&gt;"), "it is shown as text");
+  assertSavedPagePolicy(html, "hostile team report");
+  assert.deepEqual(pagePolicy(html).get("script-src"), ["'none'"]);
+  // In the Markdown, a pipe in the address cannot end the cover's cell early.
+  const md = teamReportMarkdown(teamReportData(teamSource({ address: "https://a.example/|b" })), new Set());
+  assert.ok(md.includes("| Site | https://a.example/\\|b |"), md.split("\n").slice(0, 6).join("\n"));
+});
+
+/** Every file under `root`, with its bytes' hash, skipping `skip` (a folder name relative to root). */
+function treeOf(root: string, skip: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const walk = (dir: string) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      const rel = path.relative(root, full);
+      if (rel === skip) continue;
+      if (e.isDirectory()) walk(full);
+      else out.set(rel, e.isSymbolicLink() ? `link:${fs.readlinkSync(full)}` : createHash("sha256").update(fs.readFileSync(full)).digest("hex"));
+    }
+  };
+  walk(root);
+  return out;
+}
+
+const sha = (file: string): string => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+
+test("team report: written inside .scenescout/ only, with a manifest whose hashes are the files on disk", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "team-report-"));
+  try {
+    const project = path.join(root, "project");
+    const dir = path.join(project, ".scenescout");
+    fs.mkdirSync(path.join(dir, "recordings", "main"), { recursive: true });
+    fs.writeFileSync(path.join(project, "index.html"), "<p>the app</p>");
+    fs.writeFileSync(path.join(dir, "recordings", "main", "finding-a1a1a1a1a1.png"), Buffer.from("picture bytes"));
+    const outside = path.join(root, "outside.txt");
+    fs.writeFileSync(outside, "not the project's");
+    const before = treeOf(root, path.join("project", ".scenescout"));
+
+    // One picture is there, one card names a picture that is not.
+    const src = teamSource();
+    src.findings = [...src.findings, finding("9b9b9b9b9b", { severity: "low", picture: "recordings/main/finding-9b9b9b9b9b.png" } as Partial<Finding>)];
+    const report = writeTeamReport(dir, teamReportData(src));
+    assert.deepEqual(treeOf(root, path.join("project", ".scenescout")), before, "nothing outside .scenescout/ was written or changed");
+    assert.equal(report.file, ".scenescout/team-report.html");
+    assert.equal(report.evidenceDir, ".scenescout/team-report");
+    assert.equal(report.path, path.join(dir, TEAM_REPORT_FILE));
+    assert.equal(report.problems, 4);
+    assert.equal(report.pictures, 1);
+    assert.equal(report.missingPictures, 1);
+    assert.match(teamReportText(report), /1 picture was not found and is listed as not found/);
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, TEAM_EVIDENCE_DIR, TEAM_MANIFEST_FILE), "utf8"));
+    assert.equal(manifest.generator, TEAM_REPORT_GENERATOR);
+    assert.equal(manifest.version, "9.9.9");
+    assert.equal(manifest.startedAt, CHECK_START);
+    assert.equal(manifest.generatedAt, "2026-10-16T10:00:00.000Z");
+    assert.deepEqual(
+      manifest.files.map((f: TeamEvidenceEntry) => f.file),
+      [TEAM_REPORT_FILE, "team-report/report.md", "team-report/recordings/main/finding-a1a1a1a1a1.png", "team-report/recordings/main/finding-9b9b9b9b9b.png"],
+    );
+    for (const f of manifest.files as TeamEvidenceEntry[]) {
+      if (f.sha256 === null) {
+        assert.equal(f.file, "team-report/recordings/main/finding-9b9b9b9b9b.png", "only the missing picture has no hash");
+        assert.ok(!fs.existsSync(path.join(dir, f.file)));
+        continue;
+      }
+      assert.equal(sha(path.join(dir, ...f.file.split("/"))), f.sha256, `${f.file}'s hash is the file on disk`);
+      assert.equal(fs.statSync(path.join(dir, ...f.file.split("/"))).size, f.bytes);
+    }
+    // The tool's own list: every file it wrote, the manifest included, relative to the project.
+    assert.deepEqual(
+      report.manifest.map((m) => m.file),
+      [
+        ".scenescout/team-report.html",
+        ".scenescout/team-report/report.md",
+        ".scenescout/team-report/recordings/main/finding-a1a1a1a1a1.png",
+        ".scenescout/team-report/manifest.json",
+      ],
+    );
+    for (const m of report.manifest) assert.equal(sha(path.join(project, ...m.file.split("/"))), m.sha256);
+    // The page lists the evidence's hashes, and shows only the picture that is there.
+    const html = fs.readFileSync(report.path, "utf8");
+    assert.ok(html.includes(sha(path.join(dir, "team-report", "report.md"))));
+    assert.ok(html.includes('src="team-report/recordings/main/finding-a1a1a1a1a1.png"'));
+    assert.ok(!html.includes('src="team-report/recordings/main/finding-9b9b9b9b9b.png"') && html.includes(TEAM_REPORT_WORDS.pictureMissing));
+    const md = fs.readFileSync(path.join(dir, "team-report", "report.md"), "utf8");
+    assert.ok(md.includes("](recordings/main/finding-a1a1a1a1a1.png)"), "the Markdown links its picture beside it");
+
+    // A second report removes the first's evidence it no longer shows, and leaves a file it never wrote.
+    fs.writeFileSync(path.join(dir, "team-report", "notes.txt"), "the team's own notes");
+    writeTeamReport(dir, teamReportData(teamSource({ findings: [] })));
+    assert.ok(!fs.existsSync(path.join(dir, "team-report", "recordings", "main", "finding-a1a1a1a1a1.png")), "the old picture went with its report");
+    assert.equal(fs.readFileSync(path.join(dir, "team-report", "notes.txt"), "utf8"), "the team's own notes");
+    assert.ok(fs.existsSync(path.join(dir, "recordings", "main", "finding-a1a1a1a1a1.png")), "the original picture is untouched");
+    assert.deepEqual(treeOf(root, path.join("project", ".scenescout")), before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("team report: a folder that is not .scenescout/, a linked evidence folder and a linked picture never lead outside it", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "team-report-"));
+  try {
+    const dir = path.join(root, "project", ".scenescout");
+    const elsewhere = path.join(root, "elsewhere");
+    fs.mkdirSync(path.join(dir, "recordings", "main"), { recursive: true });
+    fs.mkdirSync(elsewhere);
+    fs.writeFileSync(path.join(elsewhere, "secret.txt"), "private");
+    const data = teamReportData(teamSource());
+
+    assert.throws(() => writeTeamReport(path.join(root, "project"), data), /only inside a project's \.scenescout folder/);
+    assert.deepEqual(fs.readdirSync(path.join(root, "project")), [".scenescout"], "nothing was written in the project itself");
+
+    // The evidence folder is a link out of .scenescout/: refused, and nothing lands where it points.
+    fs.symlinkSync(elsewhere, path.join(dir, TEAM_EVIDENCE_DIR), "dir");
+    assert.throws(() => writeTeamReport(dir, data), /is not a folder SceneScout made/);
+    assert.deepEqual(fs.readdirSync(elsewhere), ["secret.txt"]);
+    assert.ok(!fs.existsSync(path.join(dir, TEAM_REPORT_FILE)));
+    fs.unlinkSync(path.join(dir, TEAM_EVIDENCE_DIR));
+
+    // A folder inside the evidence that links out is refused before anything is written through it, a folder included.
+    fs.writeFileSync(path.join(dir, "recordings", "main", "finding-a1a1a1a1a1.png"), "picture bytes");
+    fs.mkdirSync(path.join(dir, TEAM_EVIDENCE_DIR));
+    fs.symlinkSync(elsewhere, path.join(dir, TEAM_EVIDENCE_DIR, "recordings"), "dir");
+    assert.throws(() => writeTeamReport(dir, data), /is a link or a file, not a folder SceneScout made/);
+    assert.deepEqual(fs.readdirSync(elsewhere), ["secret.txt"], "no folder or picture was made through the link");
+    fs.unlinkSync(path.join(dir, TEAM_EVIDENCE_DIR, "recordings"));
+
+    // An earlier manifest naming a file behind a linked folder never removes the file the link leads to.
+    fs.writeFileSync(path.join(elsewhere, "victim.txt"), "keep me");
+    fs.symlinkSync(elsewhere, path.join(dir, TEAM_EVIDENCE_DIR, "sub"), "dir");
+    fs.writeFileSync(
+      path.join(dir, TEAM_EVIDENCE_DIR, TEAM_MANIFEST_FILE),
+      JSON.stringify({ generator: TEAM_REPORT_GENERATOR, files: [{ file: "team-report/sub/victim.txt", bytes: 7, sha256: "0".repeat(64) }] }),
+    );
+    writeTeamReport(dir, teamReportData(teamSource({ findings: [] })));
+    assert.equal(fs.readFileSync(path.join(elsewhere, "victim.txt"), "utf8"), "keep me", "nothing outside was removed");
+    fs.unlinkSync(path.join(dir, TEAM_EVIDENCE_DIR, "sub"));
+    fs.rmSync(path.join(elsewhere, "victim.txt"));
+
+    // A picture that is a link to a file outside is not copied into the evidence.
+    fs.rmSync(path.join(dir, "recordings", "main", "finding-a1a1a1a1a1.png"));
+    fs.symlinkSync(path.join(elsewhere, "secret.txt"), path.join(dir, "recordings", "main", "finding-a1a1a1a1a1.png"));
+    const report = writeTeamReport(dir, data);
+    assert.equal(report.pictures, 0, "the linked picture is not evidence");
+    assert.equal(report.missingPictures, 1);
+    assert.deepEqual(fs.readdirSync(elsewhere), ["secret.txt"], "nothing was written outside");
+    assert.ok(!fs.readFileSync(report.path, "utf8").includes("private"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

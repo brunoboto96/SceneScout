@@ -30,6 +30,8 @@ export const PLAN_TOOL = "scout_guided_plan";
 export const CONFIRM_TOOL = "scout_guided_confirm";
 export const CARDS_TOOL = "scout_cards";
 export const FEEDBACK_TOOL = "scout_feedback";
+/** The team report: written by the server, with no turn for Claude (design 3.8). Only the results screen's own button calls it. */
+export const TEAM_REPORT_TOOL = "scout_team_report";
 /** How many cards the results show at once. */
 export const RESULTS_LIMIT = 20;
 /** The longest `Svg` source a surface draws. */
@@ -168,6 +170,7 @@ export const ACTION_LABEL = {
   stop: "Stop",
   recheck: "Check them again",
   plainReport: "Write the report in plain words",
+  teamReport: "Make a team report",
   confirm: "Confirm the care level",
   notABug: "Not a bug",
   explain: "Explain more",
@@ -256,6 +259,9 @@ export const PANEL_WORDS = {
   mobileCheck: "On this device, type the address in the message box: I have started the message for you.",
   mobileFill: "Check my site with SceneScout. The address is ",
   noCards: "No problems to show.",
+  writingTeamReport: "Writing the team report...",
+  openReport: "Open the report",
+  showFolder: "Show the folder",
   fallbackNext: "Say one of these to Claude:",
 };
 
@@ -278,6 +284,7 @@ export const IMPACT_MARK = { "Blocks users": "!", Annoying: "~", Cosmetic: ".", 
  *   cards: any[] | null,
  *   cardsTotal: number,
  *   pictureFiles: Record<string, string>,
+ *   teamReport: { path: string, folder: string } | null,
  *   cardId: string | null,
  *   lastChoices: any,
  *   tourPage: number,
@@ -309,6 +316,7 @@ export function initialWizard() {
     cards: null,
     cardsTotal: 0,
     pictureFiles: {},
+    teamReport: null,
     cardId: null,
     lastChoices: null,
     tourPage: 0,
@@ -361,6 +369,10 @@ export function wizardOf(value) {
     cards: Array.isArray(value.cards) ? value.cards.filter(isRecord) : null,
     cardsTotal: num(value.cardsTotal),
     pictureFiles: isRecord(value.pictureFiles) ? /** @type {Record<string, string>} */ (value.pictureFiles) : {},
+    teamReport:
+      isRecord(value.teamReport) && fileHref(value.teamReport.path) && fileHref(value.teamReport.folder)
+        ? { path: str(value.teamReport.path), folder: str(value.teamReport.folder) }
+        : null,
     cardId: str(value.cardId) || null,
     lastChoices: isRecord(value.lastChoices) ? value.lastChoices : null,
     tourPage: Math.min(TOUR.length - 1, Math.max(0, Math.floor(num(value.tourPage)))),
@@ -600,6 +612,24 @@ export function isOwnPicture(file, relative) {
   if (rel.split("/").some((s) => s === "" || s === "." || s === "..")) return false;
   const abs = file.replace(/\\/g, "/");
   return abs.endsWith(`/.scenescout/${rel}`) && !abs.split("/").some((s) => s === "." || s === "..");
+}
+
+/**
+ * Where scout_team_report wrote the page and its evidence folder, and the line
+ * to tell the person, or the error. Only absolute paths of a page named
+ * team-report.html, and its folder, inside a `.scenescout/` folder are taken.
+ *
+ * @param {any} result
+ * @returns {{ ok: true, path: string, folder: string, said: string } | { ok: false, error: string }}
+ */
+export function readTeamReport(result) {
+  const s = isRecord(result) && isRecord(result.structuredContent) ? result.structuredContent : null;
+  if (!s || result.isError === true) return { ok: false, error: errorSentence(result) };
+  const page = str(s.path).replace(/\\/g, "/");
+  const folder = str(s.folder).replace(/\\/g, "/");
+  if (!fileHref(s.path) || !fileHref(s.folder) || !page.endsWith("/.scenescout/team-report.html") || folder !== page.replace(/\.html$/, ""))
+    return { ok: false, error: "The SceneScout server did not say where it wrote the team report." };
+  return { ok: true, path: str(s.path), folder: str(s.folder), said: resultText(result).split("\n")[0] };
 }
 
 /** A `file:` address for a picture on disk, or null for anything that is not an absolute path. */
@@ -1117,7 +1147,11 @@ export function renderGuided(els, w, ctx, act) {
     const where = str(w.plan?.choices?.address) || str(w.lastChoices?.address);
     const out = [heading(`${PANEL_WORDS.results}${where ? `: ${where}` : ""} · ${w.cardsTotal} problem${w.cardsTotal === 1 ? "" : "s"}`)];
     if (w.busy === "cards") out.push(dim("Reading the problems..."));
-    else if (cards.length === 0) out.push(dim(PANEL_WORDS.noCards));
+    if (w.busy === "team-report") out.push(dim(PANEL_WORDS.writingTeamReport));
+    else if (w.teamReport) {
+      const made = [link(PANEL_WORDS.openReport, fileHref(w.teamReport.path)), link(PANEL_WORDS.showFolder, fileHref(w.teamReport.folder))].filter(Boolean);
+      if (made.length) out.push(row(made));
+    } else if (cards.length === 0) out.push(dim(PANEL_WORDS.noCards));
     for (const card of cards) {
       out.push(
         column([
@@ -1134,6 +1168,7 @@ export function renderGuided(els, w, ctx, act) {
       row([
         button("guided-results-recheck", ACTION_LABEL.recheck, () => act("send", { text: ACTION_PROMPT.recheck })),
         button("guided-results-report", ACTION_LABEL.plainReport, () => act("send", { text: ACTION_PROMPT.plainReport })),
+        button("guided-results-team-report", ACTION_LABEL.teamReport, () => act("teamReport")),
         ...(w.lastChoices ? [button("guided-results-again", PANEL_WORDS.runAgain, () => act("runAgain"))] : []),
         ...(canType ? [button("guided-results-new", PANEL_WORDS.newCheck, () => act("newCheck"))] : []),
         button("guided-results-back", PANEL_WORDS.back, () => act("go", { step: w.planId ? "running" : "welcome" })),
