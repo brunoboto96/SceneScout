@@ -197,6 +197,8 @@ import {
   MAX_READ_POSTS,
   READ_POSTS_ENV,
   readPostAllowed,
+  AUTH_POSTS_ENV,
+  authPostsSetting,
   matchReadPost,
   refusedPostPage,
   readPostEntries,
@@ -337,6 +339,8 @@ export interface AttachOptions {
    * none (policy.ts readPostsSetting).
    */
   readPosts?: string[];
+  /** False: SCENESCOUT_AUTH_POSTS is not read and the path rule decides what is a sign-in (a guided check). Default: read it. */
+  operatorAuthPosts?: boolean;
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -750,6 +754,9 @@ export class BrowserEngine {
   /** POST endpoints the user named as reads (policy.ts readPostAllowed decides when that counts). */
   readPosts: ReadPost[] = [];
   private readPostNotice = "";
+  /** The only POSTs that count as signing in, when the operator listed them (SCENESCOUT_AUTH_POSTS); null for the path rule. */
+  private authPosts: ReadPost[] | null = null;
+  private authPostNotice = "";
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
   /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
@@ -1181,6 +1188,7 @@ export class BrowserEngine {
     clearRefusedPost: (url) => this.clearRefusedPost(url),
     isOwnedResource: (pathname) => this.isOwnedResource(pathname),
     recordCreation: (res) => this.recordCreation(res),
+    authPosts: () => this.authPosts,
   });
   /**
    * Every request answered since the last action, with its status. The HTTP
@@ -1540,6 +1548,13 @@ export class BrowserEngine {
         : "") +
       (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "") +
       (trust.overflow.length > 0 ? ` More than ${MAX_TRUSTED_EMBEDS} trusted embeds; not trusted: ${trust.overflow.join(", ")}.` : "");
+    const authList = opts.operatorAuthPosts === false ? null : authPostsSetting(process.env[AUTH_POSTS_ENV]);
+    this.authPosts = authList?.entries ?? null;
+    this.authPostNotice = authList
+      ? ` Sign-in POSTs: only ${authList.entries.length > 0 ? authList.entries.map((e) => e.entry).join(", ") : "none"} (${AUTH_POSTS_ENV}); no other POST counts as signing in.` +
+        (authList.rejected.length > 0 ? ` Not a "POST /path" or "POST https://host/path" entry, so not a sign-in: ${authList.rejected.join(", ")}.` : "") +
+        (authList.overflow.length > 0 ? ` More than ${MAX_READ_POSTS} sign-in POSTs; not counted: ${authList.overflow.join(", ")}.` : "")
+      : "";
     const reads = readPostEntries(readPostsSetting(opts.readPosts, process.env[READ_POSTS_ENV]));
     this.readPosts = reads.entries;
     this.readPostNotice =
@@ -1755,6 +1770,7 @@ export class BrowserEngine {
           destructiveWire: isDestructiveWire(pathnameOf(req.url()), req.postData()),
           foreign: () => this.foreignWriteOf(req),
           offApp: () => offAppPageWrite(this.baseUrl, this.page?.url(), req.url(), this.embedMoves.movedTo),
+          authList: this.guard.authListFor(req.url()),
         })
       )
         return;
@@ -1879,7 +1895,7 @@ export class BrowserEngine {
       `Memory: ${this.memory!.dir}.${this.memory!.loadWarning ? ` WARNING: ${this.memory!.loadWarning}` : ""}` +
       (this.memory!.prunedStates > 0 ? ` Trimmed ${this.memory!.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory!.legacyDirNote ? ` ${this.memory!.legacyDirNote}` : ""}` +
-      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice} Call scout_snapshot to see the current state.` +
+      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice}${this.authPostNotice} Call scout_snapshot to see the current state.` +
       profileNote +
       authWarning
     );

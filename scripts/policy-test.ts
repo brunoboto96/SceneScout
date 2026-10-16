@@ -31,6 +31,8 @@ import {
   FOREIGN_FRAME_SANDBOX,
   allowsForeignWriteOnSignIn,
   isAuthExempt,
+  authPostsSetting,
+  AUTH_POSTS_ENV,
   isDestructive,
   isDestructiveWire,
   BlockNotices,
@@ -764,6 +766,92 @@ test("in observe mode only the requests a login itself needs are exempt", () => 
   ]) {
     assert.equal(exempt(p), false, `${p} must be blocked in observe`);
   }
+});
+
+test("in observe, refresh, token, session, callback and authorize are sign-in only on an auth path, not on a record or another resource (#549)", () => {
+  const exempt = (p: string): boolean => isAuthExempt("observe", "POST", p, false);
+  // A session still has to be able to exist and be renewed.
+  for (const p of [
+    "/api/auth/refresh",
+    "/oauth/token",
+    "/auth/token/refresh",
+    "/api/token/refresh",
+    "/api/v1/auth/session",
+    "/api/session",
+    "/session",
+    "/refresh",
+    "/connect/token",
+    "/oauth2/v1/token",
+    "/realms/acme/protocol/openid-connect/token",
+    "/api/auth/callback/credentials",
+    "/sso/callback",
+    "/oauth/authorize",
+    "/.auth/refresh",
+    // Identity providers whose tenant, realm or server id comes before the auth path.
+    "/72f988bf-86f1-41af-91ab-2d7cd011db47/oauth2/v2.0/token",
+    "/oauth2/aus1a2b3c4d5e6f7g8h9/v1/token",
+    "/b2c_1_signin/oauth2/v2.0/token",
+    "/realms/tenant2024prod/protocol/openid-connect/token",
+    // A provider's callback: /auth/:provider/callback.
+    "/auth/github/callback",
+    "/users/auth/google_oauth2/callback",
+    "/.auth/login/aad/callback",
+    // An auth service named for itself.
+    "/rt-auth/token",
+  ])
+    assert.equal(exempt(p), true, `${p} should be let through`);
+  // The same words acting on a record, or naming another resource's action, are writes.
+  for (const p of [
+    "/api/reports/refresh",
+    "/api/cache/refresh",
+    "/api/devices/4/refresh",
+    "/api/users/7/token",
+    "/api/carts/9/session",
+    "/api/payments/callback",
+    "/api/integrations/slack/authorize",
+    "/api/auth/sessions/0f8e2c1a-4b5d-4e6f-8a9b-0c1d2e3f4a5b/refresh",
+    "/api/payments/callback/stripe",
+    "/api/auth/session/extend",
+    // The word second to last, with an action after it.
+    "/api/refresh/reports",
+    "/api/token/mint",
+    "/api/callback/run",
+    "/api/v1/authorize/grant",
+    "/api/integrations/slack/callback",
+  ])
+    assert.equal(exempt(p), false, `${p} must be refused in observe`);
+  // Outside observe the broad auth rule is unchanged.
+  assert.equal(isAuthExempt("read-only", "POST", "/api/carts/9/session", false), true);
+});
+
+test("an auth allowlist (SCENESCOUT_AUTH_POSTS) replaces the path rule: only the listed sign-in POSTs are exempt (#549)", () => {
+  assert.equal(AUTH_POSTS_ENV, "SCENESCOUT_AUTH_POSTS");
+  assert.equal(authPostsSetting(undefined), null, "unset: the path rule");
+  assert.equal(authPostsSetting("  "), null, "empty: the path rule");
+  const setting = authPostsSetting("POST /api/login, POST https://idp.example.com/oauth/token\nGET /x");
+  assert.ok(setting);
+  assert.deepEqual(
+    setting.entries.map((e) => e.entry),
+    ["POST /api/login", "POST https://idp.example.com/oauth/token"],
+  );
+  assert.deepEqual(setting.rejected, ["GET /x"]);
+  const app = "https://app.example.com";
+  const list = (url: string) => ({ entries: setting.entries, appUrl: app, url });
+  const exempt = (mode: (typeof WRITE_MODES)[number], url: string, destructive = false) =>
+    isAuthExempt(mode, "POST", new URL(url).pathname, destructive, list(url));
+  assert.equal(exempt("observe", `${app}/api/login`), true, "listed");
+  assert.equal(exempt("observe", "https://idp.example.com/oauth/token"), true, "listed on another origin");
+  assert.equal(exempt("observe", `${app}/api/auth/refresh`), false, "the path rule would let it out; the list does not name it");
+  assert.equal(exempt("observe", `${app}/oauth/token`), false, "an entry with an origin matches that origin only");
+  assert.equal(exempt("observe", `${app}/api/login`, true), false, "never a destructive one");
+  assert.equal(exempt("read-only", `${app}/api/auth/login`), false, "in every mode, the list is the exemption");
+  // A list whose every entry was rejected still replaces the path rule: no POST counts as signing in.
+  const none = authPostsSetting("/api/login");
+  assert.ok(none);
+  assert.deepEqual(none.entries, []);
+  assert.equal(isAuthExempt("observe", "POST", "/api/auth/login", false, { entries: none.entries, appUrl: app, url: `${app}/api/auth/login` }), false);
+  // Without a list, the path rule.
+  assert.equal(isAuthExempt("observe", "POST", "/api/auth/refresh", false, null), true);
 });
 
 test("a blocked script request is answered with a refusal; a blocked navigation is dropped", () => {
@@ -1612,7 +1700,13 @@ test("pathnameOf reads a request URL's path, and keeps what does not parse", () 
 type GuardCall = string;
 function guardRig(
   rule: (typeof WRITE_MODES)[number],
-  opts: { foreign?: string | null; owned?: (pathname: string) => boolean; readPost?: string; frameDoc?: "foreign" | "app" | null } = {},
+  opts: {
+    foreign?: string | null;
+    owned?: (pathname: string) => boolean;
+    readPost?: string;
+    frameDoc?: "foreign" | "app" | null;
+    authPosts?: string[];
+  } = {},
 ) {
   const calls: GuardCall[] = [];
   const owned = new Set<string>();
@@ -1640,6 +1734,7 @@ function guardRig(
     recordCreation: async (res) => {
       owned.add(String((res as unknown as { created: string }).created));
     },
+    authPosts: () => (opts.authPosts ? readPostEntries(opts.authPosts).entries : null),
   };
   const guard = new RouteGuard(host);
   const send = (
@@ -1732,6 +1827,37 @@ test("RouteGuard: each verdict is applied to the request, and a refusal is recor
       assert.equal(guard.refused(theirs.request), true);
     }
   }
+});
+
+test("RouteGuard: observe's sign-in exemption, by the path rule and by an operator's allowlist (#549)", async () => {
+  {
+    const { send } = guardRig("observe");
+    assert.equal(await send("POST", "/api/auth/refresh", { body: "{}" }).done, "fallback", "a token refresh goes out");
+    assert.equal(await send("POST", "/api/reports/refresh", { body: "{}" }).done, "fulfill 403", "refreshing a report is a write");
+    assert.equal(await send("POST", "/api/devices/4/refresh", { body: "{}" }).done, "fulfill 403", "so is an action on a record");
+  }
+  {
+    const { send } = guardRig("observe", { authPosts: ["POST /api/login"] });
+    assert.equal(await send("POST", "/api/login", { body: "{}" }).done, "fallback", "the listed sign-in goes out");
+    assert.equal(await send("POST", "/api/auth/refresh", { body: "{}" }).done, "fulfill 403", "an auth path the operator did not list is refused");
+  }
+  // The browser-level interception applies the same list.
+  const unseen = async (authPosts: string[] | undefined, path: string) => {
+    const { guard } = guardRig("observe", { authPosts });
+    const sent: string[] = [];
+    await (guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+      { send: async (cmd: string) => void sent.push(cmd) },
+      {
+        requestId: "1",
+        resourceType: "Ping",
+        request: { url: `https://app.example.com${path}`, method: "POST", headers: { Origin: "https://app.example.com" }, postData: "{}" },
+      },
+    );
+    return sent[0];
+  };
+  assert.equal(await unseen(undefined, "/api/auth/logout"), "Fetch.continueRequest");
+  assert.equal(await unseen(["POST /api/login"], "/api/auth/logout"), "Fetch.failRequest");
+  assert.equal(await unseen(["POST /api/login"], "/api/login"), "Fetch.continueRequest");
 });
 
 test("RouteGuard: a safe-write PUT right after the POST that created its record waits for the creation to be recorded", async () => {
@@ -1847,6 +1973,21 @@ test("guided gate: while a guided plan is open, the environment's read POSTs are
     assert.ok(r.ok, `${planId} ${mode}`);
     assert.deepEqual(readPostsSetting(r.readPosts, ENV), [], `${planId} ${mode}: the environment's list is not read`);
   }
+});
+
+test("guided gate: while a guided plan is open, the operator's sign-in list is not read, so it cannot loosen observe (#549)", () => {
+  const plans = new GuidedPlans();
+  assert.equal(
+    "operatorAuthPosts" in guidedAttachVerdict(plans, { mode: "observe", url: "https://staging.example.com" }),
+    false,
+    "no plan: the attach reads it",
+  );
+  const built = guidedPlan({ address: "https://staging.example.com", areas: ["forms"], care: "look-only" });
+  assert.ok(built.ok);
+  const p = plans.add(built.plan);
+  const verdict = guidedAttachVerdict(plans, { planId: p.planId, mode: "observe", url: "https://staging.example.com" });
+  assert.ok(verdict.ok);
+  assert.equal(verdict.operatorAuthPosts, false);
 });
 
 test("guided gate: an accepted plan is spent when no session carries it any more, so a later check asks again", () => {
