@@ -50,6 +50,7 @@ import {
   type SignInWatch,
 } from "../src/engine/signed-in.ts";
 import { cookieMatchesHost, describeLifetime, judgeLifetime, judgeProfileFile, jwtExpiry, readLifetime } from "../src/engine/expiry.ts";
+import { savedSignInHealth } from "../src/engine/guided.ts";
 
 const POSIX = process.platform !== "win32";
 const tempProject = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-profiles-"));
@@ -1006,4 +1007,43 @@ test("a scout_login window is waited on by every call for its role, and its outc
   await new Promise((r) => setImmediate(r));
   clock = 5000;
   assert.equal((await windows.get("p\0viewer", start)).window.id, 4);
+});
+
+test("a guided check's sign-in health: the saved profile against the check's time limit, each verdict as a pair either side of it", () => {
+  const dir = path.join(os.tmpdir(), "health-project");
+  const file = profilePath(dir, "user");
+  const health = (
+    state: unknown | null,
+    over: { thoroughness?: "quick" | "normal" | "thorough"; signIn?: "none" | "password"; projectChosen?: boolean } = {},
+  ) =>
+    savedSignInHealth({ address: APP, signIn: over.signIn ?? "password", thoroughness: over.thoroughness ?? "normal" }, dir, {
+      now: NOW,
+      projectChosen: over.projectChosen,
+      exists: (p) => p === file && state !== null,
+      read: () => (typeof state === "string" ? state : JSON.stringify(state)),
+    });
+  // A normal check is 20 minutes, and the profile must outlast it by the usual 10-minute margin: 30 minutes.
+  assert.equal(health(stateOf([cookie("sid", NOW + 31 * MIN)]))?.state, "lasts");
+  assert.equal(health(stateOf([cookie("sid", NOW + 29 * MIN)]))?.state, "runs-out", "a minute short of the check and its margin");
+  // The same profile is judged against the check's own limit: it lasts a quick look (10 + 10 minutes).
+  assert.equal(health(stateOf([cookie("sid", NOW + 29 * MIN)]), { thoroughness: "quick" })?.state, "lasts");
+  assert.equal(health(stateOf([cookie("sid", NOW - MIN)]))?.state, "runs-out", "already over");
+  assert.equal(health(stateOf([cookie("sid", -1)]))?.state, "unknown", "a session cookie has no date");
+  assert.equal(health(stateOf([cookie("csrf", NOW + 5 * MIN), cookie("sid", NOW + 2 * 86_400_000)]))?.state, "may-run-out", "one dated part ends inside it");
+  assert.equal(health(null)?.state, "none", "nothing saved yet");
+  assert.equal(health("{ not json")?.state, "unknown", "a profile that cannot be read is signed in again, without claiming it ran out");
+  // Every dated part outlives the check, but a session cookie with no date may end any time: not certain, so not "lasts".
+  assert.equal(health(stateOf([cookie("prefs", NOW + 2 * 365 * 86_400_000), cookie("sid", -1)]))?.state, "unknown");
+  assert.equal(health(stateOf([cookie("prefs", NOW + 2 * 365 * 86_400_000), cookie("sid", NOW + 31 * MIN)]))?.state, "lasts", "the same, every part dated");
+  // A cookie for another host may be what keeps the sign-in alive: not certain either.
+  assert.equal(health(stateOf([cookie("sid", NOW + 31 * MIN), cookie("idp", NOW + 31 * MIN, "v", "login.example.net")]))?.state, "unknown");
+  assert.equal(health(stateOf([cookie("sid", NOW + 31 * MIN)]), { signIn: "none" }), undefined, "a check with no sign-in has no health");
+  // The way to sign in again names the command, with the folder when SceneScout chose it.
+  const lasting = health(stateOf([cookie("sid", NOW + 31 * MIN)]))!;
+  assert.equal(lasting.signInAgain.command, `scenescout login ${APP} --role user`);
+  assert.equal(lasting.sentence, "Your saved sign-in to 127.0.0.1:3000 lasts the whole check, so you do not need to sign in again.");
+  assert.match(health(stateOf([cookie("sid", NOW + 31 * MIN)]), { projectChosen: true })!.signInAgain.command, /--project '.*health-project'$/);
+  // Nothing of the profile's values reaches what the person or the agent reads.
+  for (const h of [lasting, health(stateOf([cookie("sid", NOW + 29 * MIN, "secret-session-value")]))!])
+    assert.ok(!JSON.stringify(h).includes("secret-session-value") && !JSON.stringify(h).includes("opaque-cookie-value"));
 });

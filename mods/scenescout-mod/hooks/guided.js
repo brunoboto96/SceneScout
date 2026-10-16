@@ -39,7 +39,9 @@ export const PICTURE_WIDTH = 320;
 /** Where a person reads how to fix a server that does not answer. */
 export const TROUBLESHOOTING_URL = "https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Troubleshooting.md";
 /** The steps the wizard has. */
-export const STEPS = ["welcome", "configuring", "confirm", "running", "results", "card", "safety"];
+export const STEPS = ["welcome", "configuring", "confirm", "running", "results", "card", "safety", "tour"];
+/** The `$.store` key that remembers the first-run tour was seen or skipped. One per person, not per project: the tour is about SceneScout, not a site. */
+export const TOUR_SEEN_KEY = "tourSeen";
 
 // ---- Words, copied from src/engine/guided-words.ts and src/intake.ts (live-test holds them equal) ----
 
@@ -169,12 +171,38 @@ export const ACTION_PROMPT = {
   again: (/** @type {string} */ id) => `Check SceneScout finding ${id} again with scout_verify, and tell me whether it is still there.`,
 };
 
+/** Whether the saved sign-in lasts the check, as guided-words.ts's SIGN_IN_HEALTH; the plan carries the sentence, so only the button's words are copied. */
+export const SIGN_IN_AGAIN_LABEL = "Sign in again";
+export const SIGN_IN_AGAIN_COMMAND = (/** @type {string} */ command) => `To sign in again from a terminal instead: ${command}`;
+
+// ---- The first-run tour: three panels, the panel's own words (the chat has no tour) ----
+
+export const TOUR = [
+  {
+    title: "What it does",
+    body: "SceneScout opens your site in a test browser and goes through it the way a careful tester would: its pages, its forms, signing in, and how it looks on a phone. While it works, it tells you in one sentence what it is doing.",
+  },
+  {
+    title: "How it keeps your data safe",
+    body: "It starts in Look only, which opens pages and holds back anything that would save something on your site. Sending forms or creating test data needs you to choose it and then confirm it yourself, and it never asks for your password.",
+  },
+  {
+    title: "What you get",
+    body: "Each problem comes back as a card in plain words: what was done, what was expected, what happened, and a picture. You can mark one not a bug, ask for more, or check it again after a fix.",
+  },
+];
+
 // ---- The panel's own words (no engine original) ----
 
 export const PANEL_WORDS = {
   welcome: "Find what is broken on your site, in plain words.",
   checkSite: "Check a site",
   safety: "How it keeps your data safe",
+  newHere: "New here?",
+  takeTour: "Take the 30-second tour",
+  skipTour: "Skip the tour",
+  next: "Next",
+  done: "Done",
   following: "A check is going:",
   follow: "Follow it",
   lastCheck: "Your last check:",
@@ -239,6 +267,7 @@ export const IMPACT_MARK = { "Blocks users": "!", Annoying: "~", Cosmetic: ".", 
  *   pictureFiles: Record<string, string>,
  *   cardId: string | null,
  *   lastChoices: any,
+ *   tourPage: number,
  * }} Wizard
  */
 
@@ -268,6 +297,7 @@ export function initialWizard() {
     pictureFiles: {},
     cardId: null,
     lastChoices: null,
+    tourPage: 0,
   };
 }
 
@@ -318,6 +348,7 @@ export function wizardOf(value) {
     pictureFiles: isRecord(value.pictureFiles) ? /** @type {Record<string, string>} */ (value.pictureFiles) : {},
     cardId: str(value.cardId) || null,
     lastChoices: isRecord(value.lastChoices) ? value.lastChoices : null,
+    tourPage: Math.min(TOUR.length - 1, Math.max(0, Math.floor(num(value.tourPage)))),
   };
 }
 
@@ -359,9 +390,36 @@ export function reduce(w, action) {
       return { ...w, step: "card", cardId: str(action.id) || null, notice: null };
     case "dismiss":
       return { ...w, notice: null };
+    case "tour":
+      return { ...w, step: "tour", tourPage: 0, notice: null, busy: null };
+    case "tourNext":
+      return w.step === "tour" ? { ...w, tourPage: Math.min(TOUR.length - 1, w.tourPage + 1) } : w;
+    case "tourBack":
+      return w.step === "tour" ? { ...w, tourPage: Math.max(0, w.tourPage - 1) } : w;
+    case "tourDone":
+      return w.step === "tour" ? { ...w, step: "welcome", tourPage: 0 } : w;
     default:
       return w;
   }
+}
+
+/**
+ * Whether opening the panel starts the tour: only for a person who has not
+ * seen or skipped it, and only on the welcome, so a check being set up or
+ * followed is never interrupted. A store that could not be read (an older
+ * Claude Code) counts as seen, so nobody is shown the tour on every open.
+ *
+ * A check going on (a guided one, or sessions the run pane lists) that the
+ * welcome would show is not covered by the tour either.
+ *
+ * @param {unknown} seen what `$.store` holds under TOUR_SEEN_KEY, or an Error when it could not be read
+ * @param {Wizard} w
+ * @param {{ kind: string, data?: any }} status the server's latest status
+ */
+export function startsTour(seen, w, status) {
+  if (seen instanceof Error) return false;
+  const going = guidedOf(status, null) !== null || (isRecord(status.data) && Array.isArray(status.data.sessions) && status.data.sessions.length > 0);
+  return seen !== true && w.step === "welcome" && !going;
 }
 
 /** Whether an address is on this computer: only localhost, 127.0.0.1 and ::1 are (as guided.ts's isLocalAddress). */
@@ -760,7 +818,39 @@ export function renderGuided(els, w, ctx, act) {
   else if (step === "results") rows.push(...resultsRows());
   else if (step === "card") rows.push(...cardRows());
   else if (step === "safety") rows.push(...safetyRows());
+  else if (step === "tour") rows.push(...tourRows());
   return column(rows);
+
+  function tourRows() {
+    const page = Math.min(TOUR.length - 1, Math.max(0, w.tourPage));
+    const last = page === TOUR.length - 1;
+    return [
+      dim(`${page + 1} of ${TOUR.length}`),
+      heading(TOUR[page].title),
+      text(TOUR[page].body),
+      row([
+        ...(page > 0 ? [button("guided-tour-back", PANEL_WORDS.back, () => act("tourBack"))] : []),
+        last
+          ? button("guided-tour-done", PANEL_WORDS.done, () => act("tourDone"), { variant: "primary" })
+          : button("guided-tour-next", PANEL_WORDS.next, () => act("tourNext"), { variant: "primary" }),
+        ...(last ? [] : [button("guided-tour-skip", PANEL_WORDS.skipTour, () => act("tourDone"))]),
+      ]),
+    ];
+  }
+
+  /** Before the check is under way: whether the saved sign-in lasts it, and the way to sign in again anyway. */
+  function signInHealthRows() {
+    const h = isRecord(w.plan) && isRecord(w.plan.signInHealth) ? w.plan.signInHealth : null;
+    if (!h || !str(h.sentence)) return [];
+    const again = isRecord(h.signInAgain) ? h.signInAgain : {};
+    const out = [text(str(h.sentence), { color: str(h.state) === "lasts" ? "green" : "yellow" })];
+    // Only a sign-in used as it is offers this: in every other case the check signs in first anyway.
+    if (str(h.state) === "lasts" && str(again.prompt)) {
+      out.push(row([button("guided-signin-again", str(again.label) || SIGN_IN_AGAIN_LABEL, () => act("send", { text: str(again.prompt) }))]));
+      if (str(again.command)) out.push(dim(SIGN_IN_AGAIN_COMMAND(str(again.command))));
+    }
+    return out;
+  }
 
   function welcomeRows() {
     const out = [
@@ -795,6 +885,7 @@ export function renderGuided(els, w, ctx, act) {
       );
     // A run started some other way: what the run pane shows.
     if (!g && ctx.runPane && ctx.status.kind !== "error") out.push(column([ctx.runPane], { marginTop: 1 }));
+    out.push(row([dim(PANEL_WORDS.newHere), button("guided-welcome-tour", PANEL_WORDS.takeTour, () => act("tour"), { plain: true })]));
     return out;
   }
 
@@ -904,7 +995,7 @@ export function renderGuided(els, w, ctx, act) {
     const plan = w.plan ?? {};
     const care = /** @type {Care} */ (CARES.includes(str(plan.choices?.care)) ? str(plan.choices.care) : w.draft.care);
     const reason = str(plan.confirm?.reason) || confirmReason(care, str(plan.choices?.address)) || "forms-on-remote-site";
-    const out = [heading(PANEL_WORDS.beforeStart), text(str(plan.confirm?.sentence))];
+    const out = [heading(PANEL_WORDS.beforeStart), text(str(plan.confirm?.sentence)), ...signInHealthRows()];
     out.push(text(CONFIRM_PREVIEW_HEADING, { bold: true }));
     for (const line of CARE_PREVIEW[care]) out.push(text(`  ${line}`));
     out.push(dim(CONFIRM_COMING[/** @type {keyof typeof CONFIRM_COMING} */ (reason)] ?? ""));
@@ -925,8 +1016,10 @@ export function renderGuided(els, w, ctx, act) {
 
   function runningRows() {
     const g = guidedOf(ctx.status, w.planId);
-    if (!g) return [dim(STARTING_SENTENCE), row([button("guided-running-back", PANEL_WORDS.back, () => act("go", { step: "welcome" }))])];
+    if (!g)
+      return [dim(STARTING_SENTENCE), ...signInHealthRows(), row([button("guided-running-back", PANEL_WORDS.back, () => act("go", { step: "welcome" }))])];
     const out = [heading(`${str(g.title)} · ${timeLine(g.time)}`), text(`Now: ${str(g.now)}`)];
+    if (str(g.phase) === "starting" || str(g.phase) === "signing-in") out.push(...signInHealthRows());
     const story = Array.isArray(g.story) ? g.story.map(str).filter(Boolean) : [];
     const before = story.slice(0, -1).slice(-2);
     if (before.length) out.push(dim(`before: ${before.join("; ")}`));

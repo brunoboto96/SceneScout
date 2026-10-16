@@ -4,12 +4,18 @@
  *
  * Registered by mcp-server.ts, in the order the tools have always been listed.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError, type ElicitRequestFormParams } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { formElicitationSupported, INTAKE_FORM_MESSAGE, INTAKE_TOOL, intakeFormSchema, intakeFromForm, intakeReplyText, type FormOutcome } from "../intake.js";
 import {
   buildGuidedPlan,
   CARES,
+  checkGuidedChoices,
+  savedSignInHealth,
+  type GuidedChoices,
+  type SignInHealth,
   CHECK_AREAS,
   confirmForm,
   confirmVerdict,
@@ -31,6 +37,7 @@ import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT,
 import { livePrompt, loginPrompt, LOGIN_PROMPT, LIVE_PROMPT, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../prompts.js";
 
 import { PACKAGE_ROOT, server, errorText, guidedPlans, guidedRuns } from "../server-context.js";
+import { projectFolderFor } from "./sessions.js";
 
 // The guided start as one form, where the client can show one (MCP
 // elicitation, form mode); otherwise, or when the person declines or closes it,
@@ -93,6 +100,18 @@ function confirmedText(plan: GuidedPlan, verdict: ConfirmVerdict): string {
   return `${head}\nTell the person: "${verdict.tellPerson}"`;
 }
 
+/**
+ * Before a check with a sign-in starts: whether the sign-in saved in the
+ * folder its attach will use lasts the check (design section 5 item 6).
+ * A folder the attach would refuse has no saved sign-in to judge.
+ */
+async function signInHealthFor(choices: GuidedChoices): Promise<SignInHealth | undefined> {
+  if (choices.signIn === "none") return undefined;
+  const folder = await projectFolderFor(choices.address, undefined);
+  if ("refused" in folder) return undefined;
+  return savedSignInHealth(choices, path.resolve(folder.dir), { now: Date.now(), projectChosen: folder.source === "default", exists: fs.existsSync });
+}
+
 const GUIDED_CALL_OUTPUT = z.object({ tool: z.enum(["scout_login", "scout_attach", "scout_tickets", "scout_session"]), args: z.record(z.unknown()) });
 
 /** A GuidedPlan, as scout_guided_plan's structuredContent. */
@@ -115,6 +134,13 @@ const GUIDED_PLAN_OUTPUT = {
   tellPerson: z.array(z.string()),
   calls: z.array(GUIDED_CALL_OUTPUT),
   budget: z.object({ minutes: z.number(), pages: z.number() }),
+  signInHealth: z
+    .object({
+      state: z.enum(["lasts", "may-run-out", "runs-out", "unknown", "none"]),
+      sentence: z.string(),
+      signInAgain: z.object({ label: z.string(), prompt: z.string(), command: z.string() }),
+    })
+    .optional(),
 };
 
 /** scout_guided_confirm's structuredContent. */
@@ -166,7 +192,8 @@ export function registerGuideTools(): void {
         const outcome = await askWithForm(INTAKE_FORM_MESSAGE, intakeFormSchema(url), extra, INTAKE_TOOL);
         const reply = intakeFromForm(outcome as FormOutcome);
         if (reply.kind !== "choices") return { content: [{ type: "text" as const, text: intakeReplyText(reply) }] };
-        const plan = guidedPlans.add(buildGuidedPlan(reply.choices));
+        const signInHealth = await signInHealthFor(reply.choices);
+        const plan = guidedPlans.add(buildGuidedPlan(reply.choices, undefined, signInHealth ? { signInHealth } : {}));
         guidedRuns.focus(plan.planId);
         // A care level that needs the person's confirmation asks for it now, in a second form, so the person answers both in one go.
         const confirmed = plan.confirm ? await confirmWithPerson(plan.planId, extra) : null;
@@ -235,7 +262,9 @@ export function registerGuideTools(): void {
           if (!kept) throw new Error("this server holds no guided plan with that id: build one with choices");
           plan = kept;
         } else {
-          const built = guidedPlan(choices);
+          const checked = checkGuidedChoices(choices);
+          const health = checked.ok ? await signInHealthFor(checked.choices) : undefined;
+          const built = guidedPlan(choices, undefined, () => health);
           if (!built.ok) throw new Error(built.error);
           plan = guidedPlans.add(built.plan);
           guidedRuns.focus(plan.planId);

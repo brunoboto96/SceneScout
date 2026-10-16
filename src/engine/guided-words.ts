@@ -315,3 +315,29 @@ export const PANE_WORDS = {
   sayThis: "Say this to Claude:",
   needsYou: "I need you:",
 } as const;
+
+// ---- Sign-in health: whether the saved sign-in lasts the check, said before it starts ----
+
+/** How a saved sign-in stands against a check: it lasts, part of it or all of it runs out first, nobody can tell, or there is none. */
+export type SignInHealthState = "lasts" | "may-run-out" | "runs-out" | "unknown" | "none";
+
+/**
+ * What the person is told about their saved sign-in before a check starts.
+ * Only a sign-in certain to last the check is used as it is; in every other
+ * case the check opens the sign-in window first, and the sentence says why.
+ * `where` is the site's host.
+ */
+export const SIGN_IN_HEALTH: Record<SignInHealthState, (where: string) => string> = {
+  lasts: (where) => `Your saved sign-in to ${where} lasts the whole check, so you do not need to sign in again.`,
+  "may-run-out": (where) => `Part of your saved sign-in to ${where} runs out during the check, so you sign in again first.`,
+  "runs-out": (where) => `Your saved sign-in to ${where} runs out before the check would end, so you sign in again first.`,
+  unknown: (where) => `Your saved sign-in to ${where} does not say when it runs out, so you sign in again first.`,
+  none: (where) => `You have not signed in to ${where} with SceneScout yet, so you sign in first.`,
+};
+
+/** The button that signs in again anyway, and the line that names the command for a terminal. */
+export const SIGN_IN_AGAIN = {
+  label: "Sign in again",
+  command: (command: string) => `To sign in again from a terminal instead: ${command}`,
+  prompt: (address: string, role: string) => `Sign me in to ${address} again for SceneScout: call scout_login {url: "${address}", role: "${role}"}.`,
+} as const;

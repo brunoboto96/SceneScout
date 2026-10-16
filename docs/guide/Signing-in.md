@@ -78,6 +78,8 @@ When the agent attaches with an expired login, the attach reports `⚠ AUTH FAIL
 
 Before a parallel run, `scout_lane_brief` checks that the planner's saved login will outlast the run: `runMinutes` (default 60) plus `expiryMarginMinutes` (default 10). It refuses only when it is sure: every credential in the profile has a date, none belongs to another host, and the last of them ends before the run does. It then names the `scenescout login` command to run again. Cookies that are not the sign-in (analytics, preferences) often expire first, so the first expiry is a warning rather than a reason to refuse, and undated credentials make the lifetime a warning that it is unknown.
 
+A guided check with a sign-in (the `scout_intake` form, `scout_guided_plan`, or the mod's panel) judges the login saved for its role, `user`, the same way before it starts, against the check's own time limit plus the same 10-minute margin, and tells the person in one sentence. Only a login certain to last the check is used as it is, with no sign-in window; when part of it ends inside the check, when it will end first, when it has no date to go by, or when none is saved yet, the check opens the sign-in window first and says why. Where it lasts, the panel offers **Sign in again** anyway, and names the `scenescout login <url> --role user` command that does the same from a terminal. The plan's `signInHealth` carries the verdict (`lasts`, `may-run-out`, `runs-out`, `unknown` or `none`).
+
 ## Re-attach
 
 A session attached by role that loses its sign-in first re-attaches once from the role's latest saved profile and carries on. So when a login expires mid-run, running `scenescout login … --role admin` again in another terminal is enough for the sessions of that role to pick it up.

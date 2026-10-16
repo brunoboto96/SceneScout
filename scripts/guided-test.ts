@@ -36,6 +36,7 @@ import {
   isPlanId,
   MAX_OBJECTIVE,
   newPlanId,
+  signInHealth,
   THOROUGHNESSES,
   type GuidedChoices,
   type GuidedPlan,
@@ -61,6 +62,8 @@ import {
   AREA_NOT_REACHED,
   PHASE_NOW,
   SAFETY_EXPLAINER,
+  SIGN_IN_AGAIN,
+  SIGN_IN_HEALTH,
   STUCK_SENTENCE,
   THOROUGHNESS_LABEL,
 } from "../src/engine/guided-words.ts";
@@ -812,6 +815,65 @@ test("card: the report's plain entry says exactly what the card says", () => {
     assert.ok(entry.includes(part), `the report carries "${part}"`);
   card.steps.forEach((s, i) => assert.ok(entry.includes(`${i + 1}. ${s}`), s));
   assert.ok(entry.includes(`](${card.picture!.file})`));
+});
+
+// ---- Sign-in health: whether the saved sign-in lasts the check ----
+
+test("sign-in health: each verdict on the saved profile is its state and sentence, and a missing one is none", () => {
+  const cmd = "scenescout login https://staging.example.com --role user";
+  const cases: Array<[Parameters<typeof signInHealth>[0], string]> = [
+    [{ kind: "ok" }, "lasts"],
+    [{ kind: "warn", message: "x" }, "may-run-out"],
+    [{ kind: "refuse", message: "x" }, "runs-out"],
+    [{ kind: "unknown", message: "x" }, "unknown"],
+    [null, "none"],
+    ["unreadable", "unknown"],
+  ];
+  for (const [verdict, state] of cases) {
+    const h = signInHealth(verdict, REMOTE, cmd);
+    assert.equal(h.state, state);
+    assert.equal(h.sentence, SIGN_IN_HEALTH[h.state]("staging.example.com"));
+    assert.deepEqual(h.signInAgain, { label: "Sign in again", prompt: SIGN_IN_AGAIN.prompt(REMOTE, "user"), command: cmd });
+  }
+  // "ok" with a credential that has no date is not certain to last.
+  assert.equal(signInHealth({ kind: "ok" }, REMOTE, cmd, false).state, "unknown");
+  for (const f of Object.values(SIGN_IN_HEALTH)) {
+    const said = f("staging.example.com");
+    assert.equal(said.match(/[.?!](\s|$)/g)?.length, 1, `one sentence: ${said}`);
+    assert.doesNotMatch(said, /scout_|cookie|token|JWT|expir/i, `plain: ${said}`);
+  }
+});
+
+test("sign-in health: only a saved sign-in certain to last the check skips the sign-in window, and the person is told either way", () => {
+  const cmd = "scenescout login https://staging.example.com --role user";
+  const choices = ok({ address: REMOTE, areas: ["forms"], signIn: "password" });
+  const tools = (p: GuidedPlan) => p.calls.map((c) => c.tool);
+  const lasts = buildGuidedPlan(choices, "gp-0123456789", { signInHealth: signInHealth({ kind: "ok" }, REMOTE, cmd) });
+  assert.deepEqual(tools(lasts), ["scout_attach"], "lasts: attach with the saved sign-in");
+  assert.equal(lasts.calls[0].args.role, "user", "and still as the role");
+  assert.ok(lasts.tellPerson.includes(SIGN_IN_HEALTH.lasts("staging.example.com")));
+  assert.ok(!lasts.tellPerson.some((t) => t.startsWith("A browser window will open")), "no window is promised");
+  assert.equal(lasts.signInHealth?.state, "lasts");
+  for (const verdict of [{ kind: "refuse", message: "x" }, { kind: "warn", message: "x" }, { kind: "unknown", message: "x" }, null] as const) {
+    const p = buildGuidedPlan(choices, "gp-0123456789", { signInHealth: signInHealth(verdict, REMOTE, cmd) });
+    assert.deepEqual(tools(p), ["scout_login", "scout_attach"], `${verdict?.kind ?? "none"}: the window opens first`);
+    const said = p.tellPerson.join("\n");
+    assert.ok(said.includes(p.signInHealth!.sentence) && /A browser window will open/.test(said));
+    assert.ok(p.tellPerson.indexOf(p.signInHealth!.sentence) < p.tellPerson.findIndex((t) => t.startsWith("A browser window")), "why, then what happens");
+  }
+  // No health known (a client with no folder to read): as before, the window opens.
+  assert.deepEqual(tools(buildGuidedPlan(choices, "gp-0123456789")), ["scout_login", "scout_attach"]);
+  assert.equal(buildGuidedPlan(choices, "gp-0123456789").signInHealth, undefined);
+  // A check with no sign-in carries no health, whatever is passed.
+  const none = buildGuidedPlan(ok({ address: REMOTE, areas: ["forms"] }), "gp-0123456789", { signInHealth: signInHealth({ kind: "ok" }, REMOTE, cmd) });
+  assert.equal(none.signInHealth, undefined);
+  assert.deepEqual(tools(none), ["scout_attach"]);
+  // guidedPlan asks for health only with choices it accepts.
+  let asked = 0;
+  assert.ok(!guidedPlan({ address: "ftp://x" }, undefined, () => (asked++, undefined)).ok);
+  assert.equal(asked, 0);
+  const built = guidedPlan({ address: REMOTE, areas: ["forms"], signIn: "password" }, undefined, () => signInHealth({ kind: "ok" }, REMOTE, cmd));
+  assert.ok(built.ok && built.plan.signInHealth?.state === "lasts");
 });
 
 // ---- Progress while a guided check runs (progress.ts) ----

@@ -68,6 +68,8 @@ import {
   NEEDS_YOU_SENTENCE,
   PHASE_NOW,
   SAFETY_EXPLAINER,
+  SIGN_IN_AGAIN,
+  SIGN_IN_HEALTH,
   THOROUGHNESS_LABEL,
 } from "../src/engine/guided-words.ts";
 import { CARD_IMPACTS, cardActions as engineCardActions, cardText, guidedProgress, nextActions } from "../src/engine/progress.ts";
@@ -2700,6 +2702,135 @@ test("a lane's turn ending leaves Claude's own turn running, so Stop goes into i
   assert.deepEqual(submitted, [ACTION_PROMPT.stop]);
   assert.equal(guided.endsMainTurn({ agentId: "lane-1" }), false);
   assert.equal(guided.endsMainTurn({ turnId: "main" }), true);
+});
+
+test("the first-run tour: three panels, Next, Back, Skip and Done, on every surface", () => {
+  assert.equal(guided.TOUR.length, 3);
+  for (const surface of SURFACES)
+    for (let page = 0; page < guided.TOUR.length; page++) {
+      const drawn = drawGuided(surface, wizard({ step: "tour", tourPage: page }), STATUS_IDLE);
+      assertDrawable(drawn.tree, surface, `tour ${page}`);
+      assert.ok(drawn.text.includes(guided.TOUR[page].title) && drawn.text.includes(guided.TOUR[page].body));
+      assert.ok(drawn.text.includes(`${page + 1} of 3`));
+      const last = page === guided.TOUR.length - 1;
+      if (last) assert.deepEqual(drawn.press("guided-tour-done"), { type: "tourDone", payload: undefined });
+      else {
+        assert.deepEqual(drawn.press("guided-tour-next"), { type: "tourNext", payload: undefined });
+        assert.deepEqual(
+          drawn.press("guided-tour-skip"),
+          { type: "tourDone", payload: undefined },
+          "skippable from any panel but the last, where Done ends it",
+        );
+      }
+      if (page > 0) assert.deepEqual(drawn.press("guided-tour-back"), { type: "tourBack", payload: undefined });
+      else assert.ok(!elementsOf(drawn.tree).some((e) => e.props.key === "guided-tour-back"));
+    }
+  // The welcome offers it again.
+  assert.deepEqual(drawGuided("desktop", wizard(), STATUS_IDLE).press("guided-welcome-tour"), { type: "tour", payload: undefined });
+  // The pages turn within bounds, and a tour that is not showing is not turned.
+  let w = guided.reduce(wizard({ step: "results" }), { type: "tour" });
+  assert.deepEqual([w.step, w.tourPage], ["tour", 0]);
+  w = guided.reduce(guided.reduce(guided.reduce(w, { type: "tourNext" }), { type: "tourNext" }), { type: "tourNext" });
+  assert.equal(w.tourPage, 2);
+  assert.equal(guided.reduce(w, { type: "tourBack" }).tourPage, 1);
+  assert.equal(guided.reduce(w, { type: "tourDone" }).step, "welcome");
+  assert.equal(guided.reduce(wizard({ step: "running" }), { type: "tourNext" }).tourPage, 0);
+  assert.equal(guided.reduce(wizard({ step: "running" }), { type: "tourDone" }).step, "running");
+  assert.equal(guided.wizardOf({ step: "tour", tourPage: 99 }).tourPage, 2);
+  assert.equal(guided.wizardOf({ step: "tour", tourPage: -3 }).tourPage, 0);
+  // The tour's words say what a care level does as the engine does: Look only holds back what would save something.
+  assert.ok(guided.TOUR[1].body.includes(CARE_LABEL["look-only"]) && !/nothing is sent|saves nothing/i.test(guided.TOUR[1].body));
+});
+
+test("the tour starts on a first open of the welcome only, and once done or skipped it is remembered", async () => {
+  // Who sees the tour, as a contrastive pair on each fact that decides it.
+  assert.equal(guided.startsTour(undefined, wizard(), STATUS_IDLE), true, "never seen, on the welcome");
+  assert.equal(guided.startsTour(true, wizard(), STATUS_IDLE), false, "seen");
+  assert.equal(
+    guided.startsTour(undefined, wizard({ step: "running", planId: GUIDED_PLAN_ID }), STATUS_IDLE),
+    false,
+    "a check being followed is not interrupted",
+  );
+  assert.equal(guided.startsTour(new Error("no store"), wizard(), STATUS_IDLE), false, "a store that cannot be read counts as seen");
+  assert.equal(guided.startsTour(undefined, wizard(), STATUS_RUNNING), false, "a check going on, which the welcome shows, is not covered");
+  // register.js against a stand-in `$` with a store.
+  type Hook = ($: unknown, e: any, next: (e: unknown) => Promise<unknown>) => Promise<unknown>;
+  const hooks = new Map<string, Hook[]>();
+  const on = (event: string, ...rest: unknown[]) => {
+    hooks.set(event, [...(hooks.get(event) ?? []), rest[rest.length - 1] as Hook]);
+    return { catch: () => undefined };
+  };
+  const state = new Map<string, { value: unknown; version: number }>();
+  const store = new Map<string, unknown>();
+  const $ = {
+    state: {
+      get: async (ref: { key: string }) => state.get(ref.key) ?? { value: undefined, version: 0 },
+      set: async (ref: { key: string }, value: unknown) => {
+        state.set(ref.key, { value, version: (state.get(ref.key)?.version ?? 0) + 1 });
+        return { isSet: true };
+      },
+    },
+    store: { get: async (k: string) => store.get(k), set: async (k: string, v: unknown) => void store.set(k, v) },
+    mcp: { call: async () => serverResult(paneData(paneInput())) },
+    clock: { now: async () => PANE_NOW },
+    session: { surfaces: async () => ["desktop"] },
+    ui: { open: async () => undefined, toast: () => undefined, log: () => undefined, resolve: () => elsFor("desktop") },
+  };
+  registerMod(on as never, {});
+  const open = async () => {
+    for (const hook of hooks.get("command.run") ?? []) await hook($, { command: "scenescout-guided" }, async (x) => x);
+  };
+  const step = () => (state.get("wizard")?.value as { step: string } | undefined)?.step;
+  await open();
+  assert.equal(step(), "tour", "a first open shows the tour");
+  const [render] = hooks.get("ui.render")!;
+  const press = async (key: string) => {
+    const tree = await render($, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x);
+    (elementsOf(tree).find((e) => e.props.key === key)!.props.onPress as () => void)();
+    await new Promise((r) => setTimeout(r, 20));
+  };
+  await press("guided-tour-skip");
+  assert.equal(step(), "welcome");
+  assert.equal(store.get(guided.TOUR_SEEN_KEY), true, "skipping is remembered");
+  await open();
+  assert.equal(step(), "welcome", "and the next open goes straight to the welcome");
+  // Asked for again from the welcome, it shows whatever the store says.
+  await press("guided-welcome-tour");
+  assert.equal(step(), "tour");
+});
+
+test("before a check with a sign-in starts, the panel says whether the saved sign-in lasts it; only one that does offers Sign in again", () => {
+  const planWith = (state: "lasts" | "runs-out") => {
+    const p = planFor({ address: "https://staging.example.com", areas: ["forms"], signIn: "password", care: "may-submit-forms" });
+    p.signInHealth = {
+      state,
+      sentence: SIGN_IN_HEALTH[state]("staging.example.com"),
+      signInAgain: {
+        label: SIGN_IN_AGAIN.label,
+        prompt: SIGN_IN_AGAIN.prompt("https://staging.example.com", "user"),
+        command: "scenescout login https://staging.example.com --role user",
+      },
+    };
+    return p;
+  };
+  for (const surface of SURFACES) {
+    const lasts = drawGuided(surface, wizard({ step: "running", planId: "gp-9999999999", plan: planWith("lasts") }), STATUS_IDLE);
+    assertDrawable(lasts.tree, surface, "health, lasts");
+    assert.ok(lasts.text.includes(SIGN_IN_HEALTH.lasts("staging.example.com")));
+    assert.ok(lasts.text.includes(SIGN_IN_AGAIN.command("scenescout login https://staging.example.com --role user")), lasts.text);
+    assert.deepEqual(lasts.press("guided-signin-again"), { type: "send", payload: { text: SIGN_IN_AGAIN.prompt("https://staging.example.com", "user") } });
+    const runsOut = drawGuided(surface, wizard({ step: "running", planId: "gp-9999999999", plan: planWith("runs-out") }), STATUS_IDLE);
+    assert.ok(runsOut.text.includes(SIGN_IN_HEALTH["runs-out"]("staging.example.com")));
+    assert.ok(!elementsOf(runsOut.tree).some((e) => e.props.key === "guided-signin-again"), "the check signs in first anyway");
+  }
+  // The confirmation's preview says it too, before anything starts.
+  const confirm = drawGuided("desktop", wizard({ step: "confirm", planId: GUIDED_PLAN_ID, plan: planWith("lasts") }), STATUS_IDLE);
+  assert.ok(confirm.text.includes(SIGN_IN_HEALTH.lasts("staging.example.com")));
+  // Once the check is under way, it is no longer shown.
+  const under = drawGuided("desktop", wizard({ step: "running", planId: GUIDED_PLAN_ID, plan: planWith("lasts") }), STATUS_RUNNING);
+  assert.ok(!under.text.includes(SIGN_IN_HEALTH.lasts("staging.example.com")));
+  assert.equal(guided.SIGN_IN_AGAIN_LABEL, SIGN_IN_AGAIN.label);
+  assert.equal(guided.SIGN_IN_AGAIN_COMMAND("x"), SIGN_IN_AGAIN.command("x"));
 });
 
 test("Claude's own attach that writes, and filing tickets, ask the person first; looking only never does", () => {

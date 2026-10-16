@@ -34,6 +34,8 @@ import {
   renderGuided,
   resultText,
   sendRoute,
+  startsTour,
+  TOUR_SEEN_KEY,
   wizardOf,
 } from "./guided.js";
 
@@ -150,6 +152,8 @@ export function register(on, options) {
 async function openPanel($, servers, which) {
   await poll($, servers);
   const surfaces = await $.session.surfaces();
+  // A first open of the guided panel starts on the tour; where nothing draws there is no tour to show.
+  if (which === "guided" && surfaces.length > 0) await maybeStartTour($);
   if (surfaces.length === 0) {
     const status = (await $.state.get(STATUS)).value ?? { kind: "loading" };
     if (which === "pane") return { text: fallbackText(status) };
@@ -158,6 +162,22 @@ async function openPanel($, servers, which) {
   isOpen = true;
   await $.ui.open({ id: PANE_ID, title: "SceneScout", closeOnEscape: true });
   return {};
+}
+
+/** What `$.store` says about the tour, or the Error when it could not be read (an older build without `$.store`). */
+async function tourSeen($) {
+  try {
+    return await $.store.get(TOUR_SEEN_KEY);
+  } catch (err) {
+    return err instanceof Error ? err : new Error(String(err));
+  }
+}
+
+async function maybeStartTour($) {
+  const seen = await tourSeen($);
+  if (seen instanceof Error) $.ui.log(`SceneScout: the tour's setting could not be read, so it is not shown: ${seen.message}`);
+  const status = (await $.state.get(STATUS)).value ?? { kind: "loading" };
+  await updateWizard($, (w) => (startsTour(seen, w, status) ? reduce(w, { type: "tour" }) : w));
 }
 
 /** Read the wizard, apply `fn`, and write it back only if nothing wrote it meanwhile; again on a miss. */
@@ -242,6 +262,16 @@ async function perform($, servers, type, payload) {
   switch (type) {
     case "retry":
       return poll($, servers);
+    case "tourDone": {
+      await updateWizard($, (w) => reduce(w, { type: "tourDone" }));
+      try {
+        await $.store.set(TOUR_SEEN_KEY, true);
+      } catch (err) {
+        // Not remembered: the tour shows again next time, which is the only harm.
+        $.ui.log(`SceneScout: the tour could not be marked as seen: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return;
+    }
     case "build": {
       const w = wizardOf((await $.state.get(WIZARD)).value);
       const checked = choicesFromDraft(w.draft);
