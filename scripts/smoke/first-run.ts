@@ -102,6 +102,7 @@ export async function run(ctx: SmokeContext): Promise<void> {
     await outNotWritable(base, root);
     await someoneElsesFolder(base, root);
     await observeByDefault(ctx, root);
+    await challengedStart(ctx, root);
   } finally {
     server.closeAllConnections();
     server.close();
@@ -112,6 +113,22 @@ export async function run(ctx: SmokeContext): Promise<void> {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+}
+
+/** A start page that is a bot challenge is not a look at the app: the first run exits 2, says why, and writes no report. */
+async function challengedStart(ctx: SmokeContext, root: string): Promise<void> {
+  const machine = cleanMachine(path.join(root, "challenged"));
+  const work = path.join(root, "challenged", "work");
+  fs.mkdirSync(work);
+  const out = await runFirst([`${ctx.baseUrl}/check-challenge`], work, machine.env);
+  check(
+    "a first run whose start page is a bot challenge exits 2, says bot protection blocked it, and writes no report",
+    out.status === 2 &&
+      /could not run: blocked by bot protection \(HTTP 403\)/.test(out.stderr) &&
+      !out.stdout.includes("Look at these first") &&
+      fs.readdirSync(work).length === 0,
+    `${out.status}\n${out.stdout.slice(-600)}\n${out.stderr.slice(-600)}\n${JSON.stringify(fs.readdirSync(work))}`,
+  );
 }
 
 async function firstLookAtTheDemo(base: string, root: string): Promise<void> {

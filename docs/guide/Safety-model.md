@@ -12,7 +12,7 @@ Only test apps you own or are authorised to test.
 
 | Mode | How to ask for it | What leaves the page |
 |---|---|---|
-| `observe` | `--observe`, `scout_attach {mode: "observe"}` | `GET` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token, and any `POST` you name as a read. Signing up, changing or resetting a password and creating users are refused like any other write |
+| `observe` | `--observe`, `scout_attach {mode: "observe"}` | `GET` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token ([what counts](#what-counts-as-signing-in-in-observe)), and any `POST` you name as a read. Signing up, changing or resetting a password and creating users are refused like any other write |
 | `read-only` (default) | `--read-only` | Ordinary form submissions (a plain `POST`) go through. `PUT`, `PATCH`, `DELETE`, destructive-looking `POST`s and clicks on destructive-labelled controls (delete, revoke, archive and the like) are refused |
 | `safe-write` | `--safe-write` | Anything that creates. Changes and deletes only on records this run created, never on data that was there before |
 | `destructive` | `--allow-destructive` | Everything |
@@ -83,6 +83,16 @@ Two settings, both off by default, make the best-effort part stricter.
 - `SCENESCOUT_REFUSE_DESTRUCTIVE_GETS=1` refuses, in `observe` and `read-only`, a page load whose address is a destructive command: `/items/3/delete`, `/orders/3/cancel`, `/unsubscribe?…`, `?action=delete`. `archive` and `trash` count only right after a record's id, so `/blog/archive` and `/mail/trash` still load. Frame documents are judged too, and so are the later hops of a redirect in Chromium (Firefox and WebKit follow a redirect without asking). A script's own `GET` is not judged.
 
 An operator policy file will be able to lock these on (`writeClassifier: "strict"`).
+
+## What counts as signing in, in `observe`
+
+`observe` lets a session sign in, sign out and refresh its token, and nothing else that writes. It tells those requests apart by their path, which is best effort:
+
+- `login`, `logout`, `signin`, `signout`, `sso`, `oauth`, `authenticate` and `authn` count as signing in in either of the last two segments of the path. An underscore reads as a hyphen (`/users/sign_in`), and `password` right after a sign-in word is the step that sends it (`/u/login/password`), not a change of password.
+- `refresh`, `token`, `session`, `callback` and `authorize` count only on an auth path, as the last segment: the word opens the path, or comes right after an API prefix (`/api`, `/v1`, `/v2.0`) or a segment of the auth namespace (`/auth`, `/oauth2`, `/openid-connect`, `/my-auth`, `/token`). A callback may also follow a provider's name there (`/auth/github/callback`), or come second to last after one (`/api/auth/callback/credentials`); `session` counts only as the last segment. `POST /api/auth/refresh`, `/oauth/token` and `/api/session` go out. `/api/reports/refresh`, `/api/devices/4/refresh`, `/api/users/7/token`, `/api/carts/9/session`, `/api/payments/callback`, `/api/integrations/slack/authorize` and `/api/token/mint` are writes, and are refused. So is an auth path that belongs to a record (`/api/devices/7/auth/refresh`, `/api/sessions/7/callback`) or links an integration (`/api/stripe-connect/callback`, `/api/connect/stripe/callback`); an id that opens the path or follows `realms` or `tenants` is an identity provider's tenant and does not count.
+- Signing up, changing or resetting a password, verifying an email and creating users are refused like any other write, and so is anything that looks destructive (to the strict classifier, when it is on) and any sign-in path whose method override names another method.
+
+When sign-in happens before the run (`scenescout login`, a saved role), you can replace the path rule with a list: set `SCENESCOUT_AUTH_POSTS` to the sign-in requests, written as [read POSTs](#post-endpoints-that-only-read) are (`POST /api/login`, `POST https://idp.example.com/oauth/token`). Then only those POSTs count as signing in, in every mode, and the attach says so. A listed endpoint is still refused when it looks destructive, to the [strict classifier](#stricter-judgement-of-destructive-writes) when that is on, or when it carries a method override: a `POST /api/login?_method=DELETE` is judged as a `DELETE`, and no `DELETE` is a sign-in. The list is the operator's: whatever it names goes out of `observe` as a sign-in, so name only sign-in requests. It is not read while a guided plan is open, where the path rule decides. A GraphQL endpoint carries every operation on one path, so neither rule tells its sign-in mutation apart: `observe` refuses it, and listing the endpoint lets every mutation sent to it that does not look destructive out as a sign-in. An operator policy file will be able to lock this choice (`authExemption: allowlist`). Sign-in requests no path rule can recognise, such as one whose path is a method call (`accounts:signInWithPassword`), need this list.
 
 ## POST endpoints that only read
 

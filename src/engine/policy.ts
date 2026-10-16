@@ -3,6 +3,7 @@
  * with elements whose accessible name / testid / id matches these patterns —
  * enforcement lives here, at the tool layer, never in the model's prompt.
  */
+import { isIdSegment } from "./fingerprint.js";
 import { scriptLiteral } from "./script-literal.js";
 import { strictIsDestructive, type WriteClassifier } from "./strict-writes.js";
 
@@ -688,11 +689,131 @@ export class WriteRule {
  * In observe mode, the only auth requests let through are the ones a session
  * needs in order to exist: logging in, logging out, refreshing a token. Whole
  * path SEGMENTS, never substrings — `/users/login-history/clear` and
- * `/api/tokens` (mint an API token) are not logins — and `session(s)` only as
- * the last segment, where a POST means "log in", not "act on session 123".
+ * `/api/tokens` (mint an API token) are not logins. These words count
+ * wherever they sit near the end; the ambiguous ones below only on an auth path.
  */
-const OBSERVE_AUTH_SEGMENT_RE =
-  /^(login|log-in|signin|sign-in|logout|log-out|signout|sign-out|refresh|token|oauth|oauth2|sso|callback|authorize|authenticate)$/i;
+const OBSERVE_AUTH_SEGMENT_RE = /^(login|log-in|signin|sign-in|logout|log-out|signout|sign-out|oauth|oauth2|sso|authenticate|authn)$/i;
+
+/** A sign-in step's own name, before which `password` is the step that sends it (`/u/login/password`), not a change of password. */
+const OBSERVE_SIGN_IN_SEGMENT_RE = /^(login|log-in|signin|sign-in)$/i;
+
+/** The environment variable naming the only POSTs that count as signing in (`authExemption: allowlist`). */
+export const AUTH_POSTS_ENV = "SCENESCOUT_AUTH_POSTS";
+
+/** The sign-in POSTs an operator listed, for one request: the entries, the app's URL, and the request's full URL. */
+export interface AuthPostList {
+  entries: readonly ReadPost[];
+  appUrl: string;
+  url: string;
+}
+
+/**
+ * The auth allowlist from SCENESCOUT_AUTH_POSTS, or null when it is unset or
+ * empty and the path rule applies. Entries are written as read POSTs are
+ * (`POST /api/login`, `POST https://idp.example.com/oauth/token`, `*` for one
+ * segment), separated by commas or new lines; what is not one is returned in
+ * `rejected`. Set, it is the whole exemption: sign-in is expected to happen
+ * out of band (`scenescout login`, a saved role), and only these POSTs go out
+ * as sign-in during the run.
+ */
+export function authPostsSetting(env: string | undefined): { entries: ReadPost[]; rejected: string[]; overflow: string[] } | null {
+  const list = readPostsSetting(undefined, env);
+  return list.length === 0 ? null : readPostEntries(list);
+}
+
+/**
+ * Words that name a sign-in step on an auth path (`/auth/refresh`,
+ * `/oauth/token`, `/api/session`) and an action on anything else
+ * (`/api/reports/refresh`, `/api/users/7/token`, `/api/carts/9/session`,
+ * `/api/payments/callback`). Sign-in only in context: see authWordInContext.
+ */
+const OBSERVE_AMBIGUOUS_AUTH_RE = /^(refresh|token|sessions?|callback|authorize)$/i;
+
+/** A segment as compared: a leading dot dropped (`/.auth/refresh`) and `_` read as `-` (`/users/sign_in`), so it reads as the word it holds. */
+const bareSegment = (seg: string): string => seg.replace(/^\.+/, "").replace(/_/g, "-");
+
+/** An API or version prefix: `/api`, `/rest`, `/v1`, `/v2.0`. */
+const API_PREFIX_SEGMENT_RE = /^(api|rest|v\d+(?:\.\d+)*)$/i;
+
+/** Words that name the auth namespace, as one word of a segment (`/auth`, `/oauth2`, `/openid-connect`, `/rt-auth`, `/token/refresh`). */
+const AUTH_NAMESPACE_WORD_RE =
+  /^(auth|oauth|oauth2|sso|idp|identity|openid|oidc|saml|saml2|jwt|token|tokens|session|sessions|login|signin|authentication|authn)$/i;
+
+/**
+ * Whether a segment names the auth namespace: one of its words (split on `-`,
+ * `_` and `.`) is an auth word, or the whole segment is `connect` (`/connect/token`).
+ * Inside a longer segment `connect` names an integration (`/stripe-connect`).
+ */
+function authNamespaceSegment(seg: string): boolean {
+  return /^connect$/i.test(seg) || seg.split(/[-_.]+/).some((w) => AUTH_NAMESPACE_WORD_RE.test(w));
+}
+
+/**
+ * Words of the namespace a provider's callback lands in (`/auth/github/callback`,
+ * `/.auth/login/aad/callback`). Not `connect`, `token(s)` or `session(s)`:
+ * `/api/connect/stripe/callback` links an integration and
+ * `/api/sessions/7/callback` acts on a record.
+ */
+const PROVIDER_NAMESPACE_WORD_RE = /^(auth|oauth|oauth2|omniauth|sso|idp|identity|openid|oidc|saml|saml2|login|signin|authentication)$/i;
+
+function providerNamespaceSegment(seg: string): boolean {
+  return seg.split(/[-_.]+/).some((w) => PROVIDER_NAMESPACE_WORD_RE.test(w));
+}
+
+/** Segments that scope an identity provider to a tenant or realm, whose id follows (`/realms/12345/protocol/openid-connect/token`). */
+const IDP_SCOPE_SEGMENT_RE = /^(realms|tenants|tfp)$/i;
+
+/**
+ * Whether segment `k` names an identity provider's tenant: a domain or an id
+ * that opens the path (`/tenant.example.com/...`, `/<tenant-guid>/...`), or
+ * what follows a scope segment (`/tfp/<tenant>/...`).
+ */
+function tenantSegment(segments: readonly string[], k: number): boolean {
+  if (k === 0) return segments[0].includes(".") || isIdSegment(segments[0], 1);
+  return IDP_SCOPE_SEGMENT_RE.test(bareSegment(segments[k - 1]));
+}
+
+/**
+ * Whether a record's id comes before `index`, after a segment that is not
+ * the auth namespace, an API prefix, an identity provider's scope or its
+ * tenant: `/api/devices/7/auth/refresh` acts on device 7. An id that opens the
+ * path is a tenant (`/<tenant-guid>/oauth2/v2.0/token`), one after a tenant is
+ * its sign-in policy (`/<tenant>/B2C_1_signin/oauth2/v2.0/token`), and one
+ * after an auth segment is an auth server's (`/oauth2/<server-id>/v1/token`).
+ */
+function recordBefore(segments: readonly string[], index: number): boolean {
+  for (let k = 1; k < index; k++) {
+    // +1: isIdSegment counts as split("/") does.
+    if (!isIdSegment(segments[k], k + 1)) continue;
+    const prev = bareSegment(segments[k - 1]);
+    if (authNamespaceSegment(prev) || API_PREFIX_SEGMENT_RE.test(prev) || IDP_SCOPE_SEGMENT_RE.test(prev) || tenantSegment(segments, k - 1)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the ambiguous auth word at `index` is a sign-in step: it opens the
+ * path, or comes right after an API prefix or a segment of the auth
+ * namespace (`/api/auth/refresh`, `/oauth/token`, `/oauth2/v1/token`). A
+ * callback may also follow a provider's name inside the auth namespace
+ * (`/auth/github/callback`). A word after any other resource
+ * (`/api/reports/refresh`, `/integrations/slack/authorize`) or after a
+ * record's id (`/api/devices/4/refresh`) is not.
+ *
+ * Second to last, only a callback inside the auth namespace counts
+ * (`/api/auth/callback/credentials`): `/api/token/mint` and
+ * `/api/refresh/reports` are actions on what follows.
+ */
+function authWordInContext(segments: readonly string[], index: number): boolean {
+  if (recordBefore(segments, index)) return false;
+  const word = bareSegment(segments[index]).toLowerCase();
+  const prev = index > 0 ? bareSegment(segments[index - 1]) : null;
+  if (index < segments.length - 1) return word === "callback" && prev !== null && providerNamespaceSegment(prev);
+  if (prev === null || API_PREFIX_SEGMENT_RE.test(prev) || authNamespaceSegment(prev)) return true;
+  // A provider has a name, not an id: `/auth/7/callback` acts on a record.
+  return word === "callback" && index >= 2 && !isIdSegment(segments[index - 1], index) && providerNamespaceSegment(bareSegment(segments[index - 2]));
+}
 
 /**
  * Is this request an auth flow that must work even though the mode would
@@ -705,19 +826,36 @@ const OBSERVE_AUTH_SEGMENT_RE =
  * In observe mode the exemption is much narrower than elsewhere. Signing up,
  * changing or resetting a password, verifying an email and creating a user all
  * change data on the target, and observe promises that nothing is created.
+ * Refreshing a report, rotating a device's token or creating a checkout
+ * session are writes too, so refresh, token, session, callback and authorize
+ * count only on an auth path (authWordInContext).
  */
-export function isAuthExempt(mode: WriteMode, method: string, pathname: string, destructiveWire: boolean): boolean {
+export function isAuthExempt(mode: WriteMode, method: string, pathname: string, destructiveWire: boolean, list?: AuthPostList | null): boolean {
   if (method !== "POST" || destructiveWire) return false;
+  // An operator's allowlist replaces the path rule, in every mode.
+  if (list) return matchReadPost(list.entries, list.appUrl, list.url) !== null;
   if (mode !== "observe") return AUTH_FLOW_RE.test(pathname);
   const segments = pathname.split("/").filter(Boolean);
   if (segments.length === 0) return false;
-  const last = segments[segments.length - 1];
-  if (/^sessions?$/i.test(last)) return true;
+  const last = bareSegment(segments[segments.length - 1]);
+  // The password step of signing in (`/u/login/password`), not changing or resetting one (`/account/password`).
+  if (
+    /^password$/i.test(last) &&
+    segments.length >= 2 &&
+    OBSERVE_SIGN_IN_SEGMENT_RE.test(bareSegment(segments[segments.length - 2])) &&
+    !recordBefore(segments, segments.length - 2)
+  )
+    return true;
+  if (/^(users?|accounts?|members?|password|signup|sign-up|register|verify|invite|invitations?)$/i.test(last)) return false;
   // The matching segment must be at, or next to, the end: /auth/token/refresh, /oauth/token, /login.
-  return (
-    segments.slice(-2).some((seg) => OBSERVE_AUTH_SEGMENT_RE.test(seg)) &&
-    !/^(users?|accounts?|members?|password|signup|sign-up|register|verify|invite|invitations?)$/i.test(last)
-  );
+  for (let i = Math.max(0, segments.length - 2); i < segments.length; i++) {
+    const seg = bareSegment(segments[i]);
+    if (OBSERVE_AUTH_SEGMENT_RE.test(seg)) return true;
+    // `session(s)` only as the last segment, where a POST means "sign in", not "act on session 123".
+    const sessionWord = /^sessions?$/i.test(seg);
+    if (OBSERVE_AMBIGUOUS_AUTH_RE.test(seg) && (!sessionWord || i === segments.length - 1) && authWordInContext(segments, i)) return true;
+  }
+  return false;
 }
 
 /**

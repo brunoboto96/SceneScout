@@ -66,6 +66,8 @@ export interface RouteHealth {
   design: DesignDefect[];
   /** Why the design audit could not measure this page, when it could not. */
   auditError?: string;
+  /** The bot protection that answered in the app's place (challenge.ts botChallenge), when one did. */
+  challenge?: string;
 }
 
 /** A route that answered with a file, a feed or data rather than a page (crawl.ts isNonPageResource). */
@@ -355,6 +357,10 @@ export function geometryRule(line: string): CheckRule | null {
  * no session, sending a signed-out visitor to sign-in is the route working,
  * so it goes to `needsSignIn` instead, a coverage gap rather than a defect.
  * The default is signed in, so a caller that does not say never hides one.
+ *
+ * A route a bot protection answered in the app's place (`challenge`) is not
+ * the app: nothing on it is checked, and it goes to `blocked`, a coverage gap.
+ * A start page answered that way never gets here (startPageRefusal).
  */
 export function checkFindings(
   routes: readonly RouteHealth[],
@@ -364,8 +370,9 @@ export function checkFindings(
   baselines: BaselineRun | null = null,
   ignorePaths: readonly IgnoredPath[] = [],
   signedIn = true,
-): { issues: CheckIssue[]; worthALook: CheckObservation[]; needsSignIn: string[] } {
+): { issues: CheckIssue[]; worthALook: CheckObservation[]; needsSignIn: string[]; blocked: string[] } {
   const needsSignIn: string[] = [];
+  const blocked: string[] = [];
   const byKey = new Map<string, CheckIssue>();
   const looks = new Map<string, CheckObservation>();
   /** A route (and, when named, one rule on it) that --ignore-path exempts. */
@@ -406,6 +413,11 @@ export function checkFindings(
     if (isNonPageResource(r)) continue;
     if (r.loadError !== undefined) {
       add("route-load-failed", `${route}: ${r.loadError}`, route);
+      continue;
+    }
+    // The protection's status, controls and design are the vendor's page, not the app's.
+    if (r.challenge !== undefined) {
+      if (!blocked.includes(route)) blocked.push(route);
       continue;
     }
     if (r.status !== null && r.status >= 500) add("route-server-error", `${route} → HTTP ${r.status}`, route);
@@ -450,6 +462,7 @@ export function checkFindings(
     issues: [...byKey.values(), ...visual].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.rule.localeCompare(b.rule)),
     worthALook: [...looks.values()].sort((a, b) => a.rule.localeCompare(b.rule)),
     needsSignIn,
+    blocked,
   };
 }
 
@@ -463,6 +476,33 @@ export function issuesFromRoutes(
   signedIn = true,
 ): CheckIssue[] {
   return checkFindings(routes, origin, ignore, flows, null, ignorePaths, signedIn).issues;
+}
+
+/**
+ * Why a check must not give a verdict on what its start page answered, or
+ * null. A bot challenge in the app's place, or any 4xx on the start page,
+ * means nothing in the app was tested, and the check must not pass on the
+ * challenge's own checkbox and link. A 403 on a route inside an app that
+ * loaded is that route's finding, not this. With --paths there is no start
+ * page: only every loaded path being a challenge counts.
+ */
+export function startPageRefusal(routes: readonly RouteHealth[], startIsFirst: boolean): string | null {
+  const loaded = routes.filter((r) => r.loadError === undefined);
+  const start = startIsFirst ? routes[0] : undefined;
+  const blocked = startIsFirst
+    ? start?.challenge !== undefined
+      ? start
+      : undefined
+    : loaded.length > 0 && loaded.every((r) => r.challenge !== undefined)
+      ? loaded[0]
+      : undefined;
+  if (blocked)
+    return `blocked by bot protection (HTTP ${blocked.status ?? "no status"}): ${blocked.challenge} answered in the app's place, so nothing in the app was tested. Let the check's browser through the protection (an allowlisted address, or the vendor's bypass for automated tests), or check a deployment without it.`;
+  if (start && start.loadError === undefined && start.status !== null && start.status >= 400 && start.status < 500) {
+    const signIn = start.status === 401 || start.status === 403 ? " If the page needs a signed-in session, pass one with --storage-state." : "";
+    return `the start page answered HTTP ${start.status}, so nothing in the app was tested. Check the URL.${signIn}`;
+  }
+  return null;
 }
 
 /**
@@ -911,6 +951,8 @@ export interface CheckResult {
    * results written before these were told apart from auth-redirect issues.
    */
   needsSignIn?: string[];
+  /** Routes a bot protection answered in the app's place: not measured, and not issues. Absent when there were none. */
+  blocked?: string[];
   /** Routes the engine knew of but did not reach within --max-routes (or, for a first run, its time budget). */
   unvisited: string[];
   /** Present only when the options gave a time budget: how long it was, and whether it ran out with routes still to visit. */
@@ -1298,6 +1340,19 @@ function needsSignInSection(result: Pick<CheckResult, "url" | "needsSignIn">): s
   ];
 }
 
+/** The routes a bot protection answered in the app's place, as their own section; nothing when there were none. */
+function blockedSection(blocked: readonly string[] | undefined): string[] {
+  if (!blocked?.length) return [];
+  return [
+    "",
+    `## Blocked by bot protection (${blocked.length})`,
+    "",
+    "A bot protection answered these routes in the app's place, so what is behind them was not measured. Let the check's browser through the protection (an allowlisted address, or the vendor's bypass for automated tests) to cover them.",
+    "",
+    `${blocked.slice(0, 20).map(code).join(", ")}${blocked.length > 20 ? " …" : ""}`,
+  ];
+}
+
 /** The routes known and not visited, as one line; nothing when every known route was visited. */
 export function unvisitedLine(unvisited: readonly string[], why: string): string[] {
   if (unvisited.length === 0) return [];
@@ -1329,13 +1384,15 @@ export function formatCheck(result: CheckResult): string {
       (unaudited > 0 ? ` · design not measured on ${unaudited} route(s)` : "") +
       (uncompared > 0 ? ` · ${uncompared} visual target(s) not compared: no baseline yet` : "") +
       (result.worthALook.length > 0 ? ` · ${result.worthALook.length} worth a look, never gated` : "") +
-      (result.needsSignIn?.length ? ` · ${result.needsSignIn.length} route(s) need sign-in, not covered` : ""),
+      (result.needsSignIn?.length ? ` · ${result.needsSignIn.length} route(s) need sign-in, not covered` : "") +
+      (result.blocked?.length ? ` · ${result.blocked.length} route(s) answered by bot protection, not measured` : ""),
   );
   // Right under the verdict: what a green check was allowed to do is part of what it means.
   lines.push("", `Settings — ${describeSettings(result)}`);
   lines.push(...issueSections(result.issues));
   lines.push(...worthALookSection(result.worthALook));
   lines.push(...needsSignInSection(result));
+  lines.push(...blockedSection(result.blocked));
   lines.push(...routesTable(result));
   lines.push(...resourcesTable(result.resources));
   lines.push(...unvisitedLine(result.unvisited, "over --max-routes"));
@@ -1452,6 +1509,8 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
     worthALook: result.worthALook,
     // Routes a check with no session was sent to sign-in from: a coverage gap. Absent when the check had a session.
     ...(result.needsSignIn ? { needsSignIn: result.needsSignIn } : {}),
+    // Routes a bot protection answered in the app's place: a coverage gap. Absent when there were none.
+    ...(result.blocked?.length ? { blocked: result.blocked } : {}),
     ...(result.testReport ? { testReport: result.testReport } : {}),
   };
 }
