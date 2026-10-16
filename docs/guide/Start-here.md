@@ -268,6 +268,8 @@ scenescout status           # the same information as text
 
 Ask the agent how the run is going and it calls `scout_status`. In a client that renders MCP Apps, that puts a small pane in the conversation which refreshes itself every few seconds: each session's objective and task, open findings by severity, coverage, and a button that opens the live view. It shows nothing the live view does not, and loads nothing from outside. A client without MCP Apps gets the same as text, starting with the live view's address.
 
+In a guided check the pane also follows the check in plain words: one sentence for what is happening now and the few before it, each area you chose (waiting, checking, done or skipped), pages checked and time used against the plan's limits, problems so far by how much they matter, and the newest problems as cards with **Not a bug**, **Explain more** and **Check again**. It also shows roughly how much clicking the check saved you, always with what that figure is based on; the rates behind it are a rough default, not a measurement, and the figure never goes into a report. Where the client cannot take a message from the pane, **Explain more** and **Check again** show the words to say to the agent instead.
+
 ### Who can reach it
 
 The page is served on `127.0.0.1` only, behind a token that changes on each start, and answers `GET` and nothing else. No frame it shows is written to disk. `SCENESCOUT_LIVE=off` in the server's environment keeps it closed.

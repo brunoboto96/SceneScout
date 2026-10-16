@@ -20,6 +20,7 @@
  */
 import { classify, formatDuration, type SessionState, type SessionStatus } from "./live.js";
 import type { Finding } from "./memory.js";
+import { progressText, type GuidedProgress } from "./progress.js";
 
 /** The pane's resource. `ui://` is the scheme the extension reserves for views. */
 export const STATUS_PANE_URI = "ui://scenescout/status.html";
@@ -79,6 +80,13 @@ export interface PaneData {
   /** Null before any session has attached to a project. */
   findings: PaneFindings | null;
   coverage: PaneCoverage | null;
+  /**
+   * A guided check's progress in plain words (progress.ts), present while a
+   * guided plan has been built in this server: the plan built or attached with
+   * last. Absent otherwise, so a run with no guided plan returns what it
+   * always did.
+   */
+  guided?: GuidedProgress;
 }
 
 export type PaneFinding = Pick<Finding, "severity" | "status" | "tier" | "foundAt">;
@@ -97,6 +105,8 @@ export interface PaneInput {
   /** When the run began, so "this run" can be told from history. */
   runStart?: string;
   coverage: PaneCoverage | null;
+  /** The guided check's progress, already built, when there is one. */
+  guided?: GuidedProgress;
 }
 
 /** The live view's address. One place builds it, so the pane, the text and the attach result agree. */
@@ -141,6 +151,7 @@ export function paneData(input: PaneInput): PaneData {
     findings: input.findings ? countFindings(input.findings, input.runStart) : null,
     coverage: input.coverage,
   };
+  if (input.guided) data.guided = input.guided;
   if (!data.liveUrl) {
     data.liveNote = input.liveOff
       ? "The live view is off: SCENESCOUT_LIVE=off is set in the server's environment."
@@ -188,5 +199,6 @@ export function paneText(data: PaneData): string {
     const routes = c.routesTotal > 0 ? `routes ${c.routesVisited}/${c.routesTotal} · ` : "";
     lines.push(`Coverage: ${routes}${c.states} states · ${c.elementsExercised}/${c.elementsTotal} elements exercised`);
   }
+  if (data.guided) lines.push(...progressText(data.guided));
   return lines.join("\n");
 }

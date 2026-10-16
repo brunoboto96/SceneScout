@@ -36,6 +36,7 @@ import {
   legacyObjectiveParam,
   logLine,
   evidenceFor,
+  guidedSessions,
 } from "../server-context.js";
 import { writeDocumentSync } from "../engine/owner-file.js";
 
@@ -720,6 +721,9 @@ export function registerExploreTools(): void {
             session: eng.sessionKey,
           });
           if (filed.judgeError) logLine(`dedup judge: ${filed.judgeError}; the rule decided`);
+          // In a guided check, the area this session is working on is where the finding was found (its card and scout_cards' filter).
+          const area = guidedSessions.get(session)?.area;
+          if (area) eng.memory.setArea(filed.finding.id, area);
           const picture = await findingPicture(eng, filed, ref);
           const result = text(filedText(filed, category) + picture.line, session);
           if (picture.image) result.content.push(picture.image);
