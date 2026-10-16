@@ -2104,7 +2104,7 @@ test("config: read from SCENESCOUT_CONFIG, else the launch directory, and the pr
   const launched = readLaunchPolicy({}, "/srv", fsx);
   assert.ok(launched.ok);
   assert.deepEqual(launched.loaded, { policy: { maxMode: "read-only" }, sources: [at("/srv")] });
-  const named = readLaunchPolicy({ SCENESCOUT_CONFIG: "/etc/scenescout.json" }, "/srv", fsx);
+  const named = readLaunchPolicy({ SCENESCOUT_CONFIG: etc }, "/srv", fsx);
   assert.ok(named.ok && named.loaded.policy.maxMode === "observe" && named.loaded.sources[0] === etc, "the named file, not the launch directory's");
   assert.deepEqual(readLaunchPolicy({}, "/elsewhere", fsx), { ok: true, loaded: NO_POLICY }, "no file: no config");
   for (const [value, why] of [
