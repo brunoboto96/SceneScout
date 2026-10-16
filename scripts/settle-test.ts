@@ -253,6 +253,18 @@ test("settlePage waits while a request is in flight, and stops when it lands", a
   assert.equal(page.ticks, 10, "it returns on the first look after the request lands, the quiet window having passed while it was out");
 });
 
+test("settlePage holds the quiet window from a request that starts late, on the clock the request was stamped by", async () => {
+  const page = standInPage();
+  // A short request starts and lands between two looks, inside the action's own quiet window, so the window runs
+  // on from the request rather than ending where the action's would.
+  let lastStart = 0;
+  page.onTick = () => {
+    if (page.ticks === 3) lastStart = page.clock;
+  };
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => lastStart, paceMs: () => 0, current: () => page }, page.now);
+  assert.equal(page.ticks, 3 + Math.ceil(QUIET_MS / SETTLE_TICK_MS), `${page.ticks} ticks`);
+});
+
 test("settlePage gives up at the cap on a page that never goes quiet", async () => {
   const page = standInPage();
   const started = page.clock;
