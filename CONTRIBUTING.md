@@ -68,7 +68,9 @@ network.
   `src/`, no build step. The two real-browser suites (`npm run smoke`,
   `npm run mcp-check`) rebuild first on their own; `npm run smoke:run -- auth`
   runs only the browser suites whose title matches, and
-  `npm run smoke:run -- --shard 2/3` runs one CI shard.
+  `npm run smoke:run -- --shard 2/3` runs one CI shard. A new browser suite
+  goes in the list in `scripts/smoke/suites.ts`; the shards are balanced from
+  the times in `scripts/smoke/timings.json`, so it needs no shard of its own.
 - **`npm run format`** before you push. CI checks it, so style never has to be
   discussed in review.
 - **Stay project-agnostic.** No real application, company, or product names in

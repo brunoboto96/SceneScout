@@ -109,8 +109,39 @@ jobs:
       - run: npm ci
       - name: Formatting
         run: npm run format:check
+      # The browser build is cached by OS, browser and Playwright version. Restore
+      # and save are separate steps, as in action.yml: the combined action saves
+      # only when the whole job passes, so a failing suite would never cache it.
+      # A hit skips the download; Linux still installs the system libraries,
+      # which live outside the cache.
+      - name: Browser cache key
+        id: browser
+        shell: bash
+        run: |
+          echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+          case "$RUNNER_OS" in
+            Linux) echo "path=$HOME/.cache/ms-playwright" ;;
+            macOS) echo "path=$HOME/Library/Caches/ms-playwright" ;;
+            Windows) echo "path=$USERPROFILE\\AppData\\Local\\ms-playwright" ;;
+          esac >> "$GITHUB_OUTPUT"
+      - name: Restore the browser cache
+        id: browser-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.path }}
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
       - name: Install browser
+        if: steps.browser-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
+      - name: Save the browser cache
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.path }}
+          key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+      - name: Install the browser's system libraries
+        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
+        run: npx playwright install-deps chromium
       - run: npm run build
       - name: Unit suites
         run: npm run test:unit
@@ -118,10 +149,12 @@ jobs:
         run: npm run mcp-check:run
 
   # `npm test`, split so no job runs it all: the browser suite is most of its
-  # time, so it runs in three shards (scripts/smoke/suites.ts lists them), and
-  # the second shard's job, the lightest, also runs the unit suites and
-  # mcp-check, which take about two minutes. The shard count here must be the
-  # runner's; a mismatch fails every shard rather than leaving suites unrun.
+  # time, so it runs in three shards, and the second shard's job also runs the
+  # type check, the unit suites, mcp-check and the sample report. The shards are
+  # balanced on measured time with that work counted on shard 2
+  # (scripts/smoke/timings.json; refresh it with scripts/smoke/timings.ts from
+  # this job's logs when the shards drift apart). The shard count here must be
+  # the runner's; a mismatch fails every shard rather than leaving suites unrun.
   suite:
     name: ${{ matrix.platform.os }} · node ${{ matrix.platform.node }} · shard ${{ matrix.shard }}/3
     runs-on: ${{ matrix.platform.os }}
@@ -147,8 +180,34 @@ jobs:
       - name: Formatting
         if: matrix.platform.os == 'ubuntu-latest' && matrix.platform.node == 24 && matrix.shard == 2
         run: npm run format:check
+      - name: Browser cache key
+        id: browser
+        shell: bash
+        run: |
+          echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+          case "$RUNNER_OS" in
+            Linux) echo "path=$HOME/.cache/ms-playwright" ;;
+            macOS) echo "path=$HOME/Library/Caches/ms-playwright" ;;
+            Windows) echo "path=$USERPROFILE\\AppData\\Local\\ms-playwright" ;;
+          esac >> "$GITHUB_OUTPUT"
+      - name: Restore the browser cache
+        id: browser-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.path }}
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
       - name: Install browser
+        if: steps.browser-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
+      - name: Save the browser cache
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.path }}
+          key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+      - name: Install the browser's system libraries
+        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
+        run: npx playwright install-deps chromium
       - run: npm run build
       # The test scripts are run by tsx, which strips types without checking them; this checks them against the built engine.
       - name: Type check of the test scripts
@@ -195,8 +254,34 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Browser cache key
+        id: browser
+        shell: bash
+        run: |
+          echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
+          case "$RUNNER_OS" in
+            Linux) echo "path=$HOME/.cache/ms-playwright" ;;
+            macOS) echo "path=$HOME/Library/Caches/ms-playwright" ;;
+            Windows) echo "path=$USERPROFILE\\AppData\\Local\\ms-playwright" ;;
+          esac >> "$GITHUB_OUTPUT"
+      - name: Restore the browser cache
+        id: browser-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.path }}
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ matrix.browser }}-${{ steps.browser.outputs.playwright }}
       - name: Install browser
+        if: steps.browser-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps ${{ matrix.browser }}
+      - name: Save the browser cache
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.path }}
+          key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+      - name: Install the browser's system libraries
+        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
+        run: npx playwright install-deps ${{ matrix.browser }}
       - run: npm run build
       - name: Browser suite, shard ${{ matrix.shard }} of 3
         env:

@@ -1,9 +1,9 @@
 /**
- * Every browser suite, in three shards, so CI can run them on three jobs at once (`--shard k/3`). Run unsharded, they
- * run in this order. Each shard is balanced from the suites' measured times on the CI runners (the minutes beside it),
- * and the suites that share state stay in one shard, in order: "cross-run memory, safe-write, uploads" reads what
- * "read-only exploration" recorded. The second shard is the lightest because its CI job also runs the unit suites and
- * mcp-check. The runner checks the split before it runs anything (shardProblems in shards.ts).
+ * Every browser suite, and its split into three shards so CI can run them on three jobs at once (`--shard k/3`). Run
+ * unsharded, they run in this order. The shards are balanced on the suites' measured times on the CI runners
+ * (timings.json; balanceShards in shards.ts), counting the time the second shard's job also spends on the unit suites
+ * and mcp-check, and the suites that share state stay in one shard, in order: "cross-run memory, safe-write, uploads"
+ * reads what "read-only exploration" recorded. The runner checks the split before it runs anything (shardProblems).
  */
 import * as readOnly from "./read-only.ts";
 import * as safeWrite from "./safe-write.ts";
@@ -38,6 +38,8 @@ import * as actionResults from "./action-results.ts";
 import * as maskedTyping from "./masked-typing.ts";
 import * as maskedPictures from "./masked-pictures.ts";
 import type { SmokeContext } from "./harness.ts";
+import { balanceShards, TOGETHER } from "./shards.ts";
+import { readTimings } from "./timings.ts";
 
 /** What the runner needs of a suite's module: its title, and the run it awaits. */
 export interface SmokeSuite {
@@ -45,30 +47,44 @@ export interface SmokeSuite {
   run(ctx: SmokeContext): Promise<void>;
 }
 
-export const shards: SmokeSuite[][] = [
-  // ~8 minutes
-  [readOnly, safeWrite, multiSession, authLoss, loginProfiles, scriptedLogin, passwordlessLogin, ssoLogin, reattach, refreshBroker, refreshCookie, liveView],
-  // ~6 minutes
-  [
-    injection,
-    postmessage,
-    contradiction,
-    geometry,
-    attribution,
-    frames,
-    snapshotContents,
-    refsAndDiffs,
-    targets,
-    fromRunPath,
-    settleAfterLeaving,
-    actionResults,
-    maskedTyping,
-    maskedPictures,
-    unload,
-    timeLimits,
-    firstRun,
-    ciRun,
-  ],
-  // ~8 minutes: the deterministic check alone takes about seven
-  [checkGate, baselines],
+/** The number of shards CI runs; `--shard k/n` with any other n is refused. */
+export const SHARD_COUNT = 3;
+
+export const suites: SmokeSuite[] = [
+  readOnly,
+  safeWrite,
+  multiSession,
+  authLoss,
+  loginProfiles,
+  scriptedLogin,
+  passwordlessLogin,
+  ssoLogin,
+  reattach,
+  refreshBroker,
+  refreshCookie,
+  liveView,
+  injection,
+  postmessage,
+  contradiction,
+  geometry,
+  attribution,
+  frames,
+  snapshotContents,
+  refsAndDiffs,
+  targets,
+  fromRunPath,
+  settleAfterLeaving,
+  actionResults,
+  maskedTyping,
+  maskedPictures,
+  unload,
+  timeLimits,
+  firstRun,
+  ciRun,
+  checkGate,
+  baselines,
 ];
+
+export const timings = readTimings();
+
+export const shards: SmokeSuite[][] = balanceShards(suites, SHARD_COUNT, timings.suites, { together: TOGETHER, extra: timings.jobExtra });
