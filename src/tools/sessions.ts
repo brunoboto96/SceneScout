@@ -128,7 +128,7 @@ async function readyBrowserFor(need: LaunchNeed, extra?: RequestExtra): Promise<
  * projectPath given, else the client's workspace folder, else a folder per
  * tested site. Only a client that offers roots is asked for them.
  */
-async function projectFolderFor(url: string, given: string | undefined) {
+export async function projectFolderFor(url: string, given: string | undefined) {
   let workspace: string | null = null;
   if (given === undefined && server.server.getClientCapabilities()?.roots) {
     try {
