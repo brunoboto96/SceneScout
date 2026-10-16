@@ -62,7 +62,7 @@ scenescout login http://localhost:3000/signin --role editor
 
 ### Or pass a Playwright storage state
 
-If your project already produces Playwright storage states (for example an auth setup project writing `playwright/.auth/*.json`), `scout_scan` finds them and the agent can attach with `storageStatePath` instead of `role`. Pass one or the other, never both. SceneScout reads the file; regenerating it when it expires is your Playwright setup's job.
+If your project already produces Playwright storage states (for example an auth setup project writing `playwright/.auth/*.json`), `scout_scan` finds them and the agent can attach with `storageStatePath` instead of `role`. Pass one or the other, never both. The file must be inside the project folder; one elsewhere is read only when the server's `SCENESCOUT_STORAGE_STATE_ALLOW` lists it (`--storage-state` for `check` and `ci` is read wherever it is). SceneScout reads the file; regenerating it when it expires is your Playwright setup's job.
 
 ## What a profile holds
 

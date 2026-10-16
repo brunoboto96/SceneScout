@@ -20,6 +20,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
+import { STORAGE_STATE_ALLOW_ENV, isListedPath } from "./allow-paths.js";
+import { secretFolderIn } from "./uploads.js";
 import { readFlagValue } from "./args.js";
 import { MEMORY_DIRNAME, writeSelfIgnore } from "./memory.js";
 import { SCRIPT_FLAGS } from "./scripted-login.js";
@@ -473,4 +475,74 @@ export function parseLoginArgs(args: readonly string[], cwd: string): { ok: true
       ...(!script && successUrl !== undefined ? { successUrl } : {}),
     },
   };
+}
+
+// ── a storage state named by path ────────────────────────────────────────────
+
+/**
+ * Whether a `storageStatePath` may be read. The agent names it, so it is
+ * confined, by real path, to the attached project (its .scenescout/auth/
+ * included) unless the operator lists the exact file in `allow`: the
+ * SCENESCOUT_STORAGE_STATE_ALLOW setting, or the file a command-line flag
+ * named. A file inside a secrets folder (`.ssh`, `.aws` and the like) is
+ * refused even inside the project. The path handed back is the real one that
+ * was judged, so the read goes where the check looked.
+ */
+export function fenceStorageState(projectDir: string, file: string, allow: readonly string[]): { ok: true; path: string } | { ok: false; error: string } {
+  // The real path of the nearest folder that exists, with the rest appended: a
+  // file not written yet in a project reached through a link is still inside it.
+  const real = (p: string): string => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      const parent = path.dirname(p);
+      return parent === p ? p : path.join(real(parent), path.basename(p));
+    }
+  };
+  const resolved = path.resolve(file);
+  const target = real(resolved);
+  if (isListedPath(allow, resolved, target)) return { ok: true, path: target };
+  // A project the agent named may be a whole home folder: its secrets folders are still not storage states.
+  const secretDir = secretFolderIn(resolved) ?? secretFolderIn(target);
+  if (secretDir) {
+    return {
+      ok: false,
+      error:
+        `storageStatePath ${file} is inside ${secretDir}/, which holds credentials, so it is not read. ` +
+        `Copy the storage state into the project, or the person running SceneScout can name this exact file in the server's ${STORAGE_STATE_ALLOW_ENV} setting; it cannot be set from a tool call.`,
+    };
+  }
+  const project = real(path.resolve(projectDir));
+  const rel = path.relative(project, target);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) {
+    return {
+      ok: false,
+      error:
+        `storageStatePath ${file} is outside the attached project (${project}), so it is not read. ` +
+        `Copy the storage state into the project (the project's .scenescout/ folder ignores itself in git), attach with a role saved by \`scenescout login\`, ` +
+        `or, to read this exact file, the person running SceneScout can name it in the server's ${STORAGE_STATE_ALLOW_ENV} setting (absolute paths, separated by "${path.delimiter}"); it cannot be set from a tool call.`,
+    };
+  }
+  return { ok: true, path: target };
+}
+
+/**
+ * Read a storage state from disk and split it. The errors name the file and
+ * never its contents: a JSON parser's message quotes the text around the
+ * fault, and the text may be a live session or a file that was never a
+ * storage state.
+ */
+export function readStorageState(file: string, read: (p: string) => string = (p) => fs.readFileSync(p, "utf8")): ReturnType<typeof splitProfile> {
+  let text: string;
+  try {
+    text = read(file);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "read error";
+    throw new Error(`the storage state at ${file} could not be read (${code})`);
+  }
+  try {
+    return splitProfile(JSON.parse(text));
+  } catch {
+    throw new Error(`${file} is not a valid Playwright storage state`);
+  }
 }
