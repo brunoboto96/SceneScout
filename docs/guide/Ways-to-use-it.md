@@ -97,7 +97,7 @@ In the Claude Desktop chat, and any other client that lists a server's prompts, 
 | **File problems as tickets** | Filing from the chat is coming in a later version. For now Claude shows the problems as cards and gives the [`scenescout export`](#filing-findings-as-issues) command a developer runs in a terminal: a dry run that lists what it would file, then `--yes` to file it. Choose GitHub or Jira in the prompt's `to` field, or leave it empty to see both. The token stays in that terminal's environment; never paste one into the chat |
 | **Is it safe to run on my live site?** | Claude replies with the panel's safety explainer, word for word, and calls nothing |
 
-An address with a user name, password or token in it is refused before anything starts, and the refusal does not repeat it. The desktop extension's manifest declares the same five prompts, so they are listed before the extension first starts.
+An address with a user name, password or token in it, or with a space, line break or hidden character (which a browser's address bar never holds, and which could carry words into what Claude is told), is refused before anything starts, and the refusal does not repeat it. The desktop extension's manifest declares the same five prompts, so they are listed before the extension first starts.
 
 ### Next to the code, or against a URL
 

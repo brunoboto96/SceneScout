@@ -293,6 +293,10 @@ export function checkAddress(raw: unknown): Checked<string> {
     return { ok: false, error: "the address must be written in full, starting with http:// or https://" };
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, error: "the address must start with http:// or https://" };
+  // The URL parser drops line breaks and tabs and encodes spaces, so without this an address could carry
+  // sentences into the text Claude reads (a prompt, a plan). An address a browser would open has none.
+  if (/[\s\p{Cc}\p{Cf}]/u.test(address))
+    return { ok: false, error: "the address has a space, line break or hidden character in it: copy it from the browser's address bar" };
   // Neither refusal quotes the address: it holds the credential.
   if (url.username || url.password) return { ok: false, error: `put no user name or password in the address: ${NO_CREDENTIALS}` };
   if (holdsCredential(address)) return { ok: false, error: `the address holds what looks like a password, code or token: ${NO_CREDENTIALS}` };
