@@ -21,6 +21,7 @@
  * for the shots and the report, read the run's artifact.
  * The pure rules are exported and table-tested by qa-test.
  */
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -652,19 +653,28 @@ export function qaCommentMarkdown({ json, result, runUrl, artifactUrl, url, sha,
 // shows whether it landed first. Otherwise it is sent once and the failure is reported.
 
 /**
- * Post a comment once. The retry after an ambiguous failure first looks for a comment with this exact
- * body made since the call began, so a reply that did land is not posted a second time.
+ * How far before the call the lookup for a comment that landed reaches: wide enough for a runner's clock
+ * minutes apart from GitHub's and for GitHub's whole-second times. A wide window cannot match another
+ * comment, because each post carries its own key.
+ */
+const LANDED_WINDOW_MS = 10 * 60_000;
+
+/**
+ * Post a comment once. The body carries a key of its own in an HTML comment, which GitHub does not show,
+ * so the retry after an ambiguous failure can look for this post and nothing else: a reply that did land
+ * is not posted a second time, and an identical reply an earlier command posted is never taken for it.
  */
 export function postComment(call, repo, number, body) {
-  const since = new Date(Date.now() - 1000).toISOString();
+  const since = new Date(Date.now() - LANDED_WINDOW_MS).toISOString();
+  const posted = `${body}${body.endsWith("\n") ? "" : "\n"}<!-- scenescout-qa-post ${randomUUID()} -->\n`;
   return call(
     "POST",
     `/repos/${repo}/issues/${number}/comments`,
-    { body },
+    { body: posted },
     {
       landed: async (get) => {
         const found = await get(`/repos/${repo}/issues/${number}/comments?since=${encodeURIComponent(since)}&per_page=100`);
-        return Array.isArray(found) && found.some((c) => c?.body === body);
+        return Array.isArray(found) && found.some((c) => c?.body === posted);
       },
     },
   );
@@ -688,6 +698,8 @@ export function githubClient({ token, apiUrl, fetchImpl = fetch, timeoutMs = 15_
     const mayRetry = method === "GET" || idempotent || typeof landed === "function";
     const retryable = async (attempt) => {
       if (!mayRetry || attempt >= retries) return false;
+      // The pause comes first: a write that landed may take a moment to show in a lookup.
+      await wait(1000 * 2 ** attempt + Math.floor(Math.random() * 250));
       if (method !== "GET" && !idempotent && (await landed((r) => call("GET", r)))) return "landed";
       return true;
     };
@@ -709,19 +721,13 @@ export function githubClient({ token, apiUrl, fetchImpl = fetch, timeoutMs = 15_
       } catch (err) {
         const again = await retryable(attempt);
         if (again === "landed") return null;
-        if (again) {
-          await wait(1000 * 2 ** attempt + Math.floor(Math.random() * 250));
-          continue;
-        }
+        if (again) continue;
         throw new Error(`${method} ${route} failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       if (res.status >= 500) {
         const again = await retryable(attempt);
         if (again === "landed") return null;
-        if (again) {
-          await wait(1000 * 2 ** attempt + Math.floor(Math.random() * 250));
-          continue;
-        }
+        if (again) continue;
       }
       if (!res.ok) {
         // GitHub's own words for a refusal (e.g. why a dispatch was refused), for the caller to classify; never part of the message.
@@ -993,7 +999,15 @@ export async function runShots({ env = process.env, inputs = inputsFromEnv(), fe
           `/repos/${repo}/git/refs`,
           { ref: `refs/${ref}`, sha: commit.sha },
           {
-            landed: async (get) => (await get(`/repos/${repo}/git/ref/${ref}`))?.object?.sha === commit.sha,
+            // No branch yet is the answer "it did not land", not a failure of the lookup.
+            landed: async (get) => {
+              try {
+                return (await get(`/repos/${repo}/git/ref/${ref}`))?.object?.sha === commit.sha;
+              } catch (err) {
+                if (isNotFound(err)) return false;
+                throw err;
+              }
+            },
           },
         );
       break;
