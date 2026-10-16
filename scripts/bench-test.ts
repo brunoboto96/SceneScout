@@ -1611,4 +1611,9 @@ test("server's dedup plan: the rule unless asked; the judge through a client tha
   assert.equal(dedupArgumentRefusal("judge", keyed, answers), null, "a CI run's own model is asked: no new recipient");
   assert.equal(dedupArgumentRefusal("rule", { SCENESCOUT_DEDUP: "judge" }, undefined), null, "switching the judge off is always allowed");
   assert.equal(dedupArgumentRefusal(undefined, keyed, undefined), null);
+  // The variable is read as dedupModeFromEnv reads it: padded "judge" is the team's judge, so the argument is not refused against it.
+  assert.equal(dedupArgumentRefusal("judge", { ...keyed, SCENESCOUT_DEDUP: " judge\n" }, undefined), null, "a padded judge is the variable's judge");
+  assert.notEqual(dedupArgumentRefusal("judge", { ...keyed, SCENESCOUT_DEDUP: "JUDGE" }, undefined), null, "a value the variable refuses allows nothing");
+  // An ordinary client that offers sampling is not one that answers the judge: only the declared capability counts.
+  assert.notEqual(dedupArgumentRefusal("judge", keyed, { sampling: { tools: {} } }), null, "sampling alone does not answer the judge");
 });

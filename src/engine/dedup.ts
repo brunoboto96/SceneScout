@@ -557,12 +557,12 @@ export type DedupPlan =
  * Switching the judge on sends finding text to a model provider, which is a
  * decision for whoever runs the server, not for the agent calling a tool: the
  * argument is honoured only when the server's environment already says
- * `judge` (DEDUP_ENV), or when the client answers the judge itself (a
+ * `judge` (DEDUP_ENV, read as dedupModeFromEnv reads it), or when the client answers the judge itself (a
  * `scenescout ci` run, whose model is already the recipient). Asking for
  * `rule`, or for nothing, is always allowed.
  */
 export function dedupArgumentRefusal(asked: DedupMode | undefined, env: Record<string, string | undefined>, caps: JudgeClientCaps | undefined): string | null {
-  if (asked !== "judge" || clientAnswersJudge(caps) || env[DEDUP_ENV] === "judge") return null;
+  if (asked !== "judge" || clientAnswersJudge(caps) || (env[DEDUP_ENV] ?? "").trim() === "judge") return null;
   return `dedup: "judge" was not applied: it sends finding text to a model provider, and a tool argument cannot switch that on. The person running the server turns it on with ${DEDUP_ENV}=judge in the server's environment. The rule decides duplicates.`;
 }
 
