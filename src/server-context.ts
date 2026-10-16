@@ -38,6 +38,7 @@ import { frameOnDisk, ProjectDirs, splitProjectFrame } from "./engine/replay.js"
 import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { SERVER_INSTRUCTIONS } from "./playbook.js";
 import { type EvidenceSettings } from "./engine/capture.js";
+import { GuidedPlans, type CheckArea } from "./engine/guided.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
 export const engines = new Map<string, BrowserEngine>();
@@ -619,6 +620,12 @@ export const evidenceFor = new WeakMap<BrowserEngine, EvidenceSettings & { shown
 // in the background, so a call need not last as long as the person takes and
 // a second call picks up the same window. One per project and role.
 export const pendingLogins = new LoginWindows<PendingLogin>(LOGIN_WINDOW_MAX_MS);
+
+// The guided plans built in this process (scout_intake, scout_guided_plan), and
+// which plan each session attached with and which area it is working on now
+// (scout_session {area}). Held here only: they end with the process (ADR 24).
+export const guidedPlans = new GuidedPlans();
+export const guidedSessions = new Map<string, { planId?: string; area?: CheckArea }>();
 
 // Assignments from the tool modules: an imported binding is read-only, so each
 // variable above that a tool sets has its setter here, one per variable.

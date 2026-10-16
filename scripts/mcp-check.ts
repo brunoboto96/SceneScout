@@ -25,6 +25,8 @@ const packageRoot = path.join(here, "..");
 const EXPECTED_TOOLS = [
   "scout_playbook",
   "scout_intake",
+  "scout_guided_plan",
+  "scout_guided_confirm",
   "scout_lane_report",
   "scout_scan",
   "scout_attach",
@@ -1041,36 +1043,67 @@ async function defaultFolderCheck(): Promise<void> {
   }
 }
 
+/** A form a client was shown, and a handler that answers it. */
+type FormParams = ElicitRequest["params"] & {
+  message: string;
+  requestedSchema?: { properties: Record<string, { default?: unknown; oneOf?: unknown[]; type?: string }> };
+};
+type FormAnswer = ElicitResult | ((form: FormParams) => ElicitResult);
+
+/** The environment a checking client starts the server with: no live view, nothing opened. */
+function quietEnv(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries({ ...process.env, SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none" }).filter((e): e is [string, string] => typeof e[1] === "string"),
+  );
+}
+
+/**
+ * Run `body` with a client declaring `elicitation` (or none) whose form handler
+ * answers with `answer` (a fixed result, or one built from the form). Uses the
+ * SDK's own client-side elicitation handler, so the request shape is the one a
+ * real client receives and validates. Returns what `body` returned and the
+ * forms the client was shown.
+ */
+async function withFormClient<T>(
+  elicitation: Record<string, object> | undefined,
+  answer: FormAnswer | undefined,
+  body: (client: Client) => Promise<T>,
+): Promise<{ out: T; forms: FormParams[] }> {
+  const client = new Client({ name: "ft-check-forms", version: "0.0.1" }, elicitation ? { capabilities: { elicitation } } : undefined);
+  const forms: FormParams[] = [];
+  if (elicitation)
+    client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      const form = request.params as FormParams;
+      forms.push(form);
+      if (answer === undefined) return { action: "cancel" };
+      return typeof answer === "function" ? answer(form) : answer;
+    });
+  await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env: quietEnv() }));
+  try {
+    return { out: await body(client), forms };
+  } finally {
+    await client.close();
+  }
+}
+
+/** The four digits a confirmation form shows for its code. */
+const codeIn = (form: FormParams): string => /type this code: (\d{4})\./.exec(form.message)?.[1] ?? "";
+
 /**
  * scout_intake over the wire, from clients that differ only in what they
  * declare and answer: no elicitation, URL mode only, form mode (and the empty
- * object that means it) answering accept, decline and cancel. Uses the SDK's
- * own client-side elicitation handler, so the request shape is the one a real
- * client receives and validates.
+ * object that means it) answering accept, decline and cancel, and a care level
+ * that writes, confirmed in the second form the server shows.
  */
 async function intakeCheck(): Promise<void> {
-  const env = Object.fromEntries(
-    Object.entries({ ...process.env, SCENESCOUT_LIVE: "off", SCENESCOUT_OPEN: "none" }).filter((e): e is [string, string] => typeof e[1] === "string"),
-  );
   /** Call scout_intake from a client declaring `elicitation` (or none) whose form handler answers `answer`; return the reply and the forms it was shown. */
   const intakeFrom = async (
     elicitation: Record<string, object> | undefined,
-    answer?: ElicitResult,
+    answer?: FormAnswer,
     args: Record<string, unknown> = {},
-  ): Promise<{ reply: string; forms: ElicitRequest["params"][] }> => {
-    const client = new Client({ name: "ft-check-intake", version: "0.0.1" }, elicitation ? { capabilities: { elicitation } } : undefined);
-    const forms: ElicitRequest["params"][] = [];
-    if (elicitation)
-      client.setRequestHandler(ElicitRequestSchema, async (request) => {
-        forms.push(request.params);
-        return answer ?? { action: "cancel" };
-      });
-    await client.connect(new StdioClientTransport({ command: "node", args: [serverPath], env }));
-    try {
-      return { reply: textOf(await client.callTool({ name: "scout_intake", arguments: args })), forms };
-    } finally {
-      await client.close();
-    }
+  ): Promise<{ reply: string; forms: FormParams[] }> => {
+    const got = await withFormClient(elicitation, answer, async (client) => textOf(await client.callTool({ name: "scout_intake", arguments: args })));
+    return { reply: got.out, forms: got.forms };
   };
   const asksInChat = (label: string, got: { reply: string; forms: unknown[] }, why: RegExp, formsShown: number): void => {
     if (!got.reply.endsWith(introQuestions()) || !why.test(got.reply))
@@ -1084,39 +1117,169 @@ async function intakeCheck(): Promise<void> {
   asksInChat("a client whose person declined", await intakeFrom({ form: {} }, { action: "decline" }), /declined the form/, 1);
   asksInChat("a client whose person closed the form", await intakeFrom({ form: {} }, { action: "cancel" }), /closed the form without answering/, 1);
 
+  const choices = { checkSignIn: false, checkForms: true, checkBrokenPages: true, checkPhone: false, thoroughness: "normal" };
   const accepted = await intakeFrom(
     { form: {} },
-    {
-      action: "accept",
-      content: { address: "http://localhost:3000", signIn: "sso", whatToCheck: "description", details: "the settings page", realData: "no" },
-    },
+    { action: "accept", content: { address: "http://localhost:3000", ...choices, signIn: "sso", care: "may-submit-forms" } },
     { url: "http://localhost:3000" },
   );
-  const form = accepted.forms[0] as
-    { mode?: string; message: string; requestedSchema: { properties: Record<string, { default?: string; oneOf?: unknown[] }> } } | undefined;
+  const form = accepted.forms[0];
   if (!form || form.mode !== "form" || form.message !== INTAKE_FORM_MESSAGE)
     fail(`scout_intake did not send one form-mode request with its message: ${JSON.stringify(accepted.forms)}`);
-  const fields = Object.keys(form.requestedSchema.properties);
-  if (fields.join() !== "address,signIn,whatToCheck,details,realData") fail(`the form's fields are ${fields.join()}`);
-  if (form.requestedSchema.properties.address.default !== "http://localhost:3000") fail("the address the agent passed did not start filled in");
+  const fields = Object.keys(form.requestedSchema!.properties);
+  if (fields.join() !== "address,checkSignIn,checkForms,checkBrokenPages,checkPhone,journey,tickets,signIn,care,thoroughness")
+    fail(`the form's fields are ${fields.join()}`);
+  if (form.requestedSchema!.properties.address.default !== "http://localhost:3000") fail("the address the agent passed did not start filled in");
+  if (form.requestedSchema!.properties.care.default !== "look-only") fail("the form does not start at Look only");
   if (/password|secret|token/i.test(fields.join())) fail(`the form has a field for a credential: ${fields.join()}`);
-  const order = ["scout_login {", "scout_attach {", '"mode":"read-only"', '"role":"user"', '"objective":"the settings page"'];
-  if (!order.every((part) => accepted.reply.includes(part)) || accepted.reply.indexOf("scout_login") > accepted.reply.indexOf("scout_attach"))
-    fail(`an accepted form did not return the sign-in and attach settings in order:\n${accepted.reply}`);
+  // May submit forms on this computer needs no confirmation: one form, and the plan's calls in order, each attach naming the plan.
+  const order = ["Guided plan gp-", "scout_login {", "scout_attach {", '"mode":"read-only"', '"role":"user"', '"planId":"gp-'];
+  if (
+    accepted.forms.length !== 1 ||
+    !order.every((part) => accepted.reply.includes(part)) ||
+    accepted.reply.indexOf("scout_login") > accepted.reply.indexOf("scout_attach")
+  )
+    fail(`an accepted form did not return the guided plan's sign-in and attach in order, with no second form:\n${accepted.reply}`);
   // The empty object is form mode by the specification, and an answer the schema refuses still ends in the chat.
-  const empty = await intakeFrom({}, { action: "accept", content: { address: "http://x.test", signIn: "none", whatToCheck: "everything", realData: "yes" } });
+  const empty = await intakeFrom({}, { action: "accept", content: { address: "http://x.test", ...choices, signIn: "none", care: "look-only" } });
   if (empty.forms.length !== 1 || !empty.reply.includes('"mode":"observe"')) fail(`an empty elicitation capability was not offered the form:\n${empty.reply}`);
   asksInChat(
     "a client answering with a value the form never offered",
-    await intakeFrom(
-      { form: {} },
-      { action: "accept", content: { address: "http://x.test", signIn: "fingerprint", whatToCheck: "everything", realData: "yes" } },
-    ),
+    await intakeFrom({ form: {} }, { action: "accept", content: { address: "http://x.test", ...choices, signIn: "fingerprint", care: "look-only" } }),
     /the form failed: .*(?:schema|must be equal)/,
     1,
   );
+  // May create test data: the second form is the confirmation, and only the person's yes with its code accepts the plan.
+  const createForm: ElicitResult = {
+    action: "accept",
+    content: { address: "https://staging.example.com", ...choices, signIn: "none", care: "may-create-test-data" },
+  };
+  const createAnswer = (f: FormParams): ElicitResult =>
+    f.message === INTAKE_FORM_MESSAGE ? createForm : { action: "accept", content: { answer: "yes", code: codeIn(f) } };
+  const created = await intakeFrom({ form: {} }, createAnswer);
+  if (created.forms.length !== 2 || !/is accepted/.test(created.reply) || !created.reply.includes('"mode":"safe-write"'))
+    fail(`May create test data was not confirmed in a second form and returned accepted:\n${created.reply}`);
+  const goBack = (f: FormParams): ElicitResult => (f.message === INTAKE_FORM_MESSAGE ? createForm : { action: "accept", content: { answer: "back" } });
+  const backed = await intakeFrom({ form: {} }, goBack);
+  if (backed.forms.length !== 2 || !/is NOT accepted \(went-back\)/.test(backed.reply) || /scout_attach \{/.test(backed.reply))
+    fail(`going back in the confirmation did not leave the plan unaccepted:\n${backed.reply}`);
   console.log(
-    "✓ scout_intake shows one form to a client declaring form elicitation, maps an accept to settings, and hands the questions to the chat on no form, URL only, decline, cancel or a refused answer",
+    "✓ scout_intake shows the guided form to a client declaring form elicitation, maps an accept to a plan, confirms a writing care level in a second form, and hands the questions to the chat on no form, URL only, decline, cancel or a refused answer",
+  );
+}
+
+/**
+ * scout_guided_plan and scout_guided_confirm end to end: annotations and output
+ * schemas as served, a plan built unaccepted, the attach gate refusing before
+ * any browser starts, and the person's form deciding: going back, a wrong
+ * code, a decline and a client with no forms each leave the plan unaccepted,
+ * and only a yes with the code the form showed accepts it.
+ */
+async function guidedCheck(): Promise<void> {
+  const REMOTE = "https://staging.example.com";
+  type Result = { content: Array<{ type: string; text?: string }>; structuredContent?: Record<string, unknown>; isError?: boolean };
+  let answer: FormAnswer = { action: "cancel" };
+  const got = await withFormClient(
+    { form: {} },
+    (f) => (typeof answer === "function" ? answer(f) : answer),
+    async (client) => {
+      const { tools } = await client.listTools();
+      const tool = (name: string) => tools.find((t) => t.name === name);
+      for (const [name, readOnly] of [
+        ["scout_intake", false],
+        ["scout_guided_plan", true],
+        ["scout_guided_confirm", false],
+      ] as const) {
+        const a = tool(name)?.annotations;
+        if (a?.readOnlyHint !== readOnly || a?.destructiveHint !== false)
+          fail(`${name} is not annotated readOnlyHint ${readOnly}, destructiveHint false: ${JSON.stringify(a)}`);
+      }
+      for (const name of ["scout_guided_plan", "scout_guided_confirm"]) if (!tool(name)?.outputSchema) fail(`${name} has no outputSchema`);
+
+      const call = async (name: string, args: Record<string, unknown>): Promise<Result> => (await client.callTool({ name, arguments: args })) as Result;
+      const built = await call("scout_guided_plan", { choices: { address: REMOTE, areas: ["forms"], care: "may-create-test-data" } });
+      const plan = built.structuredContent as {
+        planId: string;
+        mode: string;
+        confirm: { accepted: boolean } | null;
+        calls: Array<{ tool: string; args: Record<string, unknown> }>;
+      };
+      if (
+        built.isError ||
+        plan.mode !== "safe-write" ||
+        plan.confirm?.accepted !== false ||
+        plan.calls.find((c) => c.tool === "scout_attach")?.args.planId !== plan.planId
+      )
+        fail(`scout_guided_plan did not build an unaccepted safe-write plan whose attach names it: ${JSON.stringify(built)}`);
+      const refusal = async (args: Record<string, unknown>, why: RegExp, label: string): Promise<void> => {
+        const r = await call("scout_attach", args);
+        if (!r.isError || !why.test(textOf(r))) fail(`scout_attach ${label} was not refused (${why}): ${textOf(r)}`);
+      };
+      await refusal({ url: REMOTE, mode: "safe-write" }, /must name it/, "above observe without the plan's id");
+      await refusal({ url: REMOTE }, /must name it/, "with the default mode and no plan id");
+      await refusal({ url: REMOTE, mode: "read-only", planId: plan.planId }, /needs the person's confirmation/, "with an unaccepted plan");
+
+      const confirm = async (with_: FormAnswer): Promise<{ accepted: unknown; outcome: unknown }> => {
+        answer = with_;
+        const r = await call("scout_guided_confirm", { planId: plan.planId });
+        return r.structuredContent as { accepted: unknown; outcome: unknown };
+      };
+      const cases: Array<[FormAnswer, string]> = [
+        [{ action: "accept", content: { answer: "back" } }, "went-back"],
+        [{ action: "accept", content: { answer: "yes", code: "0000" } }, "wrong-code"],
+        [{ action: "accept", content: { answer: "yes" } }, "wrong-code"],
+        [{ action: "decline" }, "declined"],
+        [{ action: "cancel" }, "cancelled"],
+      ];
+      for (const [with_, outcome] of cases) {
+        // A wrong code is never "0000" by chance: the answer is made to differ from the code the form showed.
+        const a: FormAnswer =
+          typeof with_ === "object" && with_.content?.code === "0000"
+            ? (f) => ({ action: "accept", content: { answer: "yes", code: codeIn(f) === "0000" ? "1111" : "0000" } })
+            : with_;
+        const r = await confirm(a);
+        if (r.accepted !== false || r.outcome !== outcome)
+          fail(`a confirmation answered ${JSON.stringify(with_)} gave ${JSON.stringify(r)}, expected ${outcome} and not accepted`);
+      }
+      const still = (await call("scout_guided_plan", { planId: plan.planId })).structuredContent as { confirm: { accepted: boolean } };
+      if (still.confirm.accepted !== false) fail("a plan was accepted by an answer that was not the person's yes with the code");
+      const yes = await confirm((f) => ({ action: "accept", content: { answer: "yes", code: codeIn(f) } }));
+      if (yes.accepted !== true || yes.outcome !== "accepted") fail(`the person's yes with the code did not accept the plan: ${JSON.stringify(yes)}`);
+      const now = (await call("scout_guided_plan", { planId: plan.planId })).structuredContent as { confirm: { accepted: boolean } };
+      if (now.confirm.accepted !== true) fail("an accepted plan reads back unaccepted");
+      await refusal({ url: REMOTE, mode: "destructive", planId: plan.planId }, /"safe-write" at most/, "above the plan's mode");
+      await refusal({ url: "https://live.example.com", mode: "safe-write", planId: plan.planId }, /must be on that site/, "on another site");
+      await refusal({ url: REMOTE, mode: "read-only" }, /must name it/, "without the id once a plan is accepted");
+      // Observe needs no plan, but readPosts would let named POSTs out of it, and trustedEmbeds frames' writes out of safe-write.
+      await refusal({ url: REMOTE, mode: "observe", readPosts: ["POST /api/things"] }, /readPosts/, "in observe with readPosts while a plan is open");
+      await refusal(
+        { url: REMOTE, mode: "safe-write", planId: plan.planId, trustedEmbeds: ["https://pay.example.com"] },
+        /trustedEmbeds/,
+        "with trustedEmbeds",
+      );
+      // Nothing a caller passes accepts a plan: choices that arrive accepted are not a field.
+      const sneaky = await call("scout_guided_plan", { choices: { address: REMOTE, areas: ["forms"], care: "may-create-test-data", accepted: true } });
+      if (!sneaky.isError || !/do not take/.test(textOf(sneaky))) fail(`a choices field the plan does not take was not refused: ${textOf(sneaky)}`);
+    },
+  );
+  // Five refused answers, then the yes: six confirmation forms, each with a fresh code.
+  const codes = got.forms.map(codeIn);
+  if (got.forms.length !== 6 || codes.some((c) => !/^\d{4}$/.test(c))) fail(`the confirmation forms were ${got.forms.length}, codes ${codes.join(",")}`);
+
+  // A client that cannot show forms: the plan stays unaccepted, and the tool says so plainly.
+  const noForms = await withFormClient(undefined, undefined, async (client) => {
+    const built = (await client.callTool({
+      name: "scout_guided_plan",
+      arguments: { choices: { address: REMOTE, areas: ["forms"], care: "may-submit-forms" } },
+    })) as Result;
+    const planId = (built.structuredContent as { planId: string }).planId;
+    return (await client.callTool({ name: "scout_guided_confirm", arguments: { planId } })) as Result;
+  });
+  const unsupported = noForms.out.structuredContent as { accepted: unknown; outcome: unknown };
+  if (unsupported.accepted !== false || unsupported.outcome !== "unsupported" || !/cannot show the confirmation form/.test(textOf(noForms.out)))
+    fail(`a client with no forms did not leave the plan unaccepted with a plain sentence: ${JSON.stringify(noForms.out)}`);
+  console.log(
+    "✓ scout_guided_plan and scout_guided_confirm are annotated and schema'd, scout_attach above observe is refused without an accepted plan (and readPosts or trustedEmbeds while one is open), and only the person's yes with the code accepts one (going back, a wrong code, a decline, a close or no forms do not)",
   );
 }
 
@@ -1473,6 +1636,7 @@ async function main(): Promise<void> {
   await boardPicturesAcrossProjectsCheck();
   await openCheck();
   await intakeCheck();
+  await guidedCheck();
   await abandonedCallCheck();
   ticketDirsStartupCheck();
   console.log("\nMCP CHECK PASSED");

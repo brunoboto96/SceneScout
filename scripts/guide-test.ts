@@ -34,6 +34,7 @@ import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
 import { looksLikeUrl, SUBCOMMANDS } from "../src/commands.ts";
 import { FIRST_RUN_DEFAULTS, FIRST_RUN_OPTION_NAMES, parseFirstRunArgs } from "../src/first-run.ts";
 import {
+  AREA_FIELDS,
   FORM_CHOICES,
   flagsGiven,
   formElicitationSupported,
@@ -51,6 +52,8 @@ import {
   settingsFromAnswers,
   SKILL_FLAGS as INTAKE_FLAGS,
 } from "../src/intake.ts";
+import { CARES, CHECK_AREAS, THOROUGHNESSES, type GuidedChoices } from "../src/engine/guided.ts";
+import { AREA_LABEL, AREA_WHAT_HAPPENS, CARE_EXPLAIN, CARE_LABEL, DESTRUCTIVE_NOT_OFFERED } from "../src/engine/guided-words.ts";
 import { asLf } from "./checkout.ts";
 import { GUIDE_DIR, toWikiPage } from "./guide-wiki.mjs";
 
@@ -824,180 +827,186 @@ test("a form is offered only to a client that declared form-mode elicitation", (
   for (const [caps, want, why] of table) assert.equal(formElicitationSupported(caps as Parameters<typeof formElicitationSupported>[0]), want, why);
 });
 
-test("the form asks the four questions in the shapes form mode allows, and never for a credential", () => {
+test("the form asks the guided start in the shapes form mode allows, and never for a credential", () => {
   const schema = intakeFormSchema();
-  assert.deepEqual(Object.keys(schema.properties), ["address", "signIn", "whatToCheck", "details", "realData"]);
-  assert.deepEqual(schema.required, ["address", "signIn", "whatToCheck", "realData"]);
-  // A flat object of strings and single-choice lists; nothing nested, no arrays.
+  assert.deepEqual(Object.keys(schema.properties), [
+    "address",
+    "checkSignIn",
+    "checkForms",
+    "checkBrokenPages",
+    "checkPhone",
+    "journey",
+    "tickets",
+    "signIn",
+    "care",
+    "thoroughness",
+  ]);
+  assert.deepEqual(schema.required, ["address", "signIn", "care", "thoroughness"]);
+  // A flat object of strings, yes-or-no fields and single-choice lists; nothing nested, no arrays.
   const allowedKeys = new Set(["type", "title", "description", "minLength", "maxLength", "format", "default", "oneOf"]);
   for (const [name, field] of Object.entries(schema.properties)) {
-    assert.equal(field.type, "string", name);
+    assert.ok(field.type === "string" || field.type === "boolean", name);
     for (const key of Object.keys(field)) assert.ok(allowedKeys.has(key), `${name}.${key} is not in form mode's subset`);
     assert.ok(!("format" in field), `${name} has no format a client might render as a secret field`);
   }
-  // The only fields a person types into are the address and the description or tickets, and neither asks for a credential.
-  const typed = Object.entries(schema.properties).filter(([, f]) => !("oneOf" in f));
+  // The only fields a person types into are the address, the journey and the tickets, and none asks for a credential.
+  const typed = Object.entries(schema.properties).filter(([, f]) => f.type === "string" && !("oneOf" in f));
   assert.deepEqual(
     typed.map(([n]) => n),
-    ["address", "details"],
+    ["address", "journey", "tickets"],
   );
   for (const [name, f] of typed) assert.doesNotMatch(`${f.title} ${f.description}`, /password|passcode|code|token|secret|api key/i, name);
   assert.match(INTAKE_FORM_MESSAGE, /never asks for a password/);
-  // The questions are the plain ones, word for word, where a form can ask them as they are.
-  const ask = (id: string) => INTAKE_QUESTIONS.find((q) => q.id === id)!.ask;
-  assert.equal(schema.properties.address.description, ask("address"));
-  assert.equal(schema.properties.signIn.description, ask("sign-in"));
-  assert.equal(schema.properties.realData.description, ask("real-data"));
-  // Choices cover every answer settingsFromAnswers takes, and the least-harm answer is where the form starts.
+  assert.equal(schema.properties.address.description, INTAKE_QUESTIONS[0].ask);
+  assert.equal(schema.properties.signIn.description, INTAKE_QUESTIONS[1].ask);
+  // One yes-or-no field per area that needs no text, in the plan's order, with the plan's words.
+  assert.deepEqual(
+    AREA_FIELDS.map((f) => f.area),
+    CHECK_AREAS.filter((a) => a !== "journey" && a !== "tickets"),
+  );
+  for (const f of AREA_FIELDS) {
+    const field = schema.properties[f.field];
+    assert.deepEqual(
+      [field.type, field.title, field.description, field.default],
+      ["boolean", AREA_LABEL[f.area], AREA_WHAT_HAPPENS[f.area], f.default],
+      f.field,
+    );
+  }
+  // Every care level is offered by its plain name, the level that deletes is not, and each is explained where it is chosen.
+  assert.deepEqual(
+    FORM_CHOICES.care.map((c) => [c.const, c.title]),
+    CARES.map((c) => [c, CARE_LABEL[c]]),
+  );
+  for (const c of CARES) assert.ok(schema.properties.care.description.includes(CARE_EXPLAIN[c]), c);
+  assert.ok(schema.properties.care.description.includes(DESTRUCTIVE_NOT_OFFERED));
+  assert.doesNotMatch(JSON.stringify(schema), /destructive|safe-write|read-only|observe/);
+  // The least-harm choices are where the form starts; how the person signs in is chosen, not assumed.
+  assert.equal(schema.properties.care.default, "look-only");
+  assert.equal(schema.properties.thoroughness.default, "normal");
+  assert.ok(!("default" in schema.properties.signIn));
   assert.deepEqual(
     FORM_CHOICES.signIn.map((c) => c.const),
     ["none", ...Object.keys(SIGN_IN_HINT)],
   );
   assert.deepEqual(
-    FORM_CHOICES.realData.map((c) => c.const),
-    ["yes", "no", "unsure"],
+    FORM_CHOICES.thoroughness.map((c) => c.const),
+    [...THOROUGHNESSES],
   );
-  assert.equal(schema.properties.realData.default, "unsure");
-  assert.equal(schema.properties.whatToCheck.default, "everything");
   // A known address starts filled in; an unknown one has no default.
   assert.equal(intakeFormSchema(" http://localhost:3000 ").properties.address.default, "http://localhost:3000");
   assert.ok(!("default" in schema.properties.address));
   assert.ok(!("default" in intakeFormSchema("  ").properties.address));
 });
 
-test("each way a form round ends maps to settings or to questions for the chat", () => {
-  const full = { address: " https://app.example.com ", signIn: "none", whatToCheck: "everything", realData: "unsure" };
-  type Row = [name: string, outcome: Parameters<typeof intakeFromForm>[0], want: ReturnType<typeof intakeFromForm>];
+test("each way a form round ends maps to the person's choices, a sentence to fix, or the questions for the chat", () => {
+  const base = {
+    address: " https://app.example.com ",
+    checkSignIn: true,
+    checkForms: true,
+    checkBrokenPages: true,
+    checkPhone: false,
+    signIn: "none",
+    care: "look-only",
+    thoroughness: "normal",
+  };
   const askAll = (why: string) => ({ kind: "ask" as const, questions: [...INTAKE_QUESTIONS], known: [], why });
-  const settings = (a: Parameters<typeof settingsFromAnswers>[0]) => ({ kind: "settings" as const, settings: settingsFromAnswers(a) });
-  const q = (id: string) => INTAKE_QUESTIONS.filter((x) => x.id === id);
+  const chose = (over: Partial<GuidedChoices>) => ({
+    kind: "choices" as const,
+    choices: {
+      address: "https://app.example.com",
+      areas: ["sign-in", "forms", "broken-pages"],
+      signIn: "none",
+      care: "look-only",
+      thoroughness: "normal",
+      ...over,
+    } as GuidedChoices,
+  });
+  type Row = [name: string, outcome: Parameters<typeof intakeFromForm>[0], want: ReturnType<typeof intakeFromForm>];
   const table: Row[] = [
     ["no form in this client", { kind: "unsupported" }, askAll("this client cannot show a form")],
     ["declined", { kind: "declined" }, askAll("the person declined the form")],
     ["cancelled", { kind: "cancelled" }, askAll("the person closed the form without answering")],
     ["failed", { kind: "failed", error: "timed out" }, askAll("the form failed: timed out")],
+    ["the defaults", { kind: "accepted", content: base }, chose({})],
     [
-      "everything, not sure about data",
-      { kind: "accepted", content: full },
-      settings({ address: "https://app.example.com", signIn: "none", whatToCheck: "everything", realData: "unsure" }),
-    ],
-    [
-      "single sign-on, no real data, a description",
-      { kind: "accepted", content: { ...full, signIn: "sso", realData: "no", whatToCheck: "description", details: " the checkout flow " } },
-      settings({ address: "https://app.example.com", signIn: "sso", whatToCheck: { description: "the checkout flow" }, realData: "no" }),
-    ],
-    [
-      "tickets pasted with a rule between them",
+      "a phone check, a journey and tickets, signed in, careful about forms, thorough",
       {
         kind: "accepted",
-        content: { ...full, signIn: "one-time-code", realData: "yes", whatToCheck: "tickets", details: "T1 Export\n---\nT2 Filters\n  -----  \n" },
+        content: {
+          ...base,
+          checkSignIn: false,
+          checkBrokenPages: false,
+          checkPhone: true,
+          journey: "  Buy the cheapest item  ",
+          tickets: "T1 Export\n---\nT2 Filters\n  -----  \n",
+          signIn: "sso",
+          care: "may-submit-forms",
+          thoroughness: "thorough",
+        },
       },
-      settings({ address: "https://app.example.com", signIn: "one-time-code", whatToCheck: { tickets: ["T1 Export", "T2 Filters"] }, realData: "yes" }),
+      chose({
+        areas: ["forms", "phone", "journey", "tickets"],
+        journey: "Buy the cheapest item",
+        tickets: ["T1 Export", "T2 Filters"],
+        signIn: "sso",
+        care: "may-submit-forms",
+        thoroughness: "thorough",
+      }),
     ],
+    ["blank journey and tickets choose nothing", { kind: "accepted", content: { ...base, journey: "  ", tickets: " --- " } }, chose({})],
     [
-      "tickets chosen with the box empty: ask for them in chat, keep the rest",
-      { kind: "accepted", content: { ...full, signIn: "password", whatToCheck: "tickets", details: "  " } },
-      {
-        kind: "ask",
-        questions: q("what-to-check"),
-        known: ["Address: https://app.example.com", "Sign-in: an email and password", "What to check: tickets, not given yet", "Real data: not sure"],
-        why: "the form came back without every answer",
-      },
+      "nothing ticked and nothing written",
+      { kind: "accepted", content: { ...base, checkSignIn: false, checkForms: false, checkBrokenPages: false } },
+      { kind: "fix", error: "choose at least one thing to check" },
     ],
+    ["no sign-in answer", { kind: "accepted", content: { ...base, signIn: undefined } }, { kind: "fix", error: "choose how you sign in, or No sign-in" }],
     [
-      "a description chosen with nothing described",
-      { kind: "accepted", content: { ...full, whatToCheck: "description" } },
-      {
-        kind: "ask",
-        questions: q("what-to-check"),
-        known: ["Address: https://app.example.com", "Sign-in: no sign-in", "What to check: description, not given yet", "Real data: not sure"],
-        why: "the form came back without every answer",
-      },
-    ],
-    [
-      "everything left chosen with tickets pasted: ask, never drop them",
-      { kind: "accepted", content: { ...full, details: "T1 Export" } },
-      {
-        kind: "ask",
-        questions: q("what-to-check"),
-        known: [
-          "Address: https://app.example.com",
-          "Sign-in: no sign-in",
-          "What to check: everything was chosen, but there is text in the box too",
-          "Real data: not sure",
-        ],
-        why: "the form came back without every answer",
-      },
-    ],
-    [
-      "everything with the box left blank",
-      { kind: "accepted", content: { ...full, details: "   " } },
-      settings({ address: "https://app.example.com", signIn: "none", whatToCheck: "everything", realData: "unsure" }),
-    ],
-    [
-      "a blank address and a value the form never offered",
-      { kind: "accepted", content: { ...full, address: "   ", realData: "maybe" } },
-      {
-        kind: "ask",
-        questions: [...q("address"), ...q("real-data")],
-        known: ["Sign-in: no sign-in", "What to check: everything"],
-        why: "the form came back without every answer",
-      },
-    ],
-    [
-      "an accept with no content",
-      { kind: "accepted", content: {} },
-      { kind: "ask", questions: [...INTAKE_QUESTIONS], known: [], why: "the form came back without every answer" },
+      "a sign-in the form never offered",
+      { kind: "accepted", content: { ...base, signIn: "fingerprint" } },
+      { kind: "fix", error: "choose how you sign in, or No sign-in" },
     ],
   ];
   for (const [name, outcome, want] of table) assert.deepEqual(intakeFromForm(outcome), want, name);
-  // Real data never reaches a laxer mode than read-only through the form either.
-  for (const realData of ["yes", "no", "unsure"]) {
-    const r = intakeFromForm({ kind: "accepted", content: { ...full, realData } });
-    assert.equal(r.kind === "settings" && r.settings.attach.mode, realData === "no" ? "read-only" : "observe", realData);
+  // A yes-or-no field ticks its area only when it is exactly true.
+  const truthy = intakeFromForm({ kind: "accepted", content: { ...base, checkSignIn: "true", checkForms: 1 } });
+  assert.deepEqual(truthy.kind === "choices" && truthy.choices.areas, ["broken-pages"]);
+  // What the form cannot offer is refused by checkGuidedChoices's sentence, never replaced by a default.
+  const refusedWith = (content: Record<string, unknown>) => {
+    const r = intakeFromForm({ kind: "accepted", content: { ...base, ...content } });
+    assert.equal(r.kind, "fix", JSON.stringify(content));
+    return r.kind === "fix" ? r.error : "";
+  };
+  assert.match(refusedWith({ care: "destructive" }), /not offered here/);
+  assert.match(refusedWith({ care: "careful" }), /care must be one of/);
+  assert.match(refusedWith({ thoroughness: "forever" }), /thoroughness must be one of/);
+  assert.match(refusedWith({ address: "   " }), /give the address/);
+  // A credential written into the form is refused without being repeated.
+  for (const content of [
+    { journey: "Sign in with password hunter2!" },
+    { address: "https://bob:hunter2@app.example.com" },
+    { tickets: "Use the PIN 4821 at checkout" },
+  ]) {
+    const error = refusedWith(content);
+    assert.match(error, /password, code or token|user name or password/);
+    assert.doesNotMatch(error, /hunter2|4821/);
   }
   assert.deepEqual(splitTickets("one ticket, no rule"), ["one ticket, no rule"]);
   assert.deepEqual(splitTickets("a -- b --- c"), ["a -- b --- c"], "dashes inside a line are not a rule");
 });
 
-test("scout_intake's text: the calls in order, or the questions word for word", () => {
-  const signedIn = intakeReplyText(
-    intakeFromForm({
-      kind: "accepted",
-      content: { address: "http://localhost:3000", signIn: "sso", whatToCheck: "tickets", details: "T1\n---\nT2", realData: "no" },
-    }),
-  );
-  const order = [
-    'Tell the person: "A browser window will open: ',
-    'scout_login {"url":"http://localhost:3000","role":"user"}',
-    "scout_attach {",
-    "scout_tickets {",
-    "Keep to this area: T1; T2",
-  ];
-  let at = -1;
-  for (const part of order) {
-    const i = signedIn.indexOf(part);
-    assert.ok(i > at, `${part} comes next in:\n${signedIn}`);
-    at = i;
-  }
-  assert.match(signedIn, /"mode":"read-only","role":"user"/);
-  assert.match(signedIn, /do not ask the questions again/);
-  const plain = intakeReplyText(
-    intakeFromForm({ kind: "accepted", content: { address: "http://x.test", signIn: "none", whatToCheck: "everything", realData: "yes" } }),
-  );
-  assert.doesNotMatch(plain, /scout_login|scout_tickets|Keep to/);
-  assert.match(plain, /scout_attach \{"url":"http:\/\/x\.test","mode":"observe","objective":"Explore the whole site"\}/);
+test("scout_intake's text when no plan is built: what to fix, or the questions word for word", () => {
+  const fix = intakeReplyText({ kind: "fix", error: "choose at least one thing to check" });
+  assert.match(fix, /cannot be used: choose at least one thing to check\./);
+  assert.match(fix, new RegExp(`call ${INTAKE_TOOL} again`));
+  assert.match(fix, /Nothing was started/);
   // Every fallback ends with the four questions exactly as the skill and the explore prompt list them.
   for (const kind of ["unsupported", "declined", "cancelled"] as const) {
-    const t = intakeReplyText(intakeFromForm({ kind }));
+    const reply = intakeFromForm({ kind });
+    assert.equal(reply.kind, "ask");
+    const t = intakeReplyText(reply as Exclude<typeof reply, { kind: "choices" }>);
     assert.ok(t.endsWith(introQuestions()), kind);
     assert.match(t, /in chat, in one message/);
   }
-  const partial = intakeReplyText(
-    intakeFromForm({ kind: "accepted", content: { address: "http://x.test", signIn: "none", whatToCheck: "tickets", realData: "yes" } }),
-  );
-  assert.ok(partial.endsWith(`1. ${INTAKE_QUESTIONS[2].ask}`), "only the missing question is asked");
-  assert.match(partial, /Already answered in the form:\n- Address: http:\/\/x\.test/);
 });
 
 test("the skill calls scout_intake first and keeps asking in chat as the fallback", () => {

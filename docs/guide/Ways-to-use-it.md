@@ -65,9 +65,23 @@ Invoke the skill with no flags (`/scenescout`, or the `explore` prompt with no a
 | Real data: yes, or not sure | `observe`: nothing but `GET` requests leave the page, so nothing is created or changed |
 | Real data: no | `read-only`: ordinary forms are submitted, deletes and other destructive requests are blocked |
 
-Where your client can show a form (MCP elicitation in form mode, as Claude Code and VS Code offer), the agent calls `scout_intake` and the four questions appear as one form: pick how you sign in, what to check and whether the data is real, and the agent goes straight to the settings your answers choose. The form never asks for a password or a code; signing in happens later, in the browser window `scout_login` opens. To upload a file of tickets, pick tickets and leave the box empty, and the agent asks for the file in chat. Where the client has no forms, or you decline or close the form, the agent asks the same questions in chat.
+Where your client can show a form (MCP elicitation in form mode, as Claude Code and VS Code offer), the agent calls `scout_intake` and you get the guided start as one form instead:
 
-You are never asked to choose a write mode. `safe-write` and `destructive` are used only when you ask for them. Any flag skips the questions, and what the flags leave out takes its default.
+| Field | What you choose |
+|---|---|
+| Address | The site to check |
+| What to check | Sign-up and sign-in, forms, broken pages and links, and how it looks on a phone, each ticked or not |
+| A journey in a sentence | Optional: a journey to follow, such as "Buy the cheapest item and check the receipt" |
+| Tickets | Optional: tickets pasted with a line of `---` between them; each acceptance criterion is answered |
+| Sign-in | How you sign in, never with what |
+| How careful | **Look only** (the default), **May submit forms** or **May create test data**, each explained in the form ([care levels](Safety-model.md#care-levels-in-a-guided-check)) |
+| How thorough | Quick look, Normal (the default) or Thorough, each with its own time and page limits |
+
+The agent then gets a guided plan: what it tells you before it starts, the calls it makes, and the limits it keeps to. When the care level writes on a site that is not on this computer, or creates test data anywhere, the server shows you a second short form to confirm it, with a code to type for test data. Only your answer there lets the check start in that care level; the agent cannot give it. If you go back, or your client cannot show that form, the check can still run in Look only.
+
+The form never asks for a password or a sign-in code; signing in happens later, in the browser window `scout_login` opens. Where the client has no forms, or you decline or close the form, the agent asks the four questions above in chat instead.
+
+From the questions in chat you are never asked to choose a write mode, and `safe-write` and `destructive` are used only when you ask for them by name. The guided form reaches `safe-write` only as **May create test data**, which you confirm yourself. `destructive` is never offered there. Any flag skips the questions, and what the flags leave out takes its default.
 
 The same clients list two more prompts. `live` takes nothing and asks the agent for the loopback live-view URL of the current session. `login` takes a role, and the app's address when you have it, and asks the agent to call `scout_login` for that role. Neither takes a password.
 

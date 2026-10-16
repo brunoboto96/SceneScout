@@ -470,6 +470,7 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `actionTimeoutMs` | `SCENESCOUT_ACTION_TIMEOUT_MS`, else `5000` | 1000 to 120000 |
 | `navTimeoutMs` | `SCENESCOUT_NAV_TIMEOUT_MS`, else `20000` | 1000 to 300000 |
 | `dedup` | `SCENESCOUT_DEDUP`, else `rule` | `judge` asks a model whether a filing the rule keeps apart from everything recorded is one of the open findings on its page; it needs a key in the server's environment and sends the findings' titles, categories and evidence, and the page's path, to the provider. For the whole run |
+| `planId` | none | The guided plan this attach carries out (`gp-…`). Once any guided plan is built in the server, an attach above `observe` needs an accepted plan's id, in no mode above the plan's and on the plan's site. While a plan is open, an attach passing `readPosts` or `trustedEmbeds` is refused, and a plan no session carries any more must be confirmed again ([Safety model](Safety-model.md#care-levels-in-a-guided-check)) |
 | `open` | `SCENESCOUT_OPEN`, else by context | `live`, `report`, `both` or `none`: open the live view on this attach and `report.html` when `scout_report` writes it. Unset, both open on a local desktop session, headed or headless, and nothing opens in CI, over SSH, or on Linux with no display |
 
 ## MCP prompts

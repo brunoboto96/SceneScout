@@ -23,7 +23,7 @@ import {
 import { loadRunRecord } from "../engine/memory.js";
 import { formatCriteriaForLanes } from "../engine/tickets.js";
 
-import { engines, engineFor, server, text, errorText, serializedPerSession, sessionParam, laneLedger } from "../server-context.js";
+import { engines, engineFor, server, text, errorText, serializedPerSession, sessionParam, laneLedger, guidedSessions } from "../server-context.js";
 
 // The lane report: how a parallel agent hands its results back to the planner
 // as typed decisions. One tool for both halves, so the instruction a lane is
@@ -150,6 +150,8 @@ export function registerLaneTools(): void {
               formatBriefs(briefs, {
                 goal,
                 mode: eng.mode,
+                // The plan this session carries, so each lane's attach passes the gate the planner's did.
+                ...(guidedSessions.get(session)?.planId ? { planId: guidedSessions.get(session)!.planId } : {}),
                 role: eng.role,
                 roleProfile: eng.auth.kind === "role",
                 ...(fromRunNote ? { fromRunNote } : {}),
