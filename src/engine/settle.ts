@@ -21,6 +21,7 @@
  * person taking notes wants a fixed pace, not the fastest one. `paceMs` is a
  * floor a session asks for; unset, a session goes as fast as its page allows.
  */
+import { bestEffort } from "./best-effort.js";
 
 /** No request has started for this long and none is in flight: the page has settled. */
 export const QUIET_MS = 120;
@@ -178,4 +179,75 @@ export interface UrlWatch {
 export function keepWatchingUrl(w: UrlWatch): boolean {
   if (w.elapsedMs >= URL_CAP_MS) return false;
   return w.sinceChangeMs < URL_QUIET_MS;
+}
+
+/**
+ * The page a wait reads. Playwright's Page answers it; a test gives a
+ * stand-in, so the waits below run without a browser (settle-test).
+ */
+export interface SettlingPage {
+  waitForLoadState(state: "domcontentloaded"): Promise<unknown>;
+  waitForTimeout(timeout: number): Promise<unknown>;
+  url(): string;
+  isClosed(): boolean;
+}
+
+/** What the wait after an action reads from the session, each time it looks. */
+export interface SettleSource {
+  /** Requests started and not yet finished, failed, or left behind by their frame. */
+  inFlight(): number;
+  /** When the most recent request started. */
+  lastRequestStart(): number;
+  /** The deliberate pace the session was asked for (normalizePace). */
+  paceMs(): number;
+  /** The page the session drives now: a wait on a page the session has left ends. */
+  current(): unknown;
+}
+
+/** Wait after an action until the page has settled (shouldKeepWaiting), or the session has moved to another page. */
+export async function settlePage(page: SettlingPage, src: SettleSource): Promise<void> {
+  await bestEffort(page.waitForLoadState("domcontentloaded"));
+  // Wait on what is actually in flight rather than a flat sleep. The rule is
+  // shouldKeepWaiting above; the reasoning for not using networkidle is at the
+  // top of this file.
+  const started = Date.now();
+  for (;;) {
+    const state = {
+      inFlight: src.inFlight(),
+      sinceLastStartMs: Date.now() - src.lastRequestStart(),
+      elapsedMs: Date.now() - started,
+      paceMs: src.paceMs(),
+    };
+    if (!shouldKeepWaiting(state)) return;
+    await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
+    if (src.current() !== page) return;
+  }
+}
+
+/**
+ * The URL once it has stopped changing (keepWatchingUrl), read from the page
+ * `current` names: "" when there is none, and the URL so far once the session
+ * leaves it or it closes.
+ *
+ * Only called where a bounce verdict is about to be made. A client-side auth
+ * guard redirects on a timer and issues no request until it does, so the
+ * request-based settle has nothing to wait on and the page is read while it
+ * is still, briefly, the page it was asked for.
+ */
+export async function stableUrlOf(current: () => SettlingPage | null): Promise<string> {
+  const page = current();
+  if (!page || page.isClosed()) return page ? page.url() : "";
+  const started = Date.now();
+  let url = page.url();
+  let changedAt = started;
+  for (;;) {
+    if (!keepWatchingUrl({ sinceChangeMs: Date.now() - changedAt, elapsedMs: Date.now() - started })) return url;
+    await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
+    if (current() !== page || page.isClosed()) return url;
+    const now = page.url();
+    if (now !== url) {
+      url = now;
+      changedAt = Date.now();
+    }
+  }
 }

@@ -18,6 +18,9 @@ import { fileURLToPath } from "node:url";
 import { isNonPageRoute, normalizePath } from "../src/engine/fingerprint.ts";
 import { crawledRoute, crawlLine, mainStateFlag } from "../src/engine/crawl.ts";
 import { MemoryStore, reachedRoutes, type ActionLogEntry } from "../src/engine/memory.ts";
+import { COLLECT_INTERACTABLES_SCRIPT, MASKED_NAME } from "../src/engine/collector.ts";
+import { FORMS_INVENTORY_SCRIPT } from "../src/engine/forms.ts";
+import { keyAtXpath, SnapshotCollector, SNAPSHOTS_KEPT, type SnapshotElement } from "../src/engine/snapshot-collect.ts";
 import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
   classifyFilledStates,
@@ -1559,4 +1562,232 @@ test("saved-page policy check: a script or handler it cannot see would pass a pa
   for (const body of ['<script type="module">a()</script>', "<SCRIPT>a()</SCRIPT>", "<script>a()</script >", '<img ONERROR="a()" src="x.png">']) {
     assert.throws(() => assertSavedPagePolicy(page(body), body), /a page with no scripts runs none|exactly the page's own inline code/, body);
   }
+});
+
+// ---- snapshot collection: refs, kept snapshots and the hydration retry (snapshot-collect.ts) ----
+
+type RawStandIn = {
+  tag: string;
+  role: string;
+  name: string;
+  testid: string | null;
+  xpath: string;
+  disabled: boolean;
+  href: string | null;
+  rect: { x: number; y: number; width: number; height: number };
+  cut?: boolean;
+};
+
+const raw = (name: string, over: Partial<RawStandIn> = {}): RawStandIn => ({
+  tag: "button",
+  role: "button",
+  name,
+  testid: null,
+  xpath: `/html/body/button[${name}]`,
+  disabled: false,
+  href: null,
+  rect: { x: 0, y: 0, width: 80, height: 24 },
+  ...over,
+});
+
+/**
+ * A page that answers the collector's element read with the next of `reads`
+ * (repeating the last), its form read with `forms`, and has no frames.
+ */
+function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknown[] } = {}) {
+  const top = { name: "top" };
+  const state = { url: opts.url ?? "http://app.test/things", reads: [...reads], elementReads: 0, harvested: 0 };
+  const page = {
+    evaluate: async (script: string) => {
+      if (script === COLLECT_INTERACTABLES_SCRIPT) {
+        state.elementReads += 1;
+        return state.reads.length > 1 ? state.reads.shift() : state.reads[0];
+      }
+      if (script === FORMS_INVENTORY_SCRIPT) return opts.forms ?? [];
+      throw new Error("unexpected page read");
+    },
+    waitForTimeout: async () => {},
+    url: () => state.url,
+    mainFrame: () => top,
+    frames: () => [top],
+  };
+  const collector = new SnapshotCollector({
+    page: () => page as unknown as import("playwright").Page,
+    formRead: (_what, work) => work,
+    foreignOriginOf: () => null,
+    harvestRoutes: () => {
+      state.harvested += 1;
+    },
+  });
+  return { collector, state };
+}
+
+/** Keep a collect as its route's snapshot, the way scout_snapshot does. */
+function keep(collector: SnapshotCollector, route: string, elements: SnapshotElement[]): void {
+  collector.keepSnapshot({
+    route,
+    byKey: new Map(elements.map((el) => [el.key, { ref: el.ref, label: el.name, href: el.href, disabled: el.disabled, state: [] }])),
+  });
+}
+
+test("a collect reads the page again until two reads agree, so a hydrating page is not listed half-drawn", async () => {
+  const { collector, state } = collectorOn([[], [raw("Menu")], [raw("Menu"), raw("Save")], [raw("Menu"), raw("Save")]]);
+  const { elements } = await collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.name),
+    ["Menu", "Save"],
+  );
+  assert.equal(state.elementReads, 4);
+  assert.equal(state.harvested, 1);
+});
+
+test("an empty page is read again rather than taken at its first answer", async () => {
+  const { collector, state } = collectorOn([[]]);
+  const { elements } = await collector.collect();
+  assert.equal(elements.length, 0);
+  // Two empty reads never count as agreeing: the read gives up after its retries.
+  assert.equal(state.elementReads, 9);
+});
+
+test("a re-snapshot of a kept route gives an unchanged element its old ref, and a new one a new ref", async () => {
+  const { collector, state } = collectorOn([[raw("Save"), raw("Cancel")]]);
+  const first = await collector.collect();
+  assert.equal(first.prev, null);
+  keep(collector, "/things", first.elements);
+  state.reads = [[raw("Save"), raw("Cancel"), raw("Delete")]];
+  const second = await collector.collect();
+  assert.equal(second.prev?.how, "latest");
+  const refOf = (els: SnapshotElement[], name: string) => els.find((el) => el.name === name)?.ref;
+  assert.equal(refOf(second.elements, "Save"), refOf(first.elements, "Save"));
+  assert.equal(refOf(second.elements, "Cancel"), refOf(first.elements, "Cancel"));
+  assert.ok(!first.elements.some((el) => el.ref === refOf(second.elements, "Delete")));
+  assert.deepEqual(second.matched, [first.elements[0].key, first.elements[1].key, null]);
+  // Only the latest collect's refs resolve.
+  assert.equal(collector.refs.size, 3);
+});
+
+test("a route never kept is listed with new refs", async () => {
+  const { collector } = collectorOn([[raw("Save")]]);
+  const first = await collector.collect();
+  const second = await collector.collect();
+  assert.equal(second.prev, null);
+  assert.notEqual(second.elements[0].ref, first.elements[0].ref);
+});
+
+test("a kept snapshot is compared as the latest, a revisited route, or another tab of the same screen", async () => {
+  const { collector, state } = collectorOn([[raw("Save")]], { url: "http://app.test/things?tab=one" });
+  keep(collector, "/things?tab=one", (await collector.collect()).elements);
+  assert.equal((await collector.collect()).prev?.how, "latest");
+  state.url = "http://app.test/things?tab=two";
+  const tab = await collector.collect();
+  assert.equal(tab.prev?.how, "tab");
+  assert.equal(tab.prev?.snap.route, "/things?tab=one");
+  keep(collector, "/things?tab=two", tab.elements);
+  state.url = "http://app.test/things?tab=one";
+  assert.equal((await collector.collect()).prev?.how, "revisited");
+});
+
+test("only the last SNAPSHOTS_KEPT routes are kept; the least recent is dropped first", async () => {
+  const { collector, state } = collectorOn([[raw("Save")]]);
+  for (let i = 0; i <= SNAPSHOTS_KEPT; i++) keep(collector, `/r${i}`, []);
+  state.url = "http://app.test/r0";
+  assert.equal((await collector.collect()).prev, null);
+  state.url = "http://app.test/r1";
+  assert.equal((await collector.collect()).prev?.how, "revisited");
+});
+
+test("dropped refs remember the first reason until the next kept snapshot, and forgetting clears every kept one", async () => {
+  const { collector } = collectorOn([[raw("Save")]]);
+  const first = await collector.collect();
+  keep(collector, "/things", first.elements);
+  collector.dropRefs("the page navigated");
+  collector.dropRefs("a dialog closed");
+  assert.equal(collector.refs.size, 0);
+  assert.equal(collector.refsDropped, "the page navigated");
+  keep(collector, "/things", first.elements);
+  assert.equal(collector.refsDropped, null);
+  collector.dropRefs("the page navigated");
+  collector.forgetSnapshots();
+  assert.equal(collector.refsDropped, null);
+  assert.equal((await collector.collect()).prev, null);
+});
+
+test("elements past the collector's cap are counted apart, never listed", async () => {
+  const { collector } = collectorOn([[raw("Save"), { ...raw("row"), role: "link", testid: "row-1", cut: true }]]);
+  const { elements, cut, truncated } = await collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.name),
+    ["Save"],
+  );
+  assert.equal(cut.length, 1);
+  assert.equal(truncated, true);
+  assert.equal(collector.lastCollectTruncated, true);
+  const { collector: plain } = collectorOn([[raw("Save")]]);
+  assert.equal((await plain.collect()).truncated, false);
+  assert.equal(plain.lastCollectTruncated, false);
+});
+
+test("a destructive label is marked as the snapshot lists it, and a ref of the page itself is looked up on the page", async () => {
+  const { collector } = collectorOn([[raw("Delete account"), raw("Save")]]);
+  const { elements } = await collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.destructive),
+    [true, false],
+  );
+  assert.equal(collector.scopeOf(elements[0]) as unknown, (collector as unknown as { host: { page: () => unknown } }).host.page());
+});
+
+test("a form with no attributes is known by the key of the page's element at its submit xpath", async () => {
+  const field = { tag: "input", type: "text", disabled: false, readOnly: false, visible: true, filled: false };
+  const form = (submit: string, submitDisabled: boolean) => ({ attrs: { id: "", name: "", action: "", method: "" }, submit, fields: [field], submitDisabled });
+  const { collector } = collectorOn([[raw("Send", { testid: "send" })]], { forms: [form("/html/body/button[Send]", true), form("/nowhere", false)] });
+  const { elements, forms } = await collector.collect();
+  assert.equal(keyAtXpath(elements, "/html/body/button[Send]"), elements[0].key);
+  assert.deepEqual(forms, [{ key: elements[0].key, guarded: true }]);
+});
+
+test("a frame's controls are listed in the page's coordinates, masked when another site's, and their refs go stale with the frame", async () => {
+  const top = { parentFrame: () => null };
+  const frame = {
+    href: "https://embed.example/widget",
+    detached: false,
+    url: () => frame.href,
+    isDetached: () => frame.detached,
+    parentFrame: () => top,
+    frameElement: async () => ({
+      boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 150 }),
+      getAttribute: async (name: string) => (name === "title" ? "Chat" : null),
+    }),
+    evaluate: async () => ({ els: [raw("Hi Alex, about the invoice", { tag: "div", role: "listitem" })], sx: 0, sy: 10 }),
+  };
+  const page = {
+    evaluate: async (script: string) => {
+      if (script === COLLECT_INTERACTABLES_SCRIPT) return [raw("Save")];
+      if (script === FORMS_INVENTORY_SCRIPT) return [];
+      return { x: 0, y: 0 };
+    },
+    waitForTimeout: async () => {},
+    url: () => "http://app.test/things",
+    mainFrame: () => top,
+    frames: () => [top, frame],
+  };
+  const collector = new SnapshotCollector({
+    page: () => page as unknown as import("playwright").Page,
+    formRead: (_what, work) => work,
+    foreignOriginOf: (f) => (f === (frame as unknown) ? "https://embed.example" : null),
+    harvestRoutes: () => {},
+  });
+  const { elements } = await collector.collect();
+  const inFrame = elements.find((el) => el.frame);
+  assert.ok(inFrame, JSON.stringify(elements));
+  assert.deepEqual(inFrame.frame, { url: "https://embed.example/widget", origin: "https://embed.example", title: "Chat", foreign: true });
+  // The frame's own scroll is taken off, the frame element's position added.
+  assert.deepEqual([inFrame.rect.x, inFrame.rect.y], [100, 190]);
+  assert.equal(inFrame.name, MASKED_NAME);
+  assert.equal(collector.scopeOf(inFrame) as unknown, frame);
+  assert.equal(collector.framesRead.size, 1);
+  frame.href = "https://embed.example/other";
+  assert.throws(() => collector.scopeOf(inFrame), /has navigated/);
+  frame.detached = true;
+  assert.throws(() => collector.scopeOf(inFrame), /has gone/);
 });
