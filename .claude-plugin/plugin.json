@@ -13,7 +13,7 @@
   "mcpServers": {
     "scenescout": {
       "command": "npx",
-      "args": ["-y", "scenescout", "serve"]
+      "args": ["-y", "scenescout@3.25.0", "serve"]
     }
   }
 }

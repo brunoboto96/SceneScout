@@ -14,6 +14,10 @@
  * differently from Prettier, so `version-packages` runs Prettier over them
  * afterwards. Without that the generated version pull request fails the format
  * check.
+ *
+ * The plugin's server launch line is pinned to the same release
+ * (`npx -y scenescout@<version> serve`), so a plugin install runs the version
+ * it was released with rather than whatever npm calls latest on each launch.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -29,8 +33,11 @@ for (const relative of [
 ]) {
   const file = path.join(root, relative);
   const json = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (json.version === pkg.version) continue;
+  const before = JSON.stringify(json);
   json.version = pkg.version;
+  const server = json.mcpServers?.[pkg.name];
+  if (server?.command === "npx") server.args = ["-y", `${pkg.name}@${pkg.version}`, "serve"];
+  if (JSON.stringify(json) === before) continue;
   fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`);
   console.log(`${relative} → ${pkg.version}`);
 }

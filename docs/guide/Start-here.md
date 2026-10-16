@@ -82,7 +82,7 @@ npx -y scenescout install --client cursor     # or vscode, codex, gemini, copilo
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
+Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`. A plugin starts the server at the version the plugin was released with (`npx -y scenescout@<version> serve`), so a new release reaches you only when you update the plugin: `/plugin marketplace update scenescout-marketplace`. To follow the latest npm release instead, register the server by hand with `npx -y scenescout serve`.
 
 An optional second plugin, `scenescout-mod`, adds a guided panel and a model setting for lane agents in the Claude Code CLI and the desktop Code tab: [The Claude Code mod](Ways-to-use-it.md#the-claude-code-mod).
 
