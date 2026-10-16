@@ -68,11 +68,10 @@ export function secretPathReason(abs: string, rel: string): string | undefined {
   const base = parts[parts.length - 1] ?? "";
   if (SSH_KEY.test(base)) return "its name is an SSH key's";
   if (SECRET_FILE.test(base)) return "its name is a credential file's";
+  // The fixtures folder itself is allowed; a dotfile or hidden folder below it is as hidden as anywhere else.
   const fixtures = parts.length >= 3 && parts[0] === ".scenescout" && parts[1] === "fixtures";
-  if (!fixtures) {
-    const dotted = parts.find((p) => p.startsWith("."));
-    if (dotted) return dotted === base ? "it is a dotfile" : `it is inside ${dotted}/, a hidden folder`;
-  }
+  const dotted = parts.slice(fixtures ? 2 : 0).find((p) => p.startsWith("."));
+  if (dotted) return dotted === base ? "it is a dotfile" : `it is inside ${dotted}/, a hidden folder`;
   return undefined;
 }
 

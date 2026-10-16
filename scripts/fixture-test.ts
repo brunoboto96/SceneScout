@@ -214,6 +214,8 @@ function homeProject(): string {
     ".docker/config.json": "{}",
     ".gnupg/secring.gpg": "gpg",
     ".scenescout/fixtures/upload.csv": "a,b",
+    ".scenescout/fixtures/.git-credentials": "https://user:token@host",
+    ".scenescout/fixtures/cache/.hidden/token.txt": "token",
     ".scenescout/auth/admin.json": "{}",
     "app/id_rsa.bak": "PRIVATE KEY",
     "app/certs/AuthKey.p8": "key",
@@ -263,6 +265,9 @@ test("credential-shaped files inside the project are refused; ordinary files bes
     "app/certs/server.pem.",
     "app/certs/server.pem ",
     "app/certs/server.key::$DATA",
+    // .scenescout/fixtures/ is allowed as a folder; a dotfile or hidden folder inside it is still hidden.
+    ".scenescout/fixtures/.git-credentials",
+    ".scenescout/fixtures/cache/.hidden/token.txt",
   ];
   for (const rel of refused) assert.ok(refusedAsSecret(resolveDiskUpload({ projectDir: home }, rel)), `${rel} must be refused`);
   // The contrastive half: same folders, names that only look nearby.
