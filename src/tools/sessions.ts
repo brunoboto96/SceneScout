@@ -12,7 +12,7 @@ import { defaultEngine } from "../browsers.js";
 import { downloadBrowsers, presentBrowsers } from "../installer.js";
 import { MemoryStore } from "../engine/memory.js";
 import { DEDUP_ENV, DEDUP_MODES, type DedupMode } from "../engine/ci.js";
-import { DedupJudge, planDedup, samplingAsk } from "../engine/dedup.js";
+import { DedupJudge, dedupArgumentRefusal, planDedup, samplingAsk } from "../engine/dedup.js";
 import { httpJudgeAsk } from "../ci-run.js";
 import { laneCloseGuard } from "../engine/lane.js";
 import { liveViewUrl } from "../engine/status-pane.js";
@@ -156,12 +156,14 @@ export async function projectFolderFor(url: string, given: string | undefined) {
  * named, else DEDUP_ENV. Returns the line the attach reports, or "".
  */
 function configureDedup(store: MemoryStore, asked: DedupMode | undefined): string {
-  if (asked) store.dedupChoice = asked;
+  const refusal = dedupArgumentRefusal(asked, process.env, server.server.getClientCapabilities());
+  if (refusal) logLine(`dedup judge refused: ${refusal}`);
+  else if (asked) store.dedupChoice = asked;
   const plan = planDedup(store.dedupChoice, process.env, server.server.getClientCapabilities());
   if (plan.mode === "rule") {
     store.dedupJudge = null;
     store.dedupOff = undefined;
-    return "";
+    return refusal ? `\n⚠ ${refusal}` : "";
   }
   // On already for this run: say so only when it has since been switched off.
   if (store.dedupJudge instanceof DedupJudge)
@@ -337,7 +339,7 @@ export function registerSessionTools(): void {
           .describe(
             `How this run tells a filed finding from one already recorded. Default: the ${DEDUP_ENV} environment variable, else 'rule', the store's rule alone. ` +
               "'judge': the rule first, then, for a filing the rule keeps apart from everything recorded, a model is asked whether it is one of the open findings on its page, and merges it when it says so. " +
-              "It needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment, and sends each pair's titles, categories and evidence, and the page's path, to that provider — ONLY when the user asked for it. " +
+              `It sends each pair's titles, categories and evidence, and the page's path, to a model provider, so this argument alone does not switch it on: the person running the server does, with ${DEDUP_ENV}=judge and ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment. ` +
               "Applies to every session of the project until the run ends.",
           ),
         planId: z

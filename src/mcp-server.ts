@@ -5,8 +5,8 @@
  * Exposes deterministic browser-exploration tools — Playwright actions, state
  * memory, oracles, findings, report — to any MCP client. The client (e.g.
  * Claude Code on a subscription) is the brain, and no LLM call happens here
- * unless finding dedup is set to ask a model judge (SCENESCOUT_DEDUP, or
- * scout_attach {dedup}): then a filing the dedup rule keeps apart is put to a
+ * unless finding dedup is set to ask a model judge (SCENESCOUT_DEDUP=judge;
+ * scout_attach {dedup: "judge"} alone is refused): then a filing the dedup rule keeps apart is put to a
  * model, through the client when it is a `scenescout ci` run, else with a key
  * from this process's environment (engine/dedup.ts).
  *
