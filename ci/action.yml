@@ -219,6 +219,9 @@ runs:
   using: composite
   steps:
     - name: Look for Node.js 20 or newer
+      env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
       id: node
       shell: bash
       run: |
@@ -229,6 +232,9 @@ runs:
         fi
 
     - name: Install Node.js
+      env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
       if: steps.node.outputs.present != 'true'
       uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
@@ -239,10 +245,15 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
         INPUTS: ${{ toJSON(inputs) }}
       run: node "$GITHUB_ACTION_PATH/../action/ci-action.mjs" resolve
 
     - name: Restore the browser cache
+      env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
       id: cache
       if: inputs.cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -254,6 +265,8 @@ runs:
       if: runner.os == 'Linux' && inputs.install-deps == 'true'
       shell: bash
       env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
         PLAYWRIGHT_CLI: ${{ steps.resolve.outputs.playwright-cli }}
         ENGINE: ${{ steps.resolve.outputs.engine }}
       run: |
@@ -265,12 +278,17 @@ runs:
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
         SCENESCOUT_CLI: ${{ steps.resolve.outputs.cli }}
         TARGET: ${{ steps.resolve.outputs.install-target }}
         PLAYWRIGHT_BROWSERS_PATH: ${{ steps.resolve.outputs.browsers-path }}
       run: node "$SCENESCOUT_CLI" install --browser-only --browsers "$TARGET"
 
     - name: Save the browser cache
+      env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
       if: always() && inputs.cache == 'true' && steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -279,6 +297,8 @@ runs:
 
     # Never fails: the exit code becomes an output, so the files are kept before the last step ends the job.
     # The key reaches the CLI through the environment the calling step set; it is never an input or an output.
+    # A composite action's steps inherit the calling step's environment, so every other step sets both key names
+    # to empty: the install, the browser download and the system-library step run no code that needs the key.
     - name: Run the exploration
       id: run
       shell: bash
@@ -291,6 +311,9 @@ runs:
       run: node "$GITHUB_ACTION_PATH/../action/ci-action.mjs" run
 
     - name: Keep the results
+      env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
       if: always() && inputs.upload-artifact == 'true' && steps.run.outputs.json != ''
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
@@ -301,6 +324,9 @@ runs:
         if-no-files-found: warn
 
     - name: Upload to code scanning
+      env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
       if: always() && inputs.upload-sarif == 'true' && steps.run.outputs.sarif != ''
       uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
       with:
@@ -311,6 +337,8 @@ runs:
       if: always() && steps.run.outputs.exit-code != ''
       shell: bash
       env:
+        ANTHROPIC_API_KEY: ""
+        OPENAI_API_KEY: ""
         INPUTS: ${{ toJSON(inputs) }}
         EXIT_CODE: ${{ steps.run.outputs.exit-code }}
         ERROR: ${{ steps.run.outputs.error }}

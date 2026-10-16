@@ -2580,3 +2580,74 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
     assert.ok(rangeAdmits(range, next) || startsLater, `AGENTS.md no longer records the Playwright hold, so widen the range ${range} (or restore the line)`);
   }
 });
+
+test("release: the job that holds the publish token runs no repository code, and the bundle ships with a checksum and an attestation", () => {
+  type Step = { uses?: string; run?: string; with?: Record<string, string | boolean>; id?: string };
+  type Job = { needs?: string | string[]; if?: string; permissions?: Record<string, string>; steps: Step[] };
+  const wf = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8")) as { jobs: Record<string, Job> };
+  const holders = Object.entries(wf.jobs).filter(([, j]) => j.permissions?.["id-token"] === "write");
+  const idTokenJobs = holders.map(([name]) => name).sort();
+  assert.deepEqual(idTokenJobs, ["attest-desktop-extension", "publish"], "only the publish job and the attestation job mint a token");
+  const publish = wf.jobs.publish;
+  assert.deepEqual(publish.permissions, { contents: "read", "id-token": "write" });
+  assert.match(String(publish.if), /published == 'true'/, "only for a release that was made");
+  assert.ok(!publish.steps.some((s) => s.uses?.startsWith("actions/checkout")), "no checkout where the token can be minted");
+  assert.ok(
+    publish.steps.some((s) => /^actions\/download-artifact@/.test(s.uses ?? "")),
+    "it downloads the tarball the release job built",
+  );
+  const runs = publish.steps.map((s) => s.run ?? "").filter(Boolean);
+  assert.ok(
+    runs.some((r) => /^npm publish \S+\.tgz\b/.test(r)),
+    "and publishes that tarball",
+  );
+  assert.ok(
+    !runs.some((r) => /\bnpm (ci|install|run|exec)\b|\bnpx\b/.test(r.replace("npm install -g npm@", ""))),
+    "and runs no dependency or repository script",
+  );
+  // The contrast: the job that builds and runs repository code cannot mint it.
+  assert.equal(wf.jobs.release.permissions?.["id-token"], undefined);
+  assert.ok(
+    wf.jobs.release.steps.some((s) => /^actions\/upload-artifact@/.test(s.uses ?? "")),
+    "the release job hands over the tarball it packed",
+  );
+
+  const attach = wf.jobs["attach-desktop-extension"];
+  assert.ok(
+    attach.steps.some((s) => /sha256sum \*\.mcpb > SHA256SUMS/.test(s.run ?? "")),
+    "a checksum file for the bundle",
+  );
+  assert.ok(
+    attach.steps.some((s) => /gh release upload "\$TAG" \*\.mcpb SHA256SUMS\b/.test(s.run ?? "")),
+    "uploaded beside it",
+  );
+  const attest = wf.jobs["attest-desktop-extension"];
+  assert.deepEqual(attest.permissions, { contents: "read", "id-token": "write", attestations: "write" });
+  const step = attest.steps.find((s) => /^actions\/attest-build-provenance@[0-9a-f]{40}$/.test(s.uses ?? ""));
+  assert.ok(step, "the bundle is attested by an action pinned by commit");
+  assert.equal(step.with?.["subject-path"], "*.mcpb");
+  assert.ok(!attest.steps.some((s) => s.uses?.startsWith("actions/checkout")), "and no repository code");
+});
+
+test("build: dist is emptied before tsc, so a file deleted from src is not packed", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  assert.match(pkg.scripts.build, /rmSync\(['"]dist['"], *\{[^}]*recursive: *true[^}]*\}\).*&& tsc$/, "clear dist, then compile");
+  assert.match(pkg.scripts["release:tag"], /npm pack --pack-destination \.release-pack/, "the release packs the built package for the publish job");
+});
+
+test("ci action: the model key is blanked for every step except the one that runs the exploration", () => {
+  type Step = { id?: string; name?: string; env?: Record<string, string> };
+  const action = parseYaml(fs.readFileSync(path.join(repoRoot, "ci", "action.yml"), "utf8")) as { runs: { steps: Step[] } };
+  const names = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"];
+  const withKey = action.runs.steps.filter((s) => names.some((n) => s.env && n in s.env && s.env[n] !== ""));
+  assert.deepEqual(
+    withKey.map((s) => s.id),
+    [],
+    "no step sets the key to a value; the run step receives the caller's own",
+  );
+  for (const step of action.runs.steps) {
+    const blank = names.every((n) => step.env?.[n] === "");
+    if (step.id === "run") assert.ok(!names.some((n) => step.env && n in step.env), "the run step keeps the key the caller set");
+    else assert.ok(blank, `${step.name ?? step.id} sees no model key`);
+  }
+});

@@ -12,6 +12,7 @@ dist/
 .scenescout-fixtures/
 .tmp-fixtures/
 *.tgz
+.release-pack/
 
 # ── never commit these ───────────────────────────────────────────────────────
 # Secrets and local configuration
