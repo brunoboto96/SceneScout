@@ -29,7 +29,87 @@ import {
   type NotTestedReason,
 } from "../engine/tickets.js";
 
-import { engines, engineFor, server, text, errorText, openDecisions, openForUser, serializedPerSession, sessionParam, logLine } from "../server-context.js";
+import { CANDIDATES_NOTE, FEEDBACK_SAYS } from "../engine/guided-words.js";
+import { CHECK_AREAS } from "../engine/guided.js";
+import { FEEDBACK_VERDICTS, MAX_FEEDBACK_REASON, type FeedbackVerdict } from "../engine/memory.js";
+import {
+  CARD_FEEDBACK,
+  CARD_IMPACTS,
+  CARD_STATUSES,
+  cardText,
+  feedbackCandidates,
+  MAX_CARDS,
+  MAX_INLINE_PICTURES,
+  readInlinePicture,
+  selectCards,
+  type CardFilter,
+} from "../engine/progress.js";
+
+import {
+  engines,
+  engineFor,
+  server,
+  text,
+  errorText,
+  openDecisions,
+  openForUser,
+  serializedPerSession,
+  sessionParam,
+  logLine,
+  guidedRuns,
+  guidedSessions,
+  projectEngine,
+} from "../server-context.js";
+
+/** A PlainCard, as scout_cards' structuredContent carries it. */
+const PLAIN_CARD_OUTPUT = z.object({
+  id: z.string(),
+  impact: z.enum(CARD_IMPACTS),
+  severity: z.enum(["high", "medium", "low"]),
+  title: z.string(),
+  problem: z.string(),
+  expected: z.string(),
+  happened: z.string(),
+  page: z.string(),
+  alsoOn: z.array(z.string()),
+  steps: z.array(z.string()),
+  area: z.enum(CHECK_AREAS).optional(),
+  picture: z.object({ file: z.string(), width: z.number(), height: z.number(), what: z.string() }).nullable(),
+  status: z.enum(CARD_STATUSES),
+  feedback: z.object({ verdict: z.enum(FEEDBACK_VERDICTS), reason: z.string().optional(), at: z.string() }).optional(),
+  ticket: z.object({ tracker: z.enum(["github", "jira"]), ref: z.string(), url: z.string() }).optional(),
+  technical: z.object({ category: z.string(), evidence: z.string().optional(), route: z.string() }),
+  firstSeen: z.string(),
+  timesSeen: z.number(),
+});
+
+const CARDS_OUTPUT = {
+  cards: z.array(PLAIN_CARD_OUTPUT),
+  total: z.number(),
+  notABug: z.number(),
+  missing: z.array(z.string()),
+};
+
+const FEEDBACK_OUTPUT = {
+  findingId: z.string().optional(),
+  verdict: z.enum(FEEDBACK_VERDICTS).optional(),
+  candidates: z
+    .array(
+      z.object({
+        findingId: z.string(),
+        verdict: z.enum(FEEDBACK_VERDICTS),
+        reason: z.string().optional(),
+        at: z.string(),
+        suggests: z.enum(["non-defect", "defect"]),
+        title: z.string(),
+        category: z.string(),
+        severity: z.enum(["high", "medium", "low"]),
+        route: z.string(),
+        evidence: z.string().optional(),
+      }),
+    )
+    .optional(),
+};
 
 export function registerResultTools(): void {
   server.registerTool(
@@ -185,6 +265,9 @@ export function registerResultTools(): void {
             attachedSessions: [...engines.keys()],
           });
           void p;
+          // A guided check's report is written: its progress says done once nothing is running.
+          const carried = guidedSessions.get(session)?.planId;
+          if (carried) guidedRuns.reported(carried);
           // What this run left, for a later run to continue or replay from (--from-run). Never fatal: the report is written.
           try {
             eng.memory.addRunRecord(runRecordOf(eng.memory, all, gapList));
@@ -390,5 +473,134 @@ export function registerResultTools(): void {
         }
       },
     ),
+  );
+
+  // Findings as cards a person reads, and the person's own label on one (design 3.3 and 3.4).
+  // Neither touches a browser or waits behind a session's calls: they read and label the project's memory.
+  server.registerTool(
+    "scout_cards",
+    {
+      title: "Finding cards",
+      description:
+        "Show the project's findings as plain cards, worst first: impact (Blocks users, Annoying, Cosmetic, Worth a look), title, what kind of problem, the page, numbered steps, what was expected, what happened, and the finding id. " +
+        "Use it at the end of a guided check, or whenever the person wants to read what was found in plain words; post each card's text as it is. " +
+        'By default fixed findings and the ones the person marked not a bug are left out (the count of the second is given; filter {feedback: ["not-a-bug"]} lists them). Pass ids to show exactly those. ' +
+        'pictures: "inline" puts each card\'s picture in the result as an image (at most 10, at most 1024 px on the longer side), "files" (default) names each picture\'s file, "none" leaves them out. Touches no browser.',
+      inputSchema: {
+        filter: z
+          .object({
+            impact: z.array(z.enum(CARD_IMPACTS)).max(CARD_IMPACTS.length).optional().describe("Only these impacts"),
+            area: z.array(z.enum(CHECK_AREAS)).max(CHECK_AREAS.length).optional().describe("Only findings found while checking these areas of a guided check"),
+            status: z
+              .array(z.enum(CARD_STATUSES))
+              .max(CARD_STATUSES.length)
+              .optional()
+              .describe('Only these: "open", "fixed", "still-there", "changed". Default: all but fixed'),
+            feedback: z
+              .array(z.enum(CARD_FEEDBACK))
+              .max(CARD_FEEDBACK.length)
+              .optional()
+              .describe('Only these labels: "not-a-bug", "confirmed", or "none" for no label. Default: all but not-a-bug'),
+          })
+          .optional()
+          .describe("Narrow the cards. Omitted parts take their defaults"),
+        ids: z.array(z.string().max(40)).max(MAX_CARDS).optional().describe("Show exactly these finding ids, whatever their status or label"),
+        limit: z.number().int().min(1).max(MAX_CARDS).optional().describe(`How many cards at most (default 20, at most ${MAX_CARDS})`),
+        pictures: z
+          .enum(["inline", "files", "none"])
+          .optional()
+          .describe('"inline": each picture as an image in the result; "files" (default): its file; "none"'),
+      },
+      outputSchema: CARDS_OUTPUT,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ filter, ids, limit, pictures }: { filter?: CardFilter; ids?: string[]; limit?: number; pictures?: "inline" | "files" | "none" }) => {
+      try {
+        const memory = projectEngine()?.memory;
+        if (!memory) throw new Error("No project is open yet: findings are read from the project a session attached to, so attach first.");
+        const chosen = selectCards(memory.findings, { filter, ids, limit });
+        const mode = pictures ?? "files";
+        const content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+        const head =
+          chosen.total === 0
+            ? "No findings match."
+            : `${chosen.total} finding${chosen.total === 1 ? "" : "s"}${chosen.cards.length < chosen.total ? `, the first ${chosen.cards.length} shown` : ""}, worst first.`;
+        const extra = [
+          chosen.notABug > 0
+            ? `${chosen.notABug} marked not a bug ${chosen.notABug === 1 ? "is" : "are"} left out: filter {feedback: ["not-a-bug"]} shows ${chosen.notABug === 1 ? "it" : "them"}.`
+            : "",
+          chosen.missing.length > 0 ? `No finding with id ${chosen.missing.join(", ")}.` : "",
+        ].filter(Boolean);
+        content.push({ type: "text", text: [head, ...extra].join("\n") });
+        let shown = 0;
+        for (const card of chosen.cards) {
+          const file = mode === "files" && card.picture ? path.join(memory.dir, card.picture.file) : undefined;
+          content.push({ type: "text", text: cardText(card, file) });
+          if (mode !== "inline" || !card.picture) continue;
+          if (shown >= MAX_INLINE_PICTURES) {
+            content.push({ type: "text", text: `(Picture not shown: this call already shows ${MAX_INLINE_PICTURES}. Ask for this card by its id to see it.)` });
+            continue;
+          }
+          const got = readInlinePicture(memory.dir, card.picture.file);
+          if ("image" in got) {
+            content.push(got.image);
+            shown += 1;
+          } else content.push({ type: "text", text: `(Picture not shown: ${got.why}.)` });
+        }
+        return { content, structuredContent: { ...chosen } };
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "scout_feedback",
+    {
+      title: "Label a finding",
+      description:
+        'Record the person\'s own verdict on a finding: "not-a-bug" or "confirmed", with their reason if they gave one (at most 300 characters). Call it only with what the person said; never label a finding yourself. ' +
+        "The finding is kept either way, keeps its id, and a later filing of the same problem still merges into it; cards and the status pane list a not-a-bug one apart. " +
+        "export: true instead lists every label in the project as candidates for a maintainer to review: they never change an answer key or the dedup by themselves. Touches no browser.",
+      inputSchema: {
+        id: z.string().max(40).optional().describe("The finding the person is labelling. Required unless export"),
+        verdict: z.enum(FEEDBACK_VERDICTS).optional().describe('"not-a-bug" or "confirmed". Required unless export'),
+        reason: z.string().max(MAX_FEEDBACK_REASON).optional().describe("Why, in the person's words"),
+        export: z.boolean().optional().describe("List every label as candidates for a maintainer, instead of labelling"),
+      },
+      outputSchema: FEEDBACK_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ id, verdict, reason, export: list }: { id?: string; verdict?: FeedbackVerdict; reason?: string; export?: boolean }) => {
+      try {
+        const memory = projectEngine()?.memory;
+        if (!memory) throw new Error("No project is open yet: labels are kept on the project a session attached to, so attach first.");
+        if (list) {
+          if (id !== undefined || verdict !== undefined) throw new Error("pass export alone, or id and verdict to label a finding");
+          const candidates = feedbackCandidates(memory.findings);
+          const lines =
+            candidates.length === 0
+              ? ["No finding has a label yet."]
+              : [
+                  CANDIDATES_NOTE,
+                  "",
+                  ...candidates.map(
+                    (c) =>
+                      `- ${c.findingId} ${c.verdict} (suggests a ${c.suggests}): [${c.severity}] ${c.title} on ${c.route}${c.reason ? ` - "${c.reason}"` : ""}`,
+                  ),
+                ];
+          return { content: [{ type: "text" as const, text: lines.join("\n") }], structuredContent: { candidates } };
+        }
+        if (!id || !verdict) throw new Error('pass the finding and the person\'s verdict: scout_feedback {id: "a1b2c3d4e5", verdict: "not-a-bug"}');
+        const f = memory.setFeedback(id, verdict, reason);
+        if (!f) throw new Error(`no finding with id ${id} in this project`);
+        return {
+          content: [{ type: "text" as const, text: `${f.title} (${f.id}): ${FEEDBACK_SAYS[verdict]}` }],
+          structuredContent: { findingId: f.id, verdict },
+        };
+      } catch (err) {
+        return errorText(err);
+      }
+    },
   );
 }

@@ -40,6 +40,7 @@ import { SERVER_INSTRUCTIONS } from "./playbook.js";
 import { type EvidenceSettings } from "./engine/capture.js";
 import { GuidedPlans, type CheckArea } from "./engine/guided.js";
 import { NO_POLICY, type LoadedPolicy } from "./engine/project-config.js";
+import { GuidedRuns, nowSentence } from "./engine/progress.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
 export const engines = new Map<string, BrowserEngine>();
@@ -446,6 +447,9 @@ export function writeStatus(session: string, phase: "running" | "idle", tool: st
     ...(objective ? { objective: redactSecrets(objective) } : {}),
     ...(task ? { task: redactSecrets(task) } : {}),
   });
+  // A session carrying a guided plan: what it is doing joins the check's story, in the narrator's fixed words.
+  const planId = guidedSessions.get(session)?.planId;
+  if (planId && phase === "running") guidedRuns.step(planId, nowSentence(tool, lastWriter.url, lastWriter.task), Date.now());
   liveStarts.set(dir, ensureLive(dir));
   void flushStatus(dir);
 }
@@ -627,6 +631,20 @@ export const pendingLogins = new LoginWindows<PendingLogin>(LOGIN_WINDOW_MAX_MS)
 // (scout_session {area}). Held here only: they end with the process (ADR 24).
 export const guidedPlans = new GuidedPlans();
 export const guidedSessions = new Map<string, { planId?: string; area?: CheckArea }>();
+// What each guided check has done so far, for the progress the status pane shows (progress.ts).
+export const guidedRuns = new GuidedRuns();
+
+/**
+ * The engine whose project the person is shown, for tools that read the
+ * project without a session of their own (the status pane, scout_cards,
+ * scout_feedback): a session carrying the guided plan on show, else the
+ * session that wrote the board last, else any attached one.
+ */
+export function projectEngine(): BrowserEngine | undefined {
+  const focused = guidedRuns.focused;
+  const carrying = focused ? [...guidedSessions.entries()].filter(([, s]) => s.planId === focused).map(([name]) => engines.get(name)) : [];
+  return [...carrying, lastWriter ? engines.get(lastWriter.session) : undefined, ...engines.values()].find((e): e is BrowserEngine => !!e?.memory);
+}
 
 // The operator's SceneScout config, read once as the server starts (mcp-server.ts, engine/project-config.ts).
 // Nothing a tool is passed changes it: scout_attach applies it, and a project's own file may only tighten it.

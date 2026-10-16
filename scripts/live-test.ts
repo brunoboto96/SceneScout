@@ -51,6 +51,9 @@ import {
   type PaneInput,
 } from "../src/engine/status-pane.ts";
 import { statusPanePage } from "../src/engine/status-pane-page.ts";
+import { guidedPlan } from "../src/engine/guided.ts";
+import { guidedProgress } from "../src/engine/progress.ts";
+import type { Finding } from "../src/engine/memory.ts";
 import * as mod from "../mods/scenescout-mod/hooks/pane.js";
 import {
   COULD_NOT_OPEN,
@@ -1869,6 +1872,87 @@ test("the text fallback stands alone: the address first, then sessions, findings
   assert.ok(lines.includes("Open findings: 1 (1 high, 0 medium, 0 low), 1 this run; 1 worth a look"), text);
   assert.ok(lines.includes("Coverage: routes 2/4 · 3 states · 9/20 elements exercised"), text);
   assert.match(paneText(paneData(paneInput())), /\nNo session is attached\.$/);
+});
+
+/** A guided check's progress as the server builds it for the pane: one plan, one session on the forms area, one finding. */
+function guidedPaneData() {
+  const built = guidedPlan({ address: "https://staging.example.com", areas: ["forms", "broken-pages"], care: "look-only" }, "gp-0123456789");
+  assert.ok(built.ok);
+  const finding: Finding = {
+    id: "0a1b2c3d4e",
+    severity: "high",
+    category: "false_success",
+    title: "Saving a thing says it worked when it did not",
+    detail: "The page shows Saved.",
+    url: "https://staging.example.com/things/new",
+    state: "/things/new#abc",
+    repro: [],
+    foundAt: new Date(PANE_NOW - 60_000).toISOString(),
+    runs: 1,
+  };
+  const guided = guidedProgress({
+    nowMs: PANE_NOW,
+    plan: built.plan,
+    run: { startedMs: PANE_NOW - 6 * 60_000, lastActiveMs: PANE_NOW, story: ["Opening /"], areasStarted: ["forms"], reported: false },
+    sessions: [
+      {
+        session: "default",
+        state: "running",
+        tool: "scout_type",
+        url: "https://staging.example.com/things/new",
+        since: new Date(PANE_NOW - 5_000).toISOString(),
+        area: "forms",
+      },
+    ],
+    coverage: { routesVisited: 4, routesTotal: 9, elementsExercised: 12 },
+    findings: [finding],
+  });
+  return paneData(paneInput({ sessions: [paneSession({ phase: "running", tool: "scout_type" })], findings: [finding], runStart: RUN_START, guided }));
+}
+
+test("the pane's data carries a guided check's progress, and none at all when no plan was built", () => {
+  const data = guidedPaneData();
+  const g = data.guided!;
+  assert.equal(g.title, "Checking staging.example.com");
+  assert.equal(g.now, "Typing into a field on /things/new");
+  assert.deepEqual(
+    g.areas.map((a) => [a.area, a.state]),
+    [
+      ["forms", "in-progress"],
+      ["broken-pages", "waiting"],
+    ],
+  );
+  assert.deepEqual(g.problems, { blocksUsers: 1, annoying: 0, cosmetic: 0, worthALook: 0 });
+  assert.equal(g.latest[0].id, "0a1b2c3d4e");
+  assert.ok(g.saved?.basis.startsWith("4 pages and 12 controls"), "the figure travels with its basis");
+  assert.deepEqual(g.time, { usedMs: 6 * 60_000, budgetMs: 20 * 60_000 });
+  // The text a client with no pane gets carries the same, the figure with its basis.
+  const text = paneText(data);
+  assert.ok(text.includes("Checking staging.example.com (6m of 20m). Now: Typing into a field on /things/new"), text);
+  assert.ok(text.includes("  [..] Forms - "), text);
+  assert.ok(text.includes("  Problems so far: 1 block users, 0 annoying, 0 cosmetic. Pages: 4 of 9."), text);
+  assert.ok(text.includes(`  ${g.saved!.sentence}`), text);
+  // The data is plain JSON the pane can read, with no other token than the live view's.
+  assert.equal(JSON.stringify(data).split("tok_abcdefghijklmnop").length - 1, 1);
+  // No guided plan: no field, so a run without one returns exactly what it did before.
+  assert.ok(!("guided" in paneData(paneInput())));
+  // The mod's pane still draws the data with a guided check in it.
+  assert.ok(drawnText(mod.renderPane(els, mod.readResult(serverResult(data), PANE_NOW))).length > 0);
+});
+
+test("the pane's page draws a guided check: its section, cards and buttons are built as text, and buttons call only three tools", () => {
+  const page = statusPanePage("9.9.9");
+  const script = page.slice(page.indexOf("<script>") + "<script>".length, page.lastIndexOf("</script>"));
+  assert.doesNotThrow(() => new Function(script));
+  assert.match(page, /<section id="guided"[^>]*data-testid="status-pane-guided"[^>]*hidden>/);
+  assert.ok(script.includes('var DIRECT_TOOLS = ["scout_cards", "scout_feedback", "scout_guided_confirm"];'));
+  // A prompt button goes to the host as a message only where it says it takes one, else the words are shown.
+  assert.ok(script.includes("hostCapabilities.message") && script.includes('request("ui/message"'));
+  // Every button the script makes has a test id.
+  const made = script.split('document.createElement("button")').length - 1;
+  assert.equal(made, 1, "one place makes buttons");
+  assert.ok(/b\.setAttribute\("data-testid", prefix \+ slug\(action\.label\)\)/.test(script));
+  assert.doesNotMatch(script, /innerHTML|insertAdjacentHTML|document\.write/);
 });
 
 test("the pane's page: its script parses, it loads nothing from outside, and every control has a test id", () => {

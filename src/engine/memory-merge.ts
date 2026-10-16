@@ -139,6 +139,14 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
       evidence: newer.evidence ?? older.evidence,
       regressedAt: newer.regressedAt ?? older.regressedAt,
     };
+    // The person's label is later knowledge of its own: the newer label wins, whichever side filed last.
+    const labels = [f.feedback, other.feedback].filter((x): x is NonNullable<typeof x> => !!x).sort((a, b) => (a.at < b.at ? 1 : -1));
+    if (labels[0]) merged.feedback = labels[0];
+    else delete merged.feedback;
+    // The area it was first found in stays with it.
+    const area = older.area ?? newer.area;
+    if (area) merged.area = area;
+    else delete merged.area;
     // A picture and its shot travel together, from whichever side has one, the newer first.
     const pictured = newer.picture ? newer : older.picture ? older : null;
     delete merged.picture;

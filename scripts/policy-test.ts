@@ -1845,6 +1845,31 @@ test("guided gate: while a guided plan is open, readPosts and trustedEmbeds are 
   assert.ok(!t.ok && /trustedEmbeds/.test(t.why), "safe-write with trusted embeds under an accepted plan");
 });
 
+test("guided gate: while a guided plan is open, the environment's read POSTs are ignored too, so observe stays observe", () => {
+  const REMOTE = "https://staging.example.com";
+  const ENV = "POST /api/search, POST /api/reports/query";
+  // With no plan built, the attach takes the environment's list, as it always has.
+  const none = guidedAttachVerdict(new GuidedPlans(), { mode: "observe", url: REMOTE });
+  assert.ok(none.ok);
+  assert.deepEqual(readPostsSetting(none.readPosts, ENV), ["POST /api/search", "POST /api/reports/query"]);
+  // Once one is built, the attach passes an empty list, which wins over SCENESCOUT_READ_POSTS, with the plan's id or without.
+  const plans = new GuidedPlans();
+  const look = guidedPlan({ address: REMOTE, areas: ["forms"], care: "look-only" });
+  const forms = guidedPlan({ address: "http://localhost:3000", areas: ["forms"], care: "may-submit-forms" });
+  assert.ok(look.ok && forms.ok);
+  const l = plans.add(look.plan);
+  const f = plans.add(forms.plan);
+  for (const [planId, mode, url] of [
+    [undefined, "observe", REMOTE],
+    [l.planId, "observe", REMOTE],
+    [f.planId, "read-only", "http://localhost:3000"],
+  ] as const) {
+    const r = guidedAttachVerdict(plans, { planId, mode, url });
+    assert.ok(r.ok, `${planId} ${mode}`);
+    assert.deepEqual(readPostsSetting(r.readPosts, ENV), [], `${planId} ${mode}: the environment's list is not read`);
+  }
+});
+
 test("guided gate: an accepted plan is spent when no session carries it any more, so a later check asks again", () => {
   const REMOTE = "https://staging.example.com";
   const plans = new GuidedPlans();

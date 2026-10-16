@@ -19,7 +19,10 @@ import {
   PACE_MAX_MS,
   QUIET_MS,
   SETTLE_CAP_MS,
+  SETTLE_TICK_MS,
+  settlePage,
   shouldKeepWaiting,
+  stableUrlOf,
   URL_CAP_MS,
   URL_QUIET_MS,
 } from "../src/engine/settle.ts";
@@ -196,4 +199,101 @@ test("a redirect chain commits once, keeping the final hop", () => {
   assert.equal(t.count, 1);
   t.ended("hop-2");
   assert.equal(t.count, 0);
+});
+
+// ---- the waits themselves, on a stand-in page (settlePage, stableUrlOf) ----
+
+/** A stand-in for the page a wait reads: its URL, whether it is closed, and how often the wait looked again. */
+function standInPage(url = "http://app.test/a") {
+  const page = {
+    href: url,
+    closed: false,
+    loadWaits: 0,
+    ticks: 0,
+    onTick: () => {},
+    async waitForLoadState(_state: "domcontentloaded") {
+      page.loadWaits += 1;
+    },
+    async waitForTimeout(ms: number) {
+      page.ticks += 1;
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      page.onTick();
+    },
+    url: () => page.href,
+    isClosed: () => page.closed,
+  };
+  return page;
+}
+
+test("settlePage waits for the document, then returns at once on a quiet page", async () => {
+  const page = standInPage();
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 0, current: () => page });
+  assert.equal(page.loadWaits, 1);
+  // The quiet window runs from the action as well (QUIET_MS), so a few ticks, not many.
+  assert.ok(page.ticks <= QUIET_MS / SETTLE_TICK_MS + 2, `${page.ticks} ticks`);
+});
+
+test("settlePage waits while a request is in flight, and stops when it lands", async () => {
+  const page = standInPage();
+  let inFlight = 1;
+  page.onTick = () => {
+    if (page.ticks === 10) inFlight = 0;
+  };
+  await settlePage(page, { inFlight: () => inFlight, lastRequestStart: () => 0, paceMs: () => 0, current: () => page });
+  assert.ok(page.ticks >= 10, `${page.ticks} ticks`);
+});
+
+test("settlePage stops waiting once the session has moved to another page", async () => {
+  const page = standInPage();
+  const other = standInPage();
+  // Something is always in flight, so only the page changing ends the wait before the cap.
+  const started = Date.now();
+  await settlePage(page, { inFlight: () => 1, lastRequestStart: () => Date.now(), paceMs: () => 0, current: () => other });
+  assert.equal(page.ticks, 1);
+  assert.ok(Date.now() - started < SETTLE_CAP_MS / 2);
+});
+
+test("settlePage holds a page for the pace the session asked for", async () => {
+  const page = standInPage();
+  const started = Date.now();
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 300, current: () => page });
+  assert.ok(Date.now() - started >= 300);
+});
+
+test("settlePage reads the page even when its document wait fails", async () => {
+  const page = standInPage();
+  page.waitForLoadState = async () => {
+    throw new Error("Target page, context or browser has been closed");
+  };
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 0, current: () => page });
+  assert.ok(page.ticks >= 1);
+});
+
+test("stableUrlOf answers empty with no page, and a closed page's URL at once", async () => {
+  assert.equal(await stableUrlOf(() => null), "");
+  const page = standInPage("http://app.test/closed");
+  page.closed = true;
+  assert.equal(await stableUrlOf(() => page), "http://app.test/closed");
+  assert.equal(page.ticks, 0);
+});
+
+test("stableUrlOf follows a late redirect and returns where it settled", async () => {
+  const page = standInPage("http://app.test/private");
+  page.onTick = () => {
+    if (page.ticks === 5) page.href = "http://app.test/login";
+  };
+  assert.equal(await stableUrlOf(() => page), "http://app.test/login");
+  // It kept watching for the quiet window after the change.
+  assert.ok(page.ticks * SETTLE_TICK_MS >= URL_QUIET_MS, `${page.ticks} ticks`);
+});
+
+test("stableUrlOf returns the URL so far once the session leaves the page", async () => {
+  const page = standInPage("http://app.test/a");
+  let current: typeof page | null = page;
+  page.onTick = () => {
+    page.href = "http://app.test/b";
+    current = null;
+  };
+  assert.equal(await stableUrlOf(() => current), "http://app.test/a");
+  assert.equal(page.ticks, 1);
 });

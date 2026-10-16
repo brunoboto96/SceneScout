@@ -54,6 +54,7 @@ import {
   MAX_JUDGED_MERGES,
   judgedMergesOf,
   MAX_SEEN_ON,
+  MAX_FEEDBACK_REASON,
   type DuplicateJudge,
   type Finding,
   type FindingInput,
@@ -390,6 +391,74 @@ test("a finding's picture is kept, and survives a merge with another process's c
   assert.equal(typeof kept?.picture, "string");
   assert.deepEqual(kept?.pictureShot, pictureShot);
   assert.equal(store.setPicture("no-such-id", picture, pictureShot), null);
+});
+
+test("a finding the person labels not a bug is kept, keeps its id and status, and a later filing of it still merges into it", async () => {
+  const store = freshStore();
+  const input = { ...base, title: "Saving a thing answers 500", detail: "d", evidence: "POST /api/things 500" };
+  const [filed] = store.addFinding(input);
+  const labelled = store.setFeedback(
+    filed.id,
+    "not-a-bug",
+    "  The 500 is the staging copy's mail server, card 4111 1111 1111 1111, token=abc123def456ghi789  ",
+  );
+  assert.equal(labelled?.feedback?.verdict, "not-a-bug");
+  // The reason is kept short and redacted, like any text stored on a finding.
+  assert.ok(labelled?.feedback?.reason && !labelled.feedback.reason.includes("abc123def456ghi789"), labelled?.feedback?.reason);
+  assert.ok(!labelled.feedback.reason.includes("4111 1111 1111 1111"), labelled.feedback.reason);
+  assert.equal(store.findings.length, 1, "nothing is deleted");
+  assert.equal(store.findings[0].status, undefined, "nor resolved");
+  // The same problem filed again, by the rule and through the judge's path, is the labelled finding, not a new one.
+  const [again, isNew] = store.addFinding({ ...input, title: "Saving a thing fails with a server error" });
+  assert.equal(isNew, false);
+  assert.equal(again.id, filed.id);
+  const viaFile = await store.fileFinding({ ...input, detail: "seen again" });
+  assert.equal(viaFile.isNew, false);
+  assert.equal(viaFile.finding.id, filed.id);
+  assert.equal(store.findings.length, 1);
+  assert.equal(store.findings[0].feedback?.verdict, "not-a-bug", "the label survives the merge");
+  // Read back from disk, the label is there.
+  store.flush();
+  assert.equal(openStore(path.dirname(store.dir)).findings[0].feedback?.verdict, "not-a-bug");
+  // A newer label replaces it; an unknown id is null; an empty reason is left out.
+  assert.deepEqual(Object.keys(store.setFeedback(filed.id, "confirmed", "   ")!.feedback!).sort(), ["at", "verdict"]);
+  assert.equal(store.setFeedback("no-such-id", "not-a-bug"), null);
+  assert.ok(store.setFeedback(filed.id, "not-a-bug", "x".repeat(1000))!.feedback!.reason!.length <= MAX_FEEDBACK_REASON);
+});
+
+test("merging two processes' copies of a finding keeps the newer label and the first area, whichever side was filed last", () => {
+  const finding = {
+    id: "x",
+    severity: "low" as const,
+    category: "c",
+    title: "t",
+    detail: "d",
+    url: "u",
+    state: "/a#1",
+    repro: [],
+    foundAt: "2026-01-01",
+    runs: 1,
+  };
+  const label = { verdict: "not-a-bug" as const, at: "2026-01-03T00:00:00Z" };
+  // The other process re-found it later (its copy is newer) with no label: the label is not lost.
+  const mine: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [{ ...finding, feedback: label, area: "forms" }] };
+  const theirs: Parameters<typeof mergeMemory>[0] = { version: 1, states: {}, findings: [{ ...finding, foundAt: "2026-01-02" }] };
+  for (const merged of [mergeMemory(mine, theirs), mergeMemory(theirs, mine)]) {
+    assert.deepEqual(merged.findings[0].feedback, label);
+    assert.equal(merged.findings[0].area, "forms");
+  }
+  // Two labels: the one given last wins.
+  const later = { verdict: "confirmed" as const, at: "2026-01-04T00:00:00Z" };
+  const both = mergeMemory(mine, { ...theirs, findings: [{ ...finding, feedback: later }] }).findings[0];
+  assert.deepEqual(both.feedback, later);
+  const neither = mergeMemory({ ...mine, findings: [finding] }, theirs).findings[0];
+  assert.ok(!("feedback" in neither) && !("area" in neither), "neither has one: no field");
+  // setArea records the first area only.
+  const store = freshStore();
+  const [filed] = store.addFinding({ ...base, title: "An area is kept", detail: "d" });
+  assert.equal(store.setArea(filed.id, "forms")?.area, "forms");
+  assert.equal(store.setArea(filed.id, "phone")?.area, "forms");
+  assert.equal(store.setArea("no-such-id", "forms"), null);
 });
 
 test("dedup: two bugs on one endpoint that answered 2xx stay two findings", () => {

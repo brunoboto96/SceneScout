@@ -30,7 +30,7 @@ import { CONFIRM_SAYS } from "../engine/guided-words.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL } from "../playbook.js";
 import { livePrompt, loginPrompt, LOGIN_PROMPT, LIVE_PROMPT, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../prompts.js";
 
-import { PACKAGE_ROOT, server, errorText, guidedPlans, operatorPolicy } from "../server-context.js";
+import { PACKAGE_ROOT, server, errorText, guidedPlans, guidedRuns, operatorPolicy } from "../server-context.js";
 
 // The guided start as one form, where the client can show one (MCP
 // elicitation, form mode); otherwise, or when the person declines or closes it,
@@ -169,6 +169,7 @@ export function registerGuideTools(): void {
         const reply = intakeFromForm(outcome as FormOutcome, maxMode);
         if (reply.kind !== "choices") return { content: [{ type: "text" as const, text: intakeReplyText(reply) }] };
         const plan = guidedPlans.add(buildGuidedPlan(reply.choices, undefined, { maxMode }));
+        guidedRuns.focus(plan.planId);
         // A care level that needs the person's confirmation asks for it now, in a second form, so the person answers both in one go.
         const confirmed = plan.confirm ? await confirmWithPerson(plan.planId, extra) : null;
         const now = guidedPlans.get(plan.planId)!;
@@ -239,6 +240,7 @@ export function registerGuideTools(): void {
           const built = guidedPlan(choices, undefined, { maxMode: operatorPolicy.policy.maxMode });
           if (!built.ok) throw new Error(built.error);
           plan = guidedPlans.add(built.plan);
+          guidedRuns.focus(plan.planId);
         }
         return { content: [{ type: "text" as const, text: guidedPlanText(plan) }], structuredContent: { ...plan } };
       } catch (err) {

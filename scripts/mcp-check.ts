@@ -59,6 +59,8 @@ const EXPECTED_TOOLS = [
   "scout_criterion",
   "scout_status",
   "scout_status_poll",
+  "scout_cards",
+  "scout_feedback",
 ];
 
 type ToolText = { content: Array<{ type: string; text?: string }> };
@@ -1284,6 +1286,128 @@ async function guidedCheck(): Promise<void> {
 }
 
 /**
+ * A guided check's progress and its cards over the wire: a Look only plan
+ * attached with, an area set, a finding filed there; the pane's poll carries
+ * the progress; scout_cards shows the card with its picture inline; a
+ * not-a-bug label from scout_feedback keeps the finding, leaves it out of the
+ * default cards and the progress, and is listed as a candidate by export.
+ */
+async function guidedCardsCheck(): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-cards-"));
+  type Result = {
+    content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+    structuredContent?: Record<string, unknown>;
+    isError?: boolean;
+  };
+  try {
+    await withFormClient(undefined, undefined, async (client) => {
+      const call = async (name: string, args: Record<string, unknown>): Promise<Result> => (await client.callTool({ name, arguments: args })) as Result;
+      const { tools } = await client.listTools();
+      for (const [name, readOnly] of [
+        ["scout_cards", true],
+        ["scout_feedback", false],
+      ] as const) {
+        const t = tools.find((x) => x.name === name);
+        if (t?.annotations?.readOnlyHint !== readOnly || t.annotations.destructiveHint !== false || !t.outputSchema)
+          fail(`${name} is not annotated readOnlyHint ${readOnly}, destructiveHint false, with an outputSchema: ${JSON.stringify(t?.annotations)}`);
+      }
+      const before = await call("scout_cards", {});
+      if (!before.isError || !/attach first/.test(textOf(before))) fail(`scout_cards before any attach did not say to attach first: ${textOf(before)}`);
+
+      const built = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms", "broken-pages"] } });
+      const plan = built.structuredContent as { planId: string; mode: string };
+      if (built.isError || plan.mode !== "observe") fail(`a Look only plan was not built: ${textOf(built)}`);
+      type Poll = {
+        guided?: {
+          planId: string;
+          phase: string;
+          now: string;
+          areas: Array<{ area: string; state: string }>;
+          latest: Array<{ id: string }>;
+          problems: { blocksUsers: number };
+          saved: { basis: string } | null;
+        };
+      };
+      const poll = async (): Promise<NonNullable<Poll["guided"]>> => {
+        const g = ((await call(STATUS_POLL_TOOL, {})).structuredContent as Poll | undefined)?.guided;
+        if (!g) fail("the pane's poll carries no guided progress while a guided plan is open");
+        return g;
+      };
+      if ((await poll()).phase !== "starting") fail("a plan built but not attached with is not shown as starting");
+
+      const attached = await call("scout_attach", {
+        url: fixture.baseUrl,
+        projectPath: projectDir,
+        session: "g",
+        mode: "observe",
+        planId: plan.planId,
+        objective: "guided",
+      });
+      if (attached.isError) fail(`the attach with a Look only plan was refused: ${textOf(attached)}`);
+      await call("scout_session", { name: "g", area: "forms" });
+      const filed = await call("scout_finding", {
+        session: "g",
+        task: "Check the form",
+        severity: "high",
+        category: "ux-confusing",
+        title: "The send button gives no sign it worked",
+        detail: "Pressing it changes nothing on the page.",
+        evidence: "guided cards check",
+      });
+      const id = /\(id ([0-9a-f]{10})\)/.exec(textOf(filed))?.[1];
+      if (!id) fail(`scout_finding gave no id: ${textOf(filed)}`);
+      const running = await poll();
+      if (
+        running.planId !== plan.planId ||
+        running.areas.find((a) => a.area === "forms")?.state !== "in-progress" ||
+        running.latest[0]?.id !== id ||
+        running.problems.blocksUsers !== 1 ||
+        !running.now
+      )
+        fail(`the pane's poll does not show the check's progress: ${JSON.stringify(running).slice(0, 600)}`);
+      const statusText = textOf(await call(STATUS_TOOL, {}));
+      if (!statusText.includes(`Checking ${new URL(fixture.baseUrl).host}`)) fail(`${STATUS_TOOL}'s text carries no guided progress:\n${statusText}`);
+
+      const cards = await call("scout_cards", { filter: { area: ["forms"] }, pictures: "inline" });
+      const got = cards.structuredContent as { cards: Array<{ id: string; area?: string; picture: unknown }>; total: number };
+      if (cards.isError || got.total !== 1 || got.cards[0].id !== id || got.cards[0].area !== "forms")
+        fail(`scout_cards did not show the card found in the forms area: ${JSON.stringify(cards).slice(0, 600)}`);
+      if (!textOf(cards).includes(`BLOCKS USERS - The send button gives no sign it worked`)) fail(`scout_cards' text is not the card: ${textOf(cards)}`);
+      if (got.cards[0].picture && !cards.content.some((c) => c.type === "image" && c.mimeType === "image/png"))
+        fail("scout_cards with pictures inline returned no image for a card that has a picture");
+
+      const labelled = await call("scout_feedback", { id, verdict: "not-a-bug", reason: "The page reloads on purpose" });
+      if (labelled.isError || (labelled.structuredContent as { verdict?: string }).verdict !== "not-a-bug")
+        fail(`scout_feedback did not label the finding: ${textOf(labelled)}`);
+      const after = (await call("scout_cards", {})).structuredContent as { total: number; notABug: number };
+      if (after.total !== 0 || after.notABug !== 1) fail(`a not-a-bug finding is not left out of the default cards and counted: ${JSON.stringify(after)}`);
+      const kept = (await call("scout_cards", { ids: [id] })).structuredContent as { cards: Array<{ feedback?: { verdict: string } }> };
+      if (kept.cards[0]?.feedback?.verdict !== "not-a-bug") fail("the labelled finding is not kept with its label");
+      if ((await poll()).problems.blocksUsers !== 0) fail("the progress still counts a finding the person marked not a bug");
+      const exported = await call("scout_feedback", { export: true });
+      const candidates = (exported.structuredContent as { candidates: Array<{ findingId: string; suggests: string }> }).candidates;
+      if (
+        candidates.length !== 1 ||
+        candidates[0].findingId !== id ||
+        candidates[0].suggests !== "non-defect" ||
+        !/candidates for a maintainer/.test(textOf(exported))
+      )
+        fail(`scout_feedback export did not list the label as a candidate: ${textOf(exported)}`);
+      const unknown = await call("scout_feedback", { id: "ffffffffff", verdict: "confirmed" });
+      if (!unknown.isError) fail("scout_feedback labelled a finding that does not exist");
+      await call("scout_close", { all: true });
+    });
+  } finally {
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+  console.log(
+    "✓ a guided check's progress reaches the pane's poll and the status text, scout_cards shows its card with the area and picture, and a not-a-bug label keeps the finding, leaves it out of the cards and the count, and is exported as a candidate",
+  );
+}
+
+/**
  * A call the watchdog gave up on keeps running in the background. Once
  * scout_close has answered it must not write into the project any more: the
  * folder may be removed, or another session attached to it. The watchdog is
@@ -1757,6 +1881,7 @@ async function main(): Promise<void> {
   await intakeCheck();
   await guidedCheck();
   await configCheck();
+  await guidedCardsCheck();
   await abandonedCallCheck();
   ticketDirsStartupCheck();
   console.log("\nMCP CHECK PASSED");
