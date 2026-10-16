@@ -188,6 +188,17 @@ export function isNotABug(f: Pick<Finding, "feedback">): boolean {
   return f.feedback?.verdict === "not-a-bug";
 }
 
+/**
+ * A finding's label when it is one this engine knows, else undefined. Memory
+ * is merged between people (memory-merge.ts), so a label written by a newer
+ * version, or by hand, is read as no label rather than passed on as it is.
+ */
+export function knownFeedback(f: Pick<Finding, "feedback">): FindingFeedback | undefined {
+  const fb = f.feedback as Partial<FindingFeedback> | undefined;
+  if (!fb || !(FEEDBACK_VERDICTS as readonly unknown[]).includes(fb.verdict) || typeof fb.at !== "string") return undefined;
+  return { verdict: fb.verdict!, ...(typeof fb.reason === "string" && fb.reason ? { reason: fb.reason } : {}), at: fb.at };
+}
+
 /** Most other routes one finding records it was seen on; the oldest go first. */
 export const MAX_SEEN_ON = 20;
 

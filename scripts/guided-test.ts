@@ -11,6 +11,7 @@
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -84,6 +85,8 @@ import {
   type ProgressSession,
 } from "../src/engine/progress.ts";
 import { settingsFromAnswers } from "../src/intake.ts";
+import { encodePng } from "../src/engine/png.ts";
+import { readInlinePicture } from "../src/engine/progress.ts";
 import { allowsWrite } from "../src/engine/policy.ts";
 import { isReadMethod } from "../src/engine/unload.ts";
 import type { Finding } from "../src/engine/memory.ts";
@@ -914,6 +917,19 @@ test("progress now: the session's own task first, else a fixed sentence by tool 
   for (const s of [...Object.values(PHASE_NOW), AREA_NOT_REACHED, STUCK_SENTENCE]) assert.doesNotMatch(s, /scout_|_/);
 });
 
+test("progress now: an email, phone number or card number in the task or the page's path is redacted before it is shown", () => {
+  // The task is the agent's own words and often quotes what it typed; the path is the app's, and can name a person.
+  const person = ["jo.sample", "contoso-mail.net"].join("@");
+  const task = nowSentence("scout_type", "http://app.test/x", `Sign up as ${person}, phone +1 415 555 0134, card 4111 1111 1111 1111`);
+  assert.doesNotMatch(task, /jo\.sample|555 0134|4111 1111/, task);
+  assert.match(task, /^Sign up as \[email redacted\]/);
+  assert.equal(nowSentence("scout_navigate", `http://app.test/users/${person}/profile`), "Opening /users/[email redacted]/profile");
+  // Encoded in the path, it is still an address.
+  assert.doesNotMatch(nowSentence("scout_navigate", `http://app.test/users/${person.replace("@", "%40")}`), /jo\.sample/);
+  // A path with no one in it is left as it is.
+  assert.equal(nowSentence("scout_navigate", "http://app.test/orders/7"), "Opening /orders/7");
+});
+
 test("progress story: a new sentence is kept only when it differs from the last, and only the newest five", () => {
   let story: string[] = [];
   for (const s of ["a", "a", "b", "c", "c", "d", "e", "f", "g"]) story = pushStory(story, s);
@@ -1104,6 +1120,56 @@ test("cards: a card's text says what the card says, and a label shows on it", ()
   assert.equal(lines[lines.length - 1], `(id ${card.id}: say "check ${card.id} again", "explain ${card.id}" or "${card.id} is not a bug")`);
   assert.deepEqual(plainCard(finding({ area: "forms" })).area, "forms", "the area it was found in is on its card");
 });
+
+test("cards: a label or an area the engine does not know, read from a project's memory, is left off the card rather than breaking every card", () => {
+  // memory.json is merged between people (memory-merge.ts), so a newer version's label or a hand edit can reach an older reader.
+  // scout_cards' output schema holds both to their known values, and one unknown value would refuse the whole call.
+  const odd = finding({
+    id: "e000000001",
+    feedback: { verdict: "duplicate", at: "2026-01-01T11:00:00.000Z" } as unknown as Finding["feedback"],
+    area: "nowhere" as unknown as Finding["area"],
+  });
+  const card = plainCard(odd);
+  assert.equal("feedback" in card, false);
+  assert.equal("area" in card, false);
+  assert.equal(plainCard(finding({ feedback: { verdict: "confirmed", at: 7 } as unknown as Finding["feedback"] })).feedback, undefined, "a label with no time");
+  assert.deepEqual(feedbackCandidates([odd]), []);
+  assert.deepEqual(
+    selectCards([odd]).cards.map((c) => c.id),
+    ["e000000001"],
+    "it is shown as a card with no label",
+  );
+});
+
+test(
+  "cards: an inline picture is read only from inside .scenescout/, never through a link out of it, and only a PNG within the size caps",
+  { skip: process.platform === "win32" },
+  () => {
+    const top = fs.mkdtempSync(path.join(os.tmpdir(), "guided-pictures-"));
+    try {
+      const dir = path.join(top, ".scenescout");
+      fs.mkdirSync(path.join(dir, "recordings"), { recursive: true });
+      const png = encodePng({ width: 4, height: 2, data: new Uint8Array(4 * 2 * 4).fill(200) });
+      fs.writeFileSync(path.join(dir, "recordings", "inside.png"), png);
+      // A picture just outside the folder, and links to it from inside.
+      fs.writeFileSync(path.join(top, "outside.png"), png);
+      fs.symlinkSync(path.join(top, "outside.png"), path.join(dir, "recordings", "link.png"));
+      fs.symlinkSync(top, path.join(dir, "up"));
+      fs.writeFileSync(path.join(dir, "recordings", "notes.png"), "not a picture");
+      const got = readInlinePicture(dir, "recordings/inside.png");
+      assert.ok("image" in got && got.image.mimeType === "image/png" && got.image.data.length > 0, JSON.stringify(got));
+      for (const file of ["recordings/link.png", "up/outside.png", "../outside.png", path.join(top, "outside.png")]) {
+        const r = readInlinePicture(dir, file);
+        assert.ok("why" in r && /outside the project's folder/.test(r.why), `${file}: ${JSON.stringify(r).slice(0, 120)}`);
+      }
+      assert.match((readInlinePicture(dir, "recordings/notes.png") as { why: string }).why, /not a PNG/);
+      assert.match((readInlinePicture(dir, "recordings/missing.png") as { why: string }).why, /could not be read/);
+      assert.match((readInlinePicture(dir, "recordings/inside.png", { maxFileBytes: 10 }) as { why: string }).why, /too large/);
+    } finally {
+      fs.rmSync(top, { recursive: true, force: true });
+    }
+  },
+);
 
 test("feedback: every label is a candidate for a maintainer, newest first, and nothing more", () => {
   const all = [

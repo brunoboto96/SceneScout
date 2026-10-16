@@ -15,10 +15,13 @@
  * Every sentence comes from guided-words.ts; nothing here is written by a
  * model. The clicking-saved figure is for the person watching and is never put
  * in a report or a ticket. Nothing here imports Playwright or the MCP SDK, so
- * every rule is table-tested in guided-test (ADR 5).
+ * every rule is table-tested in guided-test (ADR 5), including which file an
+ * inline picture may be read from.
  *
  * Design: docs/design/non-technical-assistant.md, sections 2.3, 3.2 and 3.7.
  */
+import fs from "node:fs";
+import path from "node:path";
 import { type CheckArea, type GuidedPlan, MAX_PLANS, PHONE_SESSION } from "./guided.js";
 import {
   ACTION_LABEL,
@@ -34,8 +37,11 @@ import {
   savedBasis,
   savedSentence,
 } from "./guided-words.js";
-import { isNotABug, isWorthALook, type Finding } from "./memory.js";
+import { isNotABug, isWorthALook, knownFeedback, type Finding } from "./memory.js";
+import { decodePng, fitPicture, isPng } from "./png.js";
 import { IMPACT, plainCard, type CardImpact, type PlainCard } from "./plain.js";
+import { redactSecrets } from "./redact.js";
+import { redactPersonal } from "./sensitive.js";
 
 /** A check's phase. `downloading-browser` is in the design's list; the board cannot tell a first attach's download apart yet, so it is not produced. */
 export type Phase =
@@ -176,11 +182,16 @@ export function pageOf(url: string): string {
   }
 }
 
-/** The narrator's line for a session: the task it stated when it has one, else the fixed sentence for its tool on its page. */
+/**
+ * The narrator's line for a session: the task it stated when it has one, else
+ * the fixed sentence for its tool on its page. Both can name a person (a task
+ * quoting what was typed, a path like /users/<email>), so an email address,
+ * phone number or card number in either is redacted, as a finding's text is.
+ */
 export function nowSentence(tool: string, url: string, task?: string): string {
-  if (task?.trim()) return task.trim();
+  if (task?.trim()) return redactPersonal(redactSecrets(task.trim()));
   const line = Object.prototype.hasOwnProperty.call(NOW_SENTENCE, tool) ? NOW_SENTENCE[tool] : NOW_OTHER;
-  return line(pageOf(url));
+  return line(redactPersonal(pageOf(url)));
 }
 
 /** One of the plan's sessions as the progress reads it, from the status board. */
@@ -422,6 +433,43 @@ export const MAX_INLINE_PICTURES = 10;
 /** The longer side an inline picture is shrunk to, in pixels. */
 export const INLINE_PICTURE_SIDE = 1024;
 
+/** The most bytes a picture file is read for inline use; a larger one is left as its file. */
+export const MAX_PICTURE_FILE_BYTES = 8 * 1024 * 1024;
+/** The most bytes one inline picture may take once shrunk. */
+export const MAX_INLINE_PICTURE_BYTES = 400 * 1024;
+
+/**
+ * A card's picture as an image block, for scout_cards {pictures: "inline"}:
+ * read from inside `dir` (the project's .scenescout/) only. An absolute path,
+ * a path that climbs out, and a link anywhere along the way that leads out of
+ * the folder are all refused, since the folder and the path are compared once
+ * every link is resolved. Only a PNG within the size caps is read, shrunk to
+ * at most INLINE_PICTURE_SIDE on its longer side. Otherwise, why not.
+ */
+export function readInlinePicture(
+  dir: string,
+  file: string,
+  caps: { maxFileBytes?: number; maxInlineBytes?: number } = {},
+): { image: { type: "image"; data: string; mimeType: "image/png" } } | { why: string } {
+  const outside = { why: "its picture is outside the project's folder" };
+  try {
+    if (path.isAbsolute(file)) return outside;
+    const root = fs.realpathSync(dir);
+    const full = path.resolve(root, file);
+    if (!full.startsWith(root + path.sep)) return outside;
+    const real = fs.realpathSync(full);
+    if (!real.startsWith(root + path.sep)) return outside;
+    if (fs.statSync(real).size > (caps.maxFileBytes ?? MAX_PICTURE_FILE_BYTES)) return { why: "its picture is too large to show here" };
+    const bytes = fs.readFileSync(real);
+    if (!isPng(bytes)) return { why: "its picture is not a PNG" };
+    const fitted = fitPicture(decodePng(bytes), INLINE_PICTURE_SIDE, caps.maxInlineBytes ?? MAX_INLINE_PICTURE_BYTES);
+    if (!fitted) return { why: "its picture does not shrink to a readable size" };
+    return { image: { type: "image", data: fitted.png.toString("base64"), mimeType: "image/png" } };
+  } catch (err) {
+    return { why: `its picture could not be read (${err instanceof Error ? err.message : String(err)})` };
+  }
+}
+
 export const CARD_STATUSES = ["open", "fixed", "still-there", "changed"] as const;
 export const CARD_IMPACTS = [IMPACT.high, IMPACT.medium, IMPACT.low, "Worth a look"] as const satisfies readonly CardImpact[];
 /** The person's label, or "none" for a card without one. */
@@ -497,13 +545,14 @@ export interface FeedbackCandidate {
 /** Every label in the project, newest first, as candidates for a maintainer to review. */
 export function feedbackCandidates(findings: readonly Finding[]): FeedbackCandidate[] {
   return findings
-    .filter((f): f is Finding & { feedback: NonNullable<Finding["feedback"]> } => !!f.feedback)
-    .map((f) => ({
+    .map((f) => ({ f, feedback: knownFeedback(f) }))
+    .filter((x): x is { f: Finding; feedback: NonNullable<Finding["feedback"]> } => !!x.feedback)
+    .map(({ f, feedback }) => ({
       findingId: f.id,
-      verdict: f.feedback.verdict,
-      ...(f.feedback.reason ? { reason: f.feedback.reason } : {}),
-      at: f.feedback.at,
-      suggests: f.feedback.verdict === "not-a-bug" ? ("non-defect" as const) : ("defect" as const),
+      verdict: feedback.verdict,
+      ...(feedback.reason ? { reason: feedback.reason } : {}),
+      at: feedback.at,
+      suggests: feedback.verdict === "not-a-bug" ? ("non-defect" as const) : ("defect" as const),
       title: f.title,
       category: f.category,
       severity: f.severity,

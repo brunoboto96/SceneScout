@@ -9,8 +9,8 @@
  * pure string work, so the wording and the step translation are table-tested.
  */
 import { describePicture, readFindingPicture } from "./capture.js";
-import type { CheckArea } from "./guided.js";
-import { isWorthALook, seenOnOf, type Finding, type FindingCategory } from "./memory.js";
+import { CHECK_AREAS, type CheckArea } from "./guided.js";
+import { isWorthALook, knownFeedback, seenOnOf, type Finding, type FindingCategory } from "./memory.js";
 import type { OracleKind, OracleViolation } from "./oracles.js";
 
 /** Which parts a report carries: the plain view and the technical one ("both"), or one of them. */
@@ -346,6 +346,9 @@ function cardPicture(f: Finding, lastFrame: string | undefined): PlainCard["pict
 /** One finding as a card. `lastFrame` is the last recorded frame before it was filed, on a recorded run. */
 export function plainCard(f: Finding, opts: { lastFrame?: string; area?: CheckArea } = {}): PlainCard {
   const words = plainWording(f.category);
+  // The area and the label are read from memory, which may hold a value this version does not know: such a one is left off.
+  const area = opts.area ?? ((CHECK_AREAS as readonly unknown[]).includes(f.area) ? f.area : undefined);
+  const feedback = knownFeedback(f);
   return {
     id: f.id,
     impact: isWorthALook(f) ? "Worth a look" : IMPACT[f.severity],
@@ -358,10 +361,10 @@ export function plainCard(f: Finding, opts: { lastFrame?: string; area?: CheckAr
     // One cause in a shared part of the app is seen on every page that shows it.
     alsoOn: seenOnOf(f),
     steps: plainSteps(f.repro),
-    ...((opts.area ?? f.area) ? { area: opts.area ?? f.area } : {}),
+    ...(area ? { area } : {}),
     picture: cardPicture(f, opts.lastFrame),
     status: cardStatus(f),
-    ...(f.feedback ? { feedback: { ...f.feedback } } : {}),
+    ...(feedback ? { feedback } : {}),
     technical: { category: f.category, ...(f.evidence ? { evidence: f.evidence } : {}), route: f.state },
     firstSeen: f.foundAt,
     timesSeen: f.runs,

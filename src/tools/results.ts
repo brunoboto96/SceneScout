@@ -32,20 +32,18 @@ import {
 import { CANDIDATES_NOTE, FEEDBACK_SAYS } from "../engine/guided-words.js";
 import { CHECK_AREAS } from "../engine/guided.js";
 import { FEEDBACK_VERDICTS, MAX_FEEDBACK_REASON, type FeedbackVerdict } from "../engine/memory.js";
-import { decodePng, fitPicture, isPng } from "../engine/png.js";
 import {
   CARD_FEEDBACK,
   CARD_IMPACTS,
   CARD_STATUSES,
   cardText,
   feedbackCandidates,
-  INLINE_PICTURE_SIDE,
   MAX_CARDS,
   MAX_INLINE_PICTURES,
+  readInlinePicture,
   selectCards,
   type CardFilter,
 } from "../engine/progress.js";
-import type { PlainCard } from "../engine/plain.js";
 
 import {
   engines,
@@ -112,34 +110,6 @@ const FEEDBACK_OUTPUT = {
     )
     .optional(),
 };
-
-/** The most bytes a picture file is read for inline use; a larger one is left as its file. */
-const MAX_PICTURE_FILE_BYTES = 8 * 1024 * 1024;
-/** The most bytes one inline picture may take once shrunk. */
-const MAX_INLINE_PICTURE_BYTES = 400 * 1024;
-
-/**
- * A card's picture as an image block: read from inside .scenescout/ only (the
- * card's path is already a safe relative one, and a link out of the folder is
- * refused), shrunk to at most INLINE_PICTURE_SIDE on its longer side. Null with
- * a reason when it cannot be shown.
- */
-function inlinePicture(dir: string, card: PlainCard): { image: { type: "image"; data: string; mimeType: string } } | { why: string } {
-  if (!card.picture) return { why: "no picture" };
-  try {
-    const root = fs.realpathSync(dir);
-    const file = fs.realpathSync(path.join(dir, card.picture.file));
-    if (!file.startsWith(root + path.sep)) return { why: "its picture is outside the project's folder" };
-    if (fs.statSync(file).size > MAX_PICTURE_FILE_BYTES) return { why: "its picture is too large to show here" };
-    const bytes = fs.readFileSync(file);
-    if (!isPng(bytes)) return { why: "its picture is not a PNG" };
-    const fitted = fitPicture(decodePng(bytes), INLINE_PICTURE_SIDE, MAX_INLINE_PICTURE_BYTES);
-    if (!fitted) return { why: "its picture does not shrink to a readable size" };
-    return { image: { type: "image", data: fitted.png.toString("base64"), mimeType: "image/png" } };
-  } catch (err) {
-    return { why: `its picture could not be read (${err instanceof Error ? err.message : String(err)})` };
-  }
-}
 
 export function registerResultTools(): void {
   server.registerTool(
@@ -571,7 +541,7 @@ export function registerResultTools(): void {
             content.push({ type: "text", text: `(Picture not shown: this call already shows ${MAX_INLINE_PICTURES}. Ask for this card by its id to see it.)` });
             continue;
           }
-          const got = inlinePicture(memory.dir, card);
+          const got = readInlinePicture(memory.dir, card.picture.file);
           if ("image" in got) {
             content.push(got.image);
             shown += 1;
