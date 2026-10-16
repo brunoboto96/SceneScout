@@ -2407,3 +2407,69 @@ test("a valued option takes the next argument or its =value, and refuses a missi
   assert.deepEqual(readFlagValue(["--from", "-"], 0), { ok: true, name: "from", value: "-", last: 1 });
   assert.deepEqual(readFlagValue(["--limit=--other"], 0), { ok: true, name: "limit", value: "--other", last: 0 });
 });
+
+// The Playwright hold (#487) is a published range, not only this repository's lockfile: a caret
+// range lets `npx scenescout` and every global install resolve the release the hold is about.
+// The hold is recorded in AGENTS.md's "Pinned dependencies", and this test holds the two equal,
+// so lifting it means editing both.
+const HELD_PLAYWRIGHT_MINOR = "1.63";
+
+/** Whether a range this package might publish (`~X.Y.Z`, `^X.Y.Z`, `>=X.Y.Z <A.B.C` or `X.Y.Z`) admits `version`. */
+function rangeAdmits(range: string, version: string): boolean {
+  const parse = (v: string): number[] => {
+    const parts = v.split(".").map(Number);
+    assert.ok(parts.length === 3 && parts.every(Number.isInteger), `${v} is not a plain X.Y.Z version`);
+    return parts;
+  };
+  const cmp = (a: number[], b: number[]): number => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+  const v = parse(version);
+  const bounded = /^>=\s*(\S+)\s+<\s*(\S+)$/.exec(range.trim());
+  if (bounded) return cmp(v, parse(bounded[1])) >= 0 && cmp(v, parse(bounded[2])) < 0;
+  const op = /^[~^]/.exec(range)?.[0] ?? "";
+  const lo = parse(range.slice(op.length));
+  if (op === "") return cmp(v, lo) === 0;
+  const hi = op === "~" ? [lo[0], lo[1] + 1, 0] : lo[0] > 0 ? [lo[0] + 1, 0, 0] : lo[1] > 0 ? [0, lo[1] + 1, 0] : [0, 0, lo[2] + 1];
+  return cmp(v, lo) >= 0 && cmp(v, hi) < 0;
+}
+
+test("rangeAdmits reads the range shapes package.json may publish", () => {
+  assert.equal(rangeAdmits("^1.63.0", "1.64.1"), true, "a caret range admits the next minor");
+  assert.equal(rangeAdmits("~1.63.0", "1.63.9"), true);
+  assert.equal(rangeAdmits("~1.63.0", "1.64.0"), false, "a tilde range stops at the next minor");
+  assert.equal(rangeAdmits(">=1.63.0 <1.64.0", "1.63.2"), true);
+  assert.equal(rangeAdmits(">=1.63.0 <1.64.0", "1.64.0"), false);
+  assert.equal(rangeAdmits("1.63.0", "1.63.1"), false);
+  assert.equal(rangeAdmits("~1.63.1", "1.63.0"), false);
+  assert.equal(rangeAdmits("^0.2.1", "0.3.0"), false);
+  assert.equal(rangeAdmits("^0.0.3", "0.0.4"), false);
+});
+
+test("while AGENTS.md records the Playwright hold, the published range admits no 1.64", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { dependencies: Record<string, string> };
+  const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8")) as {
+    packages: Record<string, { version?: string; dependencies?: Record<string, string> }>;
+  };
+  const range = pkg.dependencies.playwright;
+  assert.ok(range, "playwright is a runtime dependency");
+  assert.equal(lock.packages[""]?.dependencies?.playwright, range, "the lockfile records the range package.json publishes");
+  const locked = lock.packages["node_modules/playwright"]?.version;
+  assert.ok(locked && rangeAdmits(range, locked), `the locked playwright ${locked} is inside ${range}`);
+
+  const agents = fs.readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8");
+  const hold = agents.split("\n").find((line) => line.startsWith(`- **playwright stays on ${HELD_PLAYWRIGHT_MINOR}.**`));
+  const next = `${HELD_PLAYWRIGHT_MINOR.split(".")[0]}.${Number(HELD_PLAYWRIGHT_MINOR.split(".")[1]) + 1}.0`;
+  if (hold) {
+    assert.equal(
+      rangeAdmits(range, next),
+      false,
+      `AGENTS.md holds Playwright on ${HELD_PLAYWRIGHT_MINOR}, so the published range ${range} must not admit ${next}`,
+    );
+    assert.ok(hold.includes(`\`${range}\``), `AGENTS.md's hold names the published range ${range}`);
+  } else {
+    // Lifted: the range moved past the held minor, whether it still admits it (^1.63.0) or starts later (~1.65.0).
+    const floor = /(\d+)\.(\d+)\.\d+/.exec(range);
+    const startsLater =
+      floor !== null && (Number(floor[1]) > Number(next.split(".")[0]) || (floor[1] === next.split(".")[0] && Number(floor[2]) >= Number(next.split(".")[1])));
+    assert.ok(rangeAdmits(range, next) || startsLater, `AGENTS.md no longer records the Playwright hold, so widen the range ${range} (or restore the line)`);
+  }
+});
