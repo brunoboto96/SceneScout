@@ -824,6 +824,58 @@ test("in observe, refresh, token, session, callback and authorize are sign-in on
   assert.equal(isAuthExempt("read-only", "POST", "/api/carts/9/session", false), true);
 });
 
+test("in observe, an auth path that belongs to a record or an integration is not a sign-in (#549)", () => {
+  const exempt = (p: string): boolean => isAuthExempt("observe", "POST", p, false);
+  // Each pair differs in the one fact that flips the verdict.
+  const pairs: Array<[signIn: string, write: string, why: string]> = [
+    ["/api/auth/refresh", "/api/devices/7/auth/refresh", "a device's auth credentials, not the session's"],
+    ["/api/v1/auth/token", "/api/apps/42/auth/token", "an app record's token"],
+    ["/api/auth/token", "/api/orgs/5f9c2b1e8a7d6c5b4a3f2e1d/auth/token", "a record whose id is hex"],
+    [
+      "/realms/12345/protocol/openid-connect/token",
+      "/api/projects/12345/openid-connect/token",
+      "a realm is an identity provider's scope; a project is a record",
+    ],
+    ["/auth/github/callback", "/api/sessions/7/callback", "a session record, not a provider"],
+    ["/auth/github/callback", "/auth/7/callback", "a provider has a name, not an id"],
+    ["/connect/token", "/api/stripe-connect/callback", "connect inside a longer segment names an integration"],
+    ["/auth/github/callback", "/api/connect/stripe/callback", "a provider callback under connect links an integration"],
+    ["/oauth/github/callback", "/api/tokens/github/callback", "tokens is not where a provider's callback lands"],
+    // A tenant's sign-in policy follows the tenant, and is not a record of it.
+    ["/tenant.example.com/B2C_1_signupsignin/oauth2/v2.0/token", "/api/projects/B2C_1_signupsignin/oauth2/v2.0/token", "a policy after a tenant"],
+    ["/tfp/tenant.example.com/B2C_1A_signin/oauth2/v2.0/token", "/api/devices/7/oauth2/v2.0/token", "a policy after tfp's tenant"],
+    [
+      "/72f988bf-86f1-41af-91ab-2d7cd011db47/B2C_1_signin/oauth2/v2.0/token",
+      "/devices/7/auth/refresh",
+      "a policy after a tenant's id; a record with no API prefix",
+    ],
+  ];
+  for (const [signIn, write, why] of pairs) {
+    assert.equal(exempt(signIn), true, `${signIn} should be let through`);
+    assert.equal(exempt(write), false, `${write} must be refused in observe: ${why}`);
+  }
+});
+
+test("in observe, sign-in steps that frameworks spell their own way are let through, and their look-alikes are not (#549)", () => {
+  const exempt = (p: string): boolean => isAuthExempt("observe", "POST", p, false);
+  const pairs: Array<[signIn: string, write: string]> = [
+    ["/users/sign_in", "/users/sign_up"], // underscores, as some frameworks spell it
+    ["/sign_in", "/users/password"], // a password reset request
+    ["/users/sign_out", "/users/confirmation"],
+    ["/api/v1/authn", "/api/v1/authn/recovery/password"], // a sign-in transaction, and a password reset in the same API
+    ["/u/login/password", "/account/password"], // the password step of signing in, and changing one
+    ["/login/password", "/api/users/7/password"],
+    ["/u/login/password", "/api/users/7/login/password"], // a user record's password
+  ];
+  for (const [signIn, write] of pairs) {
+    assert.equal(exempt(signIn), true, `${signIn} should be let through`);
+    assert.equal(exempt(write), false, `${write} must be refused in observe`);
+  }
+  // GraphQL carries every operation on one path, so a sign-in mutation is not told apart by its path: refused, and named in SCENESCOUT_AUTH_POSTS only knowingly.
+  assert.equal(exempt("/graphql"), false);
+  assert.equal(exempt("/api/graphql"), false);
+});
+
 test("an auth allowlist (SCENESCOUT_AUTH_POSTS) replaces the path rule: only the listed sign-in POSTs are exempt (#549)", () => {
   assert.equal(AUTH_POSTS_ENV, "SCENESCOUT_AUTH_POSTS");
   assert.equal(authPostsSetting(undefined), null, "unset: the path rule");
