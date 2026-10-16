@@ -371,6 +371,18 @@ test("the sign-in counts as lost from the verdict until a navigation lands signe
   assert.equal(t.lost, false, "a new attach ends it");
 });
 
+test("a session that was given no sign-in never counts its sign-in as lost, however often it lands on a login page", () => {
+  // An anonymous check of a site whose links lead to pages behind a sign-in
+  // bounces to the login page on each one. That is the site's access rule,
+  // not a sign-in that ran out, so it must not raise the "sign in again" screen.
+  for (const kind of ["none", "file"] as const) {
+    const t = new AuthLossTracker();
+    t.beginSession(kind, "someone");
+    for (let i = 0; i < AUTH_LOSS_STREAK + 2; i++) t.record({ requestedRoute: `/p${i}`, landedRoute: "/login", bounced: true, role: "someone" });
+    assert.equal(t.lost, kind !== "none", `a ${kind} session ${kind === "none" ? "has no sign-in to lose" : "has lost its sign-in"}`);
+  }
+});
+
 test("the notice is consumed exactly once", () => {
   // Left set, it prepended a stale "REDIRECTED: asked for X" onto the NEXT,
   // unrelated call — which is what happened whenever navigate() threw before

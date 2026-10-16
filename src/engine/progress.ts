@@ -128,7 +128,8 @@ export type Trouble = "address-unreachable" | "browser-download-failed" | "sign-
  * The engine's own wording of each failure, as it starts the message.
  * Each pattern is anchored to the start, so a page's text quoted later in a
  * message cannot raise a screen. The network codes are the browsers' own:
- * Chromium's net::ERR_*, Firefox's NS_ERROR_*, and WebKit's sentences.
+ * Chromium's net::ERR_*, Firefox's NS_ERROR_*, and WebKit's sentences
+ * (on macOS its own, on Linux its network library's).
  */
 const TROUBLE_PATTERNS: ReadonlyArray<[Trouble, RegExp]> = [
   // browser.ts, when the first page of an attach does not load.
@@ -136,7 +137,7 @@ const TROUBLE_PATTERNS: ReadonlyArray<[Trouble, RegExp]> = [
   // A later navigation to a site that stopped answering, as Playwright words it.
   [
     "address-unreachable",
-    /^(?:page\.goto|page\.reload|page\.goBack): (?:net::ERR_(?:NAME_NOT_RESOLVED|NAME_RESOLUTION_FAILED|CONNECTION_REFUSED|CONNECTION_RESET|CONNECTION_TIMED_OUT|ADDRESS_UNREACHABLE|INTERNET_DISCONNECTED)|NS_ERROR_(?:UNKNOWN_HOST|CONNECTION_REFUSED|NET_TIMEOUT|NET_RESET)|Could not connect to (?:the )?server|A server with the specified hostname could not be found)/,
+    /^(?:page\.goto|page\.reload|page\.goBack): (?:net::ERR_(?:NAME_NOT_RESOLVED|NAME_RESOLUTION_FAILED|CONNECTION_REFUSED|CONNECTION_RESET|CONNECTION_TIMED_OUT|ADDRESS_UNREACHABLE|INTERNET_DISCONNECTED)|NS_ERROR_(?:UNKNOWN_HOST|CONNECTION_REFUSED|NET_TIMEOUT|NET_RESET)|Could not connect(?: to (?:the )?server|: Connection refused)|A server with the specified hostname could not be found|Error resolving \S+: Name or service not known)/,
   ],
   // launch.ts, when the first attach's download of the test browser fails.
   ["browser-download-failed", /^The test browser could not be downloaded\b/],
@@ -184,27 +185,42 @@ function hostOf(address: string): string {
  */
 export class GuidedRuns {
   private readonly runs = new Map<string, GuidedRun>();
-  /** What went wrong in each plan's latest call, kept apart from the runs: an attach that fails never starts one. */
-  private readonly troubles = new Map<string, Trouble>();
+  /**
+   * What went wrong in each session's latest call, by plan, kept apart from
+   * the runs: an attach that fails never starts one. By session, because a
+   * check can run two browsers, and one going well says nothing of the other.
+   */
+  private readonly troubles = new Map<string, Map<string, Trouble>>();
   private shown: string | null = null;
 
   /**
-   * A call of the plan's settled: what went wrong in it, or null, which clears
-   * what went wrong before. True when this is a trouble the plan did not
-   * already have, so the person is told once, not on every call after.
+   * A call of the plan's settled in `session`: what went wrong in it, or null,
+   * which clears what went wrong there before. True when this is a trouble the
+   * plan did not already have, so the person is told once, not on every call after.
    */
-  settle(planId: string, trouble: Trouble | null): boolean {
-    const before = this.troubles.get(planId);
+  settle(planId: string, session: string, trouble: Trouble | null): boolean {
+    const held = this.troubles.get(planId) ?? new Map<string, Trouble>();
+    const had = new Set(held.values());
+    held.delete(session);
+    if (trouble) held.set(session, trouble);
     this.troubles.delete(planId);
-    if (!trouble) return false;
-    this.troubles.set(planId, trouble);
+    if (held.size > 0) this.troubles.set(planId, held);
     while (this.troubles.size > MAX_PLANS) this.troubles.delete(this.troubles.keys().next().value!);
-    return trouble !== before;
+    return trouble !== null && !had.has(trouble);
   }
 
-  /** What went wrong in the plan's latest call, if anything. */
+  /** What went wrong in the plan's latest call that still stands, in any of its sessions. */
   trouble(planId: string): Trouble | undefined {
-    return this.troubles.get(planId);
+    const held = [...(this.troubles.get(planId)?.values() ?? [])];
+    return held[held.length - 1];
+  }
+
+  /** A session closed: what went wrong in it goes with it. */
+  leave(session: string): void {
+    for (const [planId, held] of this.troubles) {
+      held.delete(session);
+      if (held.size === 0) this.troubles.delete(planId);
+    }
   }
 
   /** The plan to show: called when a plan is built, and when a session attaches with one. */
@@ -221,11 +237,14 @@ export class GuidedRuns {
    * it, so this is the same check (a second session, or signing in again) and
    * its run goes on. Otherwise a new check starts now, with a fresh run: a
    * plan confirmed again after its sessions ended is a new check (ADR 24).
+   * What went wrong before in `session` is cleared: it attached again. A new
+   * check clears what went wrong in every session of the plan before it.
    */
-  start(planId: string, nowMs: number, carried = false): void {
+  start(planId: string, nowMs: number, carried = false, session = ""): void {
     this.focus(planId);
-    this.troubles.delete(planId);
+    this.leave(session);
     if (carried && this.runs.has(planId)) return;
+    this.troubles.delete(planId);
     this.runs.delete(planId);
     this.runs.set(planId, { startedMs: nowMs, lastActiveMs: nowMs, story: [], areasStarted: [], reported: false });
     while (this.runs.size > MAX_PLANS) this.runs.delete(this.runs.keys().next().value!);

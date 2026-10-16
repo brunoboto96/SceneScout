@@ -528,7 +528,7 @@ export function serializedPerSession<A>(
         const work = fn(args, session);
         callWork.track(session, work);
         const out = await withWatchdog(label, work, watchdogMs, watchdogTimeout);
-        settleGuidedCall(guidedSessions.get(session)?.planId, out, engines.get(session)?.signInLost ?? false);
+        settleGuidedCall(guidedSessions.get(session)?.planId, session, out, engines.get(session)?.signInLost ?? false);
         // `activeName` is process-global and every scout_attach moves it. With
         // several sessions live — the multi-role runs this tool encourages —
         // an omitted `session` silently binds to whichever browser attached
@@ -639,11 +639,12 @@ export const guidedRuns = new GuidedRuns();
  * progress (the plain error screens), and, the first time, end its result
  * with the sentence the panel shows, for the agent to tell the person.
  */
-export function settleGuidedCall(planId: string | undefined, result: ToolResult, signInLost: boolean): void {
+export function settleGuidedCall(planId: string | undefined, session: string, result: ToolResult, signInLost: boolean): void {
   if (!planId) return;
   const trouble = troubleOfResult(result, signInLost);
   const plan = guidedPlans.get(planId);
-  if (guidedRuns.settle(planId, trouble) && trouble && plan) result.content.push({ type: "text", text: `\n${troubleTell(trouble, plan.choices.address)}` });
+  if (guidedRuns.settle(planId, session, trouble) && trouble && plan)
+    result.content.push({ type: "text", text: `\n${troubleTell(trouble, plan.choices.address)}` });
 }
 
 /**

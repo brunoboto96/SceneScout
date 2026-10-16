@@ -1026,16 +1026,10 @@ test("the Safety model page gives the safety explainer word for word, as the pan
   const page = pages.get("Safety-model.md")!;
   const at = page.indexOf("### Is it safe to run on my live site?");
   assert.ok(at >= 0, "the page has the explainer's section");
-  const quoted = page
-    .slice(at)
-    .split("\n")
-    .filter((line) => line.startsWith("> "))
-    .map((line) => line.slice(2));
-  assert.deepEqual(
-    quoted.slice(0, SAFETY_EXPLAINER.length),
-    [...SAFETY_EXPLAINER],
-    "each paragraph of the quote is one of the explainer's sentences, in order",
-  );
+  const section = page.slice(at).split("\n").slice(1);
+  const end = section.findIndex((line) => /^#{1,3} /.test(line));
+  const quoted = (end < 0 ? section : section.slice(0, end)).filter((line) => line.startsWith("> ")).map((line) => line.slice(2));
+  assert.deepEqual(quoted, [...SAFETY_EXPLAINER], "the section's quote is the explainer, paragraph for paragraph, and nothing more");
 });
 
 test("the suite is wired into npm test and listed in AGENTS.md", () => {

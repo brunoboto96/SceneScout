@@ -1126,6 +1126,11 @@ test("error screens: each failure the engine words is read as its screen, and no
     ["a later page on a host that no longer resolves (Chromium)", "page.goto: net::ERR_NAME_NOT_RESOLVED at https://nowhere.example/", "address-unreachable"],
     ["a refused connection (Firefox)", "page.goto: NS_ERROR_CONNECTION_REFUSED", "address-unreachable"],
     ["an unknown host (WebKit)", "page.goto: A server with the specified hostname could not be found.", "address-unreachable"],
+    ["a refused connection (WebKit on macOS)", "page.goto: Could not connect to the server.", "address-unreachable"],
+    // WebKit on Linux, where CI runs it, words the network's failures in its own network library's words.
+    ["a refused connection (WebKit on Linux)", "page.goto: Could not connect: Connection refused", "address-unreachable"],
+    ["an unknown host (WebKit on Linux)", "page.goto: Error resolving \u201cnowhere.example\u201d: Name or service not known", "address-unreachable"],
+    ["a page that did not finish loading in time is not an address that does not open", "page.goto: Timeout 20000ms exceeded.", null],
     ["the browser download failed", await downloadFailure({ ok: false }), "browser-download-failed"],
     ["the download said it worked but the build is missing", await downloadFailure({ ok: true }), "browser-download-failed"],
     // Near misses: the same words in another place, or a failure the person cannot fix with Try again.
@@ -1156,16 +1161,49 @@ test("error screens: a result is read only when it failed, and a lost sign-in co
 
 test("error screens: a plan keeps the latest call's trouble, says it once, and a call that goes well or a new start clears it", () => {
   const runs = new GuidedRuns();
-  assert.equal(runs.trouble("gp-0123456789"), undefined);
-  assert.equal(runs.settle("gp-0123456789", "address-unreachable"), true, "new: the person is told");
-  assert.equal(runs.settle("gp-0123456789", "address-unreachable"), false, "the same again: not told twice");
-  assert.equal(runs.trouble("gp-0123456789"), "address-unreachable");
-  assert.equal(runs.settle("gp-0123456789", "sign-in-expired"), true, "another trouble is told");
-  assert.equal(runs.settle("gp-0123456789", null), false);
-  assert.equal(runs.trouble("gp-0123456789"), undefined, "a call that went well clears it");
-  runs.settle("gp-0123456789", "browser-download-failed");
-  runs.start("gp-0123456789", AT);
-  assert.equal(runs.trouble("gp-0123456789"), undefined, "a session attaching with the plan clears it");
+  const plan = "gp-0123456789";
+  assert.equal(runs.trouble(plan), undefined);
+  assert.equal(runs.settle(plan, "main", "address-unreachable"), true, "new: the person is told");
+  assert.equal(runs.settle(plan, "main", "address-unreachable"), false, "the same again: not told twice");
+  assert.equal(runs.trouble(plan), "address-unreachable");
+  assert.equal(runs.settle(plan, "main", "sign-in-expired"), true, "another trouble is told");
+  assert.equal(runs.settle(plan, "main", null), false);
+  assert.equal(runs.trouble(plan), undefined, "a call that went well clears it");
+  runs.settle(plan, "main", "browser-download-failed");
+  runs.start(plan, AT, false, "main");
+  assert.equal(runs.trouble(plan), undefined, "the session attaching with the plan again clears it");
+});
+
+test("error screens: one session's trouble is not cleared by another session of the same check going well", () => {
+  // A check with the phone area runs a second browser beside the first. The
+  // first one's sign-in running out is not answered by the second one's
+  // snapshot working: the screen stays, and the person is not told it again.
+  const runs = new GuidedRuns();
+  const plan = "gp-0123456789";
+  runs.start(plan, AT, false, "main");
+  assert.equal(runs.settle(plan, "main", "sign-in-expired"), true);
+  runs.start(plan, AT + 1000, true, "phone");
+  assert.equal(runs.trouble(plan), "sign-in-expired", "the second browser attaching does not clear the first's trouble");
+  assert.equal(runs.settle(plan, "phone", null), false);
+  assert.equal(runs.trouble(plan), "sign-in-expired", "the second browser's call went well; the first's sign-in is still gone");
+  assert.equal(runs.settle(plan, "main", "sign-in-expired"), false, "the first browser's next call is not told again");
+  assert.equal(runs.settle(plan, "phone", "sign-in-expired"), false, "nor is the same trouble in the second browser");
+  runs.leave("main");
+  assert.equal(runs.trouble(plan), "sign-in-expired", "the second browser still has it");
+  runs.leave("phone");
+  assert.equal(runs.trouble(plan), undefined, "a closed session's trouble goes with it");
+});
+
+test("error screens: a new check of the plan starts with no screen, whichever session had the trouble", () => {
+  const runs = new GuidedRuns();
+  const plan = "gp-0123456789";
+  // An attach that failed leaves its trouble under a session that never went live.
+  runs.settle(plan, "default", "address-unreachable");
+  runs.start(plan, AT, false, "main");
+  assert.equal(runs.trouble(plan), undefined, "a new check, in another session, is not shown the old screen");
+  runs.settle(plan, "main", "sign-in-expired");
+  runs.start(plan, AT + 1000, true, "phone");
+  assert.equal(runs.trouble(plan), "sign-in-expired", "the same check going on in a second browser keeps it");
 });
 
 test("error screens: each trouble is one sentence and one button, and the same check without it shows no screen", () => {

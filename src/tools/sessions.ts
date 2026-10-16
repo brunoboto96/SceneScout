@@ -522,8 +522,10 @@ export function registerSessionTools(): void {
           const carried = !!guided.plan && [...guidedSessions.values()].some((s) => s.planId === guided.plan!.planId);
           holdGuidedPlan(guidedSessions, guidedPlans, target, guided.plan?.planId);
           // The check starts with its first attach, and the status pane follows it from now on.
+          // A session attached without the plan it carried before: what went wrong in it there is not the plan's any more.
+          if (!guided.plan) guidedRuns.leave(target);
           if (guided.plan) {
-            guidedRuns.start(guided.plan.planId, Date.now(), carried);
+            guidedRuns.start(guided.plan.planId, Date.now(), carried, target);
             guidedRuns.step(guided.plan.planId, nowSentence("scout_attach", redactSecrets(eng.currentUrl)), Date.now());
           }
           // A new attach is a new count of pictures returned.
@@ -565,12 +567,12 @@ export function registerSessionTools(): void {
             target,
           );
           // A saved sign-in that landed on a login page is the sign-in-expired screen (progress.ts).
-          settleGuidedCall(guided.plan?.planId, attached, eng.signInLost);
+          settleGuidedCall(guided.plan?.planId, target, attached, eng.signInLost);
           return attached;
         } catch (err) {
           // An attach of a guided check that failed on the address or the browser download: the progress shows its screen.
           const failed = errorText(err);
-          settleGuidedCall(planId && guidedPlans.get(planId) ? planId : undefined, failed, false);
+          settleGuidedCall(planId && guidedPlans.get(planId) ? planId : undefined, session ?? activeName, failed, false);
           return failed;
         }
       },
@@ -818,7 +820,10 @@ export function registerCloseTool(): void {
           for (const e of closing) flushAfterClose(e);
           for (const store of stores) store.endRun();
           sessionQueue.clear();
-          for (const name of [...guidedSessions.keys()]) holdGuidedPlan(guidedSessions, guidedPlans, name, null);
+          for (const name of [...guidedSessions.keys()]) {
+            holdGuidedPlan(guidedSessions, guidedPlans, name, null);
+            guidedRuns.leave(name);
+          }
           board.clear();
           laneLedger.clear();
           setLastWriter(null);
@@ -846,6 +851,7 @@ export function registerCloseTool(): void {
         if (eng.memory && ![...engines.values()].some((e) => e.memory === eng.memory)) eng.memory.endRun();
         sessionQueue.forget(name);
         holdGuidedPlan(guidedSessions, guidedPlans, name, null);
+        guidedRuns.leave(name);
         board.remove(name);
         laneLedger.forget(name);
         // The last session closing ends the run, and its lanes with it: a brief's
