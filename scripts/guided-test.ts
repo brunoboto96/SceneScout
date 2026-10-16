@@ -2,12 +2,18 @@
  * The guided assistant's start, and the cards it shows: every choice to its
  * plan, when a person must confirm before a plan starts (each rule as a
  * contrastive pair, so both directions are asserted), credentials refused in
- * the choices, the fixed wording, and a finding as a card.
+ * the choices, the fixed wording, and a finding as a card; then the progress
+ * a person watches while a check runs (phase, areas, the narrator's line and
+ * story, the clicking saved with its basis), and which cards scout_cards shows
+ * and what scout_feedback's export lists.
  *
  *   npm run guided-test
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   buildGuidedPlan,
   CARE_MODE,
@@ -49,9 +55,34 @@ import {
   DESTRUCTIVE_NOT_OFFERED,
   HELD_BACK,
   NEEDS_YOU_SENTENCE,
+  NOW_SENTENCE,
+  ACTION_PROMPT,
+  AREA_NOT_REACHED,
+  PHASE_NOW,
   SAFETY_EXPLAINER,
+  STUCK_SENTENCE,
   THOROUGHNESS_LABEL,
 } from "../src/engine/guided-words.ts";
+import {
+  areaStates,
+  cardText,
+  CLICKING_RATES,
+  clickingSaved,
+  feedbackCandidates,
+  guidedPhase,
+  guidedProgress,
+  GuidedRuns,
+  INLINE_PICTURE_SIDE,
+  LATEST_MAX,
+  MAX_CARDS,
+  MAX_INLINE_PICTURES,
+  nowSentence,
+  pushStory,
+  selectCards,
+  STORY_MAX,
+  type GuidedRun,
+  type ProgressSession,
+} from "../src/engine/progress.ts";
 import { settingsFromAnswers } from "../src/intake.ts";
 import { allowsWrite } from "../src/engine/policy.ts";
 import { isReadMethod } from "../src/engine/unload.ts";
@@ -778,4 +809,332 @@ test("card: the report's plain entry says exactly what the card says", () => {
     assert.ok(entry.includes(part), `the report carries "${part}"`);
   card.steps.forEach((s, i) => assert.ok(entry.includes(`${i + 1}. ${s}`), s));
   assert.ok(entry.includes(`](${card.picture!.file})`));
+});
+
+// ---- Progress while a guided check runs (progress.ts) ----
+
+const AT = Date.parse("2026-01-01T10:00:00.000Z");
+const sess = (over: Partial<ProgressSession> = {}): ProgressSession => ({
+  session: "default",
+  state: "running",
+  tool: "scout_click",
+  url: "http://app.test/things?id=7",
+  since: "2026-01-01T10:05:00.000Z",
+  ...over,
+});
+const runOf = (over: Partial<GuidedRun> = {}): GuidedRun => ({ startedMs: AT, lastActiveMs: AT, story: [], areasStarted: [], reported: false, ...over });
+const planFor = (over: Partial<GuidedChoices> = {}): GuidedPlan =>
+  buildGuidedPlan(
+    { address: "http://localhost:3000", areas: ["sign-in", "forms", "phone"], signIn: "none", care: "look-only", thoroughness: "normal", ...over },
+    "gp-0123456789",
+  );
+
+test("progress phase: what the plan waits for, what the leading session runs, and how the check ended", () => {
+  const plain = planFor();
+  const confirming = planFor({ address: "https://staging.example.com", care: "may-create-test-data" });
+  const cases: Array<[string, GuidedPlan, GuidedRun | undefined, ProgressSession[], string]> = [
+    ["not started, nothing to confirm", plain, undefined, [], "starting"],
+    ["not started, waiting for the person's confirmation", confirming, undefined, [], "needs-you"],
+    ["started, then every session left with the report written", plain, runOf({ reported: true }), [], "done"],
+    ["started, then every session left without a report", plain, runOf(), [], "stopped"],
+    ["a session stuck past its watchdog", plain, runOf(), [sess({ state: "stuck" }), sess({ session: "phone" })], "needs-you"],
+    ["signing in", plain, runOf(), [sess({ tool: "scout_login" })], "signing-in"],
+    ["re-checking", plain, runOf(), [sess({ tool: "scout_verify" })], "re-checking"],
+    ["writing the report", plain, runOf(), [sess({ tool: "scout_report" })], "writing-report"],
+    ["the report is written and nothing runs", plain, runOf({ reported: true }), [sess({ state: "idle", tool: "scout_report" })], "done"],
+    ["the report is written but a session runs on", plain, runOf({ reported: true }), [sess()], "exploring"],
+    ["the phone session leads", plain, runOf(), [sess({ session: "phone" })], "checking-phone"],
+    ["a session on the phone area leads", plain, runOf(), [sess({ area: "phone" })], "checking-phone"],
+    ["exploring", plain, runOf(), [sess({ area: "forms" })], "exploring"],
+    // A running session leads an idle one, even an idle one whose state began later.
+    [
+      "a running session leads",
+      plain,
+      runOf(),
+      [sess({ session: "phone", state: "idle", since: "2026-01-01T10:09:00.000Z" }), sess({ tool: "scout_login" })],
+      "signing-in",
+    ],
+  ];
+  for (const [name, plan, run, sessions, want] of cases) assert.equal(guidedPhase(plan, run, sessions), want, name);
+});
+
+test("progress areas: in progress while a session says so, done once moved on or reported, skipped when never reached", () => {
+  const plan = planFor({ care: "look-only" });
+  const states = (run: GuidedRun | undefined, sessions: ProgressSession[], phase: Parameters<typeof areaStates>[3]) =>
+    areaStates(plan, run, sessions, phase).map((a) => `${a.area}:${a.state}${a.note ? "+note" : ""}`);
+  assert.deepEqual(states(undefined, [], "starting"), ["sign-in:waiting", "forms:waiting", "phone:waiting"]);
+  // Working on sign-in: it is in progress and carries what Look only holds back there.
+  assert.deepEqual(states(runOf({ areasStarted: ["sign-in"] }), [sess({ area: "sign-in" })], "exploring"), [
+    "sign-in:in-progress+note",
+    "forms:waiting",
+    "phone:waiting",
+  ]);
+  // Moved on to forms: sign-in is done.
+  assert.deepEqual(states(runOf({ areasStarted: ["sign-in", "forms"] }), [sess({ area: "forms" })], "exploring"), [
+    "sign-in:done+note",
+    "forms:in-progress+note",
+    "phone:waiting",
+  ]);
+  // Two sessions on two areas at once: both in progress.
+  assert.deepEqual(states(runOf({ areasStarted: ["forms", "phone"] }), [sess({ area: "forms" }), sess({ session: "phone", area: "phone" })], "exploring"), [
+    "sign-in:waiting",
+    "forms:in-progress+note",
+    "phone:in-progress",
+  ]);
+  // The report is written: what was being worked on is done, what was never started is skipped with a reason.
+  const ended = areaStates(plan, runOf({ areasStarted: ["forms"], reported: true }), [], "done");
+  assert.deepEqual(
+    ended.map((a) => [a.area, a.state]),
+    [
+      ["sign-in", "skipped"],
+      ["forms", "done"],
+      ["phone", "skipped"],
+    ],
+  );
+  assert.equal(ended[0].note, AREA_NOT_REACHED);
+  assert.equal(ended[1].note, plan.areas[1].heldBack);
+  // A care level that holds nothing back in an area gives it no note.
+  const forms = planFor({ address: "http://localhost:3000", care: "may-submit-forms", areas: ["forms"] });
+  assert.equal(areaStates(forms, runOf({ areasStarted: ["forms"] }), [sess({ area: "forms" })], "exploring")[0].note, undefined);
+});
+
+test("progress now: the session's own task first, else a fixed sentence by tool and page, never the page's own text", () => {
+  assert.equal(nowSentence("scout_click", "http://app.test/cart?coupon=x", "Try the checkout with an empty cart"), "Try the checkout with an empty cart");
+  assert.equal(nowSentence("scout_navigate", "http://app.test/orders/7?token=abc#top"), "Opening /orders/7");
+  assert.equal(nowSentence("scout_type", "http://app.test/register"), "Typing into a field on /register");
+  assert.equal(nowSentence("scout_something_new", "http://app.test/x"), "Working on /x");
+  assert.equal(nowSentence("scout_click", "about:blank"), "Pressing something on the site");
+  assert.equal(nowSentence("scout_click", ""), "Pressing something on the site");
+  assert.equal(nowSentence("toString", "http://app.test/x"), "Working on /x", "an inherited name is not a table entry");
+  for (const [tool, line] of Object.entries(NOW_SENTENCE)) {
+    assert.match(tool, /^scout_[a-z_]+$/);
+    const said = line("/things");
+    assert.doesNotMatch(said, /scout_|observe|read-only|safe-write|\bPOST\b|\bAPI\b|_/, `"${said}" is not plain`);
+  }
+  for (const s of [...Object.values(PHASE_NOW), AREA_NOT_REACHED, STUCK_SENTENCE]) assert.doesNotMatch(s, /scout_|_/);
+});
+
+test("progress story: a new sentence is kept only when it differs from the last, and only the newest five", () => {
+  let story: string[] = [];
+  for (const s of ["a", "a", "b", "c", "c", "d", "e", "f", "g"]) story = pushStory(story, s);
+  assert.deepEqual(story, ["c", "d", "e", "f", "g"]);
+  assert.equal(STORY_MAX, 5);
+  assert.deepEqual(pushStory(["a"], ""), ["a"], "an empty sentence adds nothing");
+  const runs = new GuidedRuns();
+  runs.step("gp-0123456789", "ignored before the check starts", AT);
+  assert.equal(runs.get("gp-0123456789"), undefined);
+  runs.start("gp-0123456789", AT);
+  runs.start("gp-0123456789", AT + 60_000, true);
+  runs.step("gp-0123456789", "Opening /", AT + 1000);
+  runs.areaStarted("gp-0123456789", "forms");
+  runs.areaStarted("gp-0123456789", "forms");
+  runs.reported("gp-0123456789");
+  assert.deepEqual(runs.get("gp-0123456789"), {
+    startedMs: AT,
+    lastActiveMs: AT + 1000,
+    story: ["Opening /"],
+    areasStarted: ["forms"],
+    reported: true,
+  });
+  assert.equal(runs.focused, "gp-0123456789");
+  // A second session carrying it is the same check; an attach once nothing carries it is a new check, with a fresh run.
+  runs.start("gp-0123456789", AT + 2000, true);
+  assert.equal(runs.get("gp-0123456789")!.reported, true);
+  runs.start("gp-0123456789", AT + 120_000, false);
+  assert.deepEqual(runs.get("gp-0123456789"), { startedMs: AT + 120_000, lastActiveMs: AT + 120_000, story: [], areasStarted: [], reported: false });
+  runs.step("gp-0123456789", "Opening /", AT + 1000);
+  runs.focus("gp-abcdefghij");
+  assert.equal(runs.focused, "gp-abcdefghij");
+  // A copy: changing it changes nothing kept.
+  runs.get("gp-0123456789")!.story.push("x");
+  assert.deepEqual(runs.get("gp-0123456789")!.story, ["Opening /"]);
+});
+
+test("progress clicking saved: never a bare number, always with its basis, and nothing until a page is checked", () => {
+  assert.equal(clickingSaved(0, 40), null);
+  const s = clickingSaved(41, 63)!;
+  assert.equal(s.minutes, Math.round((41 * CLICKING_RATES.perPageSeconds + 63 * CLICKING_RATES.perControlSeconds) / 60));
+  assert.match(s.basis, /^41 pages and 63 controls checked, at \d+ s a page and \d+ s a control\. These rates are a rough default, not a measurement\.$/);
+  assert.ok(s.sentence.startsWith(`About ${s.minutes} minutes of clicking saved: `) && s.sentence.endsWith(s.basis));
+  assert.match(clickingSaved(1, 0, { perPageSeconds: 10, perControlSeconds: 5 })!.sentence, /^Less than a minute of clicking saved: 1 page and 0 controls/);
+  assert.equal(clickingSaved(2, 0, { perPageSeconds: 30, perControlSeconds: 5 })!.minutes, 1);
+});
+
+test("progress clicking saved: the figure stays out of every report and ticket", () => {
+  // It is for the person watching (design question 12): only the progress, the status pane and its page may use it.
+  const allowed = new Set(["progress.ts", "status-pane.ts", "status-pane-page.ts", "guided-words.ts"]);
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
+  const files = fs.readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts"));
+  for (const f of files) {
+    const body = fs.readFileSync(path.join(dir, f), "utf8");
+    if (/clickingSaved|savedBasis|savedSentence|CLICKING_RATES|of clicking saved/.test(body))
+      assert.ok(allowed.has(path.basename(f)), `${f} uses the clicking-saved figure`);
+  }
+});
+
+test("progress: the whole model for a running check, its problems, newest cards and buttons", () => {
+  const plan = planFor({ care: "look-only" });
+  const run = runOf({ story: ["Opening /", "Reading /login"], areasStarted: ["sign-in"] });
+  const findings = [
+    finding({ id: "a000000001", severity: "high", foundAt: "2026-01-01T10:02:00.000Z" }),
+    finding({ id: "a000000002", severity: "medium", foundAt: "2026-01-01T10:03:00.000Z" }),
+    finding({ id: "a000000003", severity: "low", foundAt: "2026-01-01T10:04:00.000Z", tier: "worth_a_look" }),
+    // Not counted: before the check, resolved, or labelled not a bug by the person.
+    finding({ id: "a000000004", severity: "high", foundAt: "2025-12-31T10:00:00.000Z" }),
+    finding({ id: "a000000005", severity: "high", foundAt: "2026-01-01T10:05:00.000Z", status: "resolved" }),
+    finding({ id: "a000000006", severity: "high", foundAt: "2026-01-01T10:06:00.000Z", feedback: { verdict: "not-a-bug", at: "2026-01-01T10:07:00.000Z" } }),
+  ];
+  const p = guidedProgress({
+    nowMs: AT + 6 * 60_000,
+    plan,
+    run,
+    sessions: [sess({ area: "sign-in", tool: "scout_type", url: "http://localhost:3000/login" })],
+    coverage: { routesVisited: 34, routesTotal: 41, elementsExercised: 20 },
+    findings,
+  });
+  assert.equal(p.title, "Checking localhost:3000");
+  assert.equal(p.phase, "exploring");
+  assert.equal(p.now, "Typing into a field on /login");
+  assert.deepEqual(p.story, ["Opening /", "Reading /login", "Typing into a field on /login"]);
+  assert.deepEqual(p.pages, { checked: 34, found: 41 });
+  assert.deepEqual(p.time, { usedMs: 6 * 60_000, budgetMs: 20 * 60_000 });
+  assert.deepEqual(p.problems, { blocksUsers: 1, annoying: 1, cosmetic: 0, worthALook: 1 });
+  assert.deepEqual(
+    p.latest.map((c) => c.id),
+    ["a000000003", "a000000002", "a000000001"],
+  );
+  assert.deepEqual(
+    p.latest[0].actions.map((a) => [a.kind, a.label]),
+    [
+      ["direct", "Not a bug"],
+      ["prompt", "Explain more"],
+      ["prompt", "Check again"],
+    ],
+  );
+  assert.deepEqual(p.latest[0].actions[0], { kind: "direct", label: "Not a bug", tool: "scout_feedback", args: { id: "a000000003", verdict: "not-a-bug" } });
+  assert.ok(p.saved && p.saved.basis.startsWith("34 pages and 20 controls"));
+  assert.deepEqual(
+    p.next.map((a) => a.label),
+    ["See all problems", "Stop"],
+  );
+  assert.equal(p.needsYou, undefined);
+  assert.ok(!("needsYou" in p));
+  // The latest cards are capped.
+  const many = Array.from({ length: 9 }, (_, i) => finding({ id: `b00000000${i}`, foundAt: `2026-01-01T10:0${i}:30.000Z` }));
+  assert.equal(guidedProgress({ nowMs: AT, plan, run, sessions: [sess()], coverage: null, findings: many }).latest.length, LATEST_MAX);
+});
+
+test("progress: before the start it asks for the confirmation, and once ended the clock and the story stop", () => {
+  const confirming = planFor({ address: "https://staging.example.com", care: "may-create-test-data" });
+  const waiting = guidedProgress({ nowMs: AT, plan: confirming, run: undefined, sessions: [], coverage: null, findings: [] });
+  assert.equal(waiting.phase, "needs-you");
+  assert.equal(waiting.needsYou?.kind, "confirm");
+  assert.equal(waiting.now, NEEDS_YOU_SENTENCE.confirm("staging.example.com"));
+  assert.deepEqual(waiting.next, [{ kind: "direct", label: "Confirm the care level", tool: "scout_guided_confirm", args: { planId: confirming.planId } }]);
+  assert.equal(waiting.saved, null);
+  assert.deepEqual(waiting.time, { usedMs: 0, budgetMs: 20 * 60_000 });
+
+  const plan = planFor();
+  const ended = guidedProgress({
+    nowMs: AT + 60 * 60_000,
+    plan,
+    run: runOf({ lastActiveMs: AT + 9 * 60_000, story: ["Writing up what it found"], reported: true }),
+    sessions: [],
+    coverage: { routesVisited: 3, routesTotal: 3, elementsExercised: 0 },
+    findings: [],
+  });
+  assert.equal(ended.phase, "done");
+  assert.equal(ended.now, PHASE_NOW.done);
+  assert.equal(ended.time.usedMs, 9 * 60_000, "the clock stops at the last step");
+  assert.deepEqual(ended.story, ["Writing up what it found"]);
+  assert.deepEqual(
+    ended.next.map((a) => a.kind === "prompt" && a.text),
+    [false, ACTION_PROMPT.recheck, ACTION_PROMPT.plainReport],
+  );
+  const stuck = guidedProgress({ nowMs: AT, plan, run: runOf(), sessions: [sess({ state: "stuck" })], coverage: null, findings: [] });
+  assert.equal(stuck.needsYou?.kind, "stuck");
+  assert.deepEqual(
+    stuck.next.map((a) => a.label),
+    ["Stop"],
+  );
+});
+
+// ---- scout_cards and scout_feedback's rules ----
+
+test("cards: worst first, fixed and not-a-bug left out by default, ids and filters show exactly what they name", () => {
+  const all = [
+    finding({ id: "c000000001", severity: "low", foundAt: "2026-01-01T10:01:00.000Z" }),
+    finding({ id: "c000000002", severity: "high", foundAt: "2026-01-01T10:02:00.000Z", area: "forms" }),
+    finding({ id: "c000000003", severity: "high", foundAt: "2026-01-01T10:03:00.000Z" }),
+    finding({ id: "c000000004", severity: "medium", foundAt: "2026-01-01T10:04:00.000Z", status: "resolved" }),
+    finding({ id: "c000000005", severity: "high", foundAt: "2026-01-01T10:05:00.000Z", feedback: { verdict: "not-a-bug", at: "2026-01-01T11:00:00.000Z" } }),
+    finding({ id: "c000000006", severity: "medium", foundAt: "2026-01-01T10:06:00.000Z", tier: "worth_a_look" }),
+  ];
+  const ids = (sel: { cards: Array<{ id: string }> }) => sel.cards.map((c) => c.id);
+  const byDefault = selectCards(all);
+  assert.deepEqual(ids(byDefault), ["c000000003", "c000000002", "c000000001", "c000000006"]);
+  assert.equal(byDefault.total, 4);
+  assert.equal(byDefault.notABug, 1, "left out, and counted so the person can ask for it");
+  assert.deepEqual(byDefault.missing, []);
+  assert.deepEqual(ids(selectCards(all, { filter: { feedback: ["not-a-bug"] } })), ["c000000005"]);
+  assert.deepEqual(ids(selectCards(all, { filter: { status: ["fixed"] } })), ["c000000004"]);
+  assert.deepEqual(ids(selectCards(all, { filter: { impact: ["Blocks users"] } })), ["c000000003", "c000000002"]);
+  assert.deepEqual(ids(selectCards(all, { filter: { area: ["forms"] } })), ["c000000002"]);
+  // Named ids are shown whatever their status or label; an unknown one is said.
+  const named = selectCards(all, { ids: ["c000000004", "c000000005", "nope"] });
+  assert.deepEqual(ids(named), ["c000000005", "c000000004"]);
+  assert.deepEqual(named.missing, ["nope"]);
+  // The limit cuts the list, never the total.
+  const one = selectCards(all, { limit: 1 });
+  assert.deepEqual([one.cards.length, one.total], [1, 4]);
+  assert.equal(selectCards(all, { limit: 999 }).cards.length, 4);
+  assert.ok(MAX_CARDS <= 50 && MAX_INLINE_PICTURES <= 10 && INLINE_PICTURE_SIDE === 1024);
+});
+
+test("cards: a card's text says what the card says, and a label shows on it", () => {
+  const card = plainCard(finding({ feedback: { verdict: "not-a-bug", reason: "Staging only", at: "2026-01-01T11:00:00.000Z" } }));
+  const t = cardText(card, "/proj/.scenescout/recordings/s/finding.png");
+  const lines = t.split("\n");
+  assert.equal(lines[0], `BLOCKS USERS - ${card.title}`);
+  assert.equal(lines[1], `${card.problem} - on /things/new?draft=1`);
+  assert.ok(t.includes(`What was done: 1. ${card.steps[0]}  2. ${card.steps[1]}`), t);
+  assert.ok(t.includes(`Expected: ${card.expected}`) && t.includes(`Happened: ${card.happened}`));
+  assert.ok(t.includes("Picture: /proj/.scenescout/recordings/s/finding.png"));
+  assert.ok(t.includes("You marked this not a bug: Staging only"));
+  assert.equal(lines[lines.length - 1], `(id ${card.id}: say "check ${card.id} again", "explain ${card.id}" or "${card.id} is not a bug")`);
+  assert.deepEqual(plainCard(finding({ area: "forms" })).area, "forms", "the area it was found in is on its card");
+});
+
+test("feedback: every label is a candidate for a maintainer, newest first, and nothing more", () => {
+  const all = [
+    finding({ id: "d000000001", feedback: { verdict: "not-a-bug", reason: "Expected on staging", at: "2026-01-01T11:00:00.000Z" } }),
+    finding({ id: "d000000002" }),
+    finding({ id: "d000000003", severity: "low", feedback: { verdict: "confirmed", at: "2026-01-01T12:00:00.000Z" } }),
+  ];
+  assert.deepEqual(feedbackCandidates(all), [
+    {
+      findingId: "d000000003",
+      verdict: "confirmed",
+      at: "2026-01-01T12:00:00.000Z",
+      suggests: "defect",
+      title: all[2].title,
+      category: "false_success",
+      severity: "low",
+      route: "/things/new",
+      evidence: all[2].evidence,
+    },
+    {
+      findingId: "d000000001",
+      verdict: "not-a-bug",
+      reason: "Expected on staging",
+      at: "2026-01-01T11:00:00.000Z",
+      suggests: "non-defect",
+      title: all[0].title,
+      category: "false_success",
+      severity: "high",
+      route: "/things/new",
+      evidence: all[0].evidence,
+    },
+  ]);
+  assert.deepEqual(feedbackCandidates([finding()]), []);
 });

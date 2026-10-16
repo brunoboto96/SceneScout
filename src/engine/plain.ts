@@ -358,9 +358,10 @@ export function plainCard(f: Finding, opts: { lastFrame?: string; area?: CheckAr
     // One cause in a shared part of the app is seen on every page that shows it.
     alsoOn: seenOnOf(f),
     steps: plainSteps(f.repro),
-    ...(opts.area ? { area: opts.area } : {}),
+    ...((opts.area ?? f.area) ? { area: opts.area ?? f.area } : {}),
     picture: cardPicture(f, opts.lastFrame),
     status: cardStatus(f),
+    ...(f.feedback ? { feedback: { ...f.feedback } } : {}),
     technical: { category: f.category, ...(f.evidence ? { evidence: f.evidence } : {}), route: f.state },
     firstSeen: f.foundAt,
     timesSeen: f.runs,

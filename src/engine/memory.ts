@@ -3,11 +3,13 @@ import crypto from "node:crypto";
 import path from "node:path";
 import type { RecordedDecision } from "./calibration.js";
 import type { PictureShot } from "./capture.js";
+import type { CheckArea } from "./guided.js";
 import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
 import { appendOwnerOnlySync, writeDocumentSync, writeOwnerOnlySync } from "./owner-file.js";
 import { redactSecrets } from "./redact.js";
+import { redactPersonal } from "./sensitive.js";
 import { REDACTION_VERSION, scrubMemoryText, scrubSessionLogs } from "./memory-scrub.js";
 import type { InjectionProbe } from "./injection.js";
 import { readFromRunNotes, readRunRecords, recordFromJson, unionFromRunNotes, unionRecords, type FromRunNote, type RunRecord } from "./from-run.js";
@@ -153,6 +155,37 @@ export interface Finding {
   picture?: string;
   /** What that picture shows (capture.ts PictureShot), kept apart so `picture` stays a plain path. */
   pictureShot?: PictureShot;
+  /**
+   * In a guided check, the area the filing session was working on when it was
+   * first filed (scout_session {area}). Absent outside a guided check.
+   */
+  area?: CheckArea;
+  /**
+   * The person's own label on it, from a guided surface (scout_feedback): "not
+   * a bug", or "confirmed". The finding is kept either way and still dedups
+   * (ADR 4); a label is a candidate for a maintainer to review, never an
+   * answer-key entry by itself. The newest label wins.
+   */
+  feedback?: FindingFeedback;
+}
+
+/** The labels a person can put on a finding. */
+export const FEEDBACK_VERDICTS = ["not-a-bug", "confirmed"] as const;
+export type FeedbackVerdict = (typeof FEEDBACK_VERDICTS)[number];
+/** The longest reason kept with a label. */
+export const MAX_FEEDBACK_REASON = 300;
+
+export interface FindingFeedback {
+  verdict: FeedbackVerdict;
+  /** Why, in the person's words, redacted when kept. */
+  reason?: string;
+  /** ISO time it was given. */
+  at: string;
+}
+
+/** Whether the person labelled a finding not a bug. */
+export function isNotABug(f: Pick<Finding, "feedback">): boolean {
+  return f.feedback?.verdict === "not-a-bug";
 }
 
 /** Most other routes one finding records it was seen on; the oldest go first. */
@@ -1392,6 +1425,32 @@ export class MemoryStore {
     f.picture = picture;
     f.pictureShot = shot;
     this.flush();
+    return f;
+  }
+
+  /**
+   * Put the person's label on a finding (scout_feedback). Nothing else about
+   * the finding changes: it stays in the list, keeps its id and status, and a
+   * later filing of the same problem still merges into it. Returns the
+   * finding, or null when there is no such id.
+   */
+  setFeedback(id: string, verdict: FeedbackVerdict, reason?: string): Finding | null {
+    const f = this.data.findings.find((x) => x.id === id);
+    if (!f) return null;
+    const said = reason?.trim() ? redactPersonal(redactSecrets(reason.trim())).slice(0, MAX_FEEDBACK_REASON) : "";
+    f.feedback = { verdict, ...(said ? { reason: said } : {}), at: new Date().toISOString() };
+    this.flush();
+    return f;
+  }
+
+  /** Record the area a finding was found in, the first time it is known. Returns the finding, or null when there is no such id. */
+  setArea(id: string, area: CheckArea): Finding | null {
+    const f = this.data.findings.find((x) => x.id === id);
+    if (!f) return null;
+    if (!f.area) {
+      f.area = area;
+      this.flush();
+    }
     return f;
   }
 

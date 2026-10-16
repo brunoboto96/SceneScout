@@ -34,7 +34,8 @@ Every tool that acts on the page returns, with its result, whatever went wrong w
 | Answer tickets | `scout_tickets` `scout_criterion` | Read the acceptance criteria in pasted or uploaded tickets; record each as passed, failed or not tested, with a confidence |
 | Re-test | `scout_verify` | List the findings earlier runs left open, worst route first, and record whether each is gone, still there or changed |
 | Split the work | `scout_lane_brief` `scout_lane_report` | Divide the app between parallel agents by whole module; fold what each hands back, and name any defect it judged but never filed |
-| Watch | `scout_status` | Each session's objective, task and findings so far; in a client that renders MCP Apps, a pane that refreshes itself |
+| Watch | `scout_status` | Each session's objective, task and findings so far; in a client that renders MCP Apps, a pane that refreshes itself. In a guided check, the check's progress in plain words and its newest cards |
+| Read the findings | `scout_cards` `scout_feedback` | Show findings as plain cards, worst first, with their pictures; record the person's own "not a bug" or "confirmed" on one, which keeps the finding, and list those labels for a maintainer |
 | Close | `scout_close` | Close one session or all of them |
 
 A few do more than their name suggests:

@@ -184,7 +184,7 @@ npx -y scenescout doctor                       # every line should be a ✓
 Use SceneScout to test http://localhost:3000
 ```
 
-In Claude Code there is a command too: `/scenescout --url http://localhost:3000 --level medium`. On its own, `/scenescout` asks instead: where your client can show a form, one guided form (the address, what to check, how you sign in, how careful to be and how thorough), and otherwise four plain questions in chat. A care level that writes on a site that is not on your computer, or that creates test data, asks you to confirm it in a second form the agent cannot answer ([care levels](docs/guide/Safety-model.md#care-levels-in-a-guided-check)).
+In Claude Code there is a command too: `/scenescout --url http://localhost:3000 --level medium`. On its own, `/scenescout` asks instead: where your client can show a form, one guided form (the address, what to check, how you sign in, how careful to be and how thorough), and otherwise four plain questions in chat. A care level that writes on a site that is not on your computer, or that creates test data, asks you to confirm it in a second form the agent cannot answer ([care levels](docs/guide/Safety-model.md#care-levels-in-a-guided-check)). While it runs, `scout_status` follows the check in plain words, and at the end the problems come back as cards you can mark "not a bug".
 
 **3. Read the report** in `.scenescout/report.md`. It opens in plain words (each problem, its steps, what was expected and what happened), with the technical detail one click away. [A complete example](examples/report.md).
 

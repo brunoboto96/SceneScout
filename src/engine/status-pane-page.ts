@@ -15,8 +15,17 @@
  * textContent and never builds markup from data. It accepts messages only from
  * its parent window. Like live-page.ts, the client script avoids template
  * literals because the page is one; status-pane tests check the script parses.
+ *
+ * In a guided check it also draws the progress (progress.ts): the narrator's
+ * line and the few before it, each area, pages, time, problems by impact, the
+ * newest cards with their buttons, the clicking saved with its basis, and the
+ * buttons to offer now. A button calls one of three tools directly
+ * (scout_cards, scout_feedback, scout_guided_confirm) or, where the host takes
+ * a message from the view (`ui/message`), sends the fixed words a prompt
+ * button carries; where it does not, the pane shows those words to say.
  */
 import { scriptLiteral } from "./script-literal.js";
+import { ACTION_LABEL, PANE_WORDS } from "./guided-words.js";
 import { MCP_APPS_PROTOCOL, STATUS_POLL_MS, STATUS_POLL_TOOL } from "./status-pane.js";
 
 export function statusPanePage(version: string): string {
@@ -98,6 +107,20 @@ export function statusPanePage(version: string): string {
   .line { font-size: var(--font-text-sm-size); color: var(--color-text-secondary); }
   .line em { font-style: normal; color: var(--color-text-primary); }
   .page { font: 12px/1.4 var(--font-mono); color: var(--color-text-secondary); }
+  h2.g-title { text-transform: none; letter-spacing: 0; font-size: var(--font-text-md-size); }
+  .now { margin: 0; font-size: 15px; font-weight: 600; }
+  ol.story { margin: 4px 0 0; padding-left: 18px; font-size: var(--font-text-sm-size); color: var(--color-text-secondary); }
+  ul.areas, ul.cards { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+  .mark { display: inline-block; min-width: 64px; font-size: 12px; color: var(--color-text-secondary); }
+  .mark.in-progress { color: var(--color-text-warning); }
+  .mark.done { color: var(--color-text-success); }
+  ul.cards li { display: grid; gap: 4px; padding-top: 8px; border-top: 1px solid var(--color-border-primary); }
+  ul.cards li:first-child { border-top: 0; padding-top: 0; }
+  .impact { font-size: 12px; font-weight: 650; }
+  .impact.high { color: var(--color-text-danger); }
+  .impact.medium { color: var(--color-text-warning); }
+  .impact.low { color: var(--color-text-info); }
+  .needs { border-color: var(--color-text-warning); }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -115,6 +138,24 @@ export function statusPanePage(version: string): string {
     <code id="live-url" class="url" data-testid="status-pane-live-url" hidden></code>
     <p id="live-note" class="note" data-testid="status-pane-live-note" hidden></p>
   </div>
+  <section id="guided" aria-labelledby="g-title" data-testid="status-pane-guided" hidden>
+    <h2 id="g-title" class="g-title"></h2>
+    <p id="g-now" class="now" aria-live="polite"></p>
+    <ol id="g-story" class="story"></ol>
+    <div id="g-needs" class="note" hidden></div>
+    <ul id="g-areas" class="areas"></ul>
+    <p class="sub"><span id="g-pages"></span> · <span id="g-time"></span></p>
+    <div class="tiles">
+      <div class="tile high"><b id="g-blocks">0</b><span>block users</span></div>
+      <div class="tile medium"><b id="g-annoying">0</b><span>annoying</span></div>
+      <div class="tile low"><b id="g-cosmetic">0</b><span>cosmetic</span></div>
+    </div>
+    <h2 id="g-cards-h">${PANE_WORDS.newest}</h2>
+    <ul id="g-cards" class="cards"></ul>
+    <p id="g-saved" class="sub" hidden></p>
+    <div id="g-next" class="actions"></div>
+    <p id="g-hint" class="note" data-testid="status-pane-guided-hint" hidden></p>
+  </section>
   <section aria-labelledby="findings-h" data-testid="status-pane-findings">
     <h2 id="findings-h">Open findings</h2>
     <div class="tiles">
@@ -156,6 +197,16 @@ export function statusPanePage(version: string): string {
   var inFlight = false;
   var liveUrl = null;
   var canOpenLinks = false;
+  var canSendMessages = false;
+  var showingAll = false;
+  // The only tools a button may call directly; anything else in the data is ignored.
+  var DIRECT_TOOLS = ["scout_cards", "scout_feedback", "scout_guided_confirm"];
+  var NEWEST_HEADING = ${scriptLiteral(PANE_WORDS.newest)};
+  var ALL_HEADING = ${scriptLiteral(PANE_WORDS.all)};
+  var NEWEST_LABEL = ${scriptLiteral(PANE_WORDS.backToNewest)};
+  var SAY_THIS = ${scriptLiteral(PANE_WORDS.sayThis)};
+  var NEEDS_YOU = ${scriptLiteral(PANE_WORDS.needsYou)};
+  var NOT_A_BUG = ${scriptLiteral(ACTION_LABEL.notABug)};
   var openHint = "";
   var observer = null;
 
@@ -344,7 +395,139 @@ export function statusPanePage(version: string): string {
       }
       list.appendChild(li);
     });
+    renderGuided(data.guided);
     if (data.at) setStatus(paused ? "Paused" : "Updated " + clock(data.at), paused ? "" : "on");
+  }
+
+  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+  function slug(text) { return String(text).toLowerCase().replace(/[^a-z]+/g, "-").replace(/^-|-$/g, ""); }
+
+  // A guided check's progress: every word in it was chosen by the server from fixed sentences, and is set as text.
+  function renderGuided(g) {
+    el("guided").hidden = !g;
+    if (!g) return;
+    el("g-title").textContent = g.title;
+    el("g-now").textContent = "Now: " + g.now;
+    var story = el("g-story");
+    clear(story);
+    // The story's last entry is the "now" line while the check runs; once it has ended, every entry is a step taken.
+    var all = Array.isArray(g.story) ? g.story : [];
+    var before = all.length > 0 && all[all.length - 1] === g.now ? all.slice(0, -1) : all;
+    before.forEach(function (line) {
+      var li = document.createElement("li");
+      li.textContent = line;
+      story.appendChild(li);
+    });
+    var needs = el("g-needs");
+    needs.hidden = !g.needsYou;
+    needs.textContent = g.needsYou ? NEEDS_YOU + " " + g.needsYou.sentence : "";
+    var areas = el("g-areas");
+    clear(areas);
+    (Array.isArray(g.areas) ? g.areas : []).forEach(function (a) {
+      var li = document.createElement("li");
+      li.setAttribute("data-testid", "status-pane-guided-area");
+      var mark = document.createElement("span");
+      mark.className = "mark " + a.state;
+      mark.textContent = a.state === "in-progress" ? "checking" : a.state;
+      li.appendChild(mark);
+      li.appendChild(document.createTextNode(a.label + (a.note ? " - " + a.note : "")));
+      areas.appendChild(li);
+    });
+    el("g-pages").textContent = "Pages checked: " + g.pages.checked + " of " + g.pages.found;
+    el("g-time").textContent = "Time: " + Math.floor(g.time.usedMs / 60000) + "m of " + Math.floor(g.time.budgetMs / 60000) + "m";
+    el("g-blocks").textContent = String(g.problems.blocksUsers);
+    el("g-annoying").textContent = String(g.problems.annoying);
+    el("g-cosmetic").textContent = String(g.problems.cosmetic);
+    if (!showingAll) renderCards(Array.isArray(g.latest) ? g.latest : [], NEWEST_HEADING);
+    el("g-saved").hidden = !g.saved;
+    el("g-saved").textContent = g.saved ? g.saved.sentence : "";
+    var next = el("g-next");
+    clear(next);
+    (Array.isArray(g.next) ? g.next : []).forEach(function (action) {
+      // While every card is shown, the same button goes back to the newest.
+      var shown = showingAll && action.tool === "scout_cards" ? { kind: "direct", label: NEWEST_LABEL, tool: "scout_cards", args: {} } : action;
+      next.appendChild(actionButton(shown, "status-pane-action-"));
+    });
+  }
+
+  function renderCards(cards, heading) {
+    el("g-cards-h").textContent = heading;
+    var list = el("g-cards");
+    clear(list);
+    cards.forEach(function (card) {
+      var li = document.createElement("li");
+      li.setAttribute("data-testid", "status-pane-guided-card");
+      var impact = document.createElement("span");
+      impact.className = "impact " + (card.severity === "high" || card.severity === "medium" || card.severity === "low" ? card.severity : "");
+      impact.textContent = card.impact;
+      var title = document.createElement("strong");
+      title.textContent = " " + card.title;
+      var head = document.createElement("div");
+      head.appendChild(impact);
+      head.appendChild(title);
+      li.appendChild(head);
+      li.appendChild(labelled("What kind of problem", card.problem + " - on " + card.page));
+      li.appendChild(labelled("What happened", card.happened));
+      var buttons = document.createElement("div");
+      buttons.className = "actions";
+      (Array.isArray(card.actions) ? card.actions : defaultCardActions(card.id)).forEach(function (action) {
+        buttons.appendChild(actionButton(action, "status-pane-card-"));
+      });
+      li.appendChild(buttons);
+      list.appendChild(li);
+    });
+  }
+
+  // Cards from scout_cards carry no buttons of their own: only "Not a bug", which needs no words from the agent.
+  function defaultCardActions(id) {
+    return [{ kind: "direct", label: NOT_A_BUG, tool: "scout_feedback", args: { id: id, verdict: "not-a-bug" } }];
+  }
+
+  function actionButton(action, prefix) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = action.label;
+    b.setAttribute("data-testid", prefix + slug(action.label));
+    b.addEventListener("click", function () { runAction(action, b); });
+    return b;
+  }
+
+  function hint(text) {
+    el("g-hint").textContent = text;
+    el("g-hint").hidden = !text;
+  }
+
+  function runAction(action, button) {
+    if (action.kind === "prompt" && typeof action.text === "string") {
+      if (!canSendMessages) { hint(SAY_THIS + " " + action.text); return; }
+      button.disabled = true;
+      request("ui/message", { role: "user", content: [{ type: "text", text: action.text }] })
+        .then(function (r) { if (r && r.isError) hint(SAY_THIS + " " + action.text); else hint(""); },
+              function () { hint(SAY_THIS + " " + action.text); })
+        .then(function () { button.disabled = false; });
+      return;
+    }
+    if (action.kind !== "direct" || DIRECT_TOOLS.indexOf(action.tool) < 0) return;
+    if (showingAll && action.tool === "scout_cards") { showingAll = false; poll(); return; }
+    button.disabled = true;
+    request("tools/call", { name: action.tool, arguments: action.args || {} })
+      .then(function (result) {
+        if (result && result.isError) throw new Error("the server refused it");
+        if (action.tool === "scout_cards" && result && result.structuredContent && Array.isArray(result.structuredContent.cards)) {
+          showingAll = true;
+          renderCards(result.structuredContent.cards, ALL_HEADING);
+        }
+        hint("");
+        // A label changes which cards are shown: while every card is on show, fetch them again.
+        if (showingAll && action.tool === "scout_feedback")
+          request("tools/call", { name: "scout_cards", arguments: {} }).then(function (r) {
+            if (r && !r.isError && r.structuredContent && Array.isArray(r.structuredContent.cards)) renderCards(r.structuredContent.cards, ALL_HEADING);
+          }, function (err) { hint("That did not work: " + (err && err.message ? err.message : String(err))); });
+        poll();
+      })
+      .catch(function (err) { hint("That did not work: " + (err && err.message ? err.message : String(err))); })
+      .then(function () { button.disabled = false; });
   }
 
   function labelled(label, value) {
@@ -426,6 +609,8 @@ export function statusPanePage(version: string): string {
       result = result || {};
       applyContext(result.hostContext || {});
       canOpenLinks = !!(result.hostCapabilities && result.hostCapabilities.openLinks);
+      // A host that can take a message from the view lets a card's "Explain more" start a turn; otherwise the pane shows the words to say.
+      canSendMessages = !!(result.hostCapabilities && result.hostCapabilities.message);
       notify("ui/notifications/initialized");
       connected = true;
       watchSize();
