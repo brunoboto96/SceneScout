@@ -32,8 +32,9 @@ updates:
 
   - package-ecosystem: github-actions
     # / reads .github/workflows and the root action.yml only; the ci and qa
-    # actions pin their own actions by commit, so their folders are listed too.
-    directories: ["/", "/ci", "/qa"]
+    # actions pin their own actions by commit, so their folders are listed too,
+    # and so is the folder of example workflows users copy.
+    directories: ["/", "/ci", "/qa", "/examples/workflows"]
     schedule:
       interval: weekly
     groups:

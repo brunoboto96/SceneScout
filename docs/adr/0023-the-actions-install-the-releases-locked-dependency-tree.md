@@ -37,7 +37,11 @@ the repository's own `package-lock.json` at that ref:
 - After the install, the published package's declared dependencies are
   compared with the lockfile's root. When they differ, the ref is not the
   release it names (a branch whose dependencies moved on since), and the
-  action installs as npm would, with a warning annotation.
+  action installs as npm would, with a warning annotation. The comparison
+  covers only the package's own declared dependencies. A ref whose lockfile
+  changed only in transitive entries therefore still installs pinned, from
+  that ref's lockfile, with no warning: it is the tree that ref was tested
+  with, which is the property this record promises.
 - A `version` input naming the ref's own release takes the pinned path, as an
   empty one does. One naming another version, a range or a tag is not what the
   lockfile describes. The action installs it as npm would, with a warning
