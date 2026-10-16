@@ -1582,7 +1582,7 @@ async function main(): Promise<void> {
     prompts
       .map((p) => p.name)
       .sort()
-      .join(",") !== "explore,live,login" ||
+      .join(",") !== "check-my-site,explore,file-tickets,is-it-safe,live,login,recheck,team-report" ||
     (liveListed?.arguments ?? []).length !== 0 ||
     !liveText.includes("127.0.0.1") ||
     !/scout_session with no arguments/.test(liveText) ||
@@ -1604,6 +1604,45 @@ async function main(): Promise<void> {
   }
   console.log("✓ the method reaches a client through instructions, scout_playbook and the explore prompt");
   console.log("✓ live and login prompts are listed, name no password, and tell the model what to return or call");
+  // The guided prompts: listed with the panel's titles, one round trip with an address, and a refusal that repeats nothing.
+  const checkListed = prompts.find((p) => p.name === "check-my-site");
+  const checkGot = promptTextOf(await client.getPrompt({ name: "check-my-site", arguments: { url: "http://localhost:3000" } }));
+  const checkBare = promptTextOf(await client.getPrompt({ name: "check-my-site" }));
+  const checkSecret = await client.getPrompt({ name: "check-my-site", arguments: { url: "https://bob:hunter2pass@staging.example.com" } }).then(
+    () => "accepted",
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  const safeGot = promptTextOf(await client.getPrompt({ name: "is-it-safe" }));
+  const ticketsTo = await client.getPrompt({ name: "file-tickets", arguments: { to: "ghp_A1b2C3d4E5f6G7h8" } }).then(
+    () => "accepted",
+    (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  );
+  const titles = Object.fromEntries(prompts.map((p) => [p.name, p.title]));
+  if (
+    checkListed?.title !== "Check my site" ||
+    titles["recheck"] !== "Re-check after a fix" ||
+    titles["team-report"] !== "Make a team report" ||
+    titles["file-tickets"] !== "File problems as tickets" ||
+    titles["is-it-safe"] !== "Is it safe to run on my live site?" ||
+    (checkListed.arguments ?? []).map((a) => `${a.name}:${a.required === true}`).join(",") !== "url:false" ||
+    !checkGot.includes('Call scout_intake with {"url":"http://localhost:3000"}') ||
+    !checkBare.includes("Call scout_intake with no arguments") ||
+    !/scout_cards/.test(checkGot) ||
+    checkSecret.includes("hunter2pass") ||
+    !/no user name or password in the address/.test(checkSecret) ||
+    !/word for word/.test(safeGot) ||
+    !safeGot.includes("It never asks for your password.") ||
+    ticketsTo.includes("ghp_") ||
+    !/to must be github or jira/.test(ticketsTo)
+  ) {
+    console.error(
+      `MCP CHECK FAILED — a guided prompt is missing, mistitled, or does not say what to call, or a refusal repeats what it refused.\n` +
+        `titles: ${JSON.stringify(titles)}\ncheck-my-site: ${JSON.stringify(checkGot.slice(0, 300))}\n` +
+        `credential url: ${JSON.stringify(checkSecret)}\nfile-tickets to: ${JSON.stringify(ticketsTo)}`,
+    );
+    process.exit(1);
+  }
+  console.log("✓ the guided prompts are listed with the panel's titles, check-my-site starts scout_intake with its address, and refusals repeat nothing");
 
   // The SKILL is the agent's entire methodology — a tool it never mentions is
   // effectively unshipped, however well the engine implements it. scout_scroll
@@ -1701,7 +1740,7 @@ async function main(): Promise<void> {
   }
   // Prompt names and arguments, held to prompts/list the same way tool options are held to their schemas.
   const promptSection = (reference.split("\n## MCP prompts\n")[1] ?? "").split("\n## ")[0];
-  const promptRows = [...promptSection.matchAll(/^\| `([a-z]+)` \| ([^|\n]+) \|/gm)];
+  const promptRows = [...promptSection.matchAll(/^\| `([a-z][a-z-]*)` \| ([^|\n]+) \|/gm)];
   const listedPrompts = new Map<string, Array<{ name: string; required: boolean }>>();
   if (!promptSection) guideGaps.push("Configuration-reference.md has no MCP prompts section");
   for (const row of promptRows) {

@@ -279,9 +279,10 @@ export function isLocalAddress(address: string): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
 }
 
-type Checked<T> = { ok: true; value: T } | { ok: false; error: string };
+export type Checked<T> = { ok: true; value: T } | { ok: false; error: string };
 
-function checkAddress(raw: unknown): Checked<string> {
+/** A site's address, checked; a refusal never quotes it, because it may hold the credential it is refused for. */
+export function checkAddress(raw: unknown): Checked<string> {
   if (typeof raw !== "string" || raw.trim() === "") return { ok: false, error: "give the address of the site, e.g. https://staging.example.com" };
   const address = raw.trim();
   if (address.length > MAX_ADDRESS) return { ok: false, error: `the address is longer than ${MAX_ADDRESS} characters` };
@@ -292,6 +293,10 @@ function checkAddress(raw: unknown): Checked<string> {
     return { ok: false, error: "the address must be written in full, starting with http:// or https://" };
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, error: "the address must start with http:// or https://" };
+  // The URL parser drops line breaks and tabs and encodes spaces, so without this an address could carry
+  // sentences into the text Claude reads (a prompt, a plan). An address a browser would open has none.
+  if (/[\s\p{Cc}\p{Cf}]/u.test(address))
+    return { ok: false, error: "the address has a space, line break or hidden character in it: copy it from the browser's address bar" };
   // Neither refusal quotes the address: it holds the credential.
   if (url.username || url.password) return { ok: false, error: `put no user name or password in the address: ${NO_CREDENTIALS}` };
   if (holdsCredential(address)) return { ok: false, error: `the address holds what looks like a password, code or token: ${NO_CREDENTIALS}` };

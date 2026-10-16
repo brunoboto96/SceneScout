@@ -37,7 +37,18 @@ export function statusPanePage(version: string): string {
 <meta name="color-scheme" content="light dark">
 <title>SceneScout run</title>
 <style>
-  /* The host may set any of these (the spec's standard variables); each has a default for one that does not. */
+${PANE_STYLE}</style>
+</head>
+<body>
+${PANE_MARKUP}<script>
+${paneScript(version)}</script>
+</body>
+</html>
+`;
+}
+
+/** The pane's styles: the spec's standard variables, each with a default for a host that does not set it, then the layout. */
+const PANE_STYLE = `  /* The host may set any of these (the spec's standard variables); each has a default for one that does not. */
   :root {
     color-scheme: light dark;
     --color-background-primary: light-dark(#ffffff, #171a1f);
@@ -122,10 +133,10 @@ export function statusPanePage(version: string): string {
   .impact.low { color: var(--color-text-info); }
   .needs { border-color: var(--color-text-warning); }
   [hidden] { display: none !important; }
-</style>
-</head>
-<body>
-<main id="main" data-testid="status-pane">
+`;
+
+/** The pane's markup: the header and its buttons, the live view's address, the guided check's section, and the run's findings, coverage and sessions. */
+const PANE_MARKUP = `<main id="main" data-testid="status-pane">
   <header>
     <h1>SceneScout run</h1>
     <span class="status" role="status" aria-live="polite"><span id="dot" class="dot"></span><span id="status-text" data-testid="status-pane-updated">Connecting…</span></span>
@@ -180,10 +191,24 @@ export function statusPanePage(version: string): string {
     <p id="no-sessions" class="note">No session is attached.</p>
   </section>
 </main>
-<script>
-(function () {
+`;
+
+/**
+ * The client script, wrapped in one immediately-invoked function so nothing leaks into the page's globals: its
+ * settings and state, the host transport, the run's rendering, the guided check's cards and buttons, then polling
+ * and the handshake, joined in this order. Its function declarations are hoisted, so a part may call a helper
+ * another part declares.
+ */
+function paneScript(version: string): string {
+  return `(function () {
   "use strict";
-  var POLL_TOOL = ${scriptLiteral(STATUS_POLL_TOOL)};
+${scriptSettings(version)}${SCRIPT_TRANSPORT}${SCRIPT_RENDER}${SCRIPT_GUIDED}${SCRIPT_CONTROLS}})();
+`;
+}
+
+/** What the script takes from the server (the poll tool, its interval, the protocol, the version and the fixed words), and the state it keeps. */
+function scriptSettings(version: string): string {
+  return `  var POLL_TOOL = ${scriptLiteral(STATUS_POLL_TOOL)};
   var POLL_MS = ${STATUS_POLL_MS};
   var PROTOCOL = ${scriptLiteral(MCP_APPS_PROTOCOL)};
   var VERSION = ${scriptLiteral(version)};
@@ -210,7 +235,11 @@ export function statusPanePage(version: string): string {
   var openHint = "";
   var observer = null;
 
-  function el(id) { return document.getElementById(id); }
+`;
+}
+
+/** The host transport: JSON-RPC over postMessage, accepting messages only from the parent window; the host's context (theme, variables, safe area) and the size the view reports. */
+const SCRIPT_TRANSPORT = `  function el(id) { return document.getElementById(id); }
 
   // The view cannot know its host's origin, so it posts to its parent with "*",
   // as the spec's own example and the SDK's transport do. Only the parent can
@@ -313,7 +342,10 @@ export function statusPanePage(version: string): string {
     observer.observe(document.body);
   }
 
-  function setStatus(text, state) {
+`;
+
+/** The run's status line, findings, coverage and sessions, each set as text. */
+const SCRIPT_RENDER = `  function setStatus(text, state) {
     el("status-text").textContent = text;
     el("dot").className = "dot" + (state ? " " + state : "");
   }
@@ -399,7 +431,10 @@ export function statusPanePage(version: string): string {
     if (data.at) setStatus(paused ? "Paused" : "Updated " + clock(data.at), paused ? "" : "on");
   }
 
-  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+`;
+
+/** A guided check's progress, its cards, and the buttons that call a tool or send a prompt; also the helpers clear, slug and labelled, which render uses too. */
+const SCRIPT_GUIDED = `  function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
   function slug(text) { return String(text).toLowerCase().replace(/[^a-z]+/g, "-").replace(/^-|-$/g, ""); }
 
@@ -540,7 +575,10 @@ export function statusPanePage(version: string): string {
     return line;
   }
 
-  function poll() {
+`;
+
+/** Polling the status tool, pause and resume, teardown, the live view's button and the ui/initialize handshake. */
+const SCRIPT_CONTROLS = `  function poll() {
     if (!connected || paused || inFlight || document.visibilityState === "hidden") return;
     inFlight = true;
     request("tools/call", { name: POLL_TOOL, arguments: {} })
@@ -620,9 +658,4 @@ export function statusPanePage(version: string): string {
     .catch(function (err) {
       setStatus("Not connected: " + (err && err.message ? err.message : String(err)), "err");
     });
-})();
-</script>
-</body>
-</html>
 `;
-}
