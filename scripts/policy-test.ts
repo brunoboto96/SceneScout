@@ -2091,21 +2091,21 @@ test("config: the project's own file can tighten the operator's and never loosen
 });
 
 test("config: read from SCENESCOUT_CONFIG, else the launch directory, and the project's file joins it", () => {
+  // Paths are built the way the code builds them, so the stand-in disk answers on Windows too.
+  const at = (dir: string): string => path.join(dir, ".scenescout", "config.json");
+  const etc = path.resolve("/etc/scenescout.json");
   const files = new Map<string, string>([
-    ["/srv/.scenescout/config.json", '{"maxMode": "read-only"}'],
-    ["/etc/scenescout.json", '{"preset": "strict"}'],
-    ["/work/app/.scenescout/config.json", '{"maxMode": "observe"}'],
-    ["/work/bad/.scenescout/config.json", '{"maxmode": "observe"}'],
+    [at("/srv"), '{"maxMode": "read-only"}'],
+    [etc, '{"preset": "strict"}'],
+    [at("/work/app"), '{"maxMode": "observe"}'],
+    [at("/work/bad"), '{"maxmode": "observe"}'],
   ]);
   const fsx = { exists: (f: string) => files.has(f), read: (f: string) => files.get(f)!, realpath: (f: string) => f };
   const launched = readLaunchPolicy({}, "/srv", fsx);
   assert.ok(launched.ok);
-  assert.deepEqual(launched.loaded, { policy: { maxMode: "read-only" }, sources: ["/srv/.scenescout/config.json"] });
+  assert.deepEqual(launched.loaded, { policy: { maxMode: "read-only" }, sources: [at("/srv")] });
   const named = readLaunchPolicy({ SCENESCOUT_CONFIG: "/etc/scenescout.json" }, "/srv", fsx);
-  assert.ok(
-    named.ok && named.loaded.policy.maxMode === "observe" && named.loaded.sources[0] === "/etc/scenescout.json",
-    "the named file, not the launch directory's",
-  );
+  assert.ok(named.ok && named.loaded.policy.maxMode === "observe" && named.loaded.sources[0] === etc, "the named file, not the launch directory's");
   assert.deepEqual(readLaunchPolicy({}, "/elsewhere", fsx), { ok: true, loaded: NO_POLICY }, "no file: no config");
   for (const [value, why] of [
     ["relative.json", /must be an absolute path/],
@@ -2116,7 +2116,7 @@ test("config: read from SCENESCOUT_CONFIG, else the launch directory, and the pr
   }
   const joined = withProjectPolicy(launched.loaded, "/work/app", fsx);
   assert.ok(joined.ok);
-  assert.deepEqual(joined.loaded, { policy: { maxMode: "observe" }, sources: ["/srv/.scenescout/config.json", "/work/app/.scenescout/config.json"] });
+  assert.deepEqual(joined.loaded, { policy: { maxMode: "observe" }, sources: [at("/srv"), at("/work/app")] });
   const same = withProjectPolicy(launched.loaded, "/srv", fsx);
   assert.ok(same.ok && same.loaded.sources.length === 1, "the operator's own file is not read twice");
   const bad = withProjectPolicy(launched.loaded, "/work/bad", fsx);
