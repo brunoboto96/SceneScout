@@ -18,29 +18,8 @@ import {
 } from "playwright";
 import fs from "node:fs";
 import path from "node:path";
-import {
-  elementKey,
-  fingerprintState,
-  isNonPageRoute,
-  keyAliasSteps,
-  normalizePath,
-  ordinalKeys,
-  refsSurviveUrlChange,
-  routeBase,
-  type InteractableInfo,
-} from "./fingerprint.js";
-import {
-  AUTH_LOSS_PREFIX,
-  JOURNEY_END,
-  JOURNEY_START,
-  MemoryStore,
-  NAME_RULE,
-  reachedRoutes,
-  redactSecrets,
-  TASK_SET,
-  type ActionLogEntry,
-  type KeyAliasSteps,
-} from "./memory.js";
+import { fingerprintState, isNonPageRoute, normalizePath, refsSurviveUrlChange } from "./fingerprint.js";
+import { AUTH_LOSS_PREFIX, JOURNEY_END, JOURNEY_START, MemoryStore, reachedRoutes, redactSecrets, TASK_SET, type ActionLogEntry } from "./memory.js";
 import type { SessionDescription } from "./live.js";
 import { maskedValue, maskFillCalls, secretFieldKind, type SecretKind } from "./sensitive.js";
 import { normalizeTask } from "./task.js";
@@ -64,7 +43,6 @@ import { captureClip, cutByViewport, type Box } from "./capture.js";
 import { maskedScreenshot } from "./secret-pixels.js";
 import { NEXT_FRAME_SCRIPT, NEXT_FRAME_WAIT_MS, STOP_ANIMATIONS_SCRIPT, steadyPicture, unsteadyNote, type PictureSettings } from "./baseline.js";
 import {
-  COLLECT_INTERACTABLES_SCRIPT,
   COLLECTOR_CAP,
   NAME_SRC,
   POLICY_TEXT_SRC,
@@ -72,24 +50,13 @@ import {
   XPATH_OF_SRC,
   affordanceFlags,
   cutSummary,
-  matchPrevious,
-  type Affordances,
-  type CutElement,
   geometryIssues,
-  type Rect,
   BROKEN_IMAGES_SCRIPT,
   brokenImageIssues,
   frameLines,
   hasVisibleFrame,
   type FrameInfo,
-  frameElementKey,
   frameLabel,
-  masksForeignName,
-  MASKED_NAME,
-  capForeignName,
-  stripForeignHref,
-  frameToPageRect,
-  type FrameTag,
   type BrokenImageScan,
   displayName,
   missingName,
@@ -97,8 +64,6 @@ import {
   placeholderEvidence,
   describeControl,
   labelFlag,
-  type NameFrom,
-  type ElementState,
   stateFlags,
   stateChange,
   trackedElements,
@@ -136,7 +101,8 @@ import {
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
-import { describePace, InFlightRequests, keepWatchingUrl, normalizePace, SETTLE_TICK_MS, shouldKeepWaiting } from "./settle.js";
+import { describePace, InFlightRequests, normalizePace, settlePage, stableUrlOf } from "./settle.js";
+import { FRAME_READ_MS, SnapshotCollector, withinFrameLimit, type SnapshotElement } from "./snapshot-collect.js";
 import {
   AnsweredNavigationError,
   answeredNavigationFailure,
@@ -183,11 +149,9 @@ import {
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
 import {
-  FORMS_INVENTORY_SCRIPT,
   FORM_PROBE_BODY,
   FORM_PROBE_OF_ACTIVE_ELEMENT,
   formIdentity,
-  formStatus,
   FORMS_READ_FAILED,
   FORMS_SUBMIT_UNMATCHED,
   isEmptySubmit,
@@ -196,7 +160,6 @@ import {
   isNavigationTeardown,
   submits,
   tracksForm,
-  type FormFacts,
   type FormProbe,
   APP_FILLED_TYPES,
   matchOption,
@@ -416,63 +379,6 @@ interface FileInputListing {
   visible: boolean;
 }
 
-interface SnapshotElement extends InteractableInfo {
-  /** The frame it was collected from; absent for the page itself. */
-  frame?: FrameTag;
-  ref: string;
-  key: string;
-  tag: string;
-  xpath: string;
-  disabled: boolean;
-  href: string | null;
-  destructive: boolean;
-  clipped?: boolean;
-  /** Nearest positioning/scroll-context id (0 = document flow) — overlap grouping. */
-  layer?: number;
-  /** Inside position:fixed/sticky chrome — overlaps between chrome are intended layering. */
-  chrome?: boolean;
-  rect: Rect;
-  /** Set when the control is pinned chrome whose centre is owned by other pinned chrome (hit-tested in the page). */
-  coveredBy?: string | null;
-  /** Set when a field's name is its placeholder, name attribute or type rather than a label. */
-  nameFrom?: NameFrom | null;
-  /** Read by the geometry oracles (collector.ts GeometryElement). */
-  focusable?: boolean;
-  focusMoves?: boolean;
-  passThrough?: boolean;
-  fieldPad?: { l: number; r: number } | null;
-  /** A user can act on it (collector isInteractive); false for what is listed only for its test id or its text. */
-  interactive?: boolean;
-  /** For an element with no control role or native control: what alone makes it actionable (collector.ts affordanceFlags). */
-  affords?: Affordances | null;
-  /** Inside an aria-hidden subtree. */
-  ariaHidden?: boolean;
-  /** A live region listed only for what it says: kept out of the state's identity and its coverage (trackedElements). */
-  liveOnly?: boolean;
-  /** Pressed, selected, checked, expanded, current (stateFlags). */
-  state?: ElementState;
-  /** The horizontally scrolling container it sits outside the visible width of, when it does. */
-  scrolledOutIn?: string | null;
-}
-
-/** One kept snapshot: its route and, by element key, what the diff compares and the ref the element had. */
-interface SnapRecord {
-  route: string;
-  byKey: Map<string, { ref: string; label: string; href: string | null; disabled: boolean; state: string[] }>;
-}
-
-/**
- * The kept snapshot a new one is compared with: the latest snapshot, an
- * earlier one of the same route, or the latest of another tab of the screen.
- */
-interface PrevSnap {
-  snap: SnapRecord;
-  how: "latest" | "revisited" | "tab";
-}
-
-/** How many routes' last snapshots are kept for diffs. */
-const SNAPSHOTS_KEPT = 20;
-
 const SETTLE_MS = 400;
 
 /** Budget for the forced retry of a click whose strict wait timed out — it skips that wait, so needs little. */
@@ -537,17 +443,6 @@ function requestSource(req: Request): { frameChain: string[]; frameUrl: string |
   return { frameChain, frameUrl };
 }
 
-/** The most frames a snapshot reads controls from. */
-const MAX_READ_FRAMES = 10;
-
-/** How long a snapshot waits for its frames' elements to answer. */
-const FRAME_READ_MS = 1500;
-
-/** The coverage key of the page's own element at this xpath (never one in a frame: its xpath names a node in another document). */
-function keyAtXpath(elements: readonly SnapshotElement[], xpath: string): string | null {
-  return elements.find((el) => !el.frame && el.xpath === xpath)?.key ?? null;
-}
-
 /** The page's own element at the probe's submit xpath, when it really is that control (forms.ts sameControl). */
 function submitControlIn(elements: readonly SnapshotElement[], probe: FormProbe): SnapshotElement | null {
   const el = elements.find((e) => !e.frame && e.xpath === probe.submit);
@@ -581,9 +476,6 @@ const probeFormOf = new Function("node", FORM_PROBE_BODY) as (node: Element) => 
  * milliseconds; this only stops a wedged page stalling the action.
  */
 const FORM_READ_MS = 1000;
-
-/** A form a collect found: its identity key, and whether the page itself refuses its empty submit. */
-type SeenForm = { key: string; guarded: boolean };
 
 /** One step of a scout_run_plan plan. */
 type PlanStep = {
@@ -817,24 +709,18 @@ export class BrowserEngine {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private oracles = new OracleMonitor();
-  private refs = new Map<string, SnapshotElement>();
-  private refCounter = 0;
+  /** The page's interactables, their refs, and the snapshots kept for diffs (snapshot-collect.ts). */
+  private readonly snapshots = new SnapshotCollector({
+    page: () => this.requirePage(),
+    formRead: (what, work) => this.formRead(what, work),
+    foreignOriginOf: (frame) => this.foreignOriginOf(frame),
+    harvestRoutes: (elements) => this.harvestRoutes(elements),
+  });
   private currentFingerprint = "";
   /** URL at the time of the last snapshot — refs are valid only while it matches. */
   private snapshotUrl = "";
   /** When the last snapshot was taken (0 before the first): what a forced click's covering element is compared against. */
   private snapshotAt = 0;
-  /**
-   * The last snapshot of each recent route, newest last (at most
-   * SNAPSHOTS_KEPT): a route snapshotted again keeps its refs and is shown as
-   * a diff, even after a visit elsewhere, and a tab of a screen diffs against
-   * the screen's last tab.
-   */
-  private snaps = new Map<string, SnapRecord>();
-  /** The route of the latest snapshot, so a diff can say whether it is against that one. */
-  private lastSnapRoute = "";
-  /** Why the refs of the latest snapshot were dropped since it was taken, or null when they were not. */
-  private refsDropped: string | null = null;
   /** Non-parameterized routes discovered by the project scan — the objective completion contract. */
   knownRoutes: string[] = [];
   /** Real path of the attached project — the fence for scout_upload's filePath. */
@@ -1427,7 +1313,7 @@ export class BrowserEngine {
    * (claims.ts keptChange). Never fails the click: unread, the rule is skipped.
    */
   private async readActedControl(el: SnapshotElement): Promise<void> {
-    const scope = this.scopeOf(el);
+    const scope = this.snapshots.scopeOf(el);
     try {
       const before = (await scope.evaluate(`(${ACTED_CONTROL_SRC})(${xpathLookup(el.xpath)})`)) as ActedControl | null;
       this.actedControl = before ? { scope, xpath: el.xpath, before } : null;
@@ -1717,7 +1603,7 @@ export class BrowserEngine {
       }
       return embedOfRequest(this.baseUrl, req.url(), site);
     });
-    this.forgetSnapshots();
+    this.snapshots.forgetSnapshots();
     this.designAuditCount = 0;
     // A new attach may be a restarted app: what failed to load before gets another try.
     this.loadFailedRoutes = new Set();
@@ -1923,9 +1809,9 @@ export class BrowserEngine {
             this.wireDialogHandler(newPage);
             this.wireEmbedMoves(newPage);
             this.page = newPage;
-            this.refs.clear();
+            this.snapshots.refs.clear();
             this.snapshotUrl = "";
-            this.forgetSnapshots();
+            this.snapshots.forgetSnapshots();
           } else {
             void this.leaveAndClose(newPage);
           }
@@ -2120,48 +2006,17 @@ export class BrowserEngine {
 
   private async settle(): Promise<void> {
     const page = this.requirePage();
-    await bestEffort(page.waitForLoadState("domcontentloaded"));
-    // Wait on what is actually in flight rather than a flat sleep. The rule is
-    // in settle.ts so it can be table-tested; the reasoning for not using
-    // networkidle is there too.
-    const started = Date.now();
-    for (;;) {
-      const state = {
-        inFlight: this.inFlight,
-        sinceLastStartMs: Date.now() - this.lastRequestStart,
-        elapsedMs: Date.now() - started,
-        paceMs: this.paceMs,
-      };
-      if (!shouldKeepWaiting(state)) return;
-      await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
-      if (this.page !== page) return;
-    }
+    await settlePage(page, {
+      inFlight: () => this.inFlight,
+      lastRequestStart: () => this.lastRequestStart,
+      paceMs: () => this.paceMs,
+      current: () => this.page,
+    });
   }
 
-  /**
-   * The URL once it has stopped changing.
-   *
-   * Only called where a bounce verdict is about to be made. A client-side auth
-   * guard redirects on a timer and issues no request until it does, so the
-   * request-based settle has nothing to wait on and the page is read while it
-   * is still, briefly, the page it was asked for.
-   */
+  /** The URL once it has stopped changing (settle.ts stableUrlOf). */
   private async stableUrl(): Promise<string> {
-    const page = this.page;
-    if (!page || page.isClosed()) return page ? page.url() : "";
-    const started = Date.now();
-    let url = page.url();
-    let changedAt = started;
-    for (;;) {
-      if (!keepWatchingUrl({ sinceChangeMs: Date.now() - changedAt, elapsedMs: Date.now() - started })) return url;
-      await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
-      if (this.page !== page || page.isClosed()) return url;
-      const now = page.url();
-      if (now !== url) {
-        url = now;
-        changedAt = Date.now();
-      }
-    }
+    return stableUrlOf(() => this.page);
   }
 
   /**
@@ -2202,239 +2057,9 @@ export class BrowserEngine {
     return this.paceMs;
   }
 
-  /** Forget every kept snapshot: the next one of any route is listed in full, with new refs. */
-  private forgetSnapshots(): void {
-    this.snaps.clear();
-    this.lastSnapRoute = "";
-    this.refsDropped = null;
-  }
-
-  /** Drop the latest snapshot's refs, remembering why so the next diff does not call them stable. */
-  private dropRefs(reason: string): void {
-    this.refs.clear();
-    this.refsDropped ??= reason;
-  }
-
-  /**
-   * The kept snapshot a route's next snapshot is compared with: the route's
-   * own, else the latest of another tab of the same screen (routeBase).
-   */
-  private prevSnapFor(route: string): PrevSnap | null {
-    const own = this.snaps.get(route);
-    if (own) return { snap: own, how: route === this.lastSnapRoute ? "latest" : "revisited" };
-    const base = routeBase(route);
-    const tabs = [...this.snaps.values()].filter((s) => routeBase(s.route) === base);
-    const latest = tabs[tabs.length - 1];
-    return latest ? { snap: latest, how: "tab" } : null;
-  }
-
-  /** Keep a snapshot as its route's latest, dropping the least recent route past SNAPSHOTS_KEPT. */
-  private keepSnapshot(snap: SnapRecord): void {
-    this.snaps.delete(snap.route);
-    this.snaps.set(snap.route, snap);
-    while (this.snaps.size > SNAPSHOTS_KEPT) this.snaps.delete(this.snaps.keys().next().value!);
-    this.lastSnapRoute = snap.route;
-    this.refsDropped = null;
-  }
-
-  /** Collect the current page's interactables into SnapshotElements with stable refs. */
-  private async collect(): Promise<{
-    elements: SnapshotElement[];
-    truncated: boolean;
-    forms: SeenForm[];
-    /** What past the element cap was left out (collector.ts cutSummary). */
-    cut: CutElement[];
-    /** The snapshot this collect's refs were carried over from, and how it relates to this page. */
-    prev: PrevSnap | null;
-    /** For each element, its key in `prev`, or null when it is new since (collector.ts matchPrevious). */
-    matched: Array<string | null>;
-    /** For each step between name rules, each listed key the rule before made differently, current → earlier (memory.ts KeyAliasSteps). */
-    aliases: KeyAliasSteps;
-  }> {
-    const page = this.requirePage();
-    type RawElement = {
-      tag: string;
-      role: string;
-      name: string;
-      testid: string | null;
-      xpath: string;
-      disabled: boolean;
-      href: string | null;
-      rect: Rect;
-      clipped?: boolean;
-      layer?: number;
-      chrome?: boolean;
-      coveredBy?: string | null;
-      nameFrom?: NameFrom | null;
-      /** Its name under each earlier name rule, rule 1 first, when content named it (collector.ts PICK_NAME_SRC); not kept on the listed element. */
-      priorNames?: string[];
-      focusable?: boolean;
-      focusMoves?: boolean;
-      passThrough?: boolean;
-      fieldPad?: { l: number; r: number } | null;
-      /** Read for the label policy only (collector.ts POLICY_TEXT_SRC); not kept on the listed element. */
-      ownText?: string;
-      centre?: string[];
-      interactive?: boolean;
-      ariaHidden?: boolean;
-      liveOnly?: boolean;
-      state?: ElementState;
-      scrolledOutIn?: string | null;
-      affords?: Affordances | null;
-      /** Past the collector's cap: only counted (CutElement). */
-      cut?: boolean;
-    };
-    // SPAs (and dev servers mid-recompile) can present an empty shell for a
-    // few seconds — and a shell that already renders its chrome (sidebar,
-    // nav) passes a zero-check while the route content is still loading.
-    // Retry until two consecutive probes agree on the element count, so we
-    // snapshot the hydrated page, not the loading state.
-    let rawElements: RawElement[] = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
-    for (let attempt = 0; attempt < 8; attempt++) {
-      await page.waitForTimeout(rawElements.length === 0 ? 500 : 300);
-      const probe = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
-      const stable = probe.length === rawElements.length && probe.length > 0;
-      rawElements = probe;
-      if (stable) break;
-    }
-
-    const cut = rawElements.filter((r) => r.cut) as CutElement[];
-    rawElements = rawElements.filter((r) => !r.cut);
-    // The page's forms, read in the same settled page as its elements. The
-    // page's own document only: an xpath names a node in one document.
-    const rawForms = ((await this.formRead("form inventory", page.evaluate(FORMS_INVENTORY_SCRIPT))) ?? []) as FormFacts[];
-    // Then each frame's own controls, read once, each within its own limit.
-    const framed = await this.collectFrames(page);
-
-    // Element identity is the coverage key (testid or role+name, ordinal-
-    // disambiguated). When a key persists across snapshots of the same route,
-    // its ref is REUSED — diffs stay meaningful and the agent's mental model
-    // (and previously issued refs) survive re-snapshots. An element inside a
-    // frame carries the frame in its key (collector.ts frameElementKey).
-    const route = normalizePath(page.url());
-    const prev = this.prevSnapFor(route);
-    this.refs.clear();
-    this.refFrames.clear();
-    const all: Array<{ raw: RawElement; frame?: Frame; tag?: FrameTag }> = [
-      ...rawElements.map((raw) => ({ raw })),
-      ...framed.flatMap((g) => g.raws.map((raw) => ({ raw: raw as RawElement, frame: g.frame, tag: g.tag }))),
-    ];
-    // A live region listed for what it says is known by its role, not its
-    // text, so a new message reads as the same region saying something else.
-    const baseKeyOf = (el: RawElement, name: string, tag?: FrameTag) => frameElementKey(el.liveOnly ? `live:${el.role}` : elementKey({ ...el, name }), tag);
-    // Each element's base key under every name rule, rule 1 first, so each step between two rules gets its own aliases.
-    const bases = all.map(({ raw: el, tag }) => ({
-      byRule: Array.from({ length: NAME_RULE }, (_, i) => baseKeyOf(el, i < NAME_RULE - 1 ? (el.priorNames?.[i] ?? el.name) : el.name, tag)),
-      tracked: !el.liveOnly,
-    }));
-    const keys = ordinalKeys(bases.map((b) => b.byRule[NAME_RULE - 1]));
-    const aliases = keyAliasSteps(bases);
-    const built = all.map(({ raw: el, frame, tag }, i) => {
-      const key = keys[i];
-      const { ownText: _ownText, centre: _centre, cut: _cut, priorNames: _priorNames, ...listed } = el;
-      const full: SnapshotElement = {
-        ...listed,
-        ...(tag ? { frame: tag } : {}),
-        // Judged on the real label, then masked: the policy must see what a click would press.
-        // A message is not a control: "Could not delete" in an alert is not a Delete button.
-        destructive: el.liveOnly ? false : destructiveLabelOf(el) !== null,
-        ...(tag?.foreign ? { name: masksForeignName(el.tag, el.role) ? MASKED_NAME : capForeignName(el.name) } : {}),
-        ...(tag?.foreign && el.href ? { href: stripForeignHref(el.href) } : {}),
-        ref: "",
-        key,
-      };
-      return { full, frame };
-    });
-    // An element keeps the ref it had in the snapshot it is matched to, so
-    // refs an agent holds survive a re-snapshot and the diff stays readable.
-    const matched = matchPrevious(
-      prev?.snap.byKey ?? new Map(),
-      built.map(({ full }) => ({ key: full.key, name: full.name, href: full.href, byPosition: full.liveOnly })),
-    );
-    const elements: SnapshotElement[] = built.map(({ full, frame }, i) => {
-      const was = matched[i];
-      full.ref = (was ? prev?.snap.byKey.get(was)?.ref : undefined) ?? `e${++this.refCounter}`;
-      this.refs.set(full.ref, full);
-      if (frame) this.refFrames.set(full.ref, frame);
-      return full;
-    });
-    this.harvestRoutes(elements.filter((el) => !el.frame?.foreign));
-    this.framesRead = new Set(framed.map((g) => g.frame));
-    // A form is known by its own attributes, else by its submit control's coverage
-    // key (forms.ts formIdentity); a form with neither is not tracked.
-    const forms = rawForms.flatMap((f): SeenForm[] => {
-      const status = formStatus(f);
-      const key = status === "untracked" ? null : (formIdentity(f.attrs) ?? keyAtXpath(elements, f.submit));
-      return key ? [{ key, guarded: status === "guarded" }] : [];
-    });
-    this.lastCollectTruncated = cut.length > 0;
-    return { elements, truncated: cut.length > 0, forms, cut, prev, matched, aliases };
-  }
-
-  /** Whether the latest collect stopped at the element cap, so some controls have no key at all. */
-  private lastCollectTruncated = false;
-
-  /**
-   * The controls inside the page's frames, up to MAX_READ_FRAMES visible ones,
-   * each read within FRAME_READ_MS so one busy frame cannot stall a snapshot.
-   * Positions are moved into the page's coordinates (the frame element's box
-   * on screen, the frame's own scroll, the page's scroll), so geometry and
-   * the design audit can place them.
-   */
-  private async collectFrames(page: Page): Promise<Array<{ frame: Frame; tag: FrameTag; raws: unknown[] }>> {
-    const top = page.mainFrame();
-    const frames = page.frames().filter((f) => f !== top && !f.isDetached());
-    if (frames.length === 0) return [];
-    const pageScroll = ((await bestEffort(page.evaluate("({ x: window.scrollX, y: window.scrollY })"), null)) as { x: number; y: number } | null) ?? {
-      x: 0,
-      y: 0,
-    };
-    const read = async (frame: Frame): Promise<{ frame: Frame; tag: FrameTag; raws: unknown[] } | null> => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const work = bestEffort(
-        (async () => {
-          const el = await frame.frameElement();
-          const box = await el.boundingBox();
-          if (!box || box.width < 2 || box.height < 2) return null;
-          const title = ((await el.getAttribute("title")) || (await el.getAttribute("name")) || "").trim();
-          const got = (await frame.evaluate(`(() => ({ els: ${COLLECT_INTERACTABLES_SCRIPT}, sx: window.scrollX, sy: window.scrollY }))()`)) as {
-            els: Array<{ rect: Rect }>;
-            sx: number;
-            sy: number;
-          };
-          const raws = got.els
-            .filter((r) => !(r as { cut?: boolean }).cut)
-            .map((r) => ({ ...r, rect: frameToPageRect(r.rect, box, { x: got.sx, y: got.sy }, pageScroll) }));
-          let origin = "";
-          try {
-            const u = new URL(frame.url());
-            if (u.protocol === "http:" || u.protocol === "https:") origin = u.origin;
-          } catch {
-            /* no web address */
-          }
-          const foreignOrigin = this.foreignOriginOf(frame);
-          return { frame, tag: { url: frame.url(), origin: foreignOrigin ?? origin, title, foreign: foreignOrigin !== null }, raws };
-        })(),
-        null,
-      );
-      const limit = new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), FRAME_READ_MS);
-      });
-      return Promise.race([work, limit]).finally(() => clearTimeout(timer));
-    };
-    // Visible frames first: a page's hidden plumbing frames must not use up the budget.
-    const boxes = await Promise.all(frames.map((f) => this.withinFrameLimit(f.frameElement().then((el) => el.boundingBox()))));
-    const visible = frames.filter((_, i) => {
-      const b = boxes[i];
-      return !!b && b.width >= 2 && b.height >= 2;
-    });
-    const got = await Promise.all(visible.slice(0, MAX_READ_FRAMES).map(read));
-    return got.filter((g): g is { frame: Frame; tag: FrameTag; raws: unknown[] } => g !== null);
-  }
-
   /** The origin of another site's frame an element is in, or null for the page and the app's own frames. */
   private foreignEmbedOf(el: SnapshotElement): string | null {
-    const frame = this.refFrames.get(el.ref);
+    const frame = this.snapshots.refFrames.get(el.ref);
     const now = frame ? this.foreignOriginOf(frame) : null;
     if (now) return now;
     return el.frame?.foreign ? el.frame.origin || el.frame.url : null;
@@ -2456,41 +2081,6 @@ export class BrowserEngine {
     return foreignFrameOrigin(this.baseUrl, chain);
   }
 
-  /** A frame read that gives up after FRAME_READ_MS, answering null. */
-  private async withinFrameLimit<T>(work: Promise<T>): Promise<T | null> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const limit = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), FRAME_READ_MS);
-    });
-    return Promise.race([bestEffort(work, null), limit]).finally(() => clearTimeout(timer));
-  }
-
-  /** Frames not directly under the page, less those whose controls were read anyway. */
-  private unreadNestedFrames(page: Page, nested: number): number {
-    const top = page.mainFrame();
-    const readNested = [...this.framesRead].filter((f) => !f.isDetached() && f.parentFrame() !== top).length;
-    return Math.max(0, nested - readNested);
-  }
-
-  /** The frames whose controls the last snapshot listed. */
-  private framesRead = new Set<Frame>();
-
-  /** The frame each ref of the last snapshot lives in; refs of the page itself are absent. */
-  private refFrames = new Map<string, Frame>();
-
-  /**
-   * Where to look for a ref's element: its frame, or the page. A frame that has
-   * gone makes the ref stale, like a page that has navigated.
-   */
-  private scopeOf(el: SnapshotElement): Page | Frame {
-    const frame = this.refFrames.get(el.ref);
-    if (!frame) return this.requirePage();
-    if (frame.isDetached()) throw new Error(`The frame holding ${el.ref} has gone — take a new scout_snapshot.`);
-    // A frame that navigated holds a new document: the ref, and what it knew of the frame's site, are stale.
-    if (el.frame && frame.url() !== el.frame.url) throw new Error(`The frame holding ${el.ref} has navigated — take a new scout_snapshot.`);
-    return frame;
-  }
-
   /**
    * Collect the current page and REGISTER it as a visited state, returning the
    * fingerprint and elements. Registration matters: markExercised refuses a key
@@ -2500,7 +2090,7 @@ export class BrowserEngine {
    */
   private async captureCoverageState(): Promise<{ fp: string; elements: SnapshotElement[]; url: string }> {
     const page = this.requirePage();
-    const { elements, forms, aliases } = await this.collect();
+    const { elements, forms, aliases } = await this.snapshots.collect();
     const url = page.url();
     const fp = fingerprintState(url, trackedElements(elements));
     this.memory?.visitState(
@@ -2590,7 +2180,7 @@ export class BrowserEngine {
     const memory = this.memory!;
     await this.settle();
 
-    const { elements, truncated, forms, cut, prev: prevSnap, matched, aliases } = await this.collect();
+    const { elements, truncated, forms, cut, prev: prevSnap, matched, aliases } = await this.snapshots.collect();
     const url = page.url();
     this.snapshotUrl = url;
     this.snapshotAt = Date.now();
@@ -2647,8 +2237,8 @@ export class BrowserEngine {
     // applied to agent context. Elements are paired with the kept snapshot's
     // by matchPrevious, the same pairing that gave them their refs.
     const prev = prevSnap?.snap ?? null;
-    const refsDropped = this.refsDropped;
-    this.keepSnapshot({
+    const refsDropped = this.snapshots.refsDropped;
+    this.snapshots.keepSnapshot({
       route,
       byKey: new Map(elements.map((el) => [el.key, { ref: el.ref, label: el.name, href: el.href, disabled: el.disabled, state: stateFlags(el.state) }])),
     });
@@ -2748,10 +2338,10 @@ export class BrowserEngine {
       (frames.length > 0 || nestedFrames > 0
         ? `\n` +
           frameLines(this.baseUrl, frames, {
-            nested: this.unreadNestedFrames(page, nestedFrames),
+            nested: this.snapshots.unreadNestedFrames(page, nestedFrames),
             writesRefused: this.mode !== "destructive",
             trustedWrites: this.mode === "safe-write" ? this.trustedEmbeds : undefined,
-            read: new Set([...this.framesRead].map((f) => f.url())),
+            read: new Set([...this.snapshots.framesRead].map((f) => f.url())),
           }).join("\n")
         : "") +
       (hiddenFileInputs.length > 0
@@ -2786,20 +2376,20 @@ export class BrowserEngine {
     this.actionStartedAt = Date.now();
     this.rebindNote = "";
     const page = this.requirePage();
-    let el = this.refs.get(ref);
+    let el = this.snapshots.refs.get(ref);
     if (!el) {
       throw new Error(
-        `Unknown ref "${ref}". Refs are only valid from the latest scout_snapshot${this.refsDropped ? ` (they were dropped when ${this.refsDropped})` : ""} — take a new snapshot.`,
+        `Unknown ref "${ref}". Refs are only valid from the latest scout_snapshot${this.snapshots.refsDropped ? ` (they were dropped when ${this.snapshots.refsDropped})` : ""} — take a new snapshot.`,
       );
     }
     const urlMoved = page.url() !== this.snapshotUrl;
     if (urlMoved && !refsSurviveUrlChange(this.snapshotUrl, page.url())) {
-      this.dropRefs(`the page moved to ${page.url()}`);
+      this.snapshots.dropRefs(`the page moved to ${page.url()}`);
       throw new Error(`Page URL changed since the last snapshot (now ${page.url()}). Take a new scout_snapshot.`);
     }
     // The element and the test id are passed as arguments: no value of the
     // page's is written into the code that runs there.
-    const scope = this.scopeOf(el);
+    const scope = this.snapshots.scopeOf(el);
     const handle = await bestEffort(scope.$(`xpath=${el.xpath}`), null);
     let live = handle ? await bestEffort(handle.evaluate(liveFactsOf), null) : null;
     await bestEffort(handle?.dispose());
@@ -2808,7 +2398,7 @@ export class BrowserEngine {
       const found = await bestEffort(scope.evaluate(uniqueByTestid, el.testid), null);
       if (found && found.live.name === el.name) {
         el = { ...el, xpath: found.xpath };
-        this.refs.set(ref, el);
+        this.snapshots.refs.set(ref, el);
         live = found.live;
         this.rebindNote = `\nℹ ${ref} re-bound after a re-render: found again by its unique testid=${el.testid}.`;
       }
@@ -2818,7 +2408,7 @@ export class BrowserEngine {
     }
     await this.beginInput();
     if (el.testid && live.testid !== el.testid) {
-      this.dropRefs(`the element under ${ref} changed`);
+      this.snapshots.dropRefs(`the element under ${ref} changed`);
       throw new Error(
         `Element under ${ref} changed (expected testid=${el.testid}, found ${live.testid ?? "none"}) — the DOM shifted; take a new scout_snapshot.`,
       );
@@ -2827,7 +2417,7 @@ export class BrowserEngine {
     // the same shared test id, so the name must match too. Another site's frame
     // shows a masked name (masksForeignName), so there is nothing to compare there.
     if (urlMoved && !el.frame?.foreign && live.name !== el.name) {
-      this.dropRefs(`the element under ${ref} changed`);
+      this.snapshots.dropRefs(`the element under ${ref} changed`);
       throw new Error(`Element under ${ref} changed after the URL did (expected "${el.name}", found "${live.name}") — take a new scout_snapshot.`);
     }
     return { el, liveLabel: live.label, live: { ownText: live.ownText, centre: live.centre } };
@@ -2956,7 +2546,7 @@ export class BrowserEngine {
       this.logAction({ action: policyAbortedNavigation ? "write-policy:navigation-blocked" : "origin-fence:bounced", target: url.slice(0, 200), url });
       await bestEffort(page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }));
       url = page.url();
-      this.dropRefs("the page left the app's origin");
+      this.snapshots.dropRefs("the page left the app's origin");
       const blocked = this.drainBlocked() + this.drainRefresh();
       return (
         (policyAbortedNavigation
@@ -2980,7 +2570,7 @@ export class BrowserEngine {
     if (navigated) {
       // Refs point into the previous page's DOM; invalidate so a stale ref
       // errors ("take a new snapshot") instead of acting on the wrong element.
-      this.dropRefs(`the page moved to ${url}`);
+      this.snapshots.dropRefs(`the page moved to ${url}`);
     }
     const rebound = this.rebindNote;
     this.rebindNote = "";
@@ -3365,7 +2955,7 @@ export class BrowserEngine {
     if (state?.fp && key && this.memory.recordFormSubmit(state.fp, key, empty)) return;
     // A page past the snapshot's element cap may never list this control, so
     // a fresh snapshot would not help: say it is untracked, not what to retry.
-    const beyondCap = !key && this.lastCollectTruncated && !state?.elements.some((e) => !e.frame && e.xpath === probe.submit);
+    const beyondCap = !key && this.snapshots.lastCollectTruncated && !state?.elements.some((e) => !e.frame && e.xpath === probe.submit);
     const what = `${empty ? "empty " : ""}${kind} submit of a form (submit control ${JSON.stringify(probe.submitName)} at ${probe.submit})`;
     this.logAction({
       action: FORMS_SUBMIT_UNMATCHED,
@@ -3409,11 +2999,11 @@ export class BrowserEngine {
       dialogsBefore: this.claimBaseline?.dialogs ?? null,
       claimsBefore: this.claimBaseline,
     };
-    const clickTarget = this.scopeOf(el).locator(`xpath=${el.xpath}`);
+    const clickTarget = this.snapshots.scopeOf(el).locator(`xpath=${el.xpath}`);
     // Read before the click: what the form's fields hold when it goes. Only a
     // button or an input can submit a form; nothing else is asked.
     const form = !el.frame && (el.tag === "button" || el.tag === "input") ? await this.probeForm(clickTarget) : null;
-    const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
+    const formState = { fp: this.currentFingerprint, elements: [...this.snapshots.refs.values()] };
     await this.readActedControl(el);
     const { forced, cover, coverReadAt } = await this.resilientClick(clickTarget, this.limits.actionMs, clicks);
     const coverNote = cover ? describeCover(cover, this.blockedBetween(this.snapshotAt, coverReadAt)) : null;
@@ -3625,7 +3215,7 @@ export class BrowserEngine {
         return embedProbeRefusal(`typing this value (${hostile})`, embed);
       }
     }
-    const locator = this.scopeOf(el).locator(`xpath=${el.xpath}`);
+    const locator = this.snapshots.scopeOf(el).locator(`xpath=${el.xpath}`);
     // Before the fill: a page that reflects input as it is typed already holds
     // the element afterwards. Never for another site's frame: no probe is placed there.
     if (!embed) await this.noteProbe(text, `${el.role} "${el.name}"`);
@@ -3638,12 +3228,14 @@ export class BrowserEngine {
       // pressEnter becomes a read-only bypass for destructive submits.
       if (this.readOnly) {
         const submitLabel = (await bestEffort(
-          this.scopeOf(el).evaluate(
-            `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return ''; ` +
-              `const f = node.form || node.closest('form'); if (!f) return ''; ` +
-              `const s = f.querySelector('[type="submit"], button:not([type="button"]):not([type="reset"])'); ` +
-              `return s ? (s.getAttribute('aria-label') || s.innerText || s.getAttribute('data-testid') || '').trim().slice(0, 120) : ''; })()`,
-          ),
+          this.snapshots
+            .scopeOf(el)
+            .evaluate(
+              `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return ''; ` +
+                `const f = node.form || node.closest('form'); if (!f) return ''; ` +
+                `const s = f.querySelector('[type="submit"], button:not([type="button"]):not([type="reset"])'); ` +
+                `return s ? (s.getAttribute('aria-label') || s.innerText || s.getAttribute('data-testid') || '').trim().slice(0, 120) : ''; })()`,
+            ),
           "",
         )) as string;
         if (isDestructive(submitLabel)) {
@@ -3653,7 +3245,7 @@ export class BrowserEngine {
       }
       // After the fill, before the key: the fields as they are when it submits.
       const form = !el.frame && el.tag === "input" ? await this.probeForm(locator) : null;
-      const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
+      const formState = { fp: this.currentFingerprint, elements: [...this.snapshots.refs.values()] };
       await locator.press("Enter", { timeout: this.limits.actionMs });
       this.noteFormSubmit(formState, "enter", form);
     }
@@ -3687,7 +3279,7 @@ export class BrowserEngine {
       if (refusal) return refusal;
       const embed = this.foreignEmbedOf(el);
       if (embed) return embedProbeRefusal("a file upload", embed);
-      locator = this.scopeOf(el).locator(`xpath=${el.xpath}`);
+      locator = this.snapshots.scopeOf(el).locator(`xpath=${el.xpath}`);
     }
     const outcome = await this.performUpload(locator, opts);
     if (outcome.refused) return outcome.refused;
@@ -3925,7 +3517,7 @@ export class BrowserEngine {
     const page = this.requirePage();
     const { el } = await this.resolveForAction(ref);
     const { before, bodyBefore, churning } = await this.hoverBaselines();
-    const locator = this.scopeOf(el).locator(`xpath=${el.xpath}`);
+    const locator = this.snapshots.scopeOf(el).locator(`xpath=${el.xpath}`);
     await locator.hover({ timeout: this.limits.actionMs });
     // Wiggle inside the element: pointer-tracking libraries distinguish real
     // movement from a single synthetic hover event.
@@ -3936,13 +3528,15 @@ export class BrowserEngine {
     }
     const { revealed, fallbackUsed } = await this.detectHoverReveal(before, bodyBefore, churning);
     const attrTexts = (await bestEffort(
-      this.scopeOf(el).evaluate(
-        `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return []; const out = []; ` +
-          `const t = node.getAttribute('title'); if (t) out.push('title: ' + t.slice(0, 300)); ` +
-          `const d = node.getAttribute('aria-describedby'); if (d) { for (const id of d.split(/\\s+/)) { ` +
-          `const refEl = document.getElementById(id); const txt = refEl ? (refEl.innerText || refEl.textContent || '').trim() : ''; ` +
-          `if (txt) out.push(txt.replace(/\\s+/g, ' ').slice(0, 300)); } } return out; })()`,
-      ),
+      this.snapshots
+        .scopeOf(el)
+        .evaluate(
+          `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return []; const out = []; ` +
+            `const t = node.getAttribute('title'); if (t) out.push('title: ' + t.slice(0, 300)); ` +
+            `const d = node.getAttribute('aria-describedby'); if (d) { for (const id of d.split(/\\s+/)) { ` +
+            `const refEl = document.getElementById(id); const txt = refEl ? (refEl.innerText || refEl.textContent || '').trim() : ''; ` +
+            `if (txt) out.push(txt.replace(/\\s+/g, ' ').slice(0, 300)); } } return out; })()`,
+        ),
       [],
     )) as string[];
     const result = await this.afterAction("hover", `${el.role} "${el.name}"`);
@@ -4010,7 +3604,7 @@ export class BrowserEngine {
     const { el, liveLabel, live } = await this.resolveForAction(ref);
     const refusal = this.actionPolicyCheck(el, liveLabel, live);
     if (refusal) return refusal;
-    const loc = this.scopeOf(el).locator(`xpath=${el.xpath}`);
+    const loc = this.snapshots.scopeOf(el).locator(`xpath=${el.xpath}`);
     const pick = await BrowserEngine.resolveSelectPick(loc, value);
     if ("refused" in pick) {
       this.logAction({ action: "select:no-match", target: `${el.name || el.testid || "dropdown"}: ${value}`.slice(0, 200), url: page.url() });
@@ -4047,7 +3641,7 @@ export class BrowserEngine {
       let next: Frame | null = null;
       for (const child of current.childFrames()) {
         // Within the frame limit: a frame that never answers must not hold up a key press.
-        const holds = await this.withinFrameLimit(child.frameElement().then((el) => el.evaluate((node) => node === node.ownerDocument?.activeElement)));
+        const holds = await withinFrameLimit(child.frameElement().then((el) => el.evaluate((node) => node === node.ownerDocument?.activeElement)));
         if (holds) {
           next = child;
           break;
@@ -4112,7 +3706,7 @@ export class BrowserEngine {
     // Enter submits from a field or a submit control; Space only activates a control.
     const formKind = BrowserEngine.ACTIVATION_KEY_RE.test(key) ? (/enter/i.test(key) ? "enter" : "click") : null;
     const form = formKind ? await this.probeFocusedForm() : null;
-    const formState = { fp: this.currentFingerprint, elements: [...this.refs.values()] };
+    const formState = { fp: this.currentFingerprint, elements: [...this.snapshots.refs.values()] };
     await page.keyboard.press(key);
     if (formKind) this.noteFormSubmit(formState, formKind, form);
     if (focused && this.memory && this.currentFingerprint) {
@@ -4139,8 +3733,8 @@ export class BrowserEngine {
    * coverage attributed to the wrong control.
    */
   private async focusedInteractable(): Promise<string | null> {
-    if (this.refs.size === 0) return null;
-    const known = [...this.refs.values()].map((el) => el.xpath);
+    if (this.snapshots.refs.size === 0) return null;
+    const known = [...this.snapshots.refs.values()].map((el) => el.xpath);
     const idx = (await bestEffort(
       this.requirePage().evaluate(
         `((paths) => { const el = document.activeElement;` +
@@ -4155,7 +3749,7 @@ export class BrowserEngine {
       -1,
     )) as number;
     if (typeof idx !== "number" || idx < 0) return null;
-    return [...this.refs.values()][idx]?.key ?? null;
+    return [...this.snapshots.refs.values()][idx]?.key ?? null;
   }
 
   /** Origin fence: exploration stays on the attached app's origin. */
@@ -4961,8 +4555,8 @@ export class BrowserEngine {
       await this.reattachAfterBounce(run, queue, i);
     }
     // Crawl leaves the page wherever it ended — refs from before are gone.
-    this.refs.clear();
-    this.forgetSnapshots();
+    this.snapshots.refs.clear();
+    this.snapshots.forgetSnapshots();
     this.snapshotUrl = "";
 
     const unvisited = this.unvisitedKnownRoutes();
@@ -5075,7 +4669,7 @@ export class BrowserEngine {
     }
     await this.settle();
     this.harvestPaused = opts.measureOnly === true;
-    const { elements, forms, aliases } = await this.collect().finally(() => (this.harvestPaused = false));
+    const { elements, forms, aliases } = await this.snapshots.collect().finally(() => (this.harvestPaused = false));
     const finalUrl = page.url();
     const route = normalizePath(finalUrl);
     const fp = fingerprintState(finalUrl, trackedElements(elements));
@@ -5240,8 +4834,8 @@ export class BrowserEngine {
     for (const [i, step] of steps.slice(0, 20).entries()) {
       if ((await this.runPlanStep(run, step, i)) === "stop") break;
     }
-    this.refs.clear();
-    this.forgetSnapshots();
+    this.snapshots.refs.clear();
+    this.snapshots.forgetSnapshots();
     this.snapshotUrl = "";
     // Count step lines, not transcript lines — hover reveals and scroll
     // positions push informational entries that are not steps.
@@ -5484,7 +5078,7 @@ export class BrowserEngine {
     try {
       // Record the state the action LANDED on (it may be a new screen
       // this plan just reached, and it deserves coverage of its own)…
-      const { elements, forms, aliases } = await this.collect();
+      const { elements, forms, aliases } = await this.snapshots.collect();
       const url = page.url();
       const fp = fingerprintState(url, trackedElements(elements));
       this.memory!.visitState(
@@ -5707,8 +5301,8 @@ export class BrowserEngine {
       this.leaveChoice = leaveBefore;
       page.off("websocket", onSocket);
       context.off("response", onResponse);
-      this.refs.clear();
-      this.forgetSnapshots();
+      this.snapshots.refs.clear();
+      this.snapshots.forgetSnapshots();
       this.snapshotUrl = "";
     }
   }
@@ -5943,22 +5537,22 @@ export class BrowserEngine {
     const page = this.requirePage();
     let el: SnapshotElement | undefined;
     if (target.ref) {
-      el = this.refs.get(target.ref);
+      el = this.snapshots.refs.get(target.ref);
       if (!el) throw new Error(`Unknown ref "${target.ref}". Refs are only valid from the latest scout_snapshot — take a new snapshot.`);
       if (!refsSurviveUrlChange(this.snapshotUrl, page.url())) {
-        this.dropRefs(`the page moved to ${page.url()}`);
+        this.snapshots.dropRefs(`the page moved to ${page.url()}`);
         throw new Error(`Page URL changed since the last snapshot (now ${page.url()}). Take a new scout_snapshot.`);
       }
     } else if (target.key) {
       await this.settle();
       // Keys carry an ordinal (collect), so the third of three same-named buttons is found as the third.
-      const { elements } = await this.collect();
+      const { elements } = await this.snapshots.collect();
       el = elements.find((e) => e.key === target.key);
       if (!el) throw new Error(`No element with the key "${target.key}" on ${page.url()}.`);
     } else {
       throw new Error("Give the ref of the element to capture, from the latest scout_snapshot.");
     }
-    const locator = this.scopeOf(el).locator(`xpath=${el.xpath}`).first();
+    const locator = this.snapshots.scopeOf(el).locator(`xpath=${el.xpath}`).first();
     await locator.scrollIntoViewIfNeeded({ timeout: 5000 });
     const box = await locator.boundingBox({ timeout: 5000 });
     if (!box) throw new Error(`${el.name || el.key} is not displayed, so it has no picture.`);
@@ -5968,7 +5562,7 @@ export class BrowserEngine {
     const png = await maskedScreenshot(page, { type: "png", clip, animations: "disabled" }, this.limits.actionMs);
     if (log) this.logAction({ action: "capture", target: el.key.slice(0, 200), url: page.url() });
     // Found by key, the refs were rebuilt without a snapshot: none of them may be acted on.
-    if (target.key) this.dropRefs("an element was captured by its key");
+    if (target.key) this.snapshots.dropRefs("an element was captured by its key");
     return { png, key: el.key, label: el.name, url: page.url() };
   }
 
@@ -6449,9 +6043,9 @@ export class BrowserEngine {
     this.context = null;
     this.browser = null;
     this.guard.clear();
-    this.refs.clear();
+    this.snapshots.refs.clear();
     this.snapshotUrl = "";
     this.currentFingerprint = "";
-    this.forgetSnapshots();
+    this.snapshots.forgetSnapshots();
   }
 }
