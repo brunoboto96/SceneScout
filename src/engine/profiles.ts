@@ -331,7 +331,9 @@ export function shellQuote(value: string, platform: NodeJS.Platform = process.pl
  * the command is run from (a project folder SceneScout chose itself).
  */
 export function loginCommand(role: string, url?: string, project?: string, platform: NodeJS.Platform = process.platform): string {
-  return `scenescout login ${url ?? "<url>"} --role ${role}${project ? ` --project ${shellQuote(project, platform)}` : ""}`;
+  // An address with a query (`?`, `&`) or anything else a shell reads is quoted, so the command can be pasted as it is.
+  const address = url === undefined ? "<url>" : /^[A-Za-z0-9._~:/%+=,@-]+$/.test(url) ? url : shellQuote(url, platform);
+  return `scenescout login ${address} --role ${role}${project ? ` --project ${shellQuote(project, platform)}` : ""}`;
 }
 
 /**

@@ -37,6 +37,7 @@ import {
   MAX_OBJECTIVE,
   newPlanId,
   signInHealth,
+  withSignInHealth,
   THOROUGHNESSES,
   type GuidedChoices,
   type GuidedPlan,
@@ -874,6 +875,27 @@ test("sign-in health: only a saved sign-in certain to last the check skips the s
   assert.equal(asked, 0);
   const built = guidedPlan({ address: REMOTE, areas: ["forms"], signIn: "password" }, undefined, () => signInHealth({ kind: "ok" }, REMOTE, cmd));
   assert.ok(built.ok && built.plan.signInHealth?.state === "lasts");
+});
+
+test("sign-in health: a plan read back to start is judged again, so a verdict from when it was built never skips the window after the sign-in ran out", () => {
+  const cmd = "scenescout login https://staging.example.com --role user";
+  const tools = (p: GuidedPlan) => p.calls.map((c) => c.tool);
+  const built = buildGuidedPlan(ok({ address: REMOTE, areas: ["forms"], signIn: "password", care: "may-submit-forms" }), "gp-0123456789", {
+    signInHealth: signInHealth({ kind: "ok" }, REMOTE, cmd),
+  });
+  assert.deepEqual(tools(built), ["scout_attach"]);
+  const accepted = { ...built, confirm: built.confirm ? { ...built.confirm, accepted: true } : null };
+  // By the time the person confirmed, the saved sign-in no longer lasts: the window opens first, and the plan stays the one confirmed.
+  const later = withSignInHealth(accepted, signInHealth({ kind: "refuse", message: "x" }, REMOTE, cmd));
+  assert.deepEqual(tools(later), ["scout_login", "scout_attach"]);
+  assert.equal(later.planId, built.planId);
+  assert.deepEqual(later.confirm, accepted.confirm, "the person's yes is kept");
+  assert.equal(later.signInHealth?.state, "runs-out");
+  assert.ok(later.tellPerson.includes(SIGN_IN_HEALTH["runs-out"]("staging.example.com")));
+  // Still lasting: the same plan.
+  assert.deepEqual(withSignInHealth(accepted, signInHealth({ kind: "ok" }, REMOTE, cmd)), accepted);
+  // Nothing known now (no folder to read): the window opens, as with no health at all.
+  assert.deepEqual(tools(withSignInHealth(accepted, undefined)), ["scout_login", "scout_attach"]);
 });
 
 // ---- Progress while a guided check runs (progress.ts) ----

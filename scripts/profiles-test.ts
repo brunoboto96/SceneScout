@@ -1047,3 +1047,54 @@ test("a guided check's sign-in health: the saved profile against the check's tim
   for (const h of [lasting, health(stateOf([cookie("sid", NOW + 29 * MIN, "secret-session-value")]))!])
     assert.ok(!JSON.stringify(h).includes("secret-session-value") && !JSON.stringify(h).includes("opaque-cookie-value"));
 });
+
+test("a guided check's sign-in health: a credential kept in sessionStorage or under a token's name counts, so it is never called lasting past it", () => {
+  const dir = path.join(os.tmpdir(), "health-storage-project");
+  const file = profilePath(dir, "user");
+  const health = (state: unknown) =>
+    savedSignInHealth({ address: APP, signIn: "password", thoroughness: "normal" }, dir, {
+      now: NOW,
+      exists: (p) => p === file,
+      read: () => JSON.stringify(state),
+    })?.state;
+  const longCookie = cookie("sid", NOW + 2 * 86_400_000);
+  const session = (origin: string, entries: { name: string; value: string }[]) => ({ ...stateOf([longCookie]), sessionStorage: [{ origin, entries }] });
+  // A token in sessionStorage that ends inside the check: the check would sign out half-way.
+  assert.equal(health(session(APP, [{ name: "accessToken", value: jwt(NOW + 5 * MIN) }])), "may-run-out");
+  assert.equal(health(session(APP, [{ name: "accessToken", value: jwt(NOW + 2 * 86_400_000) }])), "lasts", "the same token dated past the check");
+  // One with no expiry may end any time.
+  assert.equal(health(session(APP, [{ name: "accessToken", value: jwt() }])), "unknown");
+  // Another origin's sessionStorage does not sign this app in.
+  assert.equal(health(session("http://127.0.0.1:4000", [{ name: "accessToken", value: jwt(NOW + 5 * MIN) }])), "lasts");
+  // A value that is no JWT but is kept under a token's name is a credential with no date; a preference is not a credential.
+  assert.equal(health(stateOf([longCookie], [{ name: "authToken", value: "opaque-1234" }])), "unknown");
+  assert.equal(health(session(APP, [{ name: "access_token", value: "opaque-1234" }])), "unknown");
+  assert.equal(health(stateOf([longCookie], [{ name: "theme", value: "dark" }])), "lasts");
+  // readLifetime names it by its key only, as it does a localStorage one.
+  const life = readLifetime(session(APP, [{ name: "accessToken", value: jwt(NOW + 5 * MIN) }]), { url: APP });
+  assert.deepEqual(
+    life.dated.map((c) => [c.source, c.name]),
+    [
+      ["session-storage-jwt", "accessToken"],
+      ["cookie", "sid"],
+    ],
+  );
+});
+
+test("a guided check's sign-in again: the address is quoted for a shell and for the agent", () => {
+  const dir = path.join(os.tmpdir(), "health-quote-project");
+  const address = "http://127.0.0.1:3000/app?tab=1&view=$(id)";
+  const h = savedSignInHealth({ address, signIn: "password", thoroughness: "normal" }, dir, { now: NOW, exists: () => false })!;
+  assert.equal(h.signInAgain.command, `scenescout login 'http://127.0.0.1:3000/app?tab=1&view=$(id)' --role user`);
+  assert.equal(h.signInAgain.prompt, `Sign me in to ${address} again for SceneScout: call scout_login {"url":"${address}","role":"user"}.`);
+  const quoted = savedSignInHealth({ address: 'http://127.0.0.1:3000/a"b', signIn: "password", thoroughness: "normal" }, dir, {
+    now: NOW,
+    exists: () => false,
+  })!;
+  assert.ok(quoted.signInAgain.prompt.includes('{"url":"http://127.0.0.1:3000/a\\"b","role":"user"}'), quoted.signInAgain.prompt);
+  // A plain address stays as it was.
+  assert.equal(
+    savedSignInHealth({ address: APP, signIn: "password", thoroughness: "normal" }, dir, { now: NOW, exists: () => false })!.signInAgain.command,
+    `scenescout login ${APP} --role user`,
+  );
+});

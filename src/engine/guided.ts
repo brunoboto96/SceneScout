@@ -599,6 +599,17 @@ export function savedSignInHealth(
   return signInHealth(verdict, choices.address, command, life.undated === 0 && life.elsewhere === 0);
 }
 
+/**
+ * A kept plan with its sign-in judged again, as it is read back to start: a
+ * verdict from when it was built may have run out since (the person took a
+ * while to confirm, or the plan is run again later). The plan is rebuilt from
+ * its own choices and id, and the person's confirmation is kept.
+ */
+export function withSignInHealth(plan: GuidedPlan, health: SignInHealth | undefined): GuidedPlan {
+  const rebuilt = buildGuidedPlan(plan.choices, plan.planId, health ? { signInHealth: health } : {});
+  return { ...rebuilt, confirm: plan.confirm };
+}
+
 /** Choices to a plan in one step: the plan, or the sentence that says what to fix. */
 export function guidedPlan(
   input: unknown,

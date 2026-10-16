@@ -339,5 +339,5 @@ export const SIGN_IN_HEALTH: Record<SignInHealthState, (where: string) => string
 export const SIGN_IN_AGAIN = {
   label: "Sign in again",
   command: (command: string) => `To sign in again from a terminal instead: ${command}`,
-  prompt: (address: string, role: string) => `Sign me in to ${address} again for SceneScout: call scout_login {url: "${address}", role: "${role}"}.`,
+  prompt: (address: string, role: string) => `Sign me in to ${address} again for SceneScout: call scout_login ${JSON.stringify({ url: address, role })}.`,
 } as const;
