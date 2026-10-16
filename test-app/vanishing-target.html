@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Vanishing target</title>
+  </head>
+  <body>
+    <main>
+      <h1>Things</h1>
+      <!-- An icon button named only by its aria-label, as many remove buttons are. -->
+      <div id="row"><span>First thing</span> <button type="button" data-testid="thing-remove" aria-label="Delete thing">×</button></div>
+      <p role="status" data-testid="thing-status">Nothing removed</p>
+    </main>
+    <script>
+      // The list redraws behind a placeholder for 4 s, starting the moment
+      // the page's controls are next read, once armed (window.__redrawOnRead =
+      // true): the button is there when it is looked for, gone while it would
+      // be named, and back before the action limit runs out. Hooked on the
+      // selector a page read uses, so nothing else sets it off.
+      const row = document.getElementById("row");
+      const button = row.querySelector("button");
+      button.addEventListener("click", () => {
+        document.querySelector("[data-testid=thing-status]").textContent = "Removed";
+      });
+      const query = Document.prototype.querySelectorAll;
+      Document.prototype.querySelectorAll = function (selector) {
+        if (window.__redrawOnRead && String(selector).includes('[role="combobox"]')) {
+          window.__redrawOnRead = false;
+          button.remove();
+          setTimeout(() => row.appendChild(button), 4000);
+        }
+        return query.call(this, selector);
+      };
+    </script>
+  </body>
+</html>

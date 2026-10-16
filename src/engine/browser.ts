@@ -524,7 +524,6 @@ interface PlanRun {
   continuedPast: number[];
   onViolation: PlanViolationRule;
   locatePlanTarget: (target: string) => Locator;
-  liveLabel: (loc: Locator) => Promise<string>;
   /** Last state captured this plan — reused as the next step's pre-state while the page has not moved. */
   lastCapture: PlanCapture | null;
 }
@@ -592,6 +591,34 @@ function describeSelect(node: Element): Array<{ value: string; label: string; se
     .filter((o) => !o.disabled && !o.hidden && o.value !== "")
     .map((o) => ({ value: o.value, label: (o.label || o.textContent || "").trim().slice(0, 80), selected: o.selected }))
     .filter((o) => o.label !== "");
+}
+
+/** What a step's safety check and coverage name a target by, read from the element in one go (readTargetFacts). */
+interface TargetFacts {
+  /** aria-label, else the text, else the test id; trimmed, not capped, so the read-only check sees all of it. */
+  label: string;
+  testid: string | null;
+  isSelect: boolean;
+}
+
+/**
+ * A target's name, test id and kind, read in one call once the target has been
+ * found. It waits up to `ms` and throws rather than coming back empty: a target
+ * gone for a moment between being found and being named would otherwise be
+ * acted on unnamed, past the read-only check on its label.
+ */
+async function readTargetFacts(loc: Locator, ms: number): Promise<TargetFacts> {
+  const facts = await loc.evaluate(
+    (n) => ({
+      aria: n.getAttribute("aria-label"),
+      testid: n.getAttribute("data-testid"),
+      text: n.textContent,
+      isSelect: n.tagName.toLowerCase() === "select",
+    }),
+    undefined,
+    { timeout: ms },
+  );
+  return { label: (facts.aria ?? facts.text ?? facts.testid ?? "").trim(), testid: facts.testid, isSelect: facts.isSelect };
 }
 
 /**
@@ -4914,16 +4941,7 @@ export class BrowserEngine {
       if (!parsed) throw new Error(`Plan targets must be ${TARGET_HELP} (got: ${target})`);
       return BrowserEngine.locatorFor(page, parsed).first();
     };
-    const liveLabel = async (loc: ReturnType<typeof locatePlanTarget>): Promise<string> => {
-      const [aria, testid, txt] = await Promise.all([
-        bestEffort(loc.getAttribute("aria-label", { timeout: TARGET_READ_MS }), null),
-        bestEffort(loc.getAttribute("data-testid", { timeout: TARGET_READ_MS }), null),
-        bestEffort(loc.textContent({ timeout: TARGET_READ_MS }), null),
-      ]);
-      return (aria ?? txt ?? testid ?? "").trim().slice(0, 120);
-    };
-
-    const run: PlanRun = { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget, liveLabel, lastCapture: null };
+    const run: PlanRun = { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget, lastCapture: null };
     for (const [i, step] of steps.slice(0, 20).entries()) {
       if ((await this.runPlanStep(run, step, i)) === "stop") break;
     }
@@ -4942,7 +4960,7 @@ export class BrowserEngine {
 
   /** One step of a plan: act, settle, record coverage and report it on the transcript. "stop" ends the plan. */
   private async runPlanStep(run: PlanRun, step: PlanStep, i: number): Promise<"next" | "stop"> {
-    const { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget, liveLabel } = run;
+    const { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget } = run;
     this.actionStartedAt = Date.now();
     // A navigation or a scroll is not input: navigate() moves the action mark itself, and what a scroll loads is the page's own doing.
     if (step.action !== "navigate" && step.action !== "scroll") await this.beginInput();
@@ -5005,6 +5023,12 @@ export class BrowserEngine {
         // One wait for the target, at the action limit: a target the page no longer has fails here, through the
         // timeout hint below, instead of each read of it after this waiting out Playwright's own 30 s.
         await loc.waitFor({ state: "attached", timeout: this.limits.actionMs });
+        // Named as found, before the capture below gives the page time to redraw it: the read-only check and the
+        // coverage record need its name, and a target gone for a moment is waited for rather than named "".
+        const { label: name, testid, isSelect: selectTarget } = await readTargetFacts(loc, this.limits.actionMs);
+        const label = name.slice(0, 120);
+        preTestid = testid;
+        preLabel = label;
         // Coverage is recorded against the state the element LIVED IN, so it
         // has to be captured before the action changes the page. Marking it
         // afterwards (as this did) recorded against the state the click
@@ -5020,16 +5044,8 @@ export class BrowserEngine {
           // watchdog for a result identical to the one just taken.
           preState = run.lastCapture?.url === page.url() ? run.lastCapture : await bestEffort(this.captureCoverageState(), null);
         }
-        preTestid = await bestEffort(loc.getAttribute("data-testid", { timeout: TARGET_READ_MS }), null);
-        const label = await liveLabel(loc);
-        preLabel = label;
         // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
-        const isSelect =
-          step.action === "select" &&
-          (await bestEffort(
-            loc.evaluate((n) => n.tagName.toLowerCase() === "select", undefined, { timeout: TARGET_READ_MS }),
-            false,
-          ));
+        const isSelect = step.action === "select" && selectTarget;
         // The option a select step means, settled before anything is picked: one naming none fails the step at once.
         const pick = step.action === "select" ? await BrowserEngine.resolveSelectPick(loc, step.value ?? "") : null;
         if (pick && "refused" in pick) {
@@ -5464,19 +5480,10 @@ export class BrowserEngine {
           // The state first, since it is what is true; the hint still applies when the app enables it late.
           failure = `${step.target} ${blocked} after ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
         } else {
-          const label = (
-            (await bestEffort(loc.getAttribute("aria-label", { timeout: TARGET_READ_MS }), null)) ??
-            (await bestEffort(loc.textContent({ timeout: TARGET_READ_MS }), null)) ??
-            ""
-          ).trim();
-          // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
-          const isSelect =
-            step.action === "select" &&
-            (await bestEffort(
-              loc.evaluate((n) => n.tagName.toLowerCase() === "select", undefined, { timeout: TARGET_READ_MS }),
-              false,
-            ));
-          const testid = await bestEffort(loc.getAttribute("data-testid", { timeout: TARGET_READ_MS }), null);
+          // Named in one read that waits rather than coming back empty (readTargetFacts). A dropdown is named by all its
+          // options; a select step is judged by the option it picks (destructiveLabelOf).
+          const { label, testid, isSelect: selectTarget } = await readTargetFacts(loc, actionMs);
+          const isSelect = step.action === "select" && selectTarget;
           if (
             this.readOnly &&
             step.action !== "type" &&
