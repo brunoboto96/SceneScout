@@ -1,6 +1,7 @@
 {
   "name": "scenescout-mod",
-  "description": "Optional Claude Code mod for SceneScout: a run pane that refreshes itself, opened with /scenescout-pane, and an opt-in setting for the model lane agents run on. Needs the scenescout plugin or server.",
+  "displayName": "SceneScout guided panel",
+  "description": "Optional Claude Code mod for SceneScout: a guided panel (/scenescout-guided) that starts a check in plain words, follows it and shows what it found; a question before Claude starts a check that may send things to your site; and an opt-in model for lane agents. Needs the scenescout plugin or server.",
   "version": "3.25.0",
   "author": {
     "name": "brunoboto96",
@@ -9,7 +10,11 @@
   "homepage": "https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md#the-claude-code-mod",
   "repository": "https://github.com/brunoboto96/SceneScout",
   "license": "MIT",
+  "icon": "./icon.svg",
+  "supportUrl": "https://github.com/brunoboto96/SceneScout/issues",
+  "privacyPolicyUrl": "https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md#what-it-reaches",
   "keywords": ["testing", "qa", "exploratory-testing", "mod", "claude-code"],
+  "types": "./types/index.d.ts",
   "userConfig": {
     "lane_model": {
       "type": "string",
