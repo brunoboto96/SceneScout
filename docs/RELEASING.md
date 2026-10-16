@@ -18,10 +18,10 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
    to the version, the changelog, `plugin.json`, the extension manifest and the
    deleted changeset files.
 4. The workflow runs again on that merge, finds no pending changesets, builds
-   the package from a clean `dist`, packs it, pushes the `vX.Y.Z` tag and
-   creates the GitHub Release. A separate `publish` job, which runs no
-   repository code and installs no dependency, downloads the packed tarball and
-   publishes it to npm. If publishing fails, re-run that job.
+   the package from a clean `dist`, publishes it to npm, then pushes the
+   `vX.Y.Z` tag and creates the GitHub Release. The tag and the release are
+   made only once npm has the version, and a version missing from npm is
+   published again by the next run on `main` that finds no pending changesets.
 5. It then builds the Claude Desktop extension bundle from that tag
    (`npm run build && npm run mcpb`, which writes `.mcpb-build/scenescout-X.Y.Z.mcpb`),
    checks its manifest against the MCPB schema, and attaches it to the release

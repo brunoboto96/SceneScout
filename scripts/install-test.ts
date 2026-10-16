@@ -2581,36 +2581,30 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
   }
 });
 
-test("release: the job that holds the publish token runs no repository code, and the bundle ships with a checksum and an attestation", () => {
+test("release: npm publishes before the version is tagged, and the bundle ships with a checksum and an attestation", () => {
   type Step = { uses?: string; run?: string; with?: Record<string, string | boolean>; id?: string };
   type Job = { needs?: string | string[]; if?: string; permissions?: Record<string, string>; steps: Step[] };
   const wf = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8")) as { jobs: Record<string, Job> };
-  const holders = Object.entries(wf.jobs).filter(([, j]) => j.permissions?.["id-token"] === "write");
-  const idTokenJobs = holders.map(([name]) => name).sort();
-  assert.deepEqual(idTokenJobs, ["attest-desktop-extension", "publish"], "only the publish job and the attestation job mint a token");
-  const publish = wf.jobs.publish;
-  assert.deepEqual(publish.permissions, { contents: "read", "id-token": "write" });
-  assert.match(String(publish.if), /published == 'true'/, "only for a release that was made");
-  assert.ok(!publish.steps.some((s) => s.uses?.startsWith("actions/checkout")), "no checkout where the token can be minted");
-  assert.ok(
-    publish.steps.some((s) => /^actions\/download-artifact@/.test(s.uses ?? "")),
-    "it downloads the tarball the release job built",
-  );
-  const runs = publish.steps.map((s) => s.run ?? "").filter(Boolean);
-  assert.ok(
-    runs.some((r) => /^npm publish \S+\.tgz\b/.test(r)),
-    "and publishes that tarball",
-  );
-  assert.ok(
-    !runs.some((r) => /\bnpm (ci|install|run|exec)\b|\bnpx\b/.test(r.replace("npm install -g npm@", ""))),
-    "and runs no dependency or repository script",
-  );
-  // The contrast: the job that builds and runs repository code cannot mint it.
-  assert.equal(wf.jobs.release.permissions?.["id-token"], undefined);
-  assert.ok(
-    wf.jobs.release.steps.some((s) => /^actions\/upload-artifact@/.test(s.uses ?? "")),
-    "the release job hands over the tarball it packed",
-  );
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  // `changeset publish` publishes what npm does not have yet and only then tags it, so the
+  // vX.Y.Z tag, the GitHub Release and the major tag (which the actions install from npm by)
+  // never name a version npm lacks, and a version a failed run left unpublished is published
+  // by the next run. A job that tags first and publishes later keeps neither.
+  const release = wf.jobs.release;
+  const changesets = release.steps.find((s) => s.id === "changesets");
+  assert.match(String(changesets?.with?.["publish-script"]), /'npm run release'/, "the release action publishes with npm run release");
+  assert.match(pkg.scripts.release, /^npm run build && changeset publish$/, "which builds, then publishes and tags in one command");
+  assert.equal(release.permissions?.["id-token"], "write", "so the job that publishes is the one that mints the npm token");
+  const holders = Object.entries(wf.jobs)
+    .filter(([, j]) => j.permissions?.["id-token"] === "write")
+    .map(([name]) => name)
+    .sort();
+  assert.deepEqual(holders, ["attest-desktop-extension", "release"], "and only it and the attestation job can");
+  for (const [name, job] of Object.entries(wf.jobs)) {
+    if (name === "release") continue;
+    for (const s of job.steps)
+      assert.ok(!/\bnpm publish\b|\bchangeset (git-)?tag\b/.test(s.run ?? ""), `${name} neither publishes nor tags apart from the release`);
+  }
 
   const attach = wf.jobs["attach-desktop-extension"];
   assert.ok(
@@ -2626,13 +2620,12 @@ test("release: the job that holds the publish token runs no repository code, and
   const step = attest.steps.find((s) => /^actions\/attest-build-provenance@[0-9a-f]{40}$/.test(s.uses ?? ""));
   assert.ok(step, "the bundle is attested by an action pinned by commit");
   assert.equal(step.with?.["subject-path"], "*.mcpb");
-  assert.ok(!attest.steps.some((s) => s.uses?.startsWith("actions/checkout")), "and no repository code");
+  assert.ok(!attest.steps.some((s) => s.uses?.startsWith("actions/checkout") || s.run), "and runs no repository code");
 });
 
 test("build: dist is emptied before tsc, so a file deleted from src is not packed", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
   assert.match(pkg.scripts.build, /rmSync\(['"]dist['"], *\{[^}]*recursive: *true[^}]*\}\).*&& tsc$/, "clear dist, then compile");
-  assert.match(pkg.scripts["release:tag"], /npm pack --pack-destination \.release-pack/, "the release packs the built package for the publish job");
 });
 
 test("ci action: the model key is blanked for every step except the one that runs the exploration", () => {

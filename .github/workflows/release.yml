@@ -7,15 +7,12 @@ name: release
 #      starts the test workflow on that branch, because GitHub does not run
 #      pull_request workflows for a pull request opened with the Actions token.
 #   3. The maintainer approves and merges that pull request. This workflow runs
-#      again, finds no pending changesets, builds and packs the package, tags
-#      vX.Y.Z and creates the GitHub Release. A separate `publish` job then
-#      downloads that tarball and publishes it to npm. If publishing fails,
-#      re-run that job: the tarball is kept as an artifact.
+#      again, finds no pending changesets, and publishes to npm, tags vX.Y.Z
+#      and creates the GitHub Release.
 #
 # Publishing uses npm trusted publishing (OIDC): npm verifies that the request
 # comes from THIS workflow in THIS repository, so no npm token is stored
-# anywhere. Only the `publish` job (which runs no repository code) can mint the
-# token. Only the PUBLISH step is switched on by the repository variable
+# anywhere. Only the PUBLISH step is switched on by the repository variable
 # NPM_PUBLISH=enabled, set once the package exists on npm and the trusted
 # publisher is configured. The version pull request is opened either way, so
 # merged changesets never pile up unseen.
@@ -63,6 +60,7 @@ jobs:
     permissions:
       contents: write # push the version branch, tags and the GitHub Release
       pull-requests: write # open the "Version Packages" pull request
+      id-token: write # npm trusted publishing + provenance
     outputs:
       pr-number: ${{ steps.changesets.outputs.pr-number }}
       published: ${{ steps.changesets.outputs.published }}
@@ -79,32 +77,24 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      # --ignore-scripts: no dependency's install script runs in this job, which
-      # can write to the repository. The build the release needs is run
-      # explicitly by `npm run release:tag`.
+      # Trusted publishing needs npm 11.5.1 or newer. Pinned, not @latest: this
+      # job can publish, so what runs in it should not change on its own.
+      - run: npm install -g npm@11.19.1
+      # --ignore-scripts: no dependency's install script runs in a job that can
+      # mint a publish token. The build the release needs is run explicitly by
+      # `npm run release`.
       - run: npm ci --ignore-scripts
       - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         id: changesets
         with:
           version-script: npm run version-packages
           # Empty while publishing is off: the action then opens or updates the
-          # version pull request and releases nothing. Otherwise it builds and
-          # packs the package and creates the version tag; the publish job
-          # below does the npm publish.
-          publish-script: ${{ vars.NPM_PUBLISH == 'enabled' && 'npm run release:tag' || '' }}
+          # version pull request and publishes nothing.
+          publish-script: ${{ vars.NPM_PUBLISH == 'enabled' && 'npm run release' || '' }}
           pr-title: Version Packages
           commit-message: Version Packages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Keep the packed tarball for the publish job
-        if: steps.changesets.outputs.published == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: npm-tarball
-          path: .release-pack/*.tgz
-          # .release-pack is a hidden directory, which the upload skips unless asked.
-          include-hidden-files: true
-          if-no-files-found: error
       # The GitHub Action (action.yml) is used as brunoboto96/SceneScout@v3: a
       # major tag that follows the latest v3.x.y release, as actions/checkout's
       # v4 does. `changeset publish` has just made and pushed vX.Y.Z; this points
@@ -143,28 +133,6 @@ jobs:
             what="create"
           fi
           echo "::warning title=Major tag not updated::Could not $what $major at v$version, so users of @$major do not get this release yet. Check that no tag ruleset restricts updating $major: only exact release tags (refs/tags/v*.*.*) should be protected against moves."
-
-  # The only job that can mint the npm publish token. It runs no repository
-  # code and installs no dependency: it downloads the tarball the release job
-  # packed and publishes that file. npm >= 11.5.1 is needed for trusted
-  # publishing, pinned for the same reason as in the release job.
-  publish:
-    needs: release
-    if: needs.release.outputs.published == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      id-token: write # npm trusted publishing + provenance
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: npm-tarball
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-      - run: npm install -g npm@11.19.1
-      - run: npm publish ./scenescout-*.tgz
 
   # A separate job, so the permission to start workflows is never held by the
   # job that runs repository code and can publish. It keys off pr-number, which

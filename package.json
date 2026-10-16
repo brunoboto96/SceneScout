@@ -61,7 +61,6 @@
     "changeset": "changeset",
     "version-packages": "changeset version && node scripts/sync-plugin-version.mjs && npm install --package-lock-only && prettier --write package.json .claude-plugin/plugin.json mods/scenescout-mod/.claude-plugin/plugin.json desktop-extension/manifest.json",
     "release": "npm run build && changeset publish",
-    "release:tag": "npm run build && npm pack --pack-destination .release-pack && changeset tag",
     "mcpb": "node scripts/build-mcpb.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
