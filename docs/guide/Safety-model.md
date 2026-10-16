@@ -40,6 +40,17 @@ The confirmation is a form the server shows the person directly (MCP elicitation
 
 The server holds this, not the prompt. Once any guided plan has been built, `scout_attach` above `observe` is refused unless it names an accepted plan's `planId`, in no mode above the plan's and on the plan's own site, so leaving the id out is not a way round the confirmation. While a plan is open, an attach that passes `readPosts` or `trustedEmbeds` is refused in any mode, since both let out writes the care level holds back. A confirmation covers one check: once no session carries the plan (its sessions closed, or attached again without it), the plan must be confirmed again. Plans are held in the server process only and end with it.
 
+## The config file sets the limits an agent cannot loosen
+
+Over MCP the agent chooses `scout_attach`'s arguments, including the mode, and an argument wins over the server's environment. So nothing above sets a limit the agent cannot pass. The [config file](Configuration-reference.md#the-config-file) does: a JSON file a team commits as `.scenescout/config.json`, which wins over the environment and over every argument.
+
+- **It caps, and the agent can only ask for less.** `maxMode` is the loosest mode any attach, `check`, `ci` or first look may use; an attach above it is refused before a browser starts, with the file named and the reason. `readPosts` and `trustedEmbeds` become the most an attach may name, `dedup: "rule"` keeps the model judge off, `evidence` caps what a finding's picture may do, and `requireGuidedPlan` holds the guided gate (above) from the server's start, so no attach goes above `observe` without the person's confirmation.
+- **The agent cannot choose where it comes from.** The server reads it from the directory it was started in, or from the file `SCENESCOUT_CONFIG` names, once, as it starts. The folder the agent names as `projectPath` may hold a config too, but that one can only tighten: a file the agent could point at is never the lock on its own.
+- **`strict` is the one-line setting** for a team that wants every agent to look only: `{"preset": "strict"}` sets `observe` as the most, requires a guided plan, allows no `readPosts` or `trustedEmbeds` from an argument, keeps the dedup judge off and keeps finding pictures out of the conversation.
+- **No file is today's behaviour,** and a file that is not valid stops the server as it starts rather than being half applied.
+
+What it does not do: it is a file in the repository and on the disk, so an agent with shell access could edit it, or start another server. Edited mid-run, it changes nothing until the server restarts. Review changes to it as you would a CI workflow, and keep the agent's own permissions from writing to it where your client allows that. The write policy's rules themselves are unchanged: the file chooses which mode they run in.
+
 ## What a refusal looks like
 
 ```mermaid

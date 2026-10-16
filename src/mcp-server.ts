@@ -39,7 +39,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { reapOrphanBrowsers } from "./engine/reaper.js";
 import { ticketDirsFrom, ticketDirWarnings } from "./engine/tickets.js";
 import { LIVE_TOKEN_FILE, liveEngines, liveTokenFileName, pidAlive, statusFileName } from "./engine/live.js";
-import { engines, server, live, liveDirs, liveTokenWrites, pendingLogins } from "./server-context.js";
+import { engines, server, live, liveDirs, liveTokenWrites, pendingLogins, guidedPlans, setOperatorPolicy } from "./server-context.js";
+import { fsPolicyReader, readLaunchPolicy } from "./engine/project-config.js";
 import { registerGuideTools } from "./tools/guide.js";
 import { registerLaneTools } from "./tools/lanes.js";
 import { registerSessionTools, registerCloseTool } from "./tools/sessions.js";
@@ -63,6 +64,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   for (const warning of ticketDirWarnings(ticketDirs.dirs)) console.error(`[scenescout] ${warning}.`);
+  // The operator's config is read from where the server was started (or SCENESCOUT_CONFIG), never from a folder an agent names.
+  const config = readLaunchPolicy(process.env, process.cwd(), fsPolicyReader);
+  if (!config.ok) {
+    console.error(`SceneScout MCP server not started: ${config.error}. Fix it and start the server again.`);
+    process.exit(1);
+  }
+  setOperatorPolicy(config.loaded);
+  if (config.loaded.policy.requireGuidedPlan) guidedPlans.require();
+  if (config.loaded.sources.length > 0) console.error(`[scenescout] config: ${config.loaded.sources.join(", ")}`);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // A client that exits by closing the pipe sends no signal. Without this the

@@ -1179,6 +1179,8 @@ test("the artifact directory ignores itself so a tested project cannot commit it
     body.split("\n").some((l) => l.trim() === "*"),
     "an unqualified * is what makes every artifact here invisible to the parent repo",
   );
+  // The inputs a team commits are let through: saved flows, and the config that sets what SceneScout may do.
+  for (const keep of ["!flows/", "!flows/*.json", "!config.json"]) assert.ok(body.split("\n").includes(keep), `${keep} is not ignored`);
   assert.ok(store.gitIgnoreNote, "the action is reported, never done silently");
 });
 

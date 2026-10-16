@@ -39,6 +39,7 @@ import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { SERVER_INSTRUCTIONS } from "./playbook.js";
 import { type EvidenceSettings } from "./engine/capture.js";
 import { GuidedPlans, type CheckArea } from "./engine/guided.js";
+import { NO_POLICY, type LoadedPolicy } from "./engine/project-config.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
 export const engines = new Map<string, BrowserEngine>();
@@ -627,6 +628,10 @@ export const pendingLogins = new LoginWindows<PendingLogin>(LOGIN_WINDOW_MAX_MS)
 export const guidedPlans = new GuidedPlans();
 export const guidedSessions = new Map<string, { planId?: string; area?: CheckArea }>();
 
+// The operator's SceneScout config, read once as the server starts (mcp-server.ts, engine/project-config.ts).
+// Nothing a tool is passed changes it: scout_attach applies it, and a project's own file may only tighten it.
+export let operatorPolicy: LoadedPolicy = NO_POLICY;
+
 // Assignments from the tool modules: an imported binding is read-only, so each
 // variable above that a tool sets has its setter here, one per variable.
 export function setActiveName(name: string): void {
@@ -643,4 +648,7 @@ export function setLiveOpened(opened: boolean): void {
 }
 export function setOpenWhySaid(said: boolean): void {
   openWhySaid = said;
+}
+export function setOperatorPolicy(loaded: LoadedPolicy): void {
+  operatorPolicy = loaded;
 }

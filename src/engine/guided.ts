@@ -544,6 +544,7 @@ export const MAX_PLANS = 50;
 export class GuidedPlans {
   private readonly plans = new Map<string, GuidedPlan>();
   private opened = false;
+  private required = false;
 
   /** Keeps a plan, which must be unaccepted, and opens the store. */
   add(plan: GuidedPlan): GuidedPlan {
@@ -561,9 +562,20 @@ export class GuidedPlans {
     return plan ? structuredClone(plan) : undefined;
   }
 
-  /** Whether a guided plan has been built in this server: from then on an attach above observe must name an accepted one. */
+  /** Whether a guided plan has been built in this server, or the config requires one: from then on an attach above observe must name an accepted one. */
   get open(): boolean {
     return this.opened;
+  }
+
+  /** Whether the SceneScout config opened the store as the server started (requireGuidedPlan, engine/project-config.ts). */
+  get requiredByConfig(): boolean {
+    return this.required;
+  }
+
+  /** Opens the store before any plan is built, for a config that sets requireGuidedPlan: the gate holds from the server's start. */
+  require(): void {
+    this.required = true;
+    this.opened = true;
   }
 
   /** Marks a kept plan's confirmation accepted. Called with a verdict that accepted it, and nothing else. */
@@ -733,10 +745,11 @@ function originOf(address: string): string | null {
  *   Both loosen a mode, and no guided check takes them (design 6.1).
  */
 export function guidedAttachVerdict(
-  plans: Pick<GuidedPlans, "open" | "get">,
+  plans: Pick<GuidedPlans, "open" | "get"> & { requiredByConfig?: boolean },
   input: { planId?: string; mode: AnyMode; url: string; readPosts?: readonly string[]; trustedEmbeds?: readonly string[] },
 ): { ok: true; plan?: GuidedPlan } | { ok: false; why: string } {
   const above = input.mode !== "observe";
+  const isOpen = plans.requiredByConfig ? "the SceneScout config requires a guided plan (requireGuidedPlan)" : "a guided plan is open in this server";
   // Developer settings no guided check takes (design 6.1): readPosts lets named POSTs out of observe, and
   // trustedEmbeds lets frames' writes out of safe-write, so either would loosen a care level the person chose.
   if (plans.open) {
@@ -744,14 +757,14 @@ export function guidedAttachVerdict(
     if (named.length > 0)
       return {
         ok: false,
-        why: `a guided plan is open in this server, and ${named.join(" and ")} ${named.length > 1 ? "are developer settings" : "is a developer setting"} no guided check takes: attach without ${named.length > 1 ? "them" : "it"}. A developer who needs ${named.length > 1 ? "them" : "it"} sets ${named.length > 1 ? "them" : "it"} in a server with no guided plan.`,
+        why: `${isOpen}, and ${named.join(" and ")} ${named.length > 1 ? "are developer settings" : "is a developer setting"} no guided check takes: attach without ${named.length > 1 ? "them" : "it"}. A developer who needs ${named.length > 1 ? "them" : "it"} sets ${named.length > 1 ? "them" : "it"} in a server with no guided plan.`,
       };
   }
   if (input.planId === undefined) {
     if (above && plans.open)
       return {
         ok: false,
-        why: `a guided plan is open in this server, so an attach in "${input.mode}" must name it: pass the planId its scout_attach call lists. Without one, only mode "observe" is allowed.`,
+        why: `${isOpen}, so an attach in "${input.mode}" must name ${plans.requiredByConfig ? "an accepted plan: build one with scout_guided_plan, and pass" : "it: pass"} the planId its scout_attach call lists. Without one, only mode "observe" is allowed.`,
       };
     return { ok: true };
   }

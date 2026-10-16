@@ -27,7 +27,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { CHECK_OPTION_NAMES, CHECK_RULES, parseCheckArgs, WORTH_A_LOOK_RULES } from "../src/engine/check.ts";
-import { CI_OPTION_NAMES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
+import { CI_OPTION_NAMES, DEDUP_MODES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
+import { CONFIG_KEYS, PRESET_POLICY, PRESETS } from "../src/engine/project-config.ts";
+import { WRITE_MODES } from "../src/engine/policy.ts";
+import { EVIDENCE_MODES } from "../src/engine/capture.ts";
 import { EXPORT_OPTION_NAMES, parseExportArgs } from "../src/engine/export.ts";
 import { LOGIN_OPTION_NAMES } from "../src/engine/profiles.ts";
 import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
@@ -541,6 +544,31 @@ test("the reference lists exactly the environment variables the code reads", () 
   assert.ok(ENV_IN_CODE.includes("SCENESCOUT_LIVE") && ENV_IN_CODE.includes("CLAUDE_CONFIG_DIR"), "the scan of src/ found the variables it should");
   const listed = sorted(tableIn(REFERENCE, "## Environment variables").map((r) => nameIn(r[0])));
   assert.deepEqual(listed, sorted([...ENV_IN_CODE, ...Object.values(KEY_ENV)]));
+});
+
+test("the config file's tables are its keys, each key's values and every preset's settings", () => {
+  const keys = tableIn(REFERENCE, "## The config file");
+  assert.deepEqual(
+    keys.map((r) => nameIn(r[0])),
+    [...CONFIG_KEYS],
+    "every key the parser takes, in its order, and no other",
+  );
+  const valuesOf = (key: string): string[] => [...keys.find((r) => nameIn(r[0]) === key)![1].matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+  assert.deepEqual(valuesOf("preset"), [...PRESETS]);
+  assert.deepEqual(valuesOf("maxMode"), [...WRITE_MODES]);
+  assert.deepEqual(valuesOf("dedup"), [...DEDUP_MODES]);
+  assert.deepEqual(valuesOf("evidence"), [...EVIDENCE_MODES]);
+  assert.deepEqual(valuesOf("requireGuidedPlan"), ["true", "false"]);
+  const presets = tables(section(REFERENCE, "## The config file")).tables[1];
+  assert.ok(presets, "a second table, of the presets");
+  assert.deepEqual(
+    presets.header.slice(1).map((h) => nameIn(h)),
+    [...PRESETS],
+  );
+  for (const [i, preset] of PRESETS.entries()) {
+    const shown = Object.fromEntries(presets.rows.map((r) => [nameIn(r[0]), JSON.parse(nameIn(r[i + 1]))]));
+    assert.deepEqual(shown, PRESET_POLICY[preset], `the ${preset} preset as the reference shows it`);
+  }
 });
 
 const QA_WORKFLOW = read("examples/workflows/scenescout-qa.yml");

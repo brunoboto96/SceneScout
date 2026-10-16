@@ -13,6 +13,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { confirmVerdict, GuidedPlans, guidedAttachVerdict, guidedPlan, holdGuidedPlan } from "../src/engine/guided.ts";
 import {
+  applyToCommand,
+  NO_POLICY,
+  parsePolicy,
+  PRESET_POLICY,
+  readLaunchPolicy,
+  refusalText,
+  resolveSettings,
+  tightenPolicy,
+  withProjectPolicy,
+  type LoadedPolicy,
+  type Policy,
+} from "../src/engine/project-config.ts";
+import {
   allowsWrite,
   answersWithRefusal,
   AUTH_FLOW_RE,
@@ -56,6 +69,7 @@ import {
   stricterMode,
   WriteRule,
 } from "../src/engine/policy.ts";
+import type { WriteMode } from "../src/engine/policy.ts";
 import { scriptLiteral } from "../src/engine/script-literal.ts";
 import {
   deriveCollection,
@@ -1861,4 +1875,267 @@ test("guided gate: an accepted plan is spent when no session carries it any more
   holdGuidedPlan(holds, plans, "other", undefined);
   holdGuidedPlan(holds, plans, "other", null);
   assert.equal(guidedAttachVerdict(plans, { planId: r.planId, mode: "safe-write", url: REMOTE }).ok, true);
+});
+
+// ── the operator's config file (engine/project-config.ts, issue #546) ──────────
+
+const loadedOf = (policy: Policy, source = "/srv/.scenescout/config.json"): LoadedPolicy => ({ policy, sources: [source] });
+const DEFAULTS = { mode: "read-only" as const, evidence: () => "inline" as const };
+const parsed = (text: string): Policy => {
+  const r = parsePolicy(text, "config.json");
+  assert.ok(r.ok, r.ok ? "" : r.error);
+  return r.policy;
+};
+
+test("config: a file is checked whole, and an unknown key or a bad value is refused naming it", () => {
+  const refused: Array<[string, RegExp]> = [
+    ['{"maxMod": "observe"}', /unknown key "maxMod"\. The keys are/],
+    ['{"maxMode": "observe", "egres": "none", "x": 1}', /unknown keys "egres", "x"/],
+    ['{"maxMode": "read only"}', /"maxMode" must be one of "observe", "read-only", "safe-write", "destructive", not "read only"/],
+    ['{"preset": "paranoid"}', /"preset" must be one of "strict"/],
+    ['{"requireGuidedPlan": "yes"}', /"requireGuidedPlan" must be true or false/],
+    ['{"readPosts": "POST /api/search"}', /"readPosts" must be a list of strings/],
+    ['{"readPosts": ["GET /api/search"]}', /"readPosts" has entries that are not valid: "GET \/api\/search"/],
+    ['{"trustedEmbeds": ["https://pay.example.com/checkout"]}', /"trustedEmbeds" has entries that are not valid/],
+    ['{"dedup": "model"}', /"dedup" must be one of "rule", "judge"/],
+    ['{"evidence": "inline-only"}', /"evidence" must be one of "inline", "file", "off"/],
+    ["[]", /must be a JSON object/],
+    ["{maxMode: observe}", /not valid JSON/],
+  ];
+  for (const [text, why] of refused) {
+    const r = parsePolicy(text, "config.json");
+    assert.equal(r.ok, false, text);
+    if (!r.ok) {
+      assert.match(r.error, why, text);
+      assert.ok(r.error.startsWith("config.json: "), `names the file: ${r.error}`);
+    }
+  }
+  // The contrast: the same keys spelled right are taken as written.
+  assert.deepEqual(parsed('{"maxMode": "observe", "readPosts": ["POST /api/search"], "trustedEmbeds": ["https://pay.example.com"]}'), {
+    maxMode: "observe",
+    readPosts: ["POST /api/search"],
+    trustedEmbeds: ["https://pay.example.com"],
+  });
+  assert.deepEqual(parsed("{}"), {}, "an empty file sets nothing");
+});
+
+test("config: the strict preset expands to every lock, and a key beside it replaces the preset's value", () => {
+  assert.deepEqual(parsed('{"preset": "strict"}'), {
+    maxMode: "observe",
+    requireGuidedPlan: true,
+    readPosts: [],
+    trustedEmbeds: [],
+    dedup: "rule",
+    evidence: "file",
+  });
+  const loosened = parsed('{"preset": "strict", "maxMode": "read-only", "readPosts": ["POST /api/search"]}');
+  assert.equal(loosened.maxMode, "read-only");
+  assert.deepEqual(loosened.readPosts, ["POST /api/search"]);
+  assert.equal(loosened.dedup, "rule", "the keys not named keep the preset's value");
+  // The preset object is not shared: one file's edit is not the next file's preset.
+  assert.equal(PRESET_POLICY.strict.maxMode, "observe");
+  assert.deepEqual(PRESET_POLICY.strict.readPosts, []);
+});
+
+test("config: no file leaves every argument as it was, and the same arguments under a file are refused or capped", () => {
+  const asked = {
+    mode: "destructive" as const,
+    readPosts: ["POST /api/search"],
+    trustedEmbeds: ["https://pay.example.com"],
+    dedup: "judge" as const,
+    evidence: "inline" as const,
+  };
+  const free = resolveSettings(NO_POLICY, {}, asked, DEFAULTS);
+  assert.deepEqual(free.refused, []);
+  assert.deepEqual(free.notes, []);
+  assert.deepEqual(free.settings, { ...asked, requireGuidedPlan: false });
+  const none = resolveSettings(NO_POLICY, {}, {}, DEFAULTS);
+  assert.deepEqual(none.settings, { mode: "read-only", requireGuidedPlan: false, dedup: undefined, evidence: undefined }, "nothing asked: today's defaults");
+
+  const strict = resolveSettings(loadedOf(PRESET_POLICY.strict), {}, asked, DEFAULTS);
+  assert.deepEqual(
+    strict.refused.map((r) => r.key),
+    ["mode", "readPosts", "trustedEmbeds", "dedup", "evidence"],
+  );
+  const text = refusalText(loadedOf(PRESET_POLICY.strict), strict.refused);
+  assert.match(text, /^refused by the SceneScout config \(\/srv\/\.scenescout\/config\.json\): mode "destructive" is above the config's maxMode "observe"/);
+  assert.match(text, /only they can change it/);
+});
+
+test("config: maxMode refuses an argument above it, takes one at or below it, and lowers a default above it", () => {
+  const cases: Array<[WriteMode, WriteMode | undefined, { refused: boolean; mode?: WriteMode; note?: boolean }]> = [
+    ["observe", "read-only", { refused: true }],
+    ["observe", "observe", { refused: false, mode: "observe" }],
+    ["observe", undefined, { refused: false, mode: "observe", note: true }],
+    ["read-only", "read-only", { refused: false, mode: "read-only" }],
+    ["read-only", undefined, { refused: false, mode: "read-only" }],
+    ["read-only", "safe-write", { refused: true }],
+    ["safe-write", "destructive", { refused: true }],
+    ["safe-write", "observe", { refused: false, mode: "observe" }],
+    ["destructive", "destructive", { refused: false, mode: "destructive" }],
+  ];
+  for (const [max, mode, want] of cases) {
+    const r = resolveSettings(loadedOf({ maxMode: max }), {}, { mode }, DEFAULTS);
+    const label = `maxMode ${max}, asked ${mode ?? "(nothing)"}`;
+    assert.equal(r.refused.length > 0, want.refused, label);
+    if (want.refused) assert.match(r.refused[0].why, new RegExp(`mode "${mode}" is above the config's maxMode "${max}"`), label);
+    else assert.equal(r.settings.mode, want.mode, label);
+    assert.equal(r.notes.length > 0, want.note === true, label);
+  }
+});
+
+test("config: a list the file sets is the most an argument may name, and what an attach gets when it names none", () => {
+  const file = loadedOf({ readPosts: ["POST /api/search", "POST /api/reports/*/query"], trustedEmbeds: ["https://pay.example.com"] });
+  const subset = resolveSettings(file, {}, { readPosts: ["post  /api/search/"], trustedEmbeds: ["https://pay.example.com/"] }, DEFAULTS);
+  assert.deepEqual(subset.refused, [], "the same entries in another spelling are inside the list");
+  assert.deepEqual(subset.settings.readPosts, ["post  /api/search/"]);
+  const outside = resolveSettings(file, {}, { readPosts: ["POST /api/search", "POST /api/orders"], trustedEmbeds: ["https://evil.example.com"] }, DEFAULTS);
+  assert.deepEqual(
+    outside.refused.map((r) => r.key),
+    ["readPosts", "trustedEmbeds"],
+  );
+  assert.match(outside.refused[0].why, /"POST \/api\/orders" is not among them/);
+  const omitted = resolveSettings(file, {}, {}, DEFAULTS);
+  assert.deepEqual(omitted.settings.readPosts, ["POST /api/search", "POST /api/reports/*/query"]);
+  assert.deepEqual(omitted.settings.trustedEmbeds, ["https://pay.example.com"]);
+  // An empty list allows none: even one entry is refused, and nothing asked is none rather than the environment's.
+  const locked = loadedOf({ readPosts: [], trustedEmbeds: [] });
+  const one = resolveSettings(locked, {}, { readPosts: ["POST /api/search"] }, DEFAULTS);
+  assert.match(one.refused[0].why, /the config allows no readPosts/);
+  const env = resolveSettings(locked, { SCENESCOUT_READ_POSTS: "POST /api/search" }, {}, DEFAULTS);
+  assert.deepEqual(env.settings.readPosts, [], "the environment cannot add what the file leaves out");
+  assert.match(env.notes.join(" "), /SCENESCOUT_READ_POSTS entries the config does not list were left out: "POST \/api\/search"/);
+  // The environment may narrow the file's list.
+  const narrowed = resolveSettings(file, { SCENESCOUT_READ_POSTS: "POST /api/search, POST /api/orders" }, {}, DEFAULTS);
+  assert.deepEqual(narrowed.settings.readPosts, ["POST /api/search"]);
+});
+
+test("config: dedup rule refuses the judge from an argument and turns it off from the environment", () => {
+  const rule = loadedOf({ dedup: "rule" });
+  const asked = resolveSettings(rule, {}, { dedup: "judge" }, DEFAULTS);
+  assert.match(asked.refused[0]?.why ?? "", /dedup "judge" is above the config's dedup "rule"/);
+  const env = resolveSettings(rule, { SCENESCOUT_DEDUP: "judge" }, {}, DEFAULTS);
+  assert.deepEqual(env.refused, []);
+  assert.equal(env.settings.dedup, "rule", "set, so an earlier attach's choice is replaced too");
+  assert.match(env.notes.join(" "), /SCENESCOUT_DEDUP=judge is above the config's dedup "rule"/);
+  // The contrast: a file allowing the judge leaves the choice where it was.
+  const judge = resolveSettings(loadedOf({ dedup: "judge" }), {}, { dedup: "judge" }, DEFAULTS);
+  assert.deepEqual(judge.refused, []);
+  assert.equal(judge.settings.dedup, "judge");
+  assert.equal(resolveSettings(loadedOf({ dedup: "judge" }), {}, {}, DEFAULTS).settings.dedup, undefined);
+});
+
+test("config: evidence caps what a finding's picture may do, refusing an argument above it and lowering a default", () => {
+  const file = loadedOf({ evidence: "file" });
+  assert.match(resolveSettings(file, {}, { evidence: "inline" }, DEFAULTS).refused[0]?.why ?? "", /evidence "inline" is above the config's evidence "file"/);
+  assert.equal(resolveSettings(file, {}, { evidence: "off" }, DEFAULTS).settings.evidence, "off");
+  const lowered = resolveSettings(file, {}, {}, DEFAULTS);
+  assert.equal(lowered.settings.evidence, "file");
+  assert.match(lowered.notes.join(" "), /"inline" is above the config's evidence/);
+  // A default already at or below the cap is left to the usual rule.
+  assert.equal(resolveSettings(file, {}, {}, { ...DEFAULTS, evidence: () => "file" }).settings.evidence, undefined);
+  assert.equal(resolveSettings(loadedOf({ evidence: "off" }), {}, { evidence: "file" }, DEFAULTS).refused.length, 1);
+});
+
+test("config: the project's own file can tighten the operator's and never loosen it", () => {
+  const operator: Policy = { maxMode: "read-only", readPosts: ["POST /api/search", "POST /api/query"], dedup: "judge" };
+  const project: Policy = {
+    maxMode: "destructive",
+    readPosts: ["POST /api/search", "POST /api/orders"],
+    dedup: "rule",
+    requireGuidedPlan: false,
+    evidence: "inline",
+  };
+  assert.deepEqual(tightenPolicy(operator, project), {
+    maxMode: "read-only",
+    readPosts: ["POST /api/search"],
+    dedup: "rule",
+    requireGuidedPlan: false,
+    evidence: "inline",
+  });
+  assert.equal(tightenPolicy({ requireGuidedPlan: true }, { requireGuidedPlan: false }).requireGuidedPlan, true);
+  assert.equal(tightenPolicy({ maxMode: "safe-write" }, { maxMode: "observe" }).maxMode, "observe");
+  assert.deepEqual(tightenPolicy({}, {}), {});
+});
+
+test("config: read from SCENESCOUT_CONFIG, else the launch directory, and the project's file joins it", () => {
+  const files = new Map<string, string>([
+    ["/srv/.scenescout/config.json", '{"maxMode": "read-only"}'],
+    ["/etc/scenescout.json", '{"preset": "strict"}'],
+    ["/work/app/.scenescout/config.json", '{"maxMode": "observe"}'],
+    ["/work/bad/.scenescout/config.json", '{"maxmode": "observe"}'],
+  ]);
+  const fsx = { exists: (f: string) => files.has(f), read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+  const launched = readLaunchPolicy({}, "/srv", fsx);
+  assert.ok(launched.ok);
+  assert.deepEqual(launched.loaded, { policy: { maxMode: "read-only" }, sources: ["/srv/.scenescout/config.json"] });
+  const named = readLaunchPolicy({ SCENESCOUT_CONFIG: "/etc/scenescout.json" }, "/srv", fsx);
+  assert.ok(
+    named.ok && named.loaded.policy.maxMode === "observe" && named.loaded.sources[0] === "/etc/scenescout.json",
+    "the named file, not the launch directory's",
+  );
+  assert.deepEqual(readLaunchPolicy({}, "/elsewhere", fsx), { ok: true, loaded: NO_POLICY }, "no file: no config");
+  for (const [value, why] of [
+    ["relative.json", /must be an absolute path/],
+    ["/etc/none.json", /which is not there/],
+  ] as const) {
+    const r = readLaunchPolicy({ SCENESCOUT_CONFIG: value }, "/srv", fsx);
+    assert.ok(!r.ok && why.test(r.error), value);
+  }
+  const joined = withProjectPolicy(launched.loaded, "/work/app", fsx);
+  assert.ok(joined.ok);
+  assert.deepEqual(joined.loaded, { policy: { maxMode: "observe" }, sources: ["/srv/.scenescout/config.json", "/work/app/.scenescout/config.json"] });
+  const same = withProjectPolicy(launched.loaded, "/srv", fsx);
+  assert.ok(same.ok && same.loaded.sources.length === 1, "the operator's own file is not read twice");
+  const bad = withProjectPolicy(launched.loaded, "/work/bad", fsx);
+  assert.ok(!bad.ok && /unknown key "maxmode"/.test(bad.error));
+  assert.deepEqual(withProjectPolicy(launched.loaded, "/work/none", fsx), { ok: true, loaded: launched.loaded });
+});
+
+test("config: a command's --mode and --dedup are capped the same way, and a flag above the file stops it", () => {
+  const file = loadedOf({ maxMode: "observe", dedup: "rule" });
+  const flag = applyToCommand(file, {}, ["http://localhost:3000", "--mode", "read-only"], { mode: "read-only" });
+  assert.ok(!flag.ok && /mode "read-only" is above the config's maxMode "observe"/.test(flag.error));
+  const eq = applyToCommand(file, {}, ["http://localhost:3000", "--mode=read-only"], { mode: "read-only" });
+  assert.equal(eq.ok, false, "--mode=value is a flag too");
+  const dflt = applyToCommand(file, {}, ["http://localhost:3000"], { mode: "read-only", dedup: "judge" });
+  assert.ok(dflt.ok);
+  assert.equal(dflt.mode, "observe");
+  assert.equal(dflt.dedup, "rule", "ci's default judge is turned off by the file");
+  assert.match(dflt.note, /^Config: \/srv\/\.scenescout\/config\.json; /);
+  const judge = applyToCommand(file, {}, ["http://localhost:3000", "--dedup", "judge", "--mode", "observe"], { mode: "observe", dedup: "judge" });
+  assert.ok(!judge.ok && /dedup "judge"/.test(judge.error));
+  // Said once, when the environment asked for the judge too.
+  const envJudge = applyToCommand(file, { SCENESCOUT_DEDUP: "judge" }, [], { mode: "observe", dedup: "judge" });
+  assert.ok(envJudge.ok && envJudge.note.split("; ").filter((n) => n.startsWith("dedup ")).length === 1, envJudge.ok ? envJudge.note : envJudge.error);
+  // A command reads POST endpoints from the environment only: the file's list is what it gets, narrowed by the environment.
+  const posts = loadedOf({ readPosts: ["POST /api/search"] });
+  const fromEnv = applyToCommand(posts, { SCENESCOUT_READ_POSTS: "POST /api/search, POST /api/orders" }, [], { mode: "read-only" });
+  assert.ok(fromEnv.ok);
+  assert.deepEqual(fromEnv.readPosts, ["POST /api/search"]);
+  assert.equal(dflt.readPosts, undefined, "no list in the file: the environment as it is");
+  // No file: the flags as given, and nothing said.
+  assert.deepEqual(applyToCommand(NO_POLICY, {}, ["--mode", "destructive"], { mode: "destructive", dedup: "judge" }), {
+    ok: true,
+    mode: "destructive",
+    dedup: "judge",
+    note: "",
+  });
+});
+
+test("config: requireGuidedPlan opens the guided gate before any plan is built, and says the config asked for it", () => {
+  const REMOTE = "https://staging.example.com";
+  const plain = new GuidedPlans();
+  assert.equal(guidedAttachVerdict(plain, { mode: "read-only", url: REMOTE }).ok, true, "without it, no plan built: no gate");
+  const required = new GuidedPlans();
+  required.require();
+  assert.equal(required.open, true);
+  const refused = guidedAttachVerdict(required, { mode: "read-only", url: REMOTE });
+  assert.ok(
+    !refused.ok && /requires a guided plan \(requireGuidedPlan\)/.test(refused.why) && /build one with scout_guided_plan/.test(refused.why),
+    JSON.stringify(refused),
+  );
+  assert.equal(guidedAttachVerdict(required, { mode: "observe", url: REMOTE }).ok, true, "looking only needs no plan");
+  const posts = guidedAttachVerdict(required, { mode: "observe", url: REMOTE, readPosts: ["POST /api/search"] });
+  assert.ok(!posts.ok && /readPosts/.test(posts.why));
 });

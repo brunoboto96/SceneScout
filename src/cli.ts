@@ -58,7 +58,9 @@ import { runExport } from "./export-run.js";
 import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
-import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues } from "./engine/ci.js";
+import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
+import { applyToCommand, fsPolicyReader, readLaunchPolicy, withProjectPolicy } from "./engine/project-config.js";
+import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
 import { VISUAL_DIRNAME } from "./engine/baseline.js";
 import { openOrSay } from "./engine/open.js";
 import {
@@ -624,6 +626,34 @@ async function doctor(flags: string[]): Promise<void> {
   console.log(`\n${doctorAllGood({ engineOnly: flags.includes("--engine"), desktopOnly: checks.some((c) => c.name === CLAUDE_CODE_NOT_NEEDED) })}`);
 }
 
+/**
+ * The operator's config (engine/project-config.ts) applied to a command's
+ * `--mode` and `--dedup` (check, ci and a first look): SCENESCOUT_CONFIG, else the one in the directory the
+ * command runs in, tightened by the project's own. A flag above it stops the
+ * command, as a bad config does.
+ */
+function commandConfig(
+  args: string[],
+  options: { mode: WriteMode; dedup?: DedupMode; projectDir: string },
+  command: string,
+  exitCode: number,
+): { mode: WriteMode; dedup?: DedupMode } {
+  const stop = (error: string): never => {
+    console.error(`scenescout${command ? ` ${command}` : ""}: ${error}`);
+    process.exit(exitCode);
+  };
+  const launch = readLaunchPolicy(process.env, process.cwd(), fsPolicyReader);
+  if (!launch.ok) return stop(launch.error);
+  const loaded = withProjectPolicy(launch.loaded, options.projectDir, fsPolicyReader);
+  if (!loaded.ok) return stop(loaded.error);
+  const applied = applyToCommand(loaded.loaded, process.env, args, options);
+  if (!applied.ok) return stop(applied.error);
+  if (applied.note) console.error(applied.note);
+  // Commands read POST endpoints only from the environment (browser.ts), so the list the file allows is put there.
+  if (applied.readPosts !== undefined) process.env[READ_POSTS_ENV] = applied.readPosts.join("\n");
+  return applied;
+}
+
 /** `scenescout check`: exit 0 passed, 1 failed the gate, 2 could not run. */
 async function check(args: string[]): Promise<never> {
   const parsed = parseCheckArgs(args, process.cwd());
@@ -631,7 +661,8 @@ async function check(args: string[]): Promise<never> {
     console.error(`scenescout check: ${parsed.error}`);
     process.exit(EXIT.error);
   }
-  let options = parsed.options;
+  const capped = commandConfig(args, parsed.options, "check", EXIT.error);
+  let options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode };
   const outDir = options.outDir ?? defaultCheckDir(options.projectDir);
   let inputs: CheckInputs;
   let template: ReportTemplate | null = null;
@@ -733,7 +764,9 @@ async function firstRun(args: string[]): Promise<never> {
   };
   const parsed = parseFirstRunArgs(args, process.cwd());
   if (!parsed.ok) return fail(parsed.error);
-  const options = parsed.options;
+  // The config in the folder this runs in caps its --mode too; a first look's own project is an empty temporary one.
+  const capped = commandConfig(args, { mode: parsed.options.mode, projectDir: process.cwd() }, "", EXIT_FIRST_RUN.couldNotRun);
+  const options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode };
   // Found out now, not after the look; and nothing is created until the look has something to write.
   const folderProblem = reportFolderProblem(options.outDir ?? path.join(process.cwd(), FIRST_RUN_DIRNAME), options.outDir !== undefined);
   if (folderProblem) return fail(folderProblem);
@@ -814,7 +847,8 @@ async function ci(args: string[]): Promise<never> {
   };
   const parsed = parseCiArgs(args, process.cwd(), process.env);
   if (!parsed.ok) return fail(parsed.error);
-  const options = parsed.options;
+  const capped = commandConfig(args, parsed.options, "ci", EXIT_CI.couldNotRun);
+  const options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode, dedup: capped.dedup ?? parsed.options.dedup };
   const provider = detectProvider(process.env, options);
   if (!provider.ok) return fail(provider.error);
   const resolved = provider.resolved;

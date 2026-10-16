@@ -34,6 +34,7 @@ import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "../en
 import { RECORD_MAX_FRAMES } from "../engine/replay.js";
 import { describePace, normalizePace } from "../engine/settle.js";
 import { formatScan, scanProject } from "../scan.js";
+import { fsPolicyReader, policyNote, refusalText, resolveSettings, withProjectPolicy } from "../engine/project-config.js";
 import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, holdGuidedPlan, type CheckArea } from "../engine/guided.js";
 import { AREA_LABEL } from "../engine/guided-words.js";
 import { EVIDENCE_ENV, EVIDENCE_MODES, evidenceSettings, RECORD_ENV, recordChoice, type EvidenceMode } from "../engine/capture.js";
@@ -62,6 +63,7 @@ import {
   sessionQueue,
   guidedPlans,
   guidedSessions,
+  operatorPolicy,
   callWork,
   CLOSE_WORK_WAIT_MS,
   flushAfterClose,
@@ -232,8 +234,10 @@ export function registerSessionTools(): void {
           ),
         mode: z
           .enum(["observe", "read-only", "safe-write", "destructive"])
-          .default("read-only")
-          .describe("Write policy (see tool description). Never choose 'destructive' yourself — user opt-in only."),
+          .optional()
+          .describe(
+            "Write policy (see tool description). Default 'read-only', or the SceneScout config's maxMode when that is stricter; a mode above the config's maxMode is refused. Never choose 'destructive' yourself — user opt-in only.",
+          ),
         headed: z.boolean().default(false).describe("Show the browser window"),
         browser: z
           .enum(["chromium", "firefox", "webkit"])
@@ -399,13 +403,35 @@ export function registerSessionTools(): void {
         planId?: string;
       }) => {
         try {
-          // Before anything else: while a guided plan is open, nothing above observe starts without the person's confirmation (ADR 24).
-          const guided = guidedAttachVerdict(guidedPlans, { planId, mode: mode ?? "read-only", url, readPosts, trustedEmbeds });
-          if (!guided.ok) return errorText(new Error(`scout_attach refused: ${guided.why}`));
           // Settled first: a refusal leaves the default session as it was.
           const folder = await projectFolderFor(url, projectPath);
           if ("refused" in folder) return errorText(new Error(folder.refused));
           projectPath = folder.dir;
+          // Before anything starts: the operator's config, which the project's own file may only tighten (engine/project-config.ts).
+          const config = withProjectPolicy(operatorPolicy, projectPath, fsPolicyReader);
+          if (!config.ok) return errorText(new Error(`scout_attach refused: the project's SceneScout config is not valid: ${config.error}`));
+          const resolved = resolveSettings(
+            config.loaded,
+            process.env,
+            { mode, readPosts, trustedEmbeds, dedup, evidence },
+            // The default stays read-only while the guided gate is held, so an attach naming no plan is refused and told to name one (ADR 24).
+            { mode: "read-only", evidence: () => evidenceSettings(undefined, process.env).mode },
+          );
+          if (resolved.refused.length > 0) return errorText(new Error(`scout_attach ${refusalText(config.loaded, resolved.refused)}`));
+          const configNote = policyNote(config.loaded, resolved.notes);
+          mode = resolved.settings.mode;
+          // Then the guided gate: while a guided plan is open, nothing above observe starts without the person's confirmation (ADR 24).
+          // It judges what the agent passed, so readPosts and trustedEmbeds the config lists are not refused as the agent's.
+          const gate =
+            config.loaded.policy.requireGuidedPlan && !guidedPlans.requiredByConfig
+              ? { open: true, requiredByConfig: true, get: (id: string) => guidedPlans.get(id) }
+              : guidedPlans;
+          const guided = guidedAttachVerdict(gate, { planId, mode, url, readPosts, trustedEmbeds });
+          if (!guided.ok) return errorText(new Error(`scout_attach refused: ${guided.why}`));
+          readPosts = resolved.settings.readPosts;
+          trustedEmbeds = resolved.settings.trustedEmbeds;
+          dedup = resolved.settings.dedup;
+          evidence = resolved.settings.evidence;
           const target = session ?? activeName;
           if (session) {
             setActiveName(session);
@@ -539,6 +565,7 @@ export function registerSessionTools(): void {
           return text(
             browserNote +
               out +
+              configNote +
               (folder.note ? `\n\n${folder.note}` : "") +
               conflictNote +
               recordNote +
