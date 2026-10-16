@@ -51,10 +51,32 @@ import {
   type PaneInput,
 } from "../src/engine/status-pane.ts";
 import { statusPanePage } from "../src/engine/status-pane-page.ts";
-import { guidedPlan } from "../src/engine/guided.ts";
-import { guidedProgress } from "../src/engine/progress.ts";
+import { CARES, CHECK_AREAS, THOROUGHNESSES, checkGuidedChoices, confirmationReason, guidedPlan, isLocalAddress } from "../src/engine/guided.ts";
+import {
+  ACTION_LABEL,
+  ACTION_PROMPT,
+  AREA_LABEL,
+  CARE_EXPLAIN,
+  CARE_LABEL,
+  CARE_PREVIEW,
+  CONFIRM_ANSWER,
+  CONFIRM_COMING,
+  CONFIRM_PREVIEW_HEADING,
+  CONFIRM_SAYS,
+  DESTRUCTIVE_NOT_OFFERED,
+  HELD_BACK,
+  NEEDS_YOU_SENTENCE,
+  PHASE_NOW,
+  SAFETY_EXPLAINER,
+  THOROUGHNESS_LABEL,
+} from "../src/engine/guided-words.ts";
+import { CARD_IMPACTS, cardActions as engineCardActions, cardText, guidedProgress, nextActions } from "../src/engine/progress.ts";
+import { plainCard } from "../src/engine/plain.ts";
+import { AREA_FIELDS, FORM_CHOICES } from "../src/intake.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import * as mod from "../mods/scenescout-mod/hooks/pane.js";
+import * as guided from "../mods/scenescout-mod/hooks/guided.js";
+import { register as registerMod } from "../mods/scenescout-mod/hooks/register.js";
 import {
   COULD_NOT_OPEN,
   decideOpen,
@@ -2172,4 +2194,643 @@ test("the lane model is set only when configured, only on a SceneScout lane, and
     { name: "a fork inherits whatever is set", spawn: { ...lane, fork: true }, configured: "sonnet", want: null },
   ];
   for (const c of spawns) assert.equal(mod.spawnModel(c.spawn, c.configured), c.want, c.name);
+});
+
+// ---- The mod's guided panel ---------------------------------------------------
+// Every rule of the panel lives in mods/scenescout-mod/hooks/guided.js. Its words
+// are copies of the engine's, held equal here; every state is drawn from
+// fixtures on every surface's element table, and every button is pressed to
+// see what it asks for. `claude plugin test mods/scenescout-mod` mounts the
+// same panel in Claude Code's own test kit.
+
+type Surface = "terminal" | "desktop" | "vscode" | "mobile";
+/** Each surface's element table, as the mods API declares it: a tree naming an element its surface lacks fails whole. */
+const SURFACE_ELEMENTS: Record<Surface, string[]> = {
+  terminal: ["Box", "Text", "Button", "Input", "Select", "Link", "Code", "Markdown", "Client", "Raster", "Image"],
+  desktop: ["Box", "Text", "Button", "Input", "Select", "Svg", "Link", "Code", "Markdown", "Client"],
+  vscode: ["Box", "Text", "Button", "Input", "Select", "Svg", "Link", "Code", "Markdown"],
+  mobile: ["Box", "Text", "Button", "Svg", "Link", "Code", "Markdown"],
+};
+const SURFACES = Object.keys(SURFACE_ELEMENTS) as Surface[];
+function elsFor(surface: Surface): Record<string, (props: Record<string, unknown>) => El> {
+  return Object.fromEntries(SURFACE_ELEMENTS[surface].map((name) => [name, (props: Record<string, unknown>): El => ({ type: name, props })]));
+}
+/** Every element of a tree, with no hole in any children list. */
+function elementsOf(tree: unknown): El[] {
+  const out: El[] = [];
+  walk(tree, (el) => {
+    out.push(el);
+    for (const c of (el.props?.children as unknown[] | undefined) ?? []) assert.ok(c !== null && c !== undefined, `${el.type} has an empty child`);
+  });
+  return out;
+}
+/** What a tree shows a person: Text, Button labels and Markdown. */
+function shown(tree: unknown): string {
+  return elementsOf(tree)
+    .map((el) =>
+      el.type === "Text"
+        ? (el.props.children as unknown[]).join("")
+        : el.type === "Button"
+          ? String(el.props.label)
+          : el.type === "Markdown"
+            ? String(el.props.text)
+            : "",
+    )
+    .filter(Boolean)
+    .join("\n");
+}
+/** The checks a surface makes before it draws: the element is in its table, a Text holds strings, a Button and an Input have their keys. */
+function assertDrawable(tree: unknown, surface: Surface, label: string): void {
+  for (const el of elementsOf(tree)) {
+    assert.ok(SURFACE_ELEMENTS[surface].includes(el.type), `${label} on ${surface}: ${el.type} is not drawn there`);
+    if (el.type === "Text")
+      for (const c of el.props.children as unknown[]) assert.equal(typeof c, "string", `${label} on ${surface}: a Text child is not text`);
+    if (el.type === "Button") {
+      assert.match(String(el.props.key), /^(guided-[a-z0-9-]+)$/, `${label}: a Button's key is its test id`);
+      assert.ok(String(el.props.label).length > 0 && typeof el.props.onPress === "function", `${label}: ${String(el.props.key)}`);
+    }
+    if (el.type === "Input") assert.match(String(el.props.key), /^guided-[a-z0-9-]+$/);
+    if (el.type === "Svg") assert.ok(String(el.props.source).length <= guided.SVG_SOURCE_MAX && String(el.props.alt).length > 0);
+  }
+  const keys = elementsOf(tree)
+    .filter((el) => el.type === "Button")
+    .map((el) => String(el.props.key));
+  assert.equal(new Set(keys).size, keys.length, `${label} on ${surface}: two buttons share a key: ${keys.join(", ")}`);
+}
+type Acted = { type: string; payload?: Record<string, unknown> };
+/** Draw a step and record what each press asks for. */
+function drawGuided(
+  surface: Surface,
+  w: ReturnType<typeof guided.initialWizard>,
+  status: { kind: string; data?: unknown; error?: string },
+  picture: unknown = null,
+) {
+  const acts: Acted[] = [];
+  const els = elsFor(surface);
+  const runPane = status.kind === "data" ? mod.renderPane(els as never, status as never) : null;
+  const tree = guided.renderGuided(els as never, w, { surface, status, picture: picture as never, runPane }, (type, payload) => acts.push({ type, payload }));
+  const press = (key: string, value?: string) => {
+    const el = elementsOf(tree).find((e) => e.props.key === key);
+    assert.ok(el, `no element keyed ${key}: ${shown(tree)}`);
+    if (el.type === "Input") (el.props.onSubmit as (v: string) => void)(value ?? "");
+    else (el.props.onPress as () => void)();
+    return acts[acts.length - 1];
+  };
+  return { tree, acts, press, text: shown(tree), types: new Set(elementsOf(tree).map((e) => e.type)) };
+}
+
+const GUIDED_PLAN_ID = "gp-0123456789";
+const STATUS_IDLE = mod.readResult(serverResult(paneData(paneInput())), PANE_NOW);
+const STATUS_RUNNING = mod.readResult(serverResult(guidedPaneData()), PANE_NOW);
+function statusWith(over: Record<string, unknown>) {
+  const data = guidedPaneData();
+  return mod.readResult(serverResult({ ...data, guided: { ...data.guided!, ...over } } as never), PANE_NOW);
+}
+const STATUS_DOWN = mod.unreachable(["scenescout scout_status_poll: not connected"], PANE_NOW);
+function cardFixture(id: string, over: Partial<Finding> = {}) {
+  return plainCard({
+    id,
+    severity: "high",
+    category: "false_success",
+    title: "Saving a thing says it worked when it did not",
+    detail: "The page shows Saved.",
+    url: "https://staging.example.com/things/new",
+    state: "/things/new#abc",
+    repro: [],
+    foundAt: new Date(PANE_NOW - 60_000).toISOString(),
+    runs: 2,
+    ...over,
+  });
+}
+function wizard(over: Partial<ReturnType<typeof guided.initialWizard>> = {}) {
+  return { ...guided.initialWizard(), ...over };
+}
+function planFor(choices: Record<string, unknown>) {
+  const built = guidedPlan(choices, GUIDED_PLAN_ID);
+  assert.ok(built.ok, JSON.stringify(built));
+  return JSON.parse(JSON.stringify(built.plan)) as Record<string, any>;
+}
+
+test("the panel's words are the engine's, word for word", () => {
+  assert.deepEqual(guided.CARES, [...CARES]);
+  assert.deepEqual(guided.THOROUGHNESSES, [...THOROUGHNESSES]);
+  assert.deepEqual(
+    guided.PANEL_AREAS,
+    CHECK_AREAS.filter((a) => a !== "tickets"),
+  );
+  assert.deepEqual(guided.CARE_LABEL, CARE_LABEL);
+  assert.deepEqual(guided.CARE_EXPLAIN, CARE_EXPLAIN);
+  assert.deepEqual(guided.CARE_PREVIEW, CARE_PREVIEW);
+  assert.equal(guided.DESTRUCTIVE_NOT_OFFERED, DESTRUCTIVE_NOT_OFFERED);
+  assert.deepEqual(guided.AREA_LABEL, AREA_LABEL);
+  assert.deepEqual(guided.HELD_BACK, HELD_BACK);
+  assert.deepEqual(guided.THOROUGHNESS_LABEL, THOROUGHNESS_LABEL);
+  assert.deepEqual(guided.CONFIRM_COMING, CONFIRM_COMING);
+  assert.deepEqual(guided.CONFIRM_ANSWER, CONFIRM_ANSWER);
+  assert.equal(guided.CONFIRM_PREVIEW_HEADING, CONFIRM_PREVIEW_HEADING);
+  assert.deepEqual(guided.SAFETY_EXPLAINER, [...SAFETY_EXPLAINER]);
+  assert.equal(guided.SERVER_ERROR_SENTENCE, NEEDS_YOU_SENTENCE["server-error"]("x"));
+  assert.equal(guided.STARTING_SENTENCE, PHASE_NOW.starting);
+  assert.deepEqual(guided.ACTION_LABEL, ACTION_LABEL);
+  for (const k of ["stop", "recheck", "plainReport"] as const) assert.equal(guided.ACTION_PROMPT[k], ACTION_PROMPT[k]);
+  assert.equal(guided.ACTION_PROMPT.explain("a1b2c3d4e5"), ACTION_PROMPT.explain("a1b2c3d4e5"));
+  assert.equal(guided.ACTION_PROMPT.again("a1b2c3d4e5"), ACTION_PROMPT.again("a1b2c3d4e5"));
+  assert.deepEqual(guided.cardActions("a1b2c3d4e5"), engineCardActions("a1b2c3d4e5"));
+  assert.deepEqual(guided.SIGN_IN_LABEL, Object.fromEntries(FORM_CHOICES.signIn.map((c) => [c.const, c.title])));
+  assert.deepEqual(guided.AREA_DEFAULT, Object.fromEntries(AREA_FIELDS.map((f) => [f.area, f.default])));
+  assert.deepEqual(Object.keys(guided.IMPACT_MARK).sort(), [...CARD_IMPACTS].sort());
+  // The tools a button reaches are the server's own, and the same three the MCP App pane allows.
+  const guideSource = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "tools", "guide.ts"), "utf8");
+  assert.ok(
+    guideSource.includes(`export const GUIDED_PLAN_TOOL = "${guided.PLAN_TOOL}"`) &&
+      guideSource.includes(`export const GUIDED_CONFIRM_TOOL = "${guided.CONFIRM_TOOL}"`),
+  );
+  assert.ok(statusPanePage("9.9.9").includes(`var DIRECT_TOOLS = ${JSON.stringify(guided.DIRECT_TOOLS).replace(/,/g, ", ")};`));
+  assert.equal(guided.GUIDED_COMMAND, "scenescout-guided");
+});
+
+test("the panel judges an address and a care level as the engine does", () => {
+  const addresses = [
+    "http://localhost:3000",
+    "http://127.0.0.1/x",
+    "http://[::1]:8080/",
+    "https://staging.example.com",
+    "http://localhost.example.com",
+    "not a url",
+    "",
+  ];
+  for (const a of addresses) assert.equal(guided.isLocalAddress(a), isLocalAddress(a), a);
+  for (const care of CARES)
+    for (const address of addresses) assert.equal(guided.confirmReason(care, address), confirmationReason({ care, address }), `${care} ${address}`);
+});
+
+test("the draft becomes choices the server accepts, or one sentence saying what is missing", () => {
+  const d = guided.defaultDraft();
+  assert.deepEqual(d, { address: "", areas: ["sign-in", "forms", "broken-pages"], journey: "", signIn: "none", care: "look-only", thoroughness: "normal" });
+  const refused: Array<[string, Partial<typeof d>, RegExp]> = [
+    ["no address", {}, /Type the address/],
+    ["no scheme", { address: "staging.example.com" }, /starting with http/],
+    ["nothing ticked", { address: "https://staging.example.com", areas: [] }, /at least one/],
+    ["a journey with no sentence", { address: "https://staging.example.com", areas: ["journey"], journey: "  " }, /Describe the journey/],
+  ];
+  for (const [name, over, want] of refused) {
+    const got = guided.choicesFromDraft({ ...d, ...over });
+    assert.ok(!got.ok && want.test(got.error), name);
+  }
+  // Every accepted draft is accepted by the engine too, and the journey travels only with its area.
+  const accepted: Array<Partial<typeof d>> = [
+    { address: " https://staging.example.com " },
+    {
+      address: "http://localhost:3000",
+      areas: ["journey", "phone"],
+      journey: "Buy the cheapest item",
+      care: "may-create-test-data",
+      thoroughness: "thorough",
+      signIn: "sso",
+    },
+    { address: "https://staging.example.com", areas: ["forms"], journey: "left over from before", care: "may-submit-forms" },
+  ];
+  for (const over of accepted) {
+    const got = guided.choicesFromDraft({ ...d, ...over });
+    assert.ok(got.ok, JSON.stringify(over));
+    assert.ok(checkGuidedChoices(got.choices).ok, JSON.stringify(got.choices));
+    assert.equal("journey" in got.choices, (got.choices.areas as string[]).includes("journey"));
+  }
+  assert.deepEqual(
+    (guided.choicesFromDraft({ ...d, address: "http://localhost:3000", areas: ["phone", "sign-in"] }) as unknown as { choices: { areas: string[] } }).choices
+      .areas,
+    ["sign-in", "phone"],
+    "areas in the panel's order",
+  );
+});
+
+test("the wizard's own presses: steps, toggles and choices, and nothing unknown gets in", () => {
+  const w = guided.initialWizard();
+  assert.equal(guided.reduce(w, { type: "go", step: "configuring" }).step, "configuring");
+  assert.equal(guided.reduce(w, { type: "go", step: "nowhere" }), w, "an unknown step changes nothing");
+  assert.deepEqual(guided.reduce(w, { type: "toggleArea", area: "forms" }).draft.areas, ["sign-in", "broken-pages"]);
+  assert.deepEqual(guided.reduce(w, { type: "toggleArea", area: "phone" }).draft.areas, ["sign-in", "forms", "broken-pages", "phone"]);
+  assert.equal(guided.reduce(w, { type: "toggleArea", area: "tickets" }), w, "tickets are not offered in the panel");
+  assert.equal(guided.reduce(w, { type: "care", value: "destructive" }), w, "a care level that deletes cannot be chosen");
+  assert.equal(guided.reduce(w, { type: "care", value: "may-create-test-data" }).draft.care, "may-create-test-data");
+  assert.equal(guided.reduce(w, { type: "thoroughness", value: "thorough" }).draft.thoroughness, "thorough");
+  assert.equal(guided.reduce(w, { type: "signIn", value: "hunter2" }), w);
+  assert.equal(guided.reduce(w, { type: "address", value: "x".repeat(5000) }).draft.address.length, 2048);
+  const opened = guided.reduce(w, { type: "openCard", id: "0a1b2c3d4e" });
+  assert.deepEqual([opened.step, opened.cardId], ["card", "0a1b2c3d4e"]);
+  const reset = guided.reduce({ ...w, step: "results", planId: "gp-x", draft: { ...w.draft, care: "may-create-test-data" } }, { type: "newCheck" });
+  assert.deepEqual([reset.step, reset.planId, reset.draft.care], ["configuring", null, "look-only"], "a new check starts from Look only");
+  // A value an older version wrote, or none, reads back as a wizard that draws.
+  assert.deepEqual(guided.wizardOf(undefined), guided.initialWizard());
+  const odd = guided.wizardOf({ step: "gone", draft: { care: "destructive", areas: ["tickets", "forms"] }, notice: { tone: "loud", text: "x" } });
+  assert.deepEqual([odd.step, odd.draft.care, odd.draft.areas, odd.notice], ["welcome", "look-only", ["forms"], null]);
+});
+
+test("a plan that needs the person's confirmation waits on the preview; one that needs none starts Claude", () => {
+  const configuring = wizard({ step: "configuring" });
+  const asks = guided.afterPlan(configuring, {
+    content: [{ type: "text", text: "plan" }],
+    structuredContent: planFor({ address: "https://staging.example.com", areas: ["forms"], care: "may-create-test-data" }),
+  });
+  assert.equal(asks.wizard.step, "confirm");
+  assert.equal(asks.send, undefined, "nothing reaches Claude before the person answers");
+  const local = guided.afterPlan(configuring, { structuredContent: planFor({ address: "http://localhost:3000", areas: ["forms"], care: "may-submit-forms" }) });
+  assert.equal(local.wizard.step, "running");
+  assert.equal(local.send, `Run the SceneScout guided plan ${GUIDED_PLAN_ID}: call scout_guided_plan {planId: "${GUIDED_PLAN_ID}"} and follow it.`);
+  assert.equal(local.wizard.lastChoices?.address, "http://localhost:3000", "kept for Run again");
+  const refused = guided.afterPlan(configuring, { isError: true, content: [{ type: "text", text: "Error: the address must start with http:// or https://" }] });
+  assert.deepEqual([refused.wizard.step, refused.wizard.notice], ["configuring", { tone: "error", text: "The address must start with http:// or https://" }]);
+  assert.equal(refused.send, undefined);
+});
+
+test("only the person's yes in the server's form starts a check that writes", () => {
+  const plan = planFor({ address: "https://staging.example.com", areas: ["forms"], care: "may-create-test-data" });
+  const w = wizard({ step: "confirm", planId: GUIDED_PLAN_ID, plan, busy: "confirm" });
+  const answer = (outcome: string, accepted: boolean) => ({
+    content: [{ type: "text", text: "..." }],
+    structuredContent: { planId: GUIDED_PLAN_ID, accepted, outcome, tellPerson: CONFIRM_SAYS[outcome as keyof typeof CONFIRM_SAYS], mode: "safe-write" },
+  });
+  const yes = guided.afterConfirm(w, answer("accepted", true));
+  assert.equal(yes.wizard.step, "running");
+  assert.ok(yes.send?.includes(GUIDED_PLAN_ID));
+  for (const outcome of ["went-back", "wrong-code", "declined", "cancelled", "unsupported"]) {
+    const no = guided.afterConfirm(w, answer(outcome, false));
+    assert.equal(no.send, undefined, outcome);
+    assert.deepEqual([no.wizard.step, no.wizard.notice?.text], ["confirm", CONFIRM_SAYS[outcome as keyof typeof CONFIRM_SAYS]], outcome);
+  }
+  // A form the panel's own call could not show goes to Claude, whose call shows the same form; Claude starts only on an accepted plan.
+  const failed = guided.afterConfirm(w, answer("failed", false));
+  assert.match(failed.send ?? "", /call scout_guided_confirm \{planId: "gp-0123456789"\}\. Only if it says the plan is accepted/);
+  const broke = guided.afterConfirm(w, { isError: true, content: [{ type: "text", text: "Error: this server holds no guided plan with that id" }] });
+  assert.equal(broke.send, undefined);
+});
+
+test("every panel state draws on every surface: fields where the surface has them, buttons alone on mobile", () => {
+  const cards = [cardFixture("0a1b2c3d4e"), cardFixture("1b2c3d4e5f", { severity: "low", title: "A label is cut off" })];
+  const remotePlan = planFor({ address: "https://staging.example.com", areas: ["forms"], care: "may-submit-forms" });
+  const states: Array<{ name: string; w: ReturnType<typeof wizard>; status: any; want: RegExp; picture?: unknown }> = [
+    { name: "welcome", w: wizard(), status: STATUS_IDLE, want: /Find what is broken/ },
+    {
+      name: "welcome, a check going",
+      w: wizard({ lastChoices: { address: "https://staging.example.com", care: "look-only" } }),
+      status: STATUS_RUNNING,
+      want: /A check is going/,
+    },
+    {
+      name: "configuring",
+      w: wizard({
+        step: "configuring",
+        draft: { ...guided.defaultDraft(), areas: ["forms", "journey"], care: "may-submit-forms", address: "https://x.example.com" },
+      }),
+      status: STATUS_IDLE,
+      want: /How careful/,
+    },
+    {
+      name: "confirm, creating data",
+      w: wizard({
+        step: "confirm",
+        planId: GUIDED_PLAN_ID,
+        plan: planFor({ address: "https://staging.example.com", areas: ["forms"], care: "may-create-test-data" }),
+      }),
+      status: STATUS_IDLE,
+      want: /type the code/,
+    },
+    {
+      name: "confirm, waiting for the form",
+      w: wizard({ step: "confirm", planId: GUIDED_PLAN_ID, plan: remotePlan, busy: "confirm" }),
+      status: STATUS_IDLE,
+      want: /A form has opened/,
+    },
+    {
+      name: "confirm, turned down",
+      w: wizard({ step: "confirm", planId: GUIDED_PLAN_ID, plan: remotePlan, notice: { tone: "error", text: CONFIRM_SAYS.declined } }),
+      status: STATUS_IDLE,
+      want: /Run it as "Look only"/,
+    },
+    { name: "running, before the first poll", w: wizard({ step: "running", planId: "gp-9999999999" }), status: STATUS_IDLE, want: /Getting ready to start/ },
+    { name: "running", w: wizard({ step: "running", planId: GUIDED_PLAN_ID }), status: STATUS_RUNNING, want: /Checking staging\.example\.com · 6m of 20m/ },
+    {
+      name: "running, it needs the person",
+      w: wizard({ step: "running", planId: GUIDED_PLAN_ID }),
+      status: statusWith({
+        phase: "needs-you",
+        needsYou: {
+          kind: "stuck",
+          sentence: "A step is taking much longer than it should.",
+          actions: [{ kind: "prompt", label: "Stop", text: ACTION_PROMPT.stop }],
+        },
+      }),
+      want: /I need you/,
+    },
+    {
+      name: "finished",
+      w: wizard({ step: "running", planId: GUIDED_PLAN_ID, lastChoices: { address: "https://staging.example.com" } }),
+      status: statusWith({ phase: "done", next: nextActions("done") }),
+      want: /Run again/,
+    },
+    { name: "results", w: wizard({ step: "results", cards, cardsTotal: 2 }), status: STATUS_IDLE, want: /Results · 2 problems/ },
+    { name: "results, none", w: wizard({ step: "results", cards: [], cardsTotal: 0 }), status: STATUS_IDLE, want: /No problems to show/ },
+    {
+      name: "card",
+      w: wizard({ step: "card", cards, cardId: "0a1b2c3d4e", pictureFiles: { "0a1b2c3d4e": "/home/u/site/.scenescout/shots/a b.png" } }),
+      status: STATUS_RUNNING,
+      want: /What was expected/,
+      picture: { svg: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>', width: 10, height: 10 },
+    },
+    { name: "card not loaded", w: wizard({ step: "card", cardId: "ffffffffff" }), status: STATUS_IDLE, want: /No problem with id ffffffffff/ },
+    { name: "safety", w: wizard({ step: "safety" }), status: STATUS_DOWN, want: /never asks for your password/ },
+    { name: "server down", w: wizard({ step: "welcome" }), status: STATUS_DOWN, want: /could not reach the SceneScout server/ },
+  ];
+  for (const s of states)
+    for (const surface of SURFACES) {
+      const drawn = drawGuided(surface, s.w, s.status, s.picture);
+      assertDrawable(drawn.tree, surface, s.name);
+      assert.match(
+        drawn.text,
+        surface === "mobile" && s.name === "configuring" ? /type the address in the message box/ : s.want,
+        `${s.name} on ${surface}: ${drawn.text}`,
+      );
+      if (surface === "mobile") assert.ok(!drawn.types.has("Input") && !drawn.types.has("Select"), `${s.name}: mobile draws no field`);
+    }
+  // The configuring step types into fields where it can, and sends mobile to the message box.
+  assert.ok(drawGuided("desktop", states[2].w, STATUS_IDLE).types.has("Input"));
+  assert.match(drawGuided("mobile", states[2].w, STATUS_IDLE).text, /type the address in the message box/);
+  // The picture probe is drawn only where Svg is, and the links are there either way.
+  const card = states.find((s) => s.name === "card")!;
+  for (const surface of SURFACES) {
+    const drawn = drawGuided(surface, card.w, card.status, card.picture);
+    assert.equal(drawn.types.has("Svg"), surface !== "terminal", surface);
+    assert.ok(drawn.text.includes("[See picture](file:///home/u/site/.scenescout/shots/a%20b.png)"), drawn.text);
+    assert.ok(drawn.text.includes("[See it in the live view](http://localhost:4321/tok_abcdefghijklmnop/)"), drawn.text);
+  }
+  // A running check shows what the run pane shows, too.
+  assert.match(drawGuided("terminal", states[7].w, STATUS_RUNNING).text, /Open findings/);
+});
+
+test("each button asks for what it says: the server, Claude, or another step", () => {
+  const cards = [cardFixture("0a1b2c3d4e")];
+  const welcome = drawGuided("desktop", wizard(), STATUS_RUNNING);
+  assert.deepEqual(welcome.press("guided-welcome-check"), { type: "newCheck", payload: undefined });
+  assert.deepEqual(welcome.press("guided-welcome-safety"), { type: "go", payload: { step: "safety" } });
+  assert.deepEqual(welcome.press("guided-welcome-follow"), { type: "follow", payload: { planId: GUIDED_PLAN_ID } });
+  assert.deepEqual(drawGuided("mobile", wizard(), STATUS_IDLE).press("guided-welcome-check"), { type: "mobileCheck", payload: undefined });
+
+  const config = drawGuided("terminal", wizard({ step: "configuring" }), STATUS_IDLE);
+  assert.deepEqual(config.press("guided-config-address", "https://staging.example.com"), {
+    type: "address",
+    payload: { value: "https://staging.example.com" },
+  });
+  assert.deepEqual(config.press("guided-config-area-phone"), { type: "toggleArea", payload: { area: "phone" } });
+  assert.deepEqual(config.press("guided-config-care-may-create-test-data"), { type: "care", payload: { value: "may-create-test-data" } });
+  assert.deepEqual(config.press("guided-config-start"), { type: "build", payload: undefined });
+  assert.ok(
+    !config.text.includes("destructive") && !/delete data/.test(config.text.split(DESTRUCTIVE_NOT_OFFERED).join("")),
+    "no care level that deletes is offered",
+  );
+
+  const plan = planFor({ address: "https://staging.example.com", areas: ["forms"], care: "may-create-test-data" });
+  const confirm = drawGuided("desktop", wizard({ step: "confirm", planId: GUIDED_PLAN_ID, plan }), STATUS_IDLE);
+  assert.deepEqual(confirm.press("guided-confirm-yes"), { type: "confirm", payload: undefined });
+  assert.deepEqual(confirm.press("guided-confirm-back"), { type: "go", payload: { step: "configuring" } });
+  const yes = elementsOf(confirm.tree).find((e) => e.props.key === "guided-confirm-yes")!;
+  assert.equal(yes.props.label, CONFIRM_ANSWER.testCopy);
+  const back = elementsOf(confirm.tree).find((e) => e.props.key === "guided-confirm-back")!;
+  assert.equal(back.props.autoFocus, true, "Go back holds the focus, so Enter alone accepts nothing");
+  for (const line of CARE_PREVIEW["may-create-test-data"]) assert.ok(confirm.text.includes(line));
+  // Waiting on the form, there is no second yes to press.
+  assert.ok(
+    !elementsOf(drawGuided("desktop", wizard({ step: "confirm", planId: GUIDED_PLAN_ID, plan, busy: "confirm" }), STATUS_IDLE).tree).some(
+      (e) => e.props.key === "guided-confirm-yes",
+    ),
+  );
+
+  const running = drawGuided("desktop", wizard({ step: "running", planId: GUIDED_PLAN_ID }), STATUS_RUNNING);
+  assert.deepEqual(running.press("guided-running-see-all-problems"), { type: "cards", payload: undefined });
+  assert.deepEqual(running.press("guided-running-stop"), { type: "send", payload: { text: ACTION_PROMPT.stop } });
+  assert.deepEqual(running.press("guided-running-card-0a1b2c3d4e"), { type: "openCard", payload: { id: "0a1b2c3d4e", surface: "desktop" } });
+
+  const card = drawGuided("vscode", wizard({ step: "card", cards, cardId: "0a1b2c3d4e" }), STATUS_IDLE);
+  assert.deepEqual(card.press("guided-card-not-a-bug"), { type: "feedback", payload: { id: "0a1b2c3d4e", verdict: "not-a-bug" } });
+  assert.deepEqual(card.press("guided-card-explain-more"), { type: "send", payload: { text: ACTION_PROMPT.explain("0a1b2c3d4e") } });
+  assert.deepEqual(card.press("guided-card-check-again"), { type: "send", payload: { text: ACTION_PROMPT.again("0a1b2c3d4e") } });
+  assert.deepEqual(card.press("guided-card-back"), { type: "go", payload: { step: "results" } });
+  // A card the person already marked not a bug offers no second Not a bug.
+  const marked = [{ ...cards[0], feedback: { verdict: "not-a-bug", at: "2026-10-03T10:00:00.000Z" } }];
+  assert.ok(
+    !elementsOf(drawGuided("vscode", wizard({ step: "card", cards: marked, cardId: "0a1b2c3d4e" }), STATUS_IDLE).tree).some(
+      (e) => e.props.key === "guided-card-not-a-bug",
+    ),
+  );
+
+  const results = drawGuided("mobile", wizard({ step: "results", cards, cardsTotal: 1, lastChoices: { address: "https://staging.example.com" } }), STATUS_IDLE);
+  assert.deepEqual(results.press("guided-results-recheck"), { type: "send", payload: { text: ACTION_PROMPT.recheck } });
+  assert.deepEqual(results.press("guided-results-again"), { type: "runAgain", payload: undefined });
+  assert.ok(!elementsOf(results.tree).some((e) => e.props.key === "guided-results-new"), "mobile cannot type a new address");
+  assert.deepEqual(drawGuided("terminal", wizard(), STATUS_DOWN).press("guided-error-retry"), { type: "retry", payload: undefined });
+});
+
+test("an engine action becomes a server call only for the three tools a button may call", () => {
+  const cases: Array<[unknown, unknown]> = [
+    [
+      { kind: "direct", label: "x", tool: "scout_feedback", args: { id: "a", verdict: "not-a-bug" } },
+      { kind: "call", tool: "scout_feedback", args: { id: "a", verdict: "not-a-bug" } },
+    ],
+    [
+      { kind: "direct", label: "x", tool: "scout_guided_confirm", args: { planId: "gp-1" } },
+      { kind: "call", tool: "scout_guided_confirm", args: { planId: "gp-1" } },
+    ],
+    [{ kind: "direct", label: "x", tool: "scout_attach", args: { mode: "safe-write" } }, null],
+    [{ kind: "direct", label: "x", tool: "scout_feedback" }, null],
+    [
+      { kind: "prompt", label: "x", text: "Stop." },
+      { kind: "send", text: "Stop." },
+    ],
+    [{ kind: "prompt", label: "x", text: "" }, null],
+    ["scout_cards", null],
+  ];
+  for (const [action, want] of cases) assert.deepEqual(guided.actionEffect(action), want, JSON.stringify(action));
+  assert.equal(guided.sendRoute(false), "submit");
+  assert.equal(guided.sendRoute(true), "append", "a press mid-turn goes into the running turn");
+});
+
+test("a lane's turn ending leaves Claude's own turn running, so Stop goes into it rather than waiting for it to end", async () => {
+  // register.js wired to a stand-in for Claude Code's `$`: its hooks, its state, and what it sends Claude.
+  type Hook = ($: unknown, e: any, next: (e: unknown) => Promise<unknown>) => Promise<unknown>;
+  const hooks = new Map<string, Hook[]>();
+  const on = (event: string, ...rest: unknown[]) => {
+    const hook = rest[rest.length - 1] as Hook;
+    hooks.set(event, [...(hooks.get(event) ?? []), hook]);
+    return { catch: () => undefined };
+  };
+  const state = new Map<string, { value: unknown; version: number }>();
+  const appended: unknown[] = [];
+  const submitted: string[] = [];
+  const $ = {
+    state: {
+      get: async (ref: { key: string }) => state.get(ref.key) ?? { value: undefined, version: 0 },
+      set: async (ref: { key: string }, value: unknown) => {
+        state.set(ref.key, { value, version: (state.get(ref.key)?.version ?? 0) + 1 });
+        return { isSet: true };
+      },
+    },
+    session: { append: async (row: unknown) => (appended.push(row), { uuid: "row" }) },
+    prompt: { submit: async (p: { text: string }) => (submitted.push(p.text), {}) },
+    ui: { toast: () => undefined, resolve: () => elsFor("desktop") },
+  };
+  registerMod(on as never, {});
+  const raise = async (event: string, e: unknown) => {
+    for (const hook of hooks.get(event) ?? []) await hook($, e, async (x) => x);
+  };
+  await raise("turn.start", { text: "check my site", turnId: "main" });
+  // A lane subagent finishes while Claude's own turn goes on: it raises turn.complete with its agentId, and no turn.start.
+  await raise("turn.complete", { answer: "lane report", turnId: "lane", agentId: "lane-1", reason: "answer", isAborted: false, durationMs: 1 });
+  state.set("status", { value: STATUS_RUNNING, version: 1 });
+  state.set("wizard", { value: wizard({ step: "running", planId: GUIDED_PLAN_ID }), version: 1 });
+  const [render] = hooks.get("ui.render")!;
+  const tree = await render($, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x);
+  const stop = elementsOf(tree).find((e) => e.props.key === "guided-running-stop")!;
+  (stop.props.onPress as () => void)();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(submitted, [], "Stop did not wait for the turn to end");
+  assert.equal(appended.length, 1);
+  // Claude's own turn ending is the end.
+  await raise("turn.complete", { answer: "done", turnId: "main", reason: "answer", isAborted: false, durationMs: 1 });
+  (stop.props.onPress as () => void)();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(submitted, [ACTION_PROMPT.stop]);
+  assert.equal(guided.endsMainTurn({ agentId: "lane-1" }), false);
+  assert.equal(guided.endsMainTurn({ turnId: "main" }), true);
+});
+
+test("Claude's own attach that writes, and filing tickets, ask the person first; looking only never does", () => {
+  const attach = (mode: string, planId?: string) => ({
+    tool: "mcp__scenescout__scout_attach",
+    url: "https://staging.example.com",
+    mode,
+    ...(planId ? { planId } : {}),
+  });
+  const cases: Array<[string, Record<string, unknown>, string[], boolean]> = [
+    ["observe", attach("observe"), [], false],
+    ["no mode given: the server attaches in read-only", attach(""), [], true],
+    ["read-only", attach("read-only"), [], true],
+    ["safe-write", attach("safe-write"), [], true],
+    ["destructive", attach("destructive"), [], true],
+    ["a plan the person confirmed in the panel", attach("safe-write", "gp-1"), ["gp-1"], false],
+    ["another plan", attach("safe-write", "gp-2"), ["gp-1"], true],
+    ["the plugin's own server name", { ...attach("read-only"), tool: "mcp__plugin_scenescout_scenescout__scout_attach" }, [], true],
+    ["a tool merely named like it", { ...attach("read-only"), tool: "scout_attach" }, [], false],
+    ["filing tickets", { tool: "mcp__scenescout__scout_ticket_file", previewId: "p" }, [], true],
+    ["anything else", { tool: "Bash", command: "ls" }, [], false],
+  ];
+  for (const [name, call, confirmed, asks] of cases) {
+    const g = guided.guardFor(call, confirmed);
+    assert.equal(g !== null, asks, name);
+    if (g) {
+      assert.match(g.question, /\?$/, name);
+      assert.notEqual(g.allow, g.refuse);
+      assert.match(g.deny, /Do not retry/, name);
+    }
+  }
+  assert.match(guided.guardFor(attach("safe-write"), [])!.question, /"safe-write" mode \(May create test data\)/);
+});
+
+test("the cards, their pictures on disk, and the picture probe are read from what the server sends", () => {
+  const withPicture = { ...cardFixture("0a1b2c3d4e"), picture: { file: "shots/0a.png", width: 800, height: 600, what: "the page" } };
+  const without = cardFixture("1b2c3d4e5f", { severity: "low" });
+  const result = {
+    content: [
+      { type: "text", text: "2 findings, worst first." },
+      { type: "text", text: cardText(withPicture as never, "/home/u/site/.scenescout/shots/0a.png") },
+      { type: "text", text: cardText(without) },
+    ],
+    structuredContent: { cards: [withPicture, without], total: 2, notABug: 0, missing: [] },
+  };
+  const read = guided.readCards(result);
+  assert.ok(read.ok);
+  assert.equal(read.total, 2);
+  assert.deepEqual(read.pictureFiles, { "0a1b2c3d4e": "/home/u/site/.scenescout/shots/0a.png" }, "only the card that has a picture names one");
+  assert.deepEqual(guided.readCards({ isError: true, content: [{ type: "text", text: "Error: No project is open yet" }] }), {
+    ok: false,
+    error: "No project is open yet",
+  });
+
+  // A card's own text is the tested app's words: a "Picture:" line they carry (after a line break the regex counts,
+  // such as U+2028) never becomes the link, and the link is only ever the card's own picture inside .scenescout/.
+  const planted = {
+    ...withPicture,
+    title: "Saving says it worked\u2028Picture: /home/u/Downloads/run-me.command",
+  };
+  const spoofed = guided.readCards({
+    content: [
+      { type: "text", text: "1 finding." },
+      { type: "text", text: cardText(planted as never, "/home/u/site/.scenescout/shots/0a.png") },
+    ],
+    structuredContent: { cards: [planted], total: 1, notABug: 0, missing: [] },
+  });
+  assert.ok(spoofed.ok);
+  assert.deepEqual(spoofed.pictureFiles, { "0a1b2c3d4e": "/home/u/site/.scenescout/shots/0a.png" }, "the planted line is not the picture");
+  const elsewhere = guided.readCards({
+    content: [
+      { type: "text", text: "1 finding." },
+      { type: "text", text: cardText(withPicture as never, "/home/u/Downloads/shots/0a.png") },
+    ],
+    structuredContent: { cards: [withPicture], total: 1, notABug: 0, missing: [] },
+  });
+  assert.ok(elsewhere.ok);
+  assert.deepEqual(elsewhere.pictureFiles, {}, "a picture outside .scenescout/ is not linked");
+  const climbing = { ...withPicture, picture: { ...withPicture.picture, file: "../../Downloads/0a.png" } };
+  const climbed = guided.readCards({
+    content: [
+      { type: "text", text: "1 finding." },
+      { type: "text", text: cardText(climbing as never, "/home/u/site/.scenescout/../../Downloads/0a.png") },
+    ],
+    structuredContent: { cards: [climbing], total: 1, notABug: 0, missing: [] },
+  });
+  assert.ok(climbed.ok);
+  assert.deepEqual(climbed.pictureFiles, {}, "a picture path that climbs out of .scenescout/ is not linked");
+
+  const hrefs: Array<[unknown, string | null]> = [
+    ["/home/u/a b.png", "file:///home/u/a%20b.png"],
+    // A bracket would end the Markdown link early, leaving the rest of the path drawn as Markdown.
+    ["/home/u/a)(b.png", "file:///home/u/a%29%28b.png"],
+    ["C:\\Users\\u\\a.png", "file:///C:/Users/u/a.png"],
+    ["shots/a.png", null],
+    ["/home/u/a\n.png", null],
+    [42, null],
+  ];
+  for (const [file, want] of hrefs) assert.equal(guided.fileHref(file), want, String(file));
+
+  const png = (data: string, mimeType = "image/png") => ({
+    content: [
+      { type: "text", text: "x" },
+      { type: "image", data, mimeType },
+    ],
+  });
+  const ok = guided.pictureSvg(png("iVBORw0KGgo="), { width: 800, height: 600 });
+  assert.ok("svg" in ok && ok.width === guided.PICTURE_WIDTH && ok.height === 240, JSON.stringify(ok));
+  assert.ok("svg" in ok && ok.svg.includes('href="data:image/png;base64,iVBORw0KGgo="'));
+  const refused: Array<[unknown, RegExp]> = [
+    [{ content: [{ type: "text", text: "no picture" }] }, /no picture/],
+    [png("iVBORw0KGgo=", "image/jpeg"), /not a PNG/],
+    [png('x"/><script>'), /not a PNG/],
+    [png("A".repeat(guided.SVG_SOURCE_MAX)), /too large/],
+  ];
+  for (const [r, why] of refused) {
+    const got = guided.pictureSvg(r, { width: 10, height: 10 });
+    assert.ok("why" in got && why.test(got.why), JSON.stringify(got));
+  }
+});
+
+test("where nothing draws, /scenescout-guided says where the check is and what to say next, and offers only Look only", () => {
+  const idle = guided.guidedText(guided.initialWizard(), STATUS_IDLE);
+  assert.match(idle, /check my site with SceneScout/);
+  assert.match(idle, /can start only in "Look only"/);
+  const running = guided.guidedText(wizard({ planId: GUIDED_PLAN_ID }), STATUS_RUNNING);
+  assert.match(running, /^Checking staging\.example\.com \(6m of 20m\)\. Now: /);
+  assert.match(running, /Problems so far: 1 block users · 0 annoying · 0 cosmetic/);
+  assert.match(running, /id 0a1b2c3d4e/);
+  assert.match(guided.guidedText(guided.initialWizard(), STATUS_DOWN), /could not reach the SceneScout server/);
+  // A check of another plan is not passed off as the panel's.
+  assert.equal(guided.guidedOf(STATUS_RUNNING, "gp-9999999999"), null);
+  assert.equal(guided.guidedOf(STATUS_RUNNING, null)?.planId, GUIDED_PLAN_ID);
 });

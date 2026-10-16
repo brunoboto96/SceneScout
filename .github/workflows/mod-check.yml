@@ -1,0 +1,49 @@
+name: mod-check
+
+# Claude Code's own checks of the optional mod in mods/scenescout-mod:
+# `claude plugin validate` reads its manifest, contract and hooks module the
+# way Claude Code will, and `claude plugin test` mounts the guided panel on
+# every surface and presses its buttons. Run on the oldest Claude Code the
+# guide supports and on the latest. Not a required check: the mod's rules are
+# table-tested in live-test, which `test` runs; this job catches what a table
+# cannot, such as an element a surface does not draw. Neither command needs a
+# login or a key.
+
+on:
+  push:
+    branches: [main]
+    paths: ["mods/**", ".github/workflows/mod-check.yml"]
+  pull_request:
+    paths: ["mods/**", ".github/workflows/mod-check.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: mod-check-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  mod-check:
+    name: mod-check (Claude Code ${{ matrix.claude-code }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest build the guide names, and the newest.
+        claude-code: ["2.1.287", "latest"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Install Claude Code ${{ matrix.claude-code }}
+        run: npm install --global "@anthropic-ai/claude-code@${{ matrix.claude-code }}"
+      - name: Validate the mod
+        run: claude plugin validate mods/scenescout-mod
+      - name: Test the mod
+        run: claude plugin test mods/scenescout-mod

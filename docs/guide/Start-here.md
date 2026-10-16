@@ -84,7 +84,17 @@ npx -y scenescout install --client cursor     # or vscode, codex, gemini, copilo
 
 Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`. A plugin's skill comes from this repository and its server from the latest npm release, so right after a release the two can differ for a short while; `/plugin marketplace update scenescout-marketplace` brings the skill up to date.
 
-An optional second plugin, `scenescout-mod`, adds a run pane and a model setting for lane agents in the Claude Code CLI and the desktop Code tab: [The Claude Code mod](Ways-to-use-it.md#the-claude-code-mod).
+An optional second plugin, `scenescout-mod`, adds a guided panel and a model setting for lane agents in the Claude Code CLI and the desktop Code tab: [The Claude Code mod](Ways-to-use-it.md#the-claude-code-mod).
+
+### Without writing prompts: the guided panel
+
+If you would rather press buttons than write instructions, install the optional mod as well:
+
+```text
+/plugin install scenescout-mod@scenescout-marketplace
+```
+
+Then type `/scenescout-guided` in the Claude Code CLI or the Code tab of the Claude Desktop app. Press **Check a site**, type the address, tick what to check, choose how careful to be (*Look only* is the default and is safe on a live site) and press **Start**. The panel shows what it is doing in plain words while it runs, and at the end lists each problem with its steps, what was expected and what happened. Nothing that writes to your site starts without a confirmation that only you can give. [What the panel does, step by step](Ways-to-use-it.md#the-claude-code-mod).
 
 ### As a Claude Desktop extension
 
