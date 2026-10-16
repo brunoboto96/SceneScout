@@ -859,6 +859,49 @@ test("github client: a server error is retried, a refusal is not, and no call wa
   assert.throws(() => githubClient({ token: "", apiUrl: "" }), /no GitHub token/);
 });
 
+test("github client: a write is retried only when it is idempotent or a lookup shows it did not land", async () => {
+  const mk = (statuses: Array<number | "reset">) => {
+    const calls: string[] = [];
+    let i = 0;
+    const call = githubClient({
+      token: "t",
+      apiUrl: "https://api.example",
+      wait: async () => {},
+      fetchImpl: (async (_u: string, init: RequestInit) => {
+        calls.push(String(init.method));
+        const s = statuses[Math.min(i++, statuses.length - 1)];
+        if (s === "reset") throw new Error("socket hang up");
+        return new Response("{}", { status: s });
+      }) as unknown as typeof fetch,
+    });
+    return { call, calls };
+  };
+  // A write with no declared way to check is sent once, however it failed.
+  const post = mk([502, 200]);
+  await assert.rejects(post.call("POST", "/x", { a: 1 }), /HTTP 502/);
+  assert.deepEqual(post.calls, ["POST"]);
+  const reset = mk(["reset", 200]);
+  await assert.rejects(reset.call("POST", "/x", { a: 1 }), /socket hang up/);
+  assert.deepEqual(reset.calls, ["POST"], "a dropped connection may have landed, so it is not repeated blind");
+  const patch = mk([503, 200]);
+  await assert.rejects(patch.call("PATCH", "/x", { a: 1 }), /HTTP 503/);
+  assert.deepEqual(patch.calls, ["PATCH"]);
+  // The contrast: a read, and a write declared idempotent, are retried.
+  const get = mk([502, 200]);
+  assert.deepEqual(await get.call("GET", "/x"), {});
+  assert.deepEqual(get.calls, ["GET", "GET"]);
+  const idem = mk([502, 200]);
+  assert.deepEqual(await idem.call("POST", "/x", { a: 1 }, { idempotent: true }), {});
+  assert.deepEqual(idem.calls, ["POST", "POST"]);
+  // A write with a lookup: the lookup decides.
+  const landed = mk(["reset", 200]);
+  assert.equal(await landed.call("POST", "/x", { a: 1 }, { landed: async () => true }), null, "it landed, so it is not posted again");
+  assert.deepEqual(landed.calls, ["POST"]);
+  const missed = mk([502, 200]);
+  assert.deepEqual(await missed.call("POST", "/x", { a: 1 }, { landed: async () => false }), {}, "it did not land, so it is sent again");
+  assert.deepEqual(missed.calls, ["POST", "POST"]);
+});
+
 // ── show and compare ────────────────────────────────────────────────────────
 
 test("command: show and compare name an element; a URL may come first; the plain form is unchanged", () => {
