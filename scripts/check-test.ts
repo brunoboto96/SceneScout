@@ -1259,14 +1259,20 @@ test("a bot challenge is told apart from the app's own refusal, vendor by vendor
       botChallenge({ status: 403, headers: { server: "cloudflare" } }),
     ],
     [
+      "Cloudflare block page",
+      refusing(403, "<html><head><title>Attention Required! | Cloudflare</title></head><body></body></html>"),
+      refusing(403, "<html><head><title>Attention Required! | Orders</title></head><body></body></html>"),
+    ],
+    [
+      // The interstitial's title alone is ordinary words an app's own maintenance page can use: its script decides.
       "Cloudflare interstitial",
-      refusing(503, "<html><head><title>Just a moment...</title></head><body></body></html>"),
-      refusing(503, "<html><head><title>Down for maintenance</title></head><body>Just a moment, we will be back.</body></html>"),
+      refusing(503, '<html><head><title>Just a moment...</title><script>window._cf_chl_opt={cType:"managed"}</script></head></html>'),
+      refusing(503, "<html><head><title>Just a moment...</title></head><body>We are upgrading the app and will be back shortly.</body></html>"),
     ],
     ["Cloudflare challenge script", refusing(403, '<script>window._cf_chl_opt={cvId:"3"}</script>'), refusing(403, "<script>window.appConfig={}</script>")],
     [
-      "Cloudflare Turnstile host",
-      refusing(429, '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>'),
+      "Cloudflare challenge platform",
+      refusing(429, '<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray=8a"></script>'),
       refusing(429, "Too many requests, slow down."),
     ],
     [
@@ -1291,7 +1297,7 @@ test("a bot challenge is told apart from the app's own refusal, vendor by vendor
       botChallenge({ status: 405, headers: { "x-amzn-waf-action": "captcha" } }),
       botChallenge({ status: 405, headers: { "x-amzn-requestid": "abc" } }),
     ],
-    ["Imperva", refusing(403, '<iframe src="/_Incapsula_Resource?SWJIYLWA=5074a7"></iframe>'), refusing(403, '<iframe src="/_resources/forbidden"></iframe>')],
+    ["Imperva", refusing(403, "Request unsuccessful. Incapsula incident ID: 1234-5678"), refusing(403, "Request unsuccessful. Support ID: 1234-5678")],
     [
       "Sucuri header",
       botChallenge({ status: 403, headers: { "x-sucuri-block": "BL001" } }),
@@ -1302,14 +1308,14 @@ test("a bot challenge is told apart from the app's own refusal, vendor by vendor
       refusing(403, "<title>Sucuri WebSite Firewall - Access Denied</title>"),
       refusing(403, "<title>Firewall settings - Access Denied</title>"),
     ],
-    ["AWS WAF script", refusing(403, "<script>AwsWafIntegration.getToken()</script>"), refusing(403, "<script>Integration.getToken()</script>")],
+    ["AWS WAF interstitial", refusing(403, '<script>window.gokuProps = { "key": "x" };</script>'), refusing(403, "<script>window.appProps = {};</script>")],
   ];
   for (const [what, challenge, nearMiss] of pairs) {
     assert.ok(challenge, `${what}: a challenge`);
     assert.equal(nearMiss, null, `${what}: the near miss is the app's own page`);
   }
   assert.equal(pairs[0][1], "Cloudflare");
-  assert.equal(pairs[6][1], "DataDome");
+  assert.equal(pairs[7][1], "DataDome");
   // A marker on a page that answered 200 is the app loading a vendor's script, not a challenge.
   assert.equal(refusing(200, '<title>Just a moment...</title><script src="https://challenges.cloudflare.com/x.js"></script>'), null);
   // A 404 is not a refusing status: a missing page that mentions a vendor is still a missing page.
@@ -1330,6 +1336,57 @@ test("an attach names a start page that is a challenge or a 4xx, and says nothin
   // AWS WAF's captcha answers 405 with its header: the vendor decides, whatever the status.
   assert.match(startPageWarning("https://a.example/", 405, "AWS WAF") ?? "", /HTTP 405/);
   for (const status of [200, 204, 301, 500, 503, null]) assert.equal(startPageWarning("https://a.example/", status, null), null, String(status));
+});
+
+test("a vendor's script on the app's own refusal is not a challenge: only a marker the challenge page alone carries counts", () => {
+  const refusing = (status: number, body: string) => botChallenge({ status, headers: {}, body });
+  // An app's own 403 or 429 page that embeds a vendor's widget or sensor, as it does on every other page. The rendered
+  // Turnstile widget is what page.content() returns when the raw body cannot be read.
+  const appOwn: Array<[string, string]> = [
+    ["Turnstile script", '<h1>Too many attempts</h1><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async></script>'],
+    [
+      "Turnstile widget, rendered",
+      '<div class="cf-turnstile"><iframe id="cf-chl-widget-a1b2c" src="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/b/turnstile/if/ov2/av0/rcv/x"></iframe></div>',
+    ],
+    ["PerimeterX sensor", '<h1>Forbidden</h1><script>window._pxAppId="PXabc123";</script><script src="//client.px-cloud.net/PXabc123/main.min.js"></script>'],
+    [
+      "AWS WAF SDK",
+      '<h1>Forbidden</h1><script src="https://abc.edge.sdk.awswaf.com/abc/def/challenge.js"></script><script>AwsWafIntegration.getToken()</script>',
+    ],
+    ["Imperva injected script", '<h1>Forbidden</h1><script src="/_Incapsula_Resource?SWJIYLWA=719d34d31c8e3a6e6fffd425f7e032f3"></script>'],
+  ];
+  for (const [what, body] of appOwn) for (const status of [403, 429]) assert.equal(refusing(status, body), null, `${what} on ${status}`);
+  // The pages the vendors serve in the app's place still are.
+  assert.equal(refusing(403, '<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray=8a"></script>'), "Cloudflare");
+  assert.equal(refusing(403, "<p>Request unsuccessful. Incapsula incident ID: 1234-5678</p>"), "Imperva");
+  assert.equal(refusing(405, '<script>window.gokuProps = { "key": "x" };</script>'), null, "405 is not a refusing status");
+  assert.equal(refusing(403, '<script>window.gokuProps = { "key": "x" };</script>'), "AWS WAF");
+});
+
+test("a route inside the app that bot protection answered is not measured as the app: it is listed, never an issue", () => {
+  // A contrastive pair: the same refused route, and the only difference is whether a protection answered it. Rate
+  // limiting part-way through a crawl is the usual case: the protection's 503 or 429 is not the app's server error.
+  const challengeRoute = (over: Partial<RouteHealth>) =>
+    route({ path: "/reports", status: 503, elements: 1, design: [{ rule: "contrast", detail: "vendor text" }], ...over });
+  const blocked = checkFindings([route(), challengeRoute({ challenge: "Cloudflare" })], ORIGIN);
+  const appOwn = checkFindings([route(), challengeRoute({})], ORIGIN);
+  assert.deepEqual(rules(blocked.issues), [], "nothing on the protection's page is the app's");
+  assert.deepEqual(blocked.blocked, ["/reports"]);
+  assert.ok(rules(appOwn.issues).includes("route-server-error"), "the app's own 503 is still its issue");
+  assert.deepEqual(appOwn.blocked, []);
+  // A challenge answered with 200 and the vendor's header: its checkbox page is no dead end of the app's.
+  assert.deepEqual(rules(checkFindings([route(), route({ path: "/b", elements: 0, challenge: "Cloudflare" })], ORIGIN).issues), []);
+  // The report names the gap beside the verdict and in its own section; the JSON carries it apart from issues.
+  const out = formatCheck({ ...result([], "medium"), routes: [route(), challengeRoute({ challenge: "Cloudflare" })], blocked: blocked.blocked });
+  assert.match(out, /\*\*PASSED\*\*.* · 1 route\(s\) answered by bot protection, not measured/);
+  assert.match(out, /## Blocked by bot protection \(1\)/);
+  assert.deepEqual((toSummaryJson({ ...result([]), blocked: ["/reports"] }, "1") as { blocked?: string[] }).blocked, ["/reports"]);
+  assert.equal("blocked" in (toSummaryJson(result([]), "1") as object), false);
+  // The first look says it once too, and says nothing when no route was answered that way.
+  const look = firstRunSummary(firstRunFacts({ routes: [route(), challengeRoute({ challenge: "Cloudflare" })], blocked: ["/reports"] }), "r");
+  assert.equal(look.filter((l) => /^1 page was answered by bot protection in the app's place/.test(l)).length, 1, look.join("\n"));
+  assert.ok(!firstRunSummary(firstRunFacts({ routes: [route()] }), "r").some((l) => /bot protection/.test(l)));
+  assert.doesNotMatch(formatCheck(result([], "medium")), /bot protection/);
 });
 
 test("a start page behind bot protection, or answering 4xx, is could-not-run, and an app's own 403 inside it is a finding", () => {
@@ -2477,6 +2534,16 @@ test("retest: the same failure on load reproduces it; a clean load says possibly
   // The document's own status is not among the violations the check keeps, so it is read from the route.
   const [own] = checkRetestPlan([finding({ evidence: "GET /dashboard 500" })]).candidates;
   assert.equal(retestResults([own], [page({ status: 500 })])[0].verdict, "reproduces");
+  // A bot protection answering in the page's place says nothing about the app's finding: its 503 is not the app's 500
+  // coming back, and its page making none of the app's requests is not a fix.
+  const challenged = (over: Partial<MeasuredPage>) => page({ challenge: "Cloudflare", ...over });
+  assert.deepEqual(
+    [retestResults([own], [challenged({ status: 500 })])[0], verdict([challenged({ status: 503 })])].map((r) => [r.verdict, r.note]),
+    [
+      ["not-reached", "a bot protection answered in the page's place"],
+      ["not-reached", "a bot protection answered in the page's place"],
+    ],
+  );
 });
 
 const RETESTS: NonNullable<CheckResult["retest"]> = {

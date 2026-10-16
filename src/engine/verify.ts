@@ -253,6 +253,8 @@ export interface MeasuredPage {
   loginRedirect: boolean;
   /** Details of the http_error violations seen while it loaded. */
   httpErrors: string[];
+  /** The bot protection that answered in the page's place, when one did (challenge.ts). */
+  challenge?: string;
 }
 
 /**
@@ -261,8 +263,8 @@ export interface MeasuredPage {
  * `reproduces` when the load saw one of the finding's failing requests fail
  * with the same status; `possibly-fixed` when the page loaded and none did —
  * possibly, because the page may simply not have asked this time; and
- * `not-reached` when the page did not load or bounced to sign-in, which says
- * nothing about the finding either way.
+ * `not-reached` when the page did not load, bounced to sign-in or was answered
+ * by a bot protection, which says nothing about the finding either way.
  */
 export function retestResults(candidates: readonly LoadRetest[], pages: readonly MeasuredPage[]): CheckRetest[] {
   return candidates.map(({ item, path, signatures }) => {
@@ -271,6 +273,7 @@ export function retestResults(candidates: readonly LoadRetest[], pages: readonly
     if (!page) return { ...base, verdict: "not-reached", note: "the page was not visited" };
     if (page.loadError !== undefined) return { ...base, verdict: "not-reached", note: "the page did not load" };
     if (page.loginRedirect) return { ...base, verdict: "not-reached", note: "the page sent the browser to sign-in" };
+    if (page.challenge !== undefined) return { ...base, verdict: "not-reached", note: "a bot protection answered in the page's place" };
     const seen = new Set<string>();
     for (const detail of page.httpErrors) for (const s of failingSignatures(detail)) seen.add(s);
     // The document's own failure is left out of the violations (withoutOwnResponse), so it is added back here.

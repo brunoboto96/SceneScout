@@ -30,6 +30,8 @@ type Summary = {
   routes: Array<{ path: string; controls: number }>;
   /** check.json's issues, as the check wrote them. */
   issues: CheckIssue[];
+  /** Routes a bot protection answered in the app's place, when there were any. */
+  blocked?: string[];
 };
 
 /** Asynchronous on purpose: the demo app is served from this process, and a synchronous spawn would stop it answering. */
@@ -547,6 +549,15 @@ async function startPageNotTheApp({ baseUrl, work }: { baseUrl: string; work: st
       summary !== null &&
       summary.issues.some((i) => i.rule === "route-client-error" && i.routes.includes("/check-app-forbidden/admin")),
     `${inner.status} ${inner.out.slice(-800)} ${JSON.stringify(summary?.issues.map((i) => [i.rule, i.routes]))}`,
+  );
+  check(
+    "...and its route that a bot challenge answered mid-crawl (503) is listed as blocked, not filed as the app's server error",
+    summary !== null &&
+      // The challenge's own link (/check-challenge/help, also challenged) is followed and listed beside it.
+      (summary.blocked ?? []).includes("/check-app-forbidden/reports") &&
+      !summary.issues.some((i) => i.routes.some((r) => summary.blocked?.includes(r))) &&
+      /route\(s\) answered by bot protection, not measured/.test(fs.readFileSync(path.join(app.dir, "out", "report.md"), "utf8")),
+    `${JSON.stringify(summary?.blocked)} ${JSON.stringify(summary?.issues.map((i) => [i.rule, i.routes]))}`,
   );
   check(
     "a start page that answers 404 exits 2 naming the status",

@@ -429,6 +429,17 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       );
       return;
     }
+    // A route inside the same app that bot protection answers mid-crawl (rate limiting is the usual case): a 503 known
+    // only by the challenge script in its page. It is the protection's, so it is listed as blocked, not the app's 503.
+    if (urlPath === "/check-app-forbidden/reports") {
+      res.writeHead(503, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+      res.end(
+        fs
+          .readFileSync(path.join(appDir, "check-challenge.html"), "utf8")
+          .replace("</head>", '<script>window._cf_chl_opt = { cType: "managed" };</script></head>'),
+      );
+      return;
+    }
     // A start page that is missing, answered as a page with links, so only its status says it is not the app.
     if (urlPath === "/check-missing-start") {
       res.writeHead(404, { "content-type": "text/html; charset=utf-8" });

@@ -37,24 +37,25 @@ export const CHALLENGE_HEADERS: readonly HeaderRule[] = [
   { vendor: "Sucuri", header: "x-sucuri-block", value: /./, anyStatus: false },
 ];
 
-/** Text in a refusing page's body that names the protection that served it. Matched lowercased. */
+/**
+ * Text in a refusing page's body that names the protection that served it. Matched lowercased.
+ *
+ * Only what the challenge or block page alone carries: an app behind a protection loads the vendor's widget or sensor
+ * on its own pages too, its own 403 and 429 pages included, so a script host, a sensor's id or an injected resource
+ * would turn the app's refusal into the vendor's. So would ordinary words: Cloudflare's interstitial is titled "Just a
+ * moment...", and so is many an app's own maintenance page, so its script decides (check-test holds each near miss).
+ */
 export const CHALLENGE_MARKERS: ReadonlyArray<{ vendor: string; marker: string }> = [
-  { vendor: "Cloudflare", marker: "<title>just a moment...</title>" },
-  { vendor: "Cloudflare", marker: "cf-chl-" },
   { vendor: "Cloudflare", marker: "_cf_chl_opt" },
-  { vendor: "Cloudflare", marker: "challenges.cloudflare.com" },
+  { vendor: "Cloudflare", marker: "/orchestrate/chl_page/" },
   { vendor: "Cloudflare", marker: "<title>attention required! | cloudflare</title>" },
   { vendor: "Akamai", marker: "errors.edgesuite.net" },
   { vendor: "Akamai", marker: "sec-if-cpt" },
   { vendor: "Akamai", marker: "bm-verify" },
   { vendor: "DataDome", marker: "captcha-delivery.com" },
   { vendor: "PerimeterX (HUMAN)", marker: "px-captcha" },
-  { vendor: "PerimeterX (HUMAN)", marker: "_pxappid" },
-  { vendor: "PerimeterX (HUMAN)", marker: "px-cloud.net" },
-  { vendor: "AWS WAF", marker: "awswafintegration" },
-  { vendor: "AWS WAF", marker: "aws-waf-token" },
-  { vendor: "AWS WAF", marker: ".token.awswaf.com" },
-  { vendor: "Imperva", marker: "_incapsula_resource" },
+  { vendor: "AWS WAF", marker: "gokuprops" },
+  { vendor: "Imperva", marker: "incapsula incident id" },
   { vendor: "Sucuri", marker: "sucuri website firewall" },
 ];
 
