@@ -145,6 +145,28 @@ export const SAFETY_EXPLAINER: readonly string[] = [
   "It never asks for your password. When your site needs one, a browser window opens for you to sign in as you normally would.",
 ];
 
+/** The guided prompts as the chat lists them, in the words on each menu entry (design 3.5). */
+export const PROMPT_TITLE = {
+  "check-my-site": "Check my site",
+  recheck: "Re-check after a fix",
+  "team-report": "Make a team report",
+  "file-tickets": "File problems as tickets",
+  "is-it-safe": "Is it safe to run on my live site?",
+} as const;
+
+/** Said where the guided version of a step is not built yet, and what the person gets instead. */
+export const NOT_YET = {
+  "team-report":
+    "A team report made for sharing, with a cover page, each problem as a card, what was not checked and lines to sign off, is coming in a later version. For now you get the report in plain words.",
+  "file-tickets":
+    "Filing problems as tickets from the chat is coming in a later version. For now a developer can file them from a terminal, after first seeing a list of what would be filed.",
+} as const;
+
+/** Said where whoever set SceneScout up allows no care level above one. */
+export function careCapSentence(care: Care): string {
+  return `Whoever set SceneScout up here allows no care level above "${CARE_LABEL[care]}".`;
+}
+
 /** When a check needs the person, in one sentence each. `where` is the site's host. */
 export const NEEDS_YOU_SENTENCE = {
   "sign-in": (where: string) => `${where} needs you to sign in before I can go on.`,

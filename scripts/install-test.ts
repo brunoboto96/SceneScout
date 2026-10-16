@@ -71,7 +71,7 @@ import {
 
 import { INTAKE_QUESTIONS, introQuestions } from "../src/intake.ts";
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
-import { livePrompt, loginPrompt, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../src/prompts.ts";
+import { GUIDED_PROMPTS, guidedPromptText, livePrompt, loginPrompt, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../src/prompts.ts";
 
 import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
 import {
@@ -622,6 +622,9 @@ type Manifest = {
   server: { type: string; entry_point: string; mcp_config: { command: string; args: string[]; env?: Record<string, string> } };
   compatibility?: { runtimes?: { node?: string } };
   user_config?: Record<string, unknown>;
+  long_description?: string;
+  prompts?: Array<{ name: string; description?: string; arguments?: string[]; text: string }>;
+  prompts_generated?: boolean;
 };
 const readManifest = (): Manifest => JSON.parse(fs.readFileSync(path.join(repoRoot, "desktop-extension", "manifest.json"), "utf8")) as Manifest;
 
@@ -649,6 +652,38 @@ test("the desktop extension's manifest has every required field, the package's v
   // Nothing to configure and nothing secret: the bundle starts the engine as it is.
   assert.deepEqual(manifest.server.mcp_config.env ?? {}, {});
   assert.equal(manifest.user_config, undefined);
+});
+
+test("the desktop extension declares the guided prompts the server lists, each with the text it sends when given nothing", () => {
+  const manifest = readManifest();
+  assert.deepEqual(
+    manifest.prompts?.map((p) => p.name),
+    GUIDED_PROMPTS.map((p) => p.name),
+    "the chat's guided entry points, in the server's order",
+  );
+  for (const listed of GUIDED_PROMPTS) {
+    const declared: NonNullable<Manifest["prompts"]>[number] | undefined = manifest.prompts?.find((p) => p.name === listed.name);
+    assert.equal(declared?.description, listed.description, `${listed.name}: the server's description`);
+    assert.deepEqual(
+      declared?.arguments ?? [],
+      listed.arguments.map((a) => a.name),
+      `${listed.name}: the server's arguments`,
+    );
+    assert.equal(declared?.text, guidedPromptText(listed.name, undefined), `${listed.name}: what the server sends for it with no arguments`);
+  }
+  // explore, live and login, and the text a prompt's arguments change, come from the server as it runs.
+  assert.equal(manifest.prompts_generated, true);
+});
+
+test("the desktop extension's description claims no more than the write policy enforces", () => {
+  const text = readManifest().long_description ?? "";
+  // read-only lets a plain POST through, and observe lets sign-in, refresh and named read POSTs out (Safety model).
+  assert.doesNotMatch(text, /blocks edits and deletions|nothing but reads|nothing (?:existing )?is changed|reads only/i);
+  assert.match(text, /plain POST/, "says an ordinary form submission goes through in the default mode");
+  assert.match(text, /can still create a record or change one/, "and what that means for what was there");
+  assert.match(text, /signing in, signing out and refreshing a token/, "says what observe lets out besides page loads");
+  assert.match(text, /WebSocket/, "and that only HTTP is inspected");
+  assert.match(text, /Check my site/, "names the guided prompt a person starts from");
 });
 
 test("the build's declaration files stay out of the npm package and the bundle", () => {

@@ -100,6 +100,8 @@ Then type `/scenescout-guided` in the Claude Code CLI or the Code tab of the Cla
 
 Download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it, or in Claude Desktop choose Settings > Extensions > Advanced settings > Install Extension and pick the file. It is ready as soon as it is installed: start a new chat and ask *"Use SceneScout to test http://localhost:3000"*. Tell it which folder to keep its notes and report in, for example a new folder in Documents.
 
+To start without writing a prompt, pick **Check my site** from the extension's prompts in the chat: a short form asks for the address, what to check and how careful to be (*Look only*, the default, is safe on a live site), and the check ends with each problem as a card. **Is it safe to run on my live site?** answers that question first, in the same words as the guided panel. [All five guided prompts](Ways-to-use-it.md#guided-prompts-in-the-chat).
+
 The extension carries the engine, and the test browser downloads on first use: the first test says "Getting the test browser ready", downloads it once (about 200 MB) and carries on. No terminal step is needed. If the download fails, SceneScout says why and gives the command to run by hand, `npx -y scenescout install --browser-only`. `npx -y scenescout doctor` recognises the extension and checks it.
 
 ### What `install --client` does for each client
