@@ -24,8 +24,10 @@ import {
   listProfiles,
   parseLoginArgs,
   permissionNote,
+  fenceStorageState,
   profileDir,
   profilePath,
+  readStorageState,
   PROFILE_DIR_MODE,
   PROFILE_FILE_MODE,
   reloginCommand,
@@ -168,6 +170,93 @@ test("attach by role loads that role's profile; with a file, or neither, it does
     storageStatePath: "/work/state.json",
   });
   assert.deepEqual(resolveAttachAuth({ projectDir: project }, exists), { kind: "none" });
+});
+
+// A storageStatePath is a file the agent names and the engine reads. Unfenced,
+// it reads any file the account can, and a parse error quoted the file's first
+// characters back into the tool result.
+function stateProject(): { home: string; project: string } {
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pt-state-")));
+  const project = path.join(home, "app");
+  for (const rel of ["app/playwright/.auth/user.json", "app/.scenescout/auth/admin.json", "elsewhere/state.json", "passwd"]) {
+    fs.mkdirSync(path.dirname(path.join(home, rel)), { recursive: true });
+    fs.writeFileSync(path.join(home, rel), rel === "passwd" ? "root:x:0:0:root:/root:/bin/bash\n" : '{"cookies":[],"origins":[]}');
+  }
+  return { home, project };
+}
+
+test("a storage state is read from inside the project, its .scenescout/auth included, and refused outside it", () => {
+  const { home, project } = stateProject();
+  for (const inside of [path.join(project, "playwright/.auth/user.json"), path.join(project, ".scenescout/auth/admin.json")]) {
+    const r = fenceStorageState(project, inside, []);
+    assert.ok(r.ok, `${inside} → ${JSON.stringify(r)}`);
+  }
+  for (const outside of [path.join(home, "elsewhere/state.json"), path.join(home, "passwd"), path.join(project, "../passwd")]) {
+    const r = fenceStorageState(project, outside, []);
+    assert.ok(!r.ok && /outside the attached project/.test(r.error) && /SCENESCOUT_STORAGE_STATE_ALLOW/.test(r.error), `${outside} → ${JSON.stringify(r)}`);
+  }
+});
+
+test("a symlink in the project leading out of it is refused; one leading to a project file is not", () => {
+  const { home, project } = stateProject();
+  fs.symlinkSync(path.join(home, "passwd"), path.join(project, "state.json"));
+  const out = fenceStorageState(project, path.join(project, "state.json"), []);
+  assert.ok(!out.ok && /outside the attached project/.test(out.error), JSON.stringify(out));
+  fs.symlinkSync(path.join(project, "playwright/.auth/user.json"), path.join(project, "linked.json"));
+  assert.ok(fenceStorageState(project, path.join(project, "linked.json"), []).ok);
+  // A project reached through a link (as a temporary folder is on macOS) still holds a file that does not exist yet:
+  // the fence judges it, and the read then says it is missing.
+  const viaLink = path.join(home, "app-link");
+  fs.symlinkSync(project, viaLink);
+  assert.ok(fenceStorageState(viaLink, path.join(viaLink, "nope.json"), []).ok);
+  assert.ok(fenceStorageState(project, path.join(viaLink, "nope.json"), []).ok);
+  assert.ok(!fenceStorageState(viaLink, path.join(home, "nope.json"), []).ok);
+});
+
+test("a project that is a home folder still does not hand over its secrets folders as storage states", () => {
+  const { home } = stateProject();
+  fs.mkdirSync(path.join(home, ".aws"));
+  fs.writeFileSync(path.join(home, ".aws", "state.json"), '{"cookies":[],"origins":[]}');
+  const r = fenceStorageState(home, path.join(home, ".aws", "state.json"), []);
+  assert.ok(!r.ok && /holds credentials/.test(r.error), JSON.stringify(r));
+  // A Playwright auth folder is a dot-folder too, and is where storage states belong.
+  assert.ok(fenceStorageState(home, path.join(home, "app/playwright/.auth/user.json"), []).ok);
+});
+
+test("the fence hands back the real path it judged, so the read cannot be pointed elsewhere after it", () => {
+  const { project } = stateProject();
+  fs.symlinkSync(path.join(project, "playwright/.auth/user.json"), path.join(project, "via-link.json"));
+  const r = fenceStorageState(project, path.join(project, "via-link.json"), []);
+  assert.ok(r.ok);
+  assert.equal(r.path, path.join(project, "playwright/.auth/user.json"));
+});
+
+test("a file the operator lists is read from outside the project; nothing beside it is", () => {
+  const { home, project } = stateProject();
+  const listed = path.join(home, "elsewhere/state.json");
+  assert.ok(fenceStorageState(project, listed, [listed]).ok);
+  assert.ok(!fenceStorageState(project, path.join(home, "passwd"), [listed]).ok);
+  assert.ok(!fenceStorageState(project, listed, [path.join(home, "elsewhere")]).ok, "a folder is not an exact path");
+});
+
+test("a file that is not a storage state is refused without quoting a byte of it", () => {
+  const { home, project } = stateProject();
+  const passwd = path.join(home, "passwd");
+  assert.throws(
+    () => readStorageState(passwd),
+    (err: Error) => /not a valid Playwright storage state/.test(err.message) && !/root|bash|0:0/.test(err.message.replace(passwd, "")),
+  );
+  const wrongShape = path.join(project, "wrong.json");
+  fs.writeFileSync(wrongShape, '{"secret_token":"abc123"}');
+  assert.throws(
+    () => readStorageState(wrongShape),
+    (err: Error) => /not a valid Playwright storage state/.test(err.message) && !/abc123|secret_token/.test(err.message),
+  );
+  assert.throws(
+    () => readStorageState(path.join(project, "missing.json")),
+    (err: Error) => /could not be read \(ENOENT\)/.test(err.message),
+  );
+  assert.deepEqual(readStorageState(path.join(project, "playwright/.auth/user.json")).storageState, { cookies: [], origins: [] });
 });
 
 test("attach refuses role and storageStatePath together, a bad role, and a role nobody recorded", () => {

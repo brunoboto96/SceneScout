@@ -252,6 +252,11 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     fs.symlinkSync(path.join(outsideDir, "outside.txt"), path.join(projectDir, "escape-link"));
     const viaSymlink = await engine2.upload({ ref: attachmentRef, filePath: "escape-link" });
     check("a symlink inside the project pointing outside it is refused too", viaSymlink.startsWith("REFUSED"), viaSymlink);
+    // Inside the fence but credential-shaped: refused by name before the page is touched, and the upload log stays without it.
+    fs.writeFileSync(path.join(projectDir, ".env.smoke"), "SMOKE_TOKEN=not-a-real-token\n");
+    const dotenv = await engine2.upload({ ref: attachmentRef, filePath: ".env.smoke" });
+    check("a .env file inside the project is refused as a credential", dotenv.startsWith("REFUSED") && dotenv.includes("SCENESCOUT_UPLOAD_ALLOW"), dotenv);
+    check("...and never reaches the server", !stats.uploadLog.some((u) => u.filename === ".env.smoke"), JSON.stringify(stats.uploadLog));
     fs.writeFileSync(path.join(projectDir, "real-fixture.csv"), "a,b\n1,2\n");
     const fromDisk = await engine2.upload({ ref: attachmentRef, filePath: "real-fixture.csv" });
     check("a file inside the project uploads from disk", fromDisk.includes("OK: upload") && fromDisk.includes("from disk: real-fixture.csv"), fromDisk);

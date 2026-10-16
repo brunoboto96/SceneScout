@@ -249,7 +249,10 @@ import { scanProject } from "../scan.js";
 import type { RouteHealth } from "./check.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
+import { STORAGE_STATE_ALLOW_ENV, UPLOAD_ALLOW_ENV, allowedPaths } from "./allow-paths.js";
 import {
+  fenceStorageState,
+  readStorageState,
   reloginCommand,
   permissionNote,
   resolveAttachAuth,
@@ -310,6 +313,11 @@ export interface AttachOptions {
   /** projectDir is a per-site folder SceneScout chose, not one the agent or client named. */
   projectChosen?: boolean;
   storageStatePath?: string;
+  /**
+   * Files the person running SceneScout named on the command line (`--storage-state`),
+   * read even from outside the project. Never set from a tool call's arguments.
+   */
+  storageStateAllow?: readonly string[];
   /**
    * A role whose profile `scenescout login` saved under .scenescout/auth/.
    * Each session that names it gets its own context built from that file.
@@ -1562,21 +1570,22 @@ export class BrowserEngine {
       projectChosen: opts.projectChosen,
     });
     const brokered = brokerEnabled({ roleSession: auth.kind === "role", option: opts.refreshBroker, env: process.env[REFRESH_BROKER_ENV] });
-    const storageStatePath = auth.kind === "none" ? undefined : auth.storageStatePath;
+    let storageStatePath = auth.kind === "none" ? undefined : auth.storageStatePath;
+    // A file the agent named is fenced to the project unless the operator listed it (fenceStorageState, profiles.ts),
+    // and read from the real path the fence judged, not through a link that could be swapped after it.
+    if (auth.kind === "file") {
+      const allow = [...allowedPaths(process.env, STORAGE_STATE_ALLOW_ENV), ...(opts.storageStateAllow ?? []).map((p) => path.resolve(p))];
+      const fenced = fenceStorageState(opts.projectDir, auth.storageStatePath, allow);
+      if (!fenced.ok) throw new Error(fenced.error);
+      storageStatePath = fenced.path;
+    }
     if (storageStatePath && !fs.existsSync(storageStatePath)) {
       throw new Error(`storageStatePath does not exist: ${storageStatePath}`);
     }
     // Read and checked here, also before anything is closed. Playwright restores
     // the storage state; sessionStorage, which it has no field for, is put back
-    // by an init script before the app's own code runs.
-    let profile: ReturnType<typeof splitProfile> | undefined;
-    if (storageStatePath) {
-      try {
-        profile = splitProfile(JSON.parse(fs.readFileSync(storageStatePath, "utf8")));
-      } catch (err) {
-        throw new Error(`could not load the storage state at ${storageStatePath}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+    // by an init script before the app's own code runs. The error never quotes the file.
+    const profile = storageStatePath ? readStorageState(storageStatePath) : undefined;
     await this.close();
     this.limits = limits;
     this.auth = auth;
@@ -3798,9 +3807,10 @@ export class BrowserEngine {
     };
   }
 
-  /** A file from disk, fenced to the project under test — the rule itself is resolveDiskUpload() in uploads.ts. */
+  /** A file from disk, fenced to the project under test and refused when credential-shaped — the rule itself is resolveDiskUpload() in uploads.ts. */
   private resolveDiskUpload(filePath: string, name?: string): { refused: string } | ResolvedUpload {
-    return resolveDiskUpload({ projectDir: this.projectDir, projectDirNote: this.projectDirNote }, filePath, name);
+    const allow = allowedPaths(process.env, UPLOAD_ALLOW_ENV);
+    return resolveDiskUpload({ projectDir: this.projectDir, projectDirNote: this.projectDirNote, allow }, filePath, name);
   }
 
   /** Selector for transient hover-revealed surfaces (tooltips, poppers, hover cards). */
