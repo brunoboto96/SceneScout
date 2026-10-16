@@ -37,6 +37,7 @@ import {
   redactRoutes,
   settingsOf,
   splitResources,
+  startPageRefusal,
   unmeasuredReason,
   withoutOwnResponse,
   type CheckOptions,
@@ -257,7 +258,10 @@ export async function runCheck(
     if (options.baseline !== "off" && !inputs.baselineTargets)
       throw new Error(`--baseline ${options.baseline} was given no targets: read them with readCheckInputs`);
     const baselines =
-      options.baseline !== "off" && inputs.baselineTargets && unmeasuredReason(routes, !options.paths, options.paths ? [] : engine.crawlableRoutes()) === null
+      options.baseline !== "off" &&
+      inputs.baselineTargets &&
+      startPageRefusal(routes, !options.paths) === null &&
+      unmeasuredReason(routes, !options.paths, options.paths ? [] : engine.crawlableRoutes()) === null
         ? await takeBaselines(engine, options, options.baseline, inputs.baselineTargets, log)
         : null;
     const flowRuns: FlowRun[] = [];
@@ -328,6 +332,7 @@ export async function runCheck(
               status: r.status,
               ...(r.loadError !== undefined ? { loadError: r.loadError } : {}),
               loginRedirect: r.loginRedirect,
+              ...(r.challenge !== undefined ? { challenge: r.challenge } : {}),
               httpErrors: withoutOwnResponse(r)
                 .violations.filter((v) => v.kind === "http_error")
                 .map((v) => v.detail),
@@ -357,7 +362,7 @@ export async function runCheck(
     const pictured = baselines ? redactBaselineRun(baselines) : null;
     // Signed in only when given a session: with none, a route that sends the browser to sign-in needs one, and is not a lost session.
     const signedIn = options.storageStatePath !== undefined;
-    const { issues, worthALook, needsSignIn } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths, signedIn);
+    const { issues, worthALook, needsSignIn, blocked } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths, signedIn);
     const result: CheckResult = {
       url: redactRoute(options.url),
       generatedAt: new Date().toISOString(),
@@ -368,6 +373,7 @@ export async function runCheck(
       issues,
       worthALook,
       ...(signedIn ? {} : { needsSignIn }),
+      ...(blocked.length > 0 ? { blocked } : {}),
       // Routes that failed to load are issues already; "not visited" is only what --max-routes (or the time budget) left out.
       unvisited: options.paths ? [] : engine.crawlableRoutes().map(redactRoute),
       ...(options.timeBudgetMs !== undefined ? { timeBudget: { ms: options.timeBudgetMs, reached: timeLimitReached } } : {}),

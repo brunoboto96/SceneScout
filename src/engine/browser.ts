@@ -210,6 +210,7 @@ import {
 } from "./policy.js";
 import { scanProject } from "../scan.js";
 import type { RouteHealth } from "./check.js";
+import { botChallenge, challengeBodyMatters, startPageWarning } from "./challenge.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
 import { STORAGE_STATE_ALLOW_ENV, UPLOAD_ALLOW_ENV, allowedPaths } from "./allow-paths.js";
@@ -1481,8 +1482,8 @@ export class BrowserEngine {
     this.configureSession(opts);
     await this.launchContext(opts, profile);
     await this.wireContext(this.context!);
-    await this.firstNavigation(opts.url);
-    return this.attachSummary(opts, auth, storageStatePath, profileNote);
+    const startWarning = await this.firstNavigation(opts.url);
+    return (await this.attachSummary(opts, auth, storageStatePath, profileNote)) + (startWarning ? `\n${startWarning}` : "");
   }
 
   /**
@@ -1829,10 +1830,12 @@ export class BrowserEngine {
     });
   }
 
-  /** Attach, phase 5: the first navigation, to the app's URL. */
-  private async firstNavigation(url: string): Promise<void> {
+  /** Attach, phase 5: the first navigation, to the app's URL. Returns the warning when what answered is not the app (challenge.ts). */
+  private async firstNavigation(url: string): Promise<string | null> {
+    let warning: string | null;
     try {
-      await this.page!.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
+      const resp = await this.page!.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
+      warning = startPageWarning(url, resp?.status() ?? null, await BrowserEngine.challengeOf(this.page!, resp));
     } catch (err) {
       // Don't leave a half-attached engine (leaked browser, snapshots of about:blank).
       await this.close();
@@ -1841,6 +1844,17 @@ export class BrowserEngine {
     }
     await this.settle();
     this.logAction({ action: "attach", url: this.page!.url() });
+    return warning;
+  }
+
+  /** The bot protection that answered a navigation in the app's place (challenge.ts botChallenge), or null. */
+  private static async challengeOf(page: Page, resp: Response | null): Promise<string | null> {
+    if (!resp) return null;
+    const status = resp.status();
+    // The body is read only on a refusing status, where a marker can count. One that cannot be read (the challenge
+    // reloaded the page) falls back to the page's markup, then to none, leaving the headers to decide.
+    const body = challengeBodyMatters(status) ? await resp.text().catch(() => page.content().catch(() => "")) : undefined;
+    return botChallenge({ status, headers: resp.headers(), ...(body !== undefined ? { body } : {}) });
   }
 
   /** Attach, phase 6: what attaching found, and the warning when a saved sign-in landed on a login page. */
@@ -4588,9 +4602,11 @@ export class BrowserEngine {
     // treats a PDF, a feed or an attachment as a download throws from goto, and this is then the only record of it.
     const answered = BrowserEngine.watchMainDocument(page, url);
     let resource: { url: string; status: number; contentType: string } | null = null;
+    let challenge: string | null = null;
     try {
       const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
       status = resp?.status() ?? "no-response";
+      challenge = await BrowserEngine.challengeOf(page, resp);
       const contentType = mediaTypeOf(resp?.headers()["content-type"]);
       // Whatever its status: a feed that answers 404 is shown by some browsers and refused by others, and is the same
       // route's 404 either way, not a page with no controls.
@@ -4723,6 +4739,7 @@ export class BrowserEngine {
       brokenImages: inspected?.brokenImages ?? [],
       design: inspected?.design ?? [],
       ...(inspected?.auditError ? { auditError: inspected.auditError } : {}),
+      ...(challenge ? { challenge } : {}),
     });
     const deadEnd = trackedElements(elements).length === 0;
     // A field labelled only by its placeholder counts here too: to someone reading the crawl, it has no label.
@@ -4738,6 +4755,7 @@ export class BrowserEngine {
 
     const flags = [
       loginRedirect ? "AUTH-REDIRECT" : null,
+      challenge ? `BOT-CHALLENGE (${challenge})` : null,
       deadEnd ? "DEAD-END" : null,
       stateFlag,
       violations.length > 0 ? `${violations.length}⚠` : null,

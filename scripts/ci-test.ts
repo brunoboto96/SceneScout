@@ -132,6 +132,7 @@ import {
   type ToolSpec,
   type Usage,
 } from "../src/engine/ci.ts";
+import { startPageWarning } from "../src/engine/challenge.ts";
 import { MemoryStore, type Finding } from "../src/engine/memory.ts";
 import {
   appendRows,
@@ -1578,6 +1579,16 @@ test("attach: an error result or a sign-in the app no longer accepts is a failur
     attachFailure({ text: "[session orders · admin]\nAttached.\n⚠ AUTH FAILED: the saved session was refused", isError: false }),
     "⚠ AUTH FAILED: the saved session was refused",
   );
+  // A start page that is a bot challenge, or a 4xx, is not the app: the run stops rather than explore it.
+  const blocked = startPageWarning("https://app.example/", 403, "Cloudflare")!;
+  assert.equal(attachFailure({ text: `[session main]\nAttached to https://app.example/ (mode=observe).\n${blocked}`, isError: false }), blocked);
+  assert.match(blocked, /blocked by bot protection \(HTTP 403\)/);
+  const missing = startPageWarning("https://app.example/nope", 404, null)!;
+  assert.equal(attachFailure({ text: `Attached.\n${missing}`, isError: false }), missing);
+  // The contrast: a start page that answered as the app adds no line, and an attach that only mentions the words is still an attach.
+  assert.equal(startPageWarning("https://app.example/", 200, null), null);
+  assert.equal(startPageWarning("https://app.example/", 500, null), null);
+  assert.equal(attachFailure({ text: "Attached to http://127.0.0.1:3000/ — the page says ⚠ START PAGE BLOCKED", isError: false }), null);
   // The contrast: an attach whose page mentions an error is still an attach.
   assert.equal(attachFailure({ text: "Attached to http://127.0.0.1:3000/ — the page says ERROR: none", isError: false }), null);
 });
