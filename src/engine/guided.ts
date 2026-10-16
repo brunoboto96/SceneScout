@@ -279,9 +279,10 @@ export function isLocalAddress(address: string): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
 }
 
-type Checked<T> = { ok: true; value: T } | { ok: false; error: string };
+export type Checked<T> = { ok: true; value: T } | { ok: false; error: string };
 
-function checkAddress(raw: unknown): Checked<string> {
+/** A site's address, checked; a refusal never quotes it, because it may hold the credential it is refused for. */
+export function checkAddress(raw: unknown): Checked<string> {
   if (typeof raw !== "string" || raw.trim() === "") return { ok: false, error: "give the address of the site, e.g. https://staging.example.com" };
   const address = raw.trim();
   if (address.length > MAX_ADDRESS) return { ok: false, error: `the address is longer than ${MAX_ADDRESS} characters` };

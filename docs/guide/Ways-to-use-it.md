@@ -83,7 +83,21 @@ The form never asks for a password or a sign-in code; signing in happens later, 
 
 From the questions in chat you are never asked to choose a write mode, and `safe-write` and `destructive` are used only when you ask for them by name. The guided form reaches `safe-write` only as **May create test data**, which you confirm yourself. `destructive` is never offered there. Any flag skips the questions, and what the flags leave out takes its default.
 
-The same clients list two more prompts. `live` takes nothing and asks the agent for the loopback live-view URL of the current session. `login` takes a role, and the app's address when you have it, and asks the agent to call `scout_login` for that role. Neither takes a password.
+The same clients list two more prompts. `live` takes nothing and asks the agent for the loopback live-view URL of the current session. `login` takes a role, and the app's address when you have it, and asks the agent to call `scout_login` for that role. Neither takes a password. They also list five guided prompts for someone who would rather not write one: [Guided prompts in the chat](#guided-prompts-in-the-chat).
+
+### Guided prompts in the chat
+
+In the Claude Desktop chat, and any other client that lists a server's prompts, SceneScout offers five entry points. Pick one and Claude takes it from there; none of them asks for a password, a sign-in code or a token, and the words a person reads are the same ones the [guided panel](#the-claude-code-mod) shows.
+
+| Prompt | What happens |
+|---|---|
+| **Check my site** | The guided start form opens (the address, filled in when you gave one; what to check; how you sign in; how careful; how thorough). Claude follows the plan it returns, shows progress in the status pane where the app draws it or as a short line every few steps, and ends with each problem as a card, worst first, then offers the other four prompts. Claude never chooses the care level: *Look only* is the default, and a care level that sends things to your site starts only after you confirm it in the server's own form |
+| **Re-check after a fix** | Claude opens the site in *Look only*, lists the problems earlier checks left open, follows each problem's steps again and says which are gone, which are still there and which changed. A problem that can only be checked by saving something is left open, with a sentence saying so |
+| **Make a team report** | The report made for sharing (a cover page, the cards, what was not checked, sign-off lines) is coming in a later version. For now Claude writes the report in plain words and says where `report.html` is; nothing is sent anywhere |
+| **File problems as tickets** | Filing from the chat is coming in a later version. For now Claude shows the problems as cards and gives the [`scenescout export`](#filing-findings-as-issues) command a developer runs in a terminal: a dry run that lists what it would file, then `--yes` to file it. Choose GitHub or Jira in the prompt's `to` field, or leave it empty to see both. The token stays in that terminal's environment; never paste one into the chat |
+| **Is it safe to run on my live site?** | Claude replies with the panel's safety explainer, word for word, and calls nothing |
+
+An address with a user name, password or token in it is refused before anything starts, and the refusal does not repeat it. The desktop extension's manifest declares the same five prompts, so they are listed before the extension first starts.
 
 ### Next to the code, or against a URL
 

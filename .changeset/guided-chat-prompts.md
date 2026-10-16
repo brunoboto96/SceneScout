@@ -1,0 +1,5 @@
+---
+"scenescout": minor
+---
+
+The chat gets five guided prompts: **Check my site** (`check-my-site`, which opens the guided start form, follows its plan and ends with the problems as cards), **Re-check after a fix** (`recheck`, in Look only), **Make a team report** (`team-report`, the plain report for now), **File problems as tickets** (`file-tickets`, which shows the cards and gives the `scenescout export` command, filing nothing from the chat) and **Is it safe to run on my live site?** (`is-it-safe`, the guided safety explainer word for word). Their wording is the guided panel's. None takes a password, code or token, and an address carrying one is refused without being repeated. The desktop extension's manifest declares the five prompts, and its description now states what the write policy lets through: a plain POST in the default mode, and signing in, signing out, token refresh and named read POSTs in observe.
