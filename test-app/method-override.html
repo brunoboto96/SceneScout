@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Method overrides</title>
+  </head>
+  <body>
+    <main>
+      <h1>Method overrides</h1>
+      <p data-testid="override-plain">Pending</p>
+      <p data-testid="override-header">Pending</p>
+      <p data-testid="override-http-method">Pending</p>
+      <p data-testid="override-method-override">Pending</p>
+      <p data-testid="override-query">Pending</p>
+      <form method="post" action="/api/override/form">
+        <input type="hidden" name="_method" value="delete" />
+        <input type="hidden" name="id" value="3" />
+        <button type="submit" data-testid="override-form-submit">Send form</button>
+      </form>
+    </main>
+    <script>
+      // A POST that names another method: servers that honour an override act on the method named, so the write policy
+      // must judge it as that method. Each request goes to its own path so a suite can count what reached the server;
+      // the first is the contrast, a plain POST with no override, which read-only lets out.
+      const show = (testid, text) => (document.querySelector(`[data-testid="${testid}"]`).textContent = text);
+      const post = (testid, path, headers = {}) =>
+        fetch(path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ id: 3 }) })
+          .then((r) => show(testid, `status ${r.status}`))
+          .catch((err) => show(testid, `failed: ${err.message}`));
+      post("override-plain", "/api/override/plain");
+      post("override-header", "/api/override/header", { "X-HTTP-Method-Override": "DELETE" });
+      post("override-http-method", "/api/override/http-method", { "X-HTTP-Method": "DELETE" });
+      post("override-method-override", "/api/override/method-override", { "X-Method-Override": "DELETE" });
+      post("override-query", "/api/override/query?_method=DELETE");
+      // Sent as the page is left: in Chromium these reach the browser-level interception, not the route handler.
+      addEventListener("pagehide", () => {
+        navigator.sendBeacon("/api/override/beacon-plain", "id=3");
+        navigator.sendBeacon("/api/override/beacon?_method=DELETE", "id=3");
+      });
+    </script>
+  </body>
+</html>

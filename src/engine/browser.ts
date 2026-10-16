@@ -180,7 +180,7 @@ import {
   destructiveLabelOf,
   pickIsDestructive,
   isDestructive,
-  isDestructiveWire,
+  isDestructiveRequest,
   blockSignature,
   BlockNotices,
   dialogNote,
@@ -197,6 +197,7 @@ import {
   MAX_READ_POSTS,
   READ_POSTS_ENV,
   readPostAllowed,
+  writeMethod,
   AUTH_POSTS_ENV,
   authPostsSetting,
   matchReadPost,
@@ -211,6 +212,7 @@ import {
   WriteRule,
 } from "./policy.js";
 import { scanProject } from "../scan.js";
+import { REFUSE_DESTRUCTIVE_GETS_ENV, refuseDestructiveGetsSetting, STRICT_WRITES_ENV, writeClassifierSetting, type WriteClassifier } from "./strict-writes.js";
 import type { RouteHealth } from "./check.js";
 import { botChallenge, challengeBodyMatters, startPageWarning } from "./challenge.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
@@ -755,6 +757,10 @@ export class BrowserEngine {
   /** POST endpoints the user named as reads (policy.ts readPostAllowed decides when that counts). */
   readPosts: ReadPost[] = [];
   private readPostNotice = "";
+  /** Which classifier judges whether a write is destructive, and whether destructive page loads are refused (strict-writes.ts; both from the environment, both off by default). */
+  private writeClassifier: WriteClassifier = "standard";
+  private refuseDestructiveGets = false;
+  private strictNotice = "";
   /** The only POSTs that count as signing in, when the operator listed them (SCENESCOUT_AUTH_POSTS); null for the path rule. */
   private authPosts: ReadPost[] | null = null;
   private authPostNotice = "";
@@ -1191,6 +1197,8 @@ export class BrowserEngine {
     clearRefusedPost: (url) => this.clearRefusedPost(url),
     isOwnedResource: (pathname) => this.isOwnedResource(pathname),
     recordCreation: (res) => this.recordCreation(res),
+    writeClassifier: () => this.writeClassifier,
+    refuseDestructiveGets: () => this.refuseDestructiveGets,
     authPosts: () => this.authPosts,
   });
   /**
@@ -1488,6 +1496,9 @@ export class BrowserEngine {
     // the storage state; sessionStorage, which it has no field for, is put back
     // by an init script before the app's own code runs. The error never quotes the file.
     const profile = storageStatePath ? readStorageState(storageStatePath) : undefined;
+    // Checked before anything is closed too: a mistyped value must not cost the session it would have replaced.
+    writeClassifierSetting(process.env);
+    refuseDestructiveGetsSetting(process.env);
     await this.close();
     this.limits = limits;
     this.auth = auth;
@@ -1556,6 +1567,16 @@ export class BrowserEngine {
         : "") +
       (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "") +
       (trust.overflow.length > 0 ? ` More than ${MAX_TRUSTED_EMBEDS} trusted embeds; not trusted: ${trust.overflow.join(", ")}.` : "");
+    // Operator settings, read whatever else the attach asks for (strict-writes.ts says what each changes).
+    this.writeClassifier = writeClassifierSetting(process.env);
+    this.refuseDestructiveGets = refuseDestructiveGetsSetting(process.env);
+    this.strictNotice =
+      (this.writeClassifier === "strict" && this.mode !== "destructive"
+        ? ` Strict write judgement is on (${STRICT_WRITES_ENV}): a write whose path, query or body names a destructive command anywhere in an identifier counts as destructive.`
+        : "") +
+      (this.refuseDestructiveGets && (this.mode === "observe" || this.mode === "read-only")
+        ? ` Page loads whose address is a destructive command (/items/3/delete) are refused (${REFUSE_DESTRUCTIVE_GETS_ENV}).`
+        : "");
     const authList = opts.operatorAuthPosts === false ? null : authPostsSetting(process.env[AUTH_POSTS_ENV]);
     this.authPosts = authList?.entries ?? null;
     this.authPostNotice = authList
@@ -1752,10 +1773,12 @@ export class BrowserEngine {
         this.xhrCount += 1;
         this.notePageRequest(req);
       }
-      const method = req.method();
+      // Judged as the method an override names, as the route handler judges it (policy.ts writeMethod).
+      const method = writeMethod({ method: req.method(), url: req.url(), headers: req.headers(), body: req.postData() }).method;
       if (method === "GET" || method === "HEAD" || method === "OPTIONS") return;
       // A POST the user named as a read is not state the tester mutated, nor a form exercised.
-      if (this.readPostOf(this.writeRule.at(), method, req.url(), req.postData())) return;
+      const destructiveWire = isDestructiveRequest(req.url(), req.postData(), this.writeClassifier);
+      if (this.readPostOf(this.writeRule.at(), method, req.url(), req.postData(), destructiveWire)) return;
       // Infrastructure POSTs (token refresh, telemetry) are not state the
       // tester mutated — reporting them trains the driver to ignore the notice.
       if (BENIGN_MUTATION_RE.test(req.url())) return;
@@ -1775,7 +1798,7 @@ export class BrowserEngine {
           rule: this.writeRule.at(),
           method,
           pathname: pathnameOf(req.url()),
-          destructiveWire: isDestructiveWire(pathnameOf(req.url()), req.postData()),
+          destructiveWire,
           foreign: () => this.foreignWriteOf(req),
           offApp: () => offAppPageWrite(this.baseUrl, this.page?.url(), req.url(), this.embedMoves.movedTo),
           authList: this.guard.authListFor(req.url()),
@@ -1917,7 +1940,7 @@ export class BrowserEngine {
       `Memory: ${this.memory!.dir}.${this.memory!.loadWarning ? ` WARNING: ${this.memory!.loadWarning}` : ""}` +
       (this.memory!.prunedStates > 0 ? ` Trimmed ${this.memory!.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory!.legacyDirNote ? ` ${this.memory!.legacyDirNote}` : ""}` +
-      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice}${this.authPostNotice} Call scout_snapshot to see the current state.` +
+      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice}${this.strictNotice}${this.authPostNotice} Call scout_snapshot to see the current state.` +
       profileNote +
       authWarning
     );
@@ -2462,14 +2485,13 @@ export class BrowserEngine {
   /** The read-POST entry that lets this request out under `rule`, or null (policy.ts readPostAllowed). */
   private readPostOf(rule: WriteMode, method: string, url: string, body: string | null | undefined, destructiveWire?: boolean): ReadPost | null {
     if (this.readPosts.length === 0 || rule !== "observe" || method !== "POST") return null;
-    const pathname = pathnameOf(url);
     return readPostAllowed({
       mode: rule,
       method,
       url,
       appUrl: this.baseUrl,
       body,
-      destructiveWire: destructiveWire ?? isDestructiveWire(pathname, body),
+      destructiveWire: destructiveWire ?? isDestructiveRequest(url, body, this.writeClassifier),
       entries: this.readPosts,
     });
   }
@@ -2493,7 +2515,7 @@ export class BrowserEngine {
    */
   private noteObserveRefusedPost(url: string, body: string | null, referer: string | undefined): void {
     const pageUrl = refusedPostPage(this.baseUrl, referer, this.page?.url());
-    if (!pageUrl || !this.memory || isDestructiveWire(pathnameOf(url), body) || matchReadPost(this.readPosts, this.baseUrl, url)) return;
+    if (!pageUrl || !this.memory || isDestructiveRequest(url, body, this.writeClassifier) || matchReadPost(this.readPosts, this.baseUrl, url)) return;
     const endpoint = this.refusedPostEndpoint(url);
     if (endpoint) this.memory.noteObserveRefusedPost(normalizePath(pageUrl), endpoint);
   }
@@ -3830,14 +3852,21 @@ export class BrowserEngine {
       this.onLeaveRefused = () => resolve("stayed");
     });
     const going = this.withinLimit("nav", () => this.gotoSettlingFailure(page, url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
-    let outcome: "went" | "stayed";
+    let outcome: "went" | "stayed" | "refused";
     try {
       outcome = await Promise.race([going.then(() => "went" as const), stayed]);
     } catch (err) {
-      if (!this.leaveRefused(dialogsBefore)) throw err;
-      outcome = "stayed";
+      // The write policy refused the load itself (an address that is a destructive command, when that is turned on).
+      if (this.guard.tookRefusedLoad(url)) outcome = "refused";
+      else if (!this.leaveRefused(dialogsBefore)) throw err;
+      else outcome = "stayed";
     } finally {
       this.onLeaveRefused = null;
+    }
+    if (outcome === "refused") {
+      // The page did not move; the result carries the policy's notice for the refused load.
+      const result = await this.afterAction("navigate", url);
+      return result.replace(/^OK: navigate /, "NOT NAVIGATED: ");
     }
     if (outcome === "stayed") {
       // Logged now, when the answer was given: the cancelled load can take its error-page wait to settle, and logged
