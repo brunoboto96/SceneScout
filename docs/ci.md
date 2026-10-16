@@ -12,7 +12,7 @@ The exploratory side can run in CI too, with a model's API in place of a person 
 |---|---|---|
 | 0 | Passed the gate | Pass |
 | 1 | Failed it: something at the `--fail-on` severity or worse | Fail: the app has a defect |
-| 2 | Could not run, or not all of it: a bad argument, an app that never answered, a saved session that no longer signs in, only the sign-in page reached, only a start page with at most one control reached (the app had not finished drawing), a saved flow that is not valid, or a flow step the write policy refused | Fail, and read it as a setup problem; with a refused flow step the report still has the rest's verdict |
+| 2 | Could not run, or not all of it: a bad argument, an app that never answered, a start page that bot protection answered in the app's place (`blocked by bot protection (HTTP 403)`) or that answered any 4xx (the status is named), a saved session that no longer signs in, only the sign-in page reached, only a start page with at most one control reached (the app had not finished drawing), a saved flow that is not valid, or a flow step the write policy refused | Fail, and read it as a setup problem; with a refused flow step the report still has the rest's verdict |
 
 ## GitHub Actions
 
@@ -551,6 +551,8 @@ jobs:
 
 In any system, treat exit code 2 differently from 1 if you can: 2 means the job never measured the app.
 
+**A start page behind bot protection.** A runner's browser is often shown a bot challenge (Cloudflare, Akamai, DataDome, PerimeterX/HUMAN, AWS WAF, Imperva, Sucuri) instead of the app. The challenge has a checkbox and a link of its own, so a check that measured it would pass without testing anything. When the start page is a challenge, recognised by the vendor's header (`cf-mitigated: challenge`, `x-amzn-waf-action`) or by a 403, 429 or 503 carrying the vendor's markers, the check stops with exit 2: `could not run: blocked by bot protection (HTTP 403)`. Any other 4xx on the start page stops it the same way, naming the status. A 403 on a route inside an app whose start page loaded is that route's finding, as before. A route inside the app that the protection answered (rate limiting part-way through a crawl, say) is not measured and not filed: the report lists it under "Blocked by bot protection", and `check.json` under `blocked`. Let the runner through the protection (an allowlisted address, or the vendor's bypass for automated tests), or check a deployment without it. `scenescout ci` and a first run (`scenescout <url>`) stop the same way.
+
 ## An unattended exploratory run
 
 `scenescout ci <url>` is an exploratory run with nobody present. A model reached through its API drives the same `scout_*` tools, by the same method a coding agent follows, and the run ends in the same report. It needs an API key and costs what the model's API charges; `scenescout check` needs neither. It starts its server with `SCENESCOUT_OPEN=none`, so it does not open the live view or the report in a browser; a `SCENESCOUT_OPEN` already set in the environment is kept. Why it works this way: [ADR 14](adr/0014-an-unattended-run-reports-and-never-gates.md).
@@ -560,7 +562,7 @@ It reports and never gates:
 | Exit code | Meaning |
 |---|---|
 | 0 | The run ran and the report is written, whether the model finished or a cap ended it. What it found does not change this. |
-| 2 | It could not run: a bad argument, no key or two keys and no `--provider`, a key or request the API refused, an app that never answered, a saved session that no longer signs in, or results that could not be written. |
+| 2 | It could not run: a bad argument, no key or two keys and no `--provider`, a key or request the API refused, an app that never answered, a start page that bot protection answered in the app's place or that answered any 4xx (`could-not-start`, before any model call), a saved session that no longer signs in, or results that could not be written. |
 
 Two runs of the same app explore differently and find different things, so a finding from this run is something to read. To fail a pull request on something, use `scenescout check`, or a saved flow it replays.
 

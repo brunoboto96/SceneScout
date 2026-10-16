@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Just a moment...</title></head>
+<body>
+  <!-- For `scenescout check`'s start-page guard: the general shape of a bot-protection interstitial, served with 403 and
+       `cf-mitigated: challenge` on every path under /check-challenge. It shows a checkbox and a link, so a check that
+       did not tell it apart from the app would measure it and pass. Contrast: check-app-forbidden.html. -->
+  <main>
+    <h1>Checking your browser before accessing the site</h1>
+    <label><input type="checkbox" name="human"> Verify you are human</label>
+    <p><a href="/check-challenge/help">Why am I seeing this page?</a></p>
+  </main>
+</body>
+</html>
