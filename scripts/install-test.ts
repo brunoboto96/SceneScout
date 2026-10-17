@@ -91,7 +91,7 @@ import {
   reportFolderProblem,
   writeFirstRunReport,
 } from "../src/first-run.ts";
-import { MAX_CHECK_ROUTES } from "../src/engine/check.ts";
+import { MAX_CHECK_ROUTES, parseCheckArgs } from "../src/engine/check.ts";
 import { firstMessageHint, manualFor, parseClients, registerInFile, registerWithClient, vscodeAddArgs, vscodeBinary } from "../src/clients.ts";
 
 function tmp(prefix: string): string {
@@ -738,6 +738,14 @@ test("the README, the website and the skill claim no more than the write policy 
   assert.match(observe, /name as a read/, "and the POSTs named as reads");
   const readOnly = readme.split("\n").find((l) => l.startsWith("| 🟢 `read-only` |")) ?? "";
   assert.match(readOnly, /can create a record or change one that was there/, "the README says what a plain POST in read-only can do");
+  // Each row names the commands it is the default for, as the parsers default them.
+  const check = parseCheckArgs(["http://127.0.0.1:3000"], "/p");
+  assert.ok(check.ok);
+  assert.ok(
+    (check.options.mode === "observe" ? observe : readOnly).includes("`scenescout check`"),
+    `the README names check under its default, ${check.options.mode}`,
+  );
+  assert.ok(!(check.options.mode === "observe" ? readOnly : observe).includes("`scenescout check`"), "and under no other mode");
   // The guide's own summaries of the modes hold to the same rule.
   for (const page of ["Start-here.md", "Ways-to-use-it.md"]) {
     const text = fs.readFileSync(path.join(repoRoot, "docs", "guide", page), "utf8");

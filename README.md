@@ -239,8 +239,8 @@ The preview commands test a deployed preview, so the pull request's code never r
 
 | Mode | What may leave the page |
 |---|---|
-| 🔵 `observe` | `GET`, `HEAD` and `OPTIONS` requests, signing in, signing out and refreshing a token, and any `POST` you name as a read that does not look destructive. Any other form that posts is refused. The default for a first look, for `scenescout check`, and for an agent's run on a remote site with no source |
-| 🟢 `read-only` | Also ordinary form posts, which can create a record or change one that was there. `PUT`, `PATCH`, `DELETE`, requests that look destructive and clicks on controls labelled delete, archive and the like are refused. The default for an agent's run on a local app |
+| 🔵 `observe` | `GET`, `HEAD` and `OPTIONS` requests, signing in, signing out and refreshing a token, and any `POST` you name as a read that does not look destructive. Any other form that posts is refused. The default for a first look and for an agent's run on a remote site with no source |
+| 🟢 `read-only` | Also ordinary form posts, which can create a record or change one that was there. `PUT`, `PATCH`, `DELETE`, requests that look destructive and clicks on controls labelled delete, archive and the like are refused. The default for `scenescout check` and for an agent's run on a local app |
 | 🟡 `safe-write` | Also `PUT`, `PATCH` and `DELETE`, but only on records this run created |
 | 🔴 `destructive` | Everything. Only when you say the data is disposable: the agent is told never to choose it, and the config file below can rule it out |
 
