@@ -22,7 +22,16 @@ import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
 import { formatLoadRetries } from "./limits.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
-import { DEFAULT_REPORT_AUDIENCE, escapeTableCell, formatPlainSection, pictureOf, TECHNICAL_HEADING, type PlainRun, type ReportAudience } from "./plain.js";
+import {
+  DEFAULT_REPORT_AUDIENCE,
+  escapeSummaryText,
+  escapeTableCell,
+  formatPlainSection,
+  pictureOf,
+  TECHNICAL_HEADING,
+  type PlainRun,
+  type ReportAudience,
+} from "./plain.js";
 import { formatTicketsPlain, formatTicketsTechnical, ticketSummaryLine, type TicketReportInput } from "./tickets.js";
 import { COLLECTOR_CAP } from "./collector.js";
 import { buildRunRecord, fromRunLine, type RunRecord } from "./from-run.js";
@@ -1015,7 +1024,9 @@ function gapLedgerSection(lines: string[], memory: MemoryStore, extras: ReportEx
 /** A finding's full entry, written to `lines`: open, or `complete` for a resolved one. */
 function findingRenderer(lines: string[], folded = false): (f: Finding, complete?: boolean) => void {
   const renderFinding = (f: Finding, complete = false): void => {
-    lines.push(complete ? `### 🟢 [COMPLETE] ${f.title}` : `### ${SEVERITY_ICON[f.severity]} [${f.severity.toUpperCase()}] ${f.title}`);
+    // Inside the fold a title is text: a `</details>` in it would close the fold.
+    const title = folded ? escapeSummaryText(f.title) : f.title;
+    lines.push(complete ? `### 🟢 [COMPLETE] ${title}` : `### ${SEVERITY_ICON[f.severity]} [${f.severity.toUpperCase()}] ${title}`);
     lines.push(``);
     if (complete) lines.push(`- **Resolved** (was ${f.severity})`);
     if (!complete && f.regressedAt) lines.push(`- **⟳ REGRESSED:** previously marked resolved, re-found ${f.regressedAt} — the fix did not hold`);
