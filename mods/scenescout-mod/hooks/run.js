@@ -11,7 +11,10 @@
  * never carried over. It starts only in the care level it had when the person
  * queued it.
  */
-import { CARE_LABEL, afterSavedRun, guidedOf, readSaved } from "./guided.js";
+import { CARE_LABEL, afterSavedRun, guidedOf, plainLine, readSaved } from "./guided.js";
+
+/** The band's and the status line's cleaning, the same as the panel's. */
+export { plainLine };
 
 /** How long after the panel handed Claude a plan the queue waits before it reads "nothing is going" as the check having ended. */
 export const QUEUE_GRACE_MS = 15_000;
@@ -26,11 +29,16 @@ export const BAND_WORDS = {
   now: (/** @type {string} */ now) => `SceneScout · Now: ${now}`,
   queued: (/** @type {number} */ n) => `${n} queued`,
   waiting: (/** @type {number} */ n, /** @type {string} */ name) => `SceneScout · ${n} check${n === 1 ? "" : "s"} queued, next: "${name}"`,
+  paused: (/** @type {number} */ n) => `SceneScout · ${n} check${n === 1 ? "" : "s"} queued, paused: open the panel to go on`,
   confirmNext: (/** @type {string} */ name) => `SceneScout: "${name}" is next, and waits for your yes in the panel before it starts.`,
   careChanged: (/** @type {string} */ name, /** @type {string} */ now, /** @type {string} */ then) =>
     `"${name}" now uses "${now}", not "${then}" as when you queued it, so it did not start. Press Run again on the welcome to start it.`,
   toastConfirm: (/** @type {string} */ name) => `SceneScout: your next check, "${name}", needs your yes before it starts.`,
   toastNotStarted: (/** @type {string} */ name, /** @type {string} */ why) => `SceneScout: the queued check "${name}" did not start. ${why}`,
+  toastStarted: (/** @type {string} */ name) => `SceneScout: the queued check "${name}" has started. Follow it from the panel.`,
+  toastKept: (/** @type {string} */ name) =>
+    `SceneScout: "${name}" stays first in the queue, which is paused. Press Go on in the panel to start it, or Remove to drop it.`,
+  busy: "SceneScout: a check is already being planned. Wait for it before pressing again.",
 };
 
 /** @param {unknown} v */
@@ -44,18 +52,6 @@ function str(v) {
 /** @param {unknown} v */
 function num(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
-}
-
-/**
- * C0 and C1 control characters, DEL, and the bidirectional overrides: what a
- * terminal would read as a code rather than draw. A step's words can quote
- * the tested page, so the band and the status line never carry them.
- */
-const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g;
-
-/** A line as plain text: each run of control characters a space, and the spaces it leaves collapsed. */
-export function plainLine(/** @type {string} */ line) {
-  return line.replace(CONTROL, " ").replace(/ {2,}/g, " ").trim();
 }
 
 /** Whether a guided check has ended: done, or stopped. */
@@ -86,7 +82,7 @@ export function bandLine(w, status) {
 
 /** The band's line before it is made plain. @param {import("./guided.js").Wizard} w @param {{ kind: string, data?: any }} status */
 function bandWords(w, status) {
-  if (w.step === "confirm" && w.fromQueue) return BAND_WORDS.confirmNext(w.fromQueue);
+  if (w.fromQueue) return BAND_WORDS.confirmNext(w.fromQueue);
   const g = guidedOf(status, null);
   if (g && !isFinished(g)) {
     if (isRecord(g.needsYou) && str(g.needsYou.sentence)) return BAND_WORDS.needsYou(str(g.needsYou.sentence));
@@ -94,7 +90,7 @@ function bandWords(w, status) {
     if (w.queue.length) parts.push(BAND_WORDS.queued(w.queue.length));
     return parts.join(" · ");
   }
-  if (w.queue.length) return BAND_WORDS.waiting(w.queue.length, w.queue[0].name);
+  if (w.queue.length) return w.queuePaused ? BAND_WORDS.paused(w.queue.length) : BAND_WORDS.waiting(w.queue.length, w.queue[0].name);
   return null;
 }
 
@@ -130,10 +126,15 @@ export function keepsPolling(isOpen, w, status, at) {
   const g = guidedOf(status, null);
   if (g && !isFinished(g)) return true;
   // A preview waiting on the person's yes (a queued check's or their own) holds the queue, and changes only when they open the panel, which polls.
-  if (w.step === "confirm") return false;
-  if (w.queue.length > 0) return true;
+  if (awaitsYes(w)) return false;
+  if (w.queue.length > 0 && !w.queuePaused) return true;
   const handed = w.step === "running" && w.planId !== null && !(g && str(g.planId) === w.planId);
   return handed && at.now - at.sentAt < HANDED_WAIT_MS;
+}
+
+/** Whether a plan waits on the person's yes: their own preview, or a queued check's, open or not. @param {import("./guided.js").Wizard} w */
+export function awaitsYes(w) {
+  return w.step === "confirm" || w.fromQueue !== null;
 }
 
 /**
@@ -149,7 +150,7 @@ export function keepsPolling(isOpen, w, status, at) {
  * @returns {import("./guided.js").QueuedCheck | null}
  */
 export function nextQueued(w, status, at) {
-  if (w.queue.length === 0 || at.isWorking || w.busy || w.step === "confirm" || status.kind !== "data") return null;
+  if (w.queue.length === 0 || w.queuePaused || at.isWorking || w.busy || awaitsYes(w) || status.kind !== "data") return null;
   const g = guidedOf(status, null);
   if (g && !isFinished(g)) return null;
   const seenToEnd = g !== null && str(g.planId) === w.planId;
@@ -159,9 +160,13 @@ export function nextQueued(w, status, at) {
 
 /**
  * What the panel does once the server built the queued check's plan: as any
- * saved check run again (its confirmation previewed where its care level
- * needs one, else Claude started on it), unless the saved check no longer
- * has the care level it was queued with, which then does not start.
+ * saved check run again (Claude started on it, or its confirmation waiting on
+ * the person where its care level needs one), unless the saved check no
+ * longer has the care level it was queued with, which then does not start.
+ *
+ * The person stays where they are: a queued check's start never moves the
+ * panel off the results or a card they are reading, and the results keep the
+ * plan they were opened for. `started` names it, so the panel offers Follow it.
  *
  * @param {import("./guided.js").Wizard} w
  * @param {any} result scout_saved_checks' answer to `run`
@@ -174,17 +179,16 @@ export function afterQueuedRun(w, result, entry) {
   if (read.ok && read.plan && care !== entry.care) {
     const now = CARE_LABEL[/** @type {keyof typeof CARE_LABEL} */ (care)] ?? care;
     return {
-      wizard: {
-        ...w,
-        saved: read.saved,
-        busy: null,
-        step: "welcome",
-        notice: { tone: "error", text: BAND_WORDS.careChanged(entry.name, now, CARE_LABEL[entry.care]) },
-      },
+      wizard: { ...w, saved: read.saved, busy: null, notice: { tone: "error", text: BAND_WORDS.careChanged(entry.name, now, CARE_LABEL[entry.care]) } },
     };
   }
   const after = afterSavedRun(w, result);
-  return { ...after, wizard: { ...after.wizard, fromQueue: after.wizard.step === "confirm" ? entry.name : null } };
+  if (after.wizard.planId === w.planId) return after;
+  const waits = after.wizard.step === "confirm";
+  return {
+    ...after,
+    wizard: { ...after.wizard, step: w.step, notice: null, fromQueue: waits ? entry.name : null, started: entry.name },
+  };
 }
 
 /**
