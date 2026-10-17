@@ -17,11 +17,16 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
    approval counts as the code-owner review. Its diff is generated and limited
    to the version, the changelog, `plugin.json`, the extension manifest and the
    deleted changeset files.
-4. The workflow runs again on that merge, finds no pending changesets, and
-   publishes to npm, pushes the `vX.Y.Z` tag and creates the GitHub Release.
+4. The workflow runs again on that merge, finds no pending changesets, builds
+   the package from a clean `dist`, publishes it to npm, then pushes the
+   `vX.Y.Z` tag and creates the GitHub Release. The tag and the release are
+   made only once npm has the version, and a version missing from npm is
+   published again by the next run on `main` that finds no pending changesets.
 5. It then builds the Claude Desktop extension bundle from that tag
    (`npm run build && npm run mcpb`, which writes `.mcpb-build/scenescout-X.Y.Z.mcpb`),
-   checks its manifest against the MCPB schema, and attaches it to the release.
+   checks its manifest against the MCPB schema, and attaches it to the release
+   with a `SHA256SUMS` file. A build provenance attestation for the bundle is
+   recorded too: check a download with `gh attestation verify <file> --repo brunoboto96/SceneScout`.
    The manifest follows the MCPB `manifest.json` format, manifest version 0.3.
 
 Nothing is published while the repository variable `NPM_PUBLISH` is anything

@@ -2606,6 +2606,70 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
   }
 });
 
+test("release: npm publishes before the version is tagged, and the bundle ships with a checksum and an attestation", () => {
+  type Step = { uses?: string; run?: string; with?: Record<string, string | boolean>; id?: string };
+  type Job = { needs?: string | string[]; if?: string; permissions?: Record<string, string>; steps: Step[] };
+  const wf = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8")) as { jobs: Record<string, Job> };
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  // `changeset publish` publishes what npm does not have yet and only then tags it, so the
+  // vX.Y.Z tag, the GitHub Release and the major tag (which the actions install from npm by)
+  // never name a version npm lacks, and a version a failed run left unpublished is published
+  // by the next run. A job that tags first and publishes later keeps neither.
+  const release = wf.jobs.release;
+  const changesets = release.steps.find((s) => s.id === "changesets");
+  assert.match(String(changesets?.with?.["publish-script"]), /'npm run release'/, "the release action publishes with npm run release");
+  assert.match(pkg.scripts.release, /^npm run build && changeset publish$/, "which builds, then publishes and tags in one command");
+  assert.equal(release.permissions?.["id-token"], "write", "so the job that publishes is the one that mints the npm token");
+  const holders = Object.entries(wf.jobs)
+    .filter(([, j]) => j.permissions?.["id-token"] === "write")
+    .map(([name]) => name)
+    .sort();
+  assert.deepEqual(holders, ["attest-desktop-extension", "release"], "and only it and the attestation job can");
+  for (const [name, job] of Object.entries(wf.jobs)) {
+    if (name === "release") continue;
+    for (const s of job.steps)
+      assert.ok(!/\bnpm publish\b|\bchangeset (git-)?tag\b/.test(s.run ?? ""), `${name} neither publishes nor tags apart from the release`);
+  }
+
+  const attach = wf.jobs["attach-desktop-extension"];
+  assert.ok(
+    attach.steps.some((s) => /sha256sum \*\.mcpb > SHA256SUMS/.test(s.run ?? "")),
+    "a checksum file for the bundle",
+  );
+  assert.ok(
+    attach.steps.some((s) => /gh release upload "\$TAG" \*\.mcpb SHA256SUMS\b/.test(s.run ?? "")),
+    "uploaded beside it",
+  );
+  const attest = wf.jobs["attest-desktop-extension"];
+  assert.deepEqual(attest.permissions, { contents: "read", "id-token": "write", attestations: "write" });
+  const step = attest.steps.find((s) => /^actions\/attest-build-provenance@[0-9a-f]{40}$/.test(s.uses ?? ""));
+  assert.ok(step, "the bundle is attested by an action pinned by commit");
+  assert.equal(step.with?.["subject-path"], "*.mcpb");
+  assert.ok(!attest.steps.some((s) => s.uses?.startsWith("actions/checkout") || s.run), "and runs no repository code");
+});
+
+test("build: dist is emptied before tsc, so a file deleted from src is not packed", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  assert.match(pkg.scripts.build, /rmSync\(['"]dist['"], *\{[^}]*recursive: *true[^}]*\}\).*&& tsc$/, "clear dist, then compile");
+});
+
+test("ci action: the model key is blanked for every step except the one that runs the exploration", () => {
+  type Step = { id?: string; name?: string; env?: Record<string, string> };
+  const action = parseYaml(fs.readFileSync(path.join(repoRoot, "ci", "action.yml"), "utf8")) as { runs: { steps: Step[] } };
+  const names = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"];
+  const withKey = action.runs.steps.filter((s) => names.some((n) => s.env && n in s.env && s.env[n] !== ""));
+  assert.deepEqual(
+    withKey.map((s) => s.id),
+    [],
+    "no step sets the key to a value; the run step receives the caller's own",
+  );
+  for (const step of action.runs.steps) {
+    const blank = names.every((n) => step.env?.[n] === "");
+    if (step.id === "run") assert.ok(!names.some((n) => step.env && n in step.env), "the run step keeps the key the caller set");
+    else assert.ok(blank, `${step.name ?? step.id} sees no model key`);
+  }
+});
+
 test("example workflows: Dependabot reads their folder, and their third-party pins match the ones this repository's workflows use", () => {
   const cfg = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "dependabot.yml"), "utf8")) as {
     updates: Array<{ "package-ecosystem": string; directories?: string[] }>;
