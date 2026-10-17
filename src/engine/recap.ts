@@ -3,10 +3,14 @@
  * the person can share, drawn as an SVG by the engine from the check's
  * figures only. No sentence a page supplied goes into it: the address is the
  * one the person typed, every figure is a number the engine counted, and each
- * is escaped before it is placed. Pure, so report-test holds it to a golden
- * file in scripts/golden/.
+ * is escaped before it is placed. Pure but for writeRecap, its save, so
+ * report-test holds it to a golden file in scripts/golden/.
  */
+import fs from "node:fs";
+import path from "node:path";
 import type { Finding } from "./memory.js";
+import { MEMORY_DIRNAME } from "./memory-dir.js";
+import { writeDocumentSync } from "./owner-file.js";
 import type { GuidedProgress } from "./progress.js";
 import { escapeHtml } from "./replay.js";
 
@@ -48,8 +52,16 @@ export function recapDuration(ms: number): string {
 
 /** The address as drawn: one line, control characters out, cut at RECAP_ADDRESS_MAX. */
 export function recapAddress(address: string): string {
-  const one = address.replace(/[\u0000-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]+/g, " ").trim();
-  return one.length > RECAP_ADDRESS_MAX ? `${one.slice(0, RECAP_ADDRESS_MAX - 1)}…` : one;
+  // Control and direction-changing characters, the two noncharacters an XML reader refuses, and any half of a pair: a space.
+  const one = address
+    .replace(
+      /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ufffe\uffff]+|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g,
+      " ",
+    )
+    .trim();
+  // Cut by character, never inside a pair.
+  const chars = Array.from(one);
+  return chars.length > RECAP_ADDRESS_MAX ? `${chars.slice(0, RECAP_ADDRESS_MAX - 1).join("")}…` : one;
 }
 
 /**
@@ -129,4 +141,19 @@ export function recapFigures(
     endedAt: new Date(endedMs).toISOString(),
     ended: progress.phase,
   };
+}
+
+/**
+ * Write the recap to `dir`/recap.svg, where `dir` must be a project's
+ * `.scenescout/` folder and a real folder, not a link to one. The file is
+ * replaced, never written through: a link left at recap.svg is swapped for
+ * the picture, so the bytes cannot land outside the folder. Returns the path.
+ */
+export function writeRecap(dir: string, svg: string): string {
+  if (path.basename(dir) !== MEMORY_DIRNAME) throw new Error(`the recap is written only inside a project's ${MEMORY_DIRNAME} folder, not ${dir}`);
+  fs.mkdirSync(dir, { recursive: true });
+  if (!fs.lstatSync(dir).isDirectory()) throw new Error(`${dir} is a link or a file, not a folder SceneScout made, so the recap was not saved`);
+  const file = path.join(dir, RECAP_FILE);
+  writeDocumentSync(file, svg);
+  return file;
 }

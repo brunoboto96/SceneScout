@@ -206,7 +206,8 @@ export function register(on, options) {
     const tickets = (await $.state.get(TICKETS)).value ?? null;
     const cost = wizard.step === "configuring" ? await costOfferNow($, wizard.draft.thoroughness) : null;
     const recap = (await $.state.get(RECAP)).value ?? null;
-    const fixed = Number(recap?.rows?.find((r) => r[0] === "Confirmed fixed")?.[1] ?? 0);
+    // Defeated counts only the check whose results are on show: another check's card says nothing about these problems.
+    const fixed = recap?.planId === resultsPlan(wizard).planId ? Number(recap?.rows?.find((r) => r[0] === "Confirmed fixed")?.[1] ?? 0) : 0;
     const creatures = game ? bestiary(wizard.cards, fixed) : null;
     return renderGuided(els, wizard, { surface: e.surface, status, picture: shown, runPane, cost, tickets, recap, game: creatures }, (type, payload = {}) => {
       // Fired, never awaited: a press must not hold anything up while the server or a form answers.

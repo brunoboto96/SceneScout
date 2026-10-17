@@ -4493,3 +4493,19 @@ test("register.js: the card is asked for once when a check ends, Save as picture
   const [onPane] = on.hooks.get("ui.render")!;
   assert.match(shown(await onPane.hook(on.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x)), /2 defeated, 1 still about/);
 });
+
+test("register.js: the bestiary counts as defeated only the problems confirmed fixed in the check its results show", async () => {
+  const on = modHarness(true, undefined, undefined, { game: "on" });
+  // The card held is an earlier check's, with 2 confirmed fixed; the results on show are another check's.
+  on.server.recap = recapResult(GUIDED_PLAN_ID);
+  on.server.status = statusWith({ phase: "done" });
+  await on.raise("command.run", { command: "scenescout-guided" });
+  const other = "gp-other000002";
+  on.state.set("wizard", {
+    value: { ...guided.initialWizard(), step: "results", planId: other, cards: [cardFixture("0a1b2c3d4e")], cardsTotal: 1 },
+    version: 41,
+  });
+  const [pane] = on.hooks.get("ui.render")!;
+  const text = shown(await pane.hook(on.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x));
+  assert.match(text, /0 defeated, 1 still about/, "another check's fixed problems are not this one's defeated");
+});

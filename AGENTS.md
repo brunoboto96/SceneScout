@@ -120,7 +120,7 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
   - `export.ts`: which findings an export files, what each issue says and the marker that dedups it
   - `ticket-preview.ts`: filing tickets from a guided surface: a preview's identity, expiry and binding to its findings, and the person's confirmation form
   - `ticket-status.ts`: reading filed tickets back: which places a record names, a project's tickets newest first, and the kept read that limits each project to one tracker read every five minutes
-  - `recap.ts`: the end-of-check card: its figures from an ended guided check, and the SVG drawn from them with every figure and the address escaped (report-test, against `scripts/golden/recap.svg`)
+  - `recap.ts`: the end-of-check card: its figures from an ended guided check, the SVG drawn from them with every figure and the address escaped, and its save, only into a real `.scenescout/` folder and replacing a link at `recap.svg` rather than writing through it (report-test, against `scripts/golden/recap.svg`)
   - `mods/scenescout-mod/hooks/game.js`: the mod's optional game layer: off unless set to `on`, the bestiary from the cards, and drawn beside the cards without changing their words (live-test)
   - `ci-lanes.ts`: splitting an unattended run into lanes
   - `capture.ts` and `png.ts`: an element's picture and the pixel diff of two

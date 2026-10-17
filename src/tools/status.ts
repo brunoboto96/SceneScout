@@ -3,11 +3,9 @@
  *
  * Registered by mcp-server.ts, in the order the tools have always been listed.
  */
-import fs from "node:fs";
-import path from "node:path";
 import { type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { RECAP_FILE, recapFigures, recapLines, recapSvg, type RecapFigures } from "../engine/recap.js";
+import { recapFigures, recapLines, recapSvg, writeRecap, type RecapFigures } from "../engine/recap.js";
 import { MCP_APP_MIME, paneData, paneText, STATUS_PANE_URI, STATUS_POLL_TOOL, STATUS_TOOL, type PaneCoverage, type PaneData } from "../engine/status-pane.js";
 import { statusPanePage } from "../engine/status-pane-page.js";
 
@@ -178,9 +176,7 @@ export function registerStatusTools(): void {
         let file: string | null = null;
         if (save) {
           if (!memory) throw new Error("No project is open, so there is no .scenescout folder to save the recap in.");
-          file = path.join(memory.dir, RECAP_FILE);
-          fs.mkdirSync(memory.dir, { recursive: true });
-          fs.writeFileSync(file, svg);
+          file = writeRecap(memory.dir, svg);
         }
         const lines = recapLines(figures);
         const text = [

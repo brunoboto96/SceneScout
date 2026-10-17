@@ -42,7 +42,17 @@ import {
   type ReportTemplate,
 } from "../src/engine/check-report.ts";
 import { parseFlow, type Flow, type FlowOutcome } from "../src/engine/flow.ts";
-import { RECAP_ADDRESS_MAX, recapDuration, recapFigures, recapLines, recapSvg, type RecapFigures } from "../src/engine/recap.ts";
+import {
+  RECAP_ADDRESS_MAX,
+  RECAP_FILE,
+  recapAddress,
+  recapDuration,
+  recapFigures,
+  recapLines,
+  recapSvg,
+  writeRecap,
+  type RecapFigures,
+} from "../src/engine/recap.ts";
 import { assertSavedPagePolicy, pagePolicy } from "./saved-page-csp.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import { MODE_CARE_LABEL, TEAM_REPORT_WORDS } from "../src/engine/guided-words.ts";
@@ -1092,4 +1102,52 @@ test("recap: the figures are a guided check's own once it has ended, and confirm
   assert.equal(recapFigures({ ...progress, phase: "stopped" }, "x", [], started, started)?.ended, "stopped");
   for (const phase of ["starting", "signing-in", "exploring", "needs-you", "writing-report"] as const)
     assert.equal(recapFigures({ ...progress, phase }, "x", [], started, started), null, `${phase}: not ended`);
+});
+
+test("recap: an address an XML reader would refuse, or one cut inside a character, still draws a picture that parses", () => {
+  // U+FFFE and U+FFFF pass the address check but are not XML characters: the whole SVG would fail to open.
+  assert.equal(recapAddress("https://x.example/\uFFFEa\uFFFF"), "https://x.example/ a");
+  // A cut at RECAP_ADDRESS_MAX never leaves half of a character drawn outside the basic plane.
+  const cut = recapAddress(`https://x.example/${"a".repeat(RECAP_ADDRESS_MAX - 19)}\u{1F600}${"b".repeat(40)}`);
+  assert.doesNotMatch(cut, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, "no lone surrogate");
+  assert.ok(cut.endsWith("…"));
+  // The same address in the attribute and the text: a quote or angle bracket never closes either.
+  const svg = recapSvg({ ...RECAP, address: `https://x.example/"><script>alert(1)</script><a href="javascript:alert(1)">` });
+  // Every tag is one the recap draws, and every attribute value is closed by its own quote: nothing the address carried became markup.
+  const tags = svg.match(/<[^>]*>/g) ?? [];
+  for (const tag of tags) assert.match(tag, /^<\/?(svg|rect|text)(\s+[A-Za-z-]+="[^"<>]*")*\s*\/?>$/, tag);
+  assert.equal(svg.replace(/<[^>]*>/g, "").includes("<"), false);
+  assert.match(svg, /aria-label="SceneScout check: https:\/\/x\.example\/&quot;&gt;&lt;script&gt;/);
+});
+
+test("recap: a save writes recap.svg inside .scenescout only, replacing a link at the name rather than writing through it", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-recap-"));
+  try {
+    const project = path.join(root, "site");
+    const dir = path.join(project, ".scenescout");
+    fs.mkdirSync(dir, { recursive: true });
+    const outside = path.join(root, "outside.txt");
+    fs.writeFileSync(outside, "keep me");
+    fs.symlinkSync(outside, path.join(dir, RECAP_FILE));
+    const svg = recapSvg(RECAP);
+    assert.equal(writeRecap(dir, svg), path.join(dir, RECAP_FILE));
+    assert.equal(fs.readFileSync(outside, "utf8"), "keep me", "the file the link pointed at is untouched");
+    assert.ok(fs.lstatSync(path.join(dir, RECAP_FILE)).isFile(), "the link was replaced by the picture");
+    assert.equal(fs.readFileSync(path.join(dir, RECAP_FILE), "utf8"), svg);
+    // A .scenescout that is itself a link to another folder is refused, writing nothing there.
+    const elsewhere = path.join(root, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    const linked = path.join(root, "linked");
+    fs.mkdirSync(linked);
+    fs.symlinkSync(elsewhere, path.join(linked, ".scenescout"));
+    assert.throws(() => writeRecap(path.join(linked, ".scenescout"), svg), /link/);
+    assert.deepEqual(fs.readdirSync(elsewhere), []);
+    // Only a project's .scenescout folder; one not there yet is made.
+    assert.throws(() => writeRecap(project, svg), /\.scenescout/);
+    const fresh = path.join(root, "fresh", ".scenescout");
+    fs.mkdirSync(path.dirname(fresh));
+    assert.equal(writeRecap(fresh, svg), path.join(fresh, RECAP_FILE));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
