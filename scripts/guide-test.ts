@@ -1060,6 +1060,42 @@ test("the Safety model page gives the safety explainer word for word, as the pan
   assert.deepEqual(quoted, [...SAFETY_EXPLAINER], "the section's quote is the explainer, paragraph for paragraph, and nothing more");
 });
 
+test("the Safety model's guarantee table names modules and functions the code has", () => {
+  const page = pages.get("Safety-model.md")!;
+  const found = tables(section(page, "## What is a guarantee and what is best effort")).tables;
+  const byMode = found.find((t) => t.header[0] === "Request");
+  assert.deepEqual(byMode?.header, ["Request", "`observe`", "`read-only`", "`safe-write`", "`destructive`"], "one column per mode");
+  const guarantees = found.find((t) => t.header[0] === "Protection");
+  assert.deepEqual(guarantees?.header, ["Protection", "Kind", "Where it acts", "Module"]);
+  const kinds = guarantees!.rows.map((r) => r[1]);
+  for (const [i, kind] of kinds.entries()) assert.match(kind, /^(?:Guarantee|Best effort)\b/, `${guarantees!.rows[i][0]}: a guarantee or best effort`);
+  assert.ok(kinds.some((k) => k.startsWith("Guarantee")) && kinds.some((k) => k.startsWith("Best effort")), "it separates guarantees from best effort");
+  const missing: string[] = [];
+  for (const row of guarantees!.rows) {
+    // `file.ts` (`name`, `name`), ...: each file is in src/ or src/engine/, and each name is exported by one of the row's files.
+    const files = [...row[3].matchAll(/`([\w-]+\.ts)`/g)].map((m) => m[1]);
+    assert.ok(files.length > 0, `${row[0]}: names a module`);
+    const sources = files.map((f) => {
+      const at = [`src/engine/${f}`, `src/${f}`].find((p) => fs.existsSync(path.join(REPO, p)));
+      if (!at) missing.push(`${row[0]}: ${f}`);
+      return at ? read(at) : "";
+    });
+    for (const m of row[3].matchAll(/\(([^)]*)\)/g))
+      for (const name of [...m[1].matchAll(/`(\w+)`/g)].map((n) => n[1]))
+        if (!sources.some((src) => new RegExp(`export (?:async )?(?:function|const|class) ${name}\\b`).test(src))) missing.push(`${row[0]}: ${name}`);
+  }
+  assert.deepEqual(missing, [], "every module and function the table cites exists");
+});
+
+test("the Safety model's mode table gives the skill's arguments as skill arguments, not command options", () => {
+  const rows = tableIn(pages.get("Safety-model.md")!, "## The four modes");
+  for (const row of rows) {
+    assert.doesNotMatch(row[1], /`--(?:observe|read-only|safe-write)`/, `${row[0]}: a skill argument is not a scenescout option`);
+    if (row[1].includes("--allow-destructive"))
+      assert.match(row[1], /`--mode destructive --allow-destructive`/, `${row[0]}: the switch only beside --mode destructive`);
+  }
+});
+
 test("the suite is wired into npm test and listed in AGENTS.md", () => {
   const pkg = JSON.parse(read("package.json")) as { scripts: Record<string, string> };
   assert.equal(pkg.scripts["guide-test"], "tsx --test scripts/guide-test.ts");
