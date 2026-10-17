@@ -1584,6 +1584,34 @@ test("a redaction announces itself and keeps the matched scheme", () => {
   assert.ok(/\[1 secret redacted\]/.test(out), `the edit is disclosed: ${out}`);
 });
 
+test("a rejected name=value match does not hide the next secret's name (#619)", () => {
+  // "secret" after the colon is a word about the field, so the first match is refused; the scan resumes right
+  // after the first name, finds "secret ＝…" and masks its value. Each pair differs in the one fact that flips it.
+  const hidden = redactSecrets("password\t:secret ＝Abc123def456xyz");
+  assert.ok(!hidden.includes("Abc123def456xyz"), `the second secret's value is masked: ${hidden}`);
+  assert.ok(hidden.includes("password\t:secret ＝[redacted]"), `and both names are kept: ${hidden}`);
+  assert.ok(!redactSecrets("password: token = Abc123def456xyz").includes("Abc123def456xyz"));
+  assert.ok(!redactSecrets("token: password;token=Abc123def456xyz").includes("Abc123def456xyz"));
+  // The same words with no value after the second name have nothing to hide and stay as written.
+  assert.equal(redactSecrets("password\t:secret ＝required"), "password\t:secret ＝required");
+  assert.equal(redactSecrets("Password: required. Token: missing after refresh"), "Password: required. Token: missing after refresh");
+});
+
+test("a Basic or Bearer token does not stop inside a card number (#619)", () => {
+  // The token run "============4111" holds the card's first group; read to its end it would leave 12 digits in clear.
+  for (const scheme of ["Basic", "Bearer"]) {
+    const cut = redactSecrets(`${scheme} ============4111 1111 1111 1111`);
+    assert.ok(!/1111/.test(cut), `no group of the card is left: ${cut}`);
+    assert.ok(cut.includes(`${scheme} [redacted]`), `the token is masked: ${cut}`);
+    const dashed = redactSecrets(`${scheme} ============5500-0000-0000-0004`);
+    assert.ok(!/0000/.test(dashed), `${dashed}`);
+  }
+  // Not a card (the groups fail the Luhn check), so the token ends where its run does and the rest stays.
+  assert.equal(redactSecrets("Basic ============4111 1111 1111 1112"), "Basic [redacted] 1111 1111 1112 [1 secret redacted]");
+  // A token followed by a digit group that is not part of any card number is cut where its run ends.
+  assert.equal(redactSecrets("Bearer abcdefgh12345678 42 items"), "Bearer [redacted] 42 items [1 secret redacted]");
+});
+
 test("every redaction pattern reads a crafted 1 MB text in linear time (#610)", async () => {
   // Each text is shaped to make one pattern backtrack. On JavaScript's engine six of them did not finish in a
   // minute: the name=value rule's spaces and its full stops, a long parameter name or field label, and a field
