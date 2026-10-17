@@ -1,6 +1,6 @@
 # 7. The live view is local, read-only, and leaves nothing behind
 
-Status: accepted — the disk rule is amended by [ADR 8](0008-a-recorded-run-is-evidence-and-must-be-asked-for.md)
+Status: accepted — the disk rule is amended by [ADR 8](0008-a-recorded-run-is-evidence-and-must-be-asked-for.md); frames of recent steps are held in memory by [ADR 30](0030-the-live-view-holds-recent-step-frames-in-memory.md)
 
 ## Context
 
