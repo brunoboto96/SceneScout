@@ -64,6 +64,9 @@ function runCli(args: string[]): Promise<{ status: number | null; out: string }>
 
 export async function run(): Promise<void> {
   let variant: "before" | "after" = "before";
+  // Loads of /once.html still to answer with the other variant before going back to `variant`: one load drawn
+  // differently, as a renderer now and then draws a page's text a pixel off for the whole of one load.
+  let oddLoads = 0;
   const server = http.createServer((req, res) => {
     const at = (req.url ?? "/").split("?")[0];
     // A page behind a sign-in wall, as an expired session finds it.
@@ -82,13 +85,16 @@ export async function run(): Promise<void> {
       req.socket.destroy();
       return;
     }
-    if (at !== "/card.html") {
+    if (at !== "/card.html" && at !== "/once.html") {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end("not found");
       return;
     }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    res.end(fs.readFileSync(path.join(variantsDir, variant, "card.html")));
+    const odd = at === "/once.html" && oddLoads > 0;
+    if (odd) oddLoads -= 1;
+    const served = odd ? (variant === "before" ? "after" : "before") : variant;
+    res.end(fs.readFileSync(path.join(variantsDir, served, "card.html")));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -178,6 +184,26 @@ export async function run(): Promise<void> {
       `${same.status} ${JSON.stringify(same.results)}\n${same.out.slice(-600)}`,
     );
     check("...and writes no pictures", !fs.existsSync(path.join(same.dir, "visual")));
+
+    // The page's first load drawn differently, every later one as before: the difference does not repeat on a fresh load.
+    // At a path only the baseline loads, so the check's own visit of /card.html does not use up the odd load.
+    const onceDir = path.join(work, "once-baselines");
+    fs.mkdirSync(onceDir);
+    fs.writeFileSync(path.join(onceDir, "targets.json"), JSON.stringify({ targets: [{ path: "/once.html" }] }));
+    await checkWith("update", "once-taken", onceDir);
+    oddLoads = 1;
+    const once = await checkWith("compare", "once", onceDir);
+    check(
+      "a page drawn differently on one load only is taken again from a fresh load, matches at 0%, and the gate passes",
+      once.status === 0 &&
+        oddLoads === 0 &&
+        once.results.length === 1 &&
+        once.results[0].status === "matches" &&
+        once.results[0].diff?.percent === 0 &&
+        /baseline page on \/once\.html: the first picture was [\d.]+% different; taken again from a fresh load/.test(once.out) &&
+        !fs.existsSync(path.join(once.dir, "visual")),
+      `${once.status} ${oddLoads} ${JSON.stringify(once.results)}\n${once.out.slice(-800)}`,
+    );
 
     variant = "after";
     const restyled = await checkWith("compare", "restyled");

@@ -16,6 +16,7 @@ import {
   defaultBaselinesDir,
   elementTarget,
   isVisualPicture,
+  confirmedPicture,
   judgeBaseline,
   missingTargetsMessage,
   parseBaselineTargets,
@@ -544,12 +545,20 @@ function shownDir(dir: string, projectDir: string): string {
   return rel.startsWith("..") || path.isAbsolute(rel) ? dir : rel.split(path.sep).join("/");
 }
 
+/** A baseline target's picture could not be taken: the target's result, with the reason, not the check's failure. */
+class NotCaptured extends Error {
+  constructor(readonly why: string) {
+    super(why);
+  }
+}
+
 /**
  * --baseline compare|update: take each target's picture, judge it against its
  * stored baseline (baseline.ts), and write what the judgement says to write: a
  * new baseline under update, and under compare the baseline, the picture now
  * and the changed pixels of a target that changed, beside the report. A page
- * load per target, so no picture depends on the one taken before it.
+ * load per picture, so no picture depends on the one taken before it, and a
+ * second load for a target whose first picture differs (confirmedPicture).
  */
 async function takeBaselines(
   engine: BrowserEngine,
@@ -579,29 +588,39 @@ async function takeBaselines(
       const element = elementTarget(target.element);
       // parseBaselineTargets refuses such an element; one reaching here must not be pictured as the whole page instead.
       if (element === undefined) throw new Error(`baseline target ${shown} names neither the page nor an element`);
-      let shot: Awaited<ReturnType<BrowserEngine["captureForBaseline"]>>;
-      let image: RgbaImage;
-      try {
-        shot = await engine.captureForBaseline(target.path, element, BASELINE_CAPTURE);
-        image = decodePng(shot.png);
-      } catch (err) {
-        // A closed browser, or a mistake in this code, is the check's failure, never the app's: the check ends "could not run".
-        if (!engine.alive || err instanceof TypeError || err instanceof ReferenceError || err instanceof RangeError) throw err;
-        const why = firstLineOf(err);
-        results.push({ ...own, status: "not-captured", detail: why });
-        log(`  baseline ${shown}: not captured (${why})`);
-        continue;
-      }
-      const capture = { ...BASELINE_CAPTURE, viewport: shot.viewport, deviceScaleFactor: shot.deviceScaleFactor };
       const storedPng = readIfThere(at(dir, files.png));
       const storedJson = readIfThere(at(dir, files.json));
       const stored = readStoredBaseline(target, engineName, storedPng, storedJson === null ? null : storedJson.toString("utf8"));
-      const { diffImage, ...verdict } = judgeBaseline({
-        mode,
-        threshold: options.baselineThreshold,
-        stored,
-        now: { capture, platform: process.platform, image },
+      const take = async () => {
+        try {
+          const shot = await engine.captureForBaseline(target.path, element, BASELINE_CAPTURE);
+          return { shot, image: decodePng(shot.png) };
+        } catch (err) {
+          // A closed browser, or a mistake in this code, is the check's failure, never the app's: the check ends "could not run".
+          if (!engine.alive || err instanceof TypeError || err instanceof ReferenceError || err instanceof RangeError) throw err;
+          throw new NotCaptured(firstLineOf(err));
+        }
+      };
+      const judge = ({ shot, image }: Awaited<ReturnType<typeof take>>) => {
+        const capture = { ...BASELINE_CAPTURE, viewport: shot.viewport, deviceScaleFactor: shot.deviceScaleFactor };
+        return { capture, ...judgeBaseline({ mode, threshold: options.baselineThreshold, stored, now: { capture, platform: process.platform, image } }) };
+      };
+      // A picture that differs from its baseline is taken again from a fresh load, and only a difference that repeats is kept.
+      // Only a picture that could not be taken is the target's result; an error judging it is the check's own.
+      const picture = await confirmedPicture(take, judge).catch((err: unknown) => {
+        if (err instanceof NotCaptured) return err;
+        throw err;
       });
+      if (picture instanceof NotCaptured) {
+        results.push({ ...own, status: "not-captured", detail: picture.why });
+        log(`  baseline ${shown}: not captured (${picture.why})`);
+        continue;
+      }
+      const { shot, image } = picture.shot;
+      const { capture, diffImage, ...verdict } = picture.verdict;
+      if (picture.first?.diff) {
+        log(`  baseline ${shown}: the first picture was ${picture.first.diff.percent}% different; taken again from a fresh load`);
+      }
       const result: BaselineResult = {
         ...own,
         ...verdict,

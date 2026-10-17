@@ -49,6 +49,13 @@ repeatable, and what an unmet one does to the gate.
   pictured where it is inside it, and the result says so. The baseline phase
   runs after the crawl and before saved flows, so a picture is of the page as a
   visit finds it, and the motion setting is put back before the flows run.
+- **A difference is confirmed from a second load.** A picture that differs
+  from a baseline it can be compared with is taken once more from a fresh
+  load, and the second picture is the one judged and reported. Chromium on a
+  slow machine was seen to draw a page's text a pixel off for the whole of one
+  load in a few hundred: the picture holds still, so no stillness check tells
+  it apart, and the next load draws the page as always. A real change shows on
+  both loads, so it still fails the gate; the threshold stays where it was.
 - **An unmet baseline is high, like a broken flow.** A change past
   `--baseline-threshold` (default 0.1%), any change of size, a baseline that
   cannot be used, and a target that could not be pictured are each one
