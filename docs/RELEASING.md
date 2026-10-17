@@ -17,17 +17,30 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
    approval counts as the code-owner review. Its diff is generated and limited
    to the version, the changelog, `plugin.json`, the extension manifest and the
    deleted changeset files.
-4. The workflow runs again on that merge, finds no pending changesets, builds
-   the package from a clean `dist`, publishes it to npm, then pushes the
-   `vX.Y.Z` tag and creates the GitHub Release. The tag and the release are
-   made only once npm has the version, and a version missing from npm is
-   published again by the next run on `main` that finds no pending changesets.
-5. It then builds the Claude Desktop extension bundle from that tag
+4. The workflow runs again on that merge and finds no pending changesets. Its
+   `build` job asks npm whether it has the version in `package.json`. When npm
+   does not, it builds the package from a clean `dist` and packs the tarball
+   once; the `publish` job, which checks nothing out and runs none of this
+   repository's code, sends that tarball to npm with provenance, under
+   `latest` (or the prerelease tag while `.changeset/pre.json` exists). Only
+   then does the `release` job push the `vX.Y.Z` tag (`changeset git-tag`),
+   create the GitHub Release from the version's `CHANGELOG.md` section and
+   move the `v3` major tag. A version missing from npm is published by the
+   next run on `main`, whatever tags exist. [ADR 27](adr/0027-the-job-that-publishes-to-npm-runs-no-repository-code.md)
+   records why.
+5. After the release, it builds the Claude Desktop extension bundle from that tag
    (`npm run build && npm run mcpb`, which writes `.mcpb-build/scenescout-X.Y.Z.mcpb`),
    checks its manifest against the MCPB schema, and attaches it to the release
    with a `SHA256SUMS` file. A build provenance attestation for the bundle is
    recorded too: check a download with `gh attestation verify <file> --repo brunoboto96/SceneScout`.
    The manifest follows the MCPB `manifest.json` format, manifest version 0.3.
+
+```text
+gate ─► version ─► build ─► publish ─► release ─┬─► publish-guide
+           │       (pack)   (npm,      (tag,     └─► desktop-extension ─┬─► attach-desktop-extension
+           │                id-token)  Release,                         └─► attest-desktop-extension
+           └─► test-version-pr          v3)
+```
 
 Nothing is published while the repository variable `NPM_PUBLISH` is anything
 other than `enabled`. The version pull request is still opened and kept up to
@@ -50,6 +63,35 @@ sed -i.bak -E 's#(brunoboto96/SceneScout(/[A-Za-z0-9_-]+)?)@v[0-9]+\.[0-9]+\.[0-
 or a release newer than `package.json`; `install-test` fails when an example
 pins a third-party action to a different commit than this repository's own
 workflows.
+
+## Rehearsing a release
+
+Before relying on a change to the release workflow, run it once without
+publishing: Actions → **release** → **Run workflow** on `main`, with
+**dry-run** ticked (the default). Or:
+
+```bash
+gh workflow run release.yml --ref main -f dry-run=true
+```
+
+Every job runs against the version already in `package.json`:
+
+- `version` is skipped, so the Version Packages pull request is left alone.
+- `build` builds and packs the tarball, whatever npm has.
+- `publish` runs `npm publish <tarball> --provenance --dry-run --force`. A dry
+  run sends nothing; `--force` only skips npm's refusal to publish over a
+  version it already has. npm still exchanges the job's OIDC token, and the
+  step fails if npm then reports it is not logged in, so a green rehearsal
+  means the trusted publisher accepts this workflow.
+- `release` runs `changeset git-tag` in the runner and pushes, creates and moves
+  nothing.
+- `desktop-extension` builds and validates the `.mcpb` from the commit;
+  attaching, attesting and the wiki publish are skipped.
+
+What a rehearsal cannot show: npm accepting the upload itself and recording
+its provenance, the tag push, and the GitHub Release. Those run only on a real
+release. A run by hand with **dry-run** unticked is a real release run, as on a
+push to `main`; runs by hand on any other branch do nothing.
 
 ## Skipping a release run
 
@@ -106,9 +148,12 @@ Two repository settings the workflow depends on are already in place:
 
 ## If a publish fails half-way
 
-`changeset publish` skips versions that are already on npm, so re-running the
-workflow is safe. If npm has the version but the tag or GitHub Release is
-missing, create them by hand from the release commit:
+Whether to publish is decided by what npm has, so a run that failed before or
+during `npm publish` is finished by the next run on `main` (or by re-running
+the workflow). If npm has the version but the tag or GitHub Release is
+missing, re-run the failed `release` job: it skips a tag and a release that
+already exist. Once a later run has started, create them by hand from the
+release commit:
 
 ```bash
 git tag vX.Y.Z <commit> && git push origin vX.Y.Z

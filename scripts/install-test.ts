@@ -47,6 +47,7 @@ import {
 } from "../src/installer.ts";
 import { atLeastVersion, downloadEnv, installerFailure } from "../src/installer.ts";
 import { parse as parseYaml } from "yaml";
+import { distTagFor, parseVersions, releasePlan } from "./release-plan.mjs";
 import {
   attachDownloadLine,
   BROWSER_DOWNLOAD_ENV,
@@ -803,9 +804,10 @@ test("the bundle build ships what the server reads at runtime, and the release a
   const wf = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8")) as { jobs: Record<string, Job> };
   const build = wf.jobs["desktop-extension"];
   assert.ok(build, "release.yml builds the bundle");
-  assert.equal(build.if, "needs.release.outputs.published == 'true' && needs.release.outputs.tag != ''", "only for a release that was published");
+  assert.equal(build.needs, "release", "only for a version npm has: the release job runs after the publish");
+  assert.match(build.if ?? "", /needs\.release\.outputs\.ref != ''/, "and only when it handed on what to build");
   assert.deepEqual(build.permissions, { contents: "read" }, "the job that runs repository code can change nothing");
-  assert.equal(build.steps.find((s) => s.uses?.startsWith("actions/checkout"))?.with?.ref, "${{ needs.release.outputs.tag }}", "built from the release's tag");
+  assert.equal(build.steps.find((s) => s.uses?.startsWith("actions/checkout"))?.with?.ref, "${{ needs.release.outputs.ref }}", "built from the release's tag");
   assert.ok(build.steps.some((s) => s.run === "npm run mcpb"));
   assert.ok(
     build.steps.some((s) => /npx -y @anthropic-ai\/mcpb@\d+\.\d+\.\d+ validate/.test(s.run ?? "")),
@@ -2702,31 +2704,160 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
   }
 });
 
-test("release: npm publishes before the version is tagged, and the bundle ships with a checksum and an attestation", () => {
-  type Step = { uses?: string; run?: string; with?: Record<string, string | boolean>; id?: string };
-  type Job = { needs?: string | string[]; if?: string; permissions?: Record<string, string>; steps: Step[] };
-  const wf = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8")) as { jobs: Record<string, Job> };
-  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
-  // `changeset publish` publishes what npm does not have yet and only then tags it, so the
-  // vX.Y.Z tag, the GitHub Release and the major tag (which the actions install from npm by)
-  // never name a version npm lacks, and a version a failed run left unpublished is published
-  // by the next run. A job that tags first and publishes later keeps neither.
-  const release = wf.jobs.release;
-  const changesets = release.steps.find((s) => s.id === "changesets");
-  assert.match(String(changesets?.with?.["publish-script"]), /'npm run release'/, "the release action publishes with npm run release");
-  assert.match(pkg.scripts.release, /^npm run build && changeset publish$/, "which builds, then publishes and tags in one command");
-  assert.equal(release.permissions?.["id-token"], "write", "so the job that publishes is the one that mints the npm token");
+type ReleaseStep = {
+  uses?: string;
+  run?: string;
+  with?: Record<string, string | boolean>;
+  id?: string;
+  if?: string;
+  env?: Record<string, string>;
+  name?: string;
+};
+type ReleaseJob = { needs?: string | string[]; if?: string; permissions?: Record<string, string>; outputs?: Record<string, string>; steps: ReleaseStep[] };
+function releaseWorkflow(): { on: Record<string, any>; jobs: Record<string, ReleaseJob> } {
+  return parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "release.yml"), "utf8"));
+}
+const needsOf = (job: ReleaseJob): string[] => (job.needs === undefined ? [] : Array.isArray(job.needs) ? job.needs : [job.needs]);
+/** A `run:` that executes this repository's code or its installed dependencies. */
+const RUNS_REPO_CODE = /\b(node|npx|tsx|bash|sh)\b|\bnpm (run|ci|exec|test|start|pack|rebuild|x)\b|\.\/(?!package\/scenescout-)|scripts\//;
+
+test("release: the job that can mint the npm token checks nothing out, installs nothing and runs no repository code", () => {
+  const wf = releaseWorkflow();
   const holders = Object.entries(wf.jobs)
     .filter(([, j]) => j.permissions?.["id-token"] === "write")
     .map(([name]) => name)
     .sort();
-  assert.deepEqual(holders, ["attest-desktop-extension", "release"], "and only it and the attestation job can");
-  for (const [name, job] of Object.entries(wf.jobs)) {
-    if (name === "release") continue;
-    for (const s of job.steps)
-      assert.ok(!/\bnpm publish\b|\bchangeset (git-)?tag\b/.test(s.run ?? ""), `${name} neither publishes nor tags apart from the release`);
+  // The attestation job holds it too, to sign the bundle; it only downloads the file and runs one GitHub action.
+  assert.deepEqual(holders, ["attest-desktop-extension", "publish"], "only the publish and attestation jobs can mint a token");
+  for (const name of holders) {
+    const job = wf.jobs[name];
+    assert.ok(!job.steps.some((s) => s.uses?.startsWith("actions/checkout")), `${name}: no checkout`);
+    for (const s of job.steps.filter((s) => s.run)) {
+      const code = s
+        .run!.split("\n")
+        .filter((l) => !/^\s*#/.test(l))
+        .join("\n")
+        .replace(/npm install -g npm@\d+\.\d+\.\d+ --ignore-scripts/g, "")
+        .replace(/\bnpm publish "\$tarball"/g, "");
+      assert.doesNotMatch(code, RUNS_REPO_CODE, `${name} runs repository code:\n${s.run}`);
+      assert.ok(!s.run!.includes("${{"), `${name}: an expression is substituted into a script:\n${s.run}`);
+    }
   }
+  // The rule's own contrast: the build job that packs the tarball does run repository code, and is caught.
+  assert.match(wf.jobs.build.steps.map((s) => s.run ?? "").join("\n"), RUNS_REPO_CODE);
 
+  const publish = wf.jobs.publish;
+  assert.deepEqual(publish.permissions, { contents: "read", "id-token": "write" });
+  assert.deepEqual(
+    publish.steps.map((s) => s.uses?.split("@")[0] ?? "run"),
+    ["actions/setup-node", "run", "actions/download-artifact", "run"],
+    "set up Node, pin npm, download the tarball, publish it",
+  );
+  assert.equal(publish.steps[0].with?.["registry-url"], undefined, "an .npmrc expecting NODE_AUTH_TOKEN would stop trusted publishing");
+  assert.equal(publish.steps[0].with?.cache, undefined, "a cache reads a lockfile from a checkout this job does not have");
+  assert.equal(publish.steps[2].with?.name, "npm-package");
+  const script = publish.steps[3].run!;
+  assert.match(script, /tarball="\.\/package\/scenescout-\$VERSION\.tgz"/, 'a leading ./, or npm reads "package/x.tgz" as a GitHub repository');
+  const publishes = script.split("\n").filter((l) => /\bnpm publish\b/.test(l));
+  assert.equal(publishes.length, 2, "the real publish and the rehearsal");
+  for (const line of publishes) {
+    assert.match(line, /npm publish "\$tarball" --provenance --access public --tag "\$DIST_TAG" --ignore-scripts/, line);
+    // --force only skips npm's refusal to publish over a version it has; it never goes on a publish that sends.
+    if (/--force\b/.test(line)) assert.match(line, /--dry-run\b/, line);
+  }
+  assert.equal(publish.steps[3].env?.DIST_TAG, "${{ needs.build.outputs.dist-tag }}");
+  assert.equal(publish.steps[3].env?.DRY_RUN, "${{ needs.build.outputs.dry-run }}");
+});
+
+test("release: npm's answer decides the publish, the tarball is packed once, and the tag and release follow the publish", () => {
+  const wf = releaseWorkflow();
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
+  assert.equal(pkg.scripts.release, undefined, "no script publishes from a folder any more");
+
+  // The version job only versions: the action publishes nothing and creates no release.
+  const version = wf.jobs.version;
+  assert.deepEqual(version.permissions, { contents: "write", "pull-requests": "write" });
+  const changesets = version.steps.find((s) => s.id === "changesets");
+  assert.match(changesets?.uses ?? "", /^changesets\/action@[0-9a-f]{40}$/);
+  assert.equal(changesets?.with?.["publish-script"], undefined, "the action never publishes");
+  assert.equal(String(changesets?.with?.["create-github-releases"]), "false", "the release job creates the GitHub Release");
+
+  // Build: decided by npm, not by a git tag; packed into a folder made first.
+  const build = wf.jobs.build;
+  assert.deepEqual(build.permissions, { contents: "read" });
+  assert.match(build.if ?? "", /needs\.version\.outputs\.has-changesets == 'false'/, "only once the version pull request has been merged");
+  assert.match(build.if ?? "", /needs\.gate\.outputs\.dry-run == 'true'/, "or for a rehearsal");
+  const plan = build.steps.find((s) => s.id === "plan");
+  assert.equal(plan?.run, "node scripts/release-plan.mjs");
+  assert.equal(plan?.env?.NPM_PUBLISH, "${{ vars.NPM_PUBLISH }}");
+  for (const name of ["gate", "version", "build"])
+    for (const s of wf.jobs[name].steps)
+      assert.doesNotMatch(s.run ?? "", /\bgit (tag|rev-parse|ls-remote)\b|refs\/tags/, `${name} decides nothing by a git tag`);
+  const pack = build.steps.find((s) => /\bnpm pack\b/.test(s.run ?? ""));
+  assert.ok(pack?.run, "the build packs the tarball");
+  const lines = pack.run.split("\n");
+  const mkdir = lines.findIndex((l) => /^mkdir -p package$/.test(l.trim()));
+  const packLine = lines.findIndex((l) => /^npm pack --ignore-scripts --pack-destination package$/.test(l.trim()));
+  assert.ok(mkdir >= 0 && packLine > mkdir, "npm pack does not create its destination, so the folder is made first");
+  const upload = build.steps.find((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""));
+  assert.equal(upload?.with?.name, "npm-package");
+  assert.equal(upload?.with?.path, "package/scenescout-${{ steps.plan.outputs.version }}.tgz");
+  const packs = Object.entries(wf.jobs).filter(([, j]) => j.steps.some((s) => /\bnpm pack\b/.test(s.run ?? "")));
+  assert.deepEqual(
+    packs.map(([n]) => n),
+    ["build"],
+    "packed once",
+  );
+
+  // Publishing, tagging and releasing each happen in one job, and nothing uses the old commands.
+  const holding = (re: RegExp) =>
+    Object.entries(wf.jobs)
+      .filter(([, j]) => j.steps.some((s) => re.test(s.run ?? "")))
+      .map(([n]) => n);
+  assert.deepEqual(holding(/\bnpm publish\b/), ["publish"]);
+  assert.deepEqual(holding(/\bchangeset git-tag\b/), ["release"]);
+  assert.deepEqual(holding(/\bgh release create\b/), ["release"]);
+  assert.deepEqual(holding(/\bgit push\b/), ["release"]);
+  assert.deepEqual(
+    holding(/\bchangeset (publish|tag)\b|npm run release\b/),
+    [],
+    "changeset tag is deprecated, and changeset publish publishes from a job with a checkout",
+  );
+
+  // Everything that names the version comes after npm has it: each such job needs publish, directly or not.
+  const reaches = (from: string, target: string): boolean => needsOf(wf.jobs[from]).some((n) => n === target || reaches(n, target));
+  for (const name of ["release", "publish-guide", "desktop-extension", "attach-desktop-extension", "attest-desktop-extension"])
+    assert.ok(reaches(name, "publish"), `${name} runs only after the publish`);
+  const release = wf.jobs.release;
+  assert.deepEqual(release.permissions, { contents: "write" });
+  assert.match(release.if ?? "", /needs\.publish\.result == 'success'/);
+  const tag = release.steps.find((s) => s.id === "tag")!;
+  assert.match(tag.run!, /npx --no changeset git-tag/);
+  const gh = release.steps.find((s) => /\bgh release create\b/.test(s.run ?? ""))!;
+  assert.equal(gh.if, "steps.tag.outputs.tag != ''", "no release in a rehearsal");
+  assert.match(gh.run!, /gh release create "\$TAG" --verify-tag --title "\$TAG" --notes-file notes\.md "\$\{prerelease\[@\]\}"/);
+  assert.equal(release.steps.find((s) => s.name === "Point the major tag at this release")?.if, "steps.tag.outputs.tag != ''");
+  for (const name of ["publish-guide", "attach-desktop-extension", "attest-desktop-extension"])
+    assert.match(wf.jobs[name].if ?? "", /needs\.release\.outputs\.tag != ''/, `${name} writes nothing in a rehearsal`);
+  assert.equal(wf.jobs["desktop-extension"].steps[0].with?.ref, "${{ needs.release.outputs.ref }}", "the tag, or in a rehearsal the commit");
+
+  // A rehearsal is asked for by hand, and is the default when asked.
+  const input = wf.on.workflow_dispatch?.inputs?.["dry-run"];
+  assert.equal(input?.type, "boolean");
+  assert.equal(input?.default, true);
+  assert.match(
+    String((wf as { concurrency?: { group?: string } }).concurrency?.group),
+    /inputs\.dry-run && 'release-rehearsal' \|\| 'release'/,
+    "a rehearsal never displaces a release run",
+  );
+  assert.match(wf.jobs.gate.if ?? "", /github\.ref == 'refs\/heads\/main'/, "and only on main: trusted publishing names the workflow file, not the branch");
+  assert.match(version.if ?? "", /needs\.gate\.outputs\.dry-run != 'true'/, "a rehearsal opens no version pull request");
+
+  // The actions this repository allows: GitHub's own and changesets/action.
+  for (const job of Object.values(wf.jobs))
+    for (const s of job.steps.filter((s) => s.uses)) assert.match(s.uses!, /^(actions\/[\w-]+|changesets\/action)@[0-9a-f]{40}$/, s.uses);
+
+  // The bundle ships with a checksum and an attestation.
   const attach = wf.jobs["attach-desktop-extension"];
   assert.ok(
     attach.steps.some((s) => /sha256sum \*\.mcpb > SHA256SUMS/.test(s.run ?? "")),
@@ -2742,6 +2873,113 @@ test("release: npm publishes before the version is tagged, and the bundle ships 
   assert.ok(step, "the bundle is attested by an action pinned by commit");
   assert.equal(step.with?.["subject-path"], "*.mcpb");
   assert.ok(!attest.steps.some((s) => s.uses?.startsWith("actions/checkout") || s.run), "and runs no repository code");
+});
+
+/** Runs one release.yml step's script under bash with `git`, `npx` and `npm` replaced by functions that log their arguments. */
+function runReleaseStep(job: string, pick: (s: ReleaseStep) => boolean, env: Record<string, string>, opts: { npmPrints?: string; tarball?: string } = {}) {
+  const dir = tmp("sc-release-step-");
+  if (opts.tarball) {
+    fs.mkdirSync(path.join(dir, "package"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "package", opts.tarball), "");
+  }
+  const script = releaseWorkflow().jobs[job].steps.find(pick)!.run!;
+  const log = path.join(dir, "calls.log");
+  const out = path.join(dir, "output");
+  fs.writeFileSync(out, "");
+  const stubs = [
+    `git() { echo "git $*" >> "$CALLS"; case "$1" in rev-parse) [ "$2" = "--verify" ] || echo "\${TAGGED_SHA:-$GITHUB_SHA}";; esac; return 0; }`,
+    `npx() { echo "npx $*" >> "$CALLS"; }`,
+    `npm() { echo "npm $*" >> "$CALLS"; printf '%s\\n' "$NPM_PRINTS"; }`,
+  ].join("\n");
+  const r = execFileSyncSafe("bash", ["-eo", "pipefail", "-c", `${stubs}\n${script}`], {
+    cwd: dir,
+    env: {
+      PATH: process.env.PATH ?? "",
+      CALLS: log,
+      GITHUB_OUTPUT: out,
+      GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
+      NPM_PRINTS: opts.npmPrints ?? "",
+      ...env,
+    },
+  });
+  const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8") : "";
+  return { status: r.status, calls, output: fs.readFileSync(out, "utf8") };
+}
+function execFileSyncSafe(cmd: string, args: string[], opts: { cwd: string; env: Record<string, string> }): { status: number } {
+  try {
+    execFileSync(cmd, args, { ...opts, stdio: "pipe" });
+    return { status: 0 };
+  } catch (err) {
+    return { status: (err as { status?: number }).status ?? -1 };
+  }
+}
+
+test("release: a rehearsal tags in the runner and pushes nothing; a real run pushes the tag and hands it on", () => {
+  const isTag = (s: ReleaseStep) => s.id === "tag";
+  const real = runReleaseStep("release", isTag, { VERSION: "1.2.3", DRY_RUN: "false" });
+  assert.equal(real.status, 0);
+  assert.match(real.calls, /^npx --no changeset git-tag$/m);
+  assert.match(real.calls, /^git push origin refs\/tags\/v1\.2\.3$/m);
+  assert.match(real.output, /^tag=v1\.2\.3$/m);
+  assert.match(real.output, /^ref=v1\.2\.3$/m);
+  const rehearsal = runReleaseStep("release", isTag, { VERSION: "1.2.3", DRY_RUN: "true" });
+  assert.equal(rehearsal.status, 0);
+  assert.match(rehearsal.calls, /^npx --no changeset git-tag$/m, "the rehearsal runs changeset git-tag too");
+  assert.doesNotMatch(rehearsal.calls, /git push/);
+  assert.doesNotMatch(rehearsal.output, /^tag=/m, "so no later job tags, releases, attaches or attests");
+  assert.match(rehearsal.output, /^ref=0123456789abcdef0123456789abcdef01234567$/m, "the bundle is built from the commit");
+  // A tag that already names another commit: npm has this commit's version, so the run stops rather than push or release.
+  const elsewhere = runReleaseStep("release", isTag, { VERSION: "1.2.3", DRY_RUN: "false", TAGGED_SHA: "fedcba9876543210fedcba9876543210fedcba98" });
+  assert.equal(elsewhere.status, 1);
+  assert.doesNotMatch(elsewhere.calls, /git push/);
+  assert.equal(elsewhere.output, "");
+});
+
+test("release: the publish step sends the tarball under its dist-tag, and a rehearsal fails when npm took no OIDC token", () => {
+  const isPublish = (s: ReleaseStep) => s.name === "Publish to npm";
+  const run = (env: Record<string, string>, npmPrints = "", tarball: string | null = "scenescout-1.2.3.tgz") =>
+    runReleaseStep("publish", isPublish, env, { npmPrints, tarball: tarball ?? undefined });
+  // No tarball downloaded: refused before npm runs.
+  const missing = run({ VERSION: "1.2.3", DIST_TAG: "latest", DRY_RUN: "false" }, "", null);
+  assert.notEqual(missing.status, 0);
+  assert.equal(missing.calls, "");
+  const real = run({ VERSION: "1.2.3", DIST_TAG: "next", DRY_RUN: "false" });
+  assert.equal(real.status, 0);
+  assert.equal(real.calls.trim(), "npm publish ./package/scenescout-1.2.3.tgz --provenance --access public --tag next --ignore-scripts");
+  const rehearsal = run({ VERSION: "1.2.3", DIST_TAG: "latest", DRY_RUN: "true" }, "+ scenescout@1.2.3");
+  assert.equal(rehearsal.status, 0);
+  assert.equal(
+    rehearsal.calls.trim(),
+    "npm publish ./package/scenescout-1.2.3.tgz --provenance --access public --tag latest --ignore-scripts --dry-run --force",
+  );
+  // npm's own words when it holds no token: a dry run only warns, so the step turns the warning into a failure.
+  const noToken = run(
+    { VERSION: "1.2.3", DIST_TAG: "latest", DRY_RUN: "true" },
+    "npm warn This command requires you to be logged in to https://registry.npmjs.org/ (dry-run)",
+  );
+  assert.equal(noToken.status, 1);
+});
+
+test("release plan: publish exactly when npm lacks the version, under the tag changeset publish would use", () => {
+  const base = { version: "1.2.3", published: ["1.2.2"], preState: null, dryRun: false, publishEnabled: true };
+  // Each pair differs in one fact.
+  assert.equal(releasePlan(base).publish, true, "npm lacks 1.2.3");
+  assert.equal(releasePlan({ ...base, published: ["1.2.2", "1.2.3"] }).publish, false, "npm has 1.2.3");
+  assert.equal(releasePlan({ ...base, publishEnabled: false }).publish, false, "NPM_PUBLISH is off");
+  assert.equal(releasePlan({ ...base, published: ["1.2.3"], dryRun: true }).publish, true, "a rehearsal always reaches npm publish --dry-run");
+  assert.equal(releasePlan({ ...base, publishEnabled: false, dryRun: true }).publish, true, "even with NPM_PUBLISH off, since it sends nothing");
+  assert.equal(releasePlan(base).distTag, "latest");
+  assert.equal(releasePlan({ ...base, version: "2.0.0-next.0", preState: { tag: "next" } }).distTag, "next", "pre mode publishes to its tag");
+  assert.equal(distTagFor(null), "latest");
+  for (const bad of [undefined, "", "1.2.3", "^1", "a b"]) assert.throws(() => distTagFor({ tag: bad }), /names no usable tag/, String(bad));
+  for (const bad of ["1.2", "v1.2.3", "", "1.2.3 "]) assert.throws(() => releasePlan({ ...base, version: bad }), /not a release version/, bad);
+
+  assert.deepEqual(parseVersions('["1.0.0","1.0.1"]', false), ["1.0.0", "1.0.1"]);
+  assert.deepEqual(parseVersions('"1.0.0"', false), ["1.0.0"], "npm prints a lone version as a string");
+  assert.deepEqual(parseVersions('{"error":{"code":"E404","summary":"Not Found"}}', true), [], "a package npm has never seen");
+  assert.throws(() => parseVersions('{"error":{"code":"ETIMEDOUT","summary":"timed out"}}', true), /ETIMEDOUT/, "anything else stops the run");
+  assert.throws(() => parseVersions("npm error", true), /no JSON/);
+  assert.throws(() => parseVersions("[1]", false), /unexpected/);
 });
 
 test("build: dist is emptied before tsc, so a file deleted from src is not packed", () => {

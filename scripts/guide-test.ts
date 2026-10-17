@@ -726,14 +726,15 @@ test("the wiki workflow: release or by hand, a build job that cannot write, a pu
 
 test("the release workflow dispatches the wiki publish for the exact tag it released, from a job that can do nothing else", () => {
   const wf = readYaml(".github/workflows/release.yml");
-  assert.equal(wf.jobs.release.outputs.published, "${{ steps.changesets.outputs.published }}");
-  assert.equal(wf.jobs.release.outputs.tag, "${{ steps.major.outputs.tag }}");
-  const major = (wf.jobs.release.steps as Array<{ id?: string; run?: string }>).find((s) => s.id === "major");
-  assert.match(major?.run ?? "", /echo "tag=v\$version" >> "\$GITHUB_OUTPUT"/, "the tag is the version just published");
+  assert.equal(wf.jobs.release.outputs.tag, "${{ steps.tag.outputs.tag }}");
+  const tag = (wf.jobs.release.steps as Array<{ id?: string; run?: string }>).find((s) => s.id === "tag");
+  const script = tag?.run ?? "";
+  assert.match(script, /echo "tag=\$tag" >> "\$GITHUB_OUTPUT"/, "the tag is the version just published");
+  assert.ok(script.indexOf('echo "tag=$tag"') > script.indexOf('git push origin "refs/tags/$tag"'), "and is handed on only once it is pushed");
   const job = wf.jobs["publish-guide"];
   assert.ok(job, "release.yml has a publish-guide job");
   assert.equal(job.needs, "release");
-  assert.equal(job.if, "needs.release.outputs.published == 'true' && needs.release.outputs.tag != ''", "only when something was published");
+  assert.equal(job.if, "${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.tag != '' }}", "only when something was released");
   assert.deepEqual(job.permissions, { actions: "write" });
   const steps = job.steps as Array<{ run?: string; uses?: string; env?: Record<string, string> }>;
   assert.ok(!steps.some((s) => s.uses), "no checkout, no action: it only dispatches");
