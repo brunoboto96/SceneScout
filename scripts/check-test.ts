@@ -20,6 +20,7 @@ import {
   browsersPath,
   checkArgs,
   defaultArtifactName,
+  retentionDaysOf,
   engineOf,
   explainError,
   hasCheckCommand,
@@ -1893,6 +1894,19 @@ test("action: each use in a job gets its own artifact name, so a second use does
   assert.equal(defaultArtifactName("ui check/x", 1), "scenescout-check-ui_check_x");
   assert.equal(defaultArtifactName(undefined, 3), "scenescout-check-3");
   assert.equal(defaultInputs()["artifact-name"], "", "a fixed default name collides on the second use");
+});
+
+test("action: artifact-retention-days reaches the upload and is an action input, not a CLI option", () => {
+  const steps = action.runs.steps as Array<{ uses?: string; with?: Record<string, unknown> }>;
+  const upload = steps.find((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""))!;
+  assert.equal(upload.with?.["retention-days"], "${{ steps.resolve.outputs.retention-days }}");
+  assert.equal(defaultInputs()["artifact-retention-days"], "", "the repository's setting unless asked");
+  assert.ok(ACTION_ONLY_INPUTS.includes("artifact-retention-days"));
+  assert.ok(!checkArgs({ ...defaultInputs(), url: "http://127.0.0.1:3000", "artifact-retention-days": "7" }).some((a: string) => a.includes("retention")));
+  assert.equal(retentionDaysOf({}), "");
+  assert.equal(retentionDaysOf({ "artifact-retention-days": " 14 " }), "14");
+  for (const bad of ["0", "91", "-1", "1.5", "7d", "1e1", "abc"])
+    assert.throws(() => retentionDaysOf({ "artifact-retention-days": bad }), /artifact-retention-days/, bad);
 });
 
 test("action: an upload that fails cannot hide the verdict, and a failed gate still saves the browser cache", () => {

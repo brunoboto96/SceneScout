@@ -20,7 +20,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { browsersPath, engineOf, escapeAnnotation, inputsFromEnv, installPackage, installTarget, setOutputs } from "./check-action.mjs";
+import { browsersPath, engineOf, escapeAnnotation, inputsFromEnv, installPackage, installTarget, retentionDaysOf, setOutputs } from "./check-action.mjs";
 
 /** Inputs that configure the action rather than the run. Every other input is a `scenescout ci` option of the same name (ci-test holds the lists equal). */
 export const CI_ACTION_ONLY_INPUTS = [
@@ -33,6 +33,7 @@ export const CI_ACTION_ONLY_INPUTS = [
   "upload-sarif",
   "upload-artifact",
   "artifact-name",
+  "artifact-retention-days",
   "cache",
 ];
 
@@ -137,6 +138,7 @@ function resolve() {
     cli,
     version,
     "artifact-name": String(inputs["artifact-name"] ?? "").trim() || defaultCiArtifactName(process.env.GITHUB_JOB, nextUse()),
+    "retention-days": retentionDaysOf(inputs),
     engine,
     "install-target": installTarget(engine),
     "playwright-version": JSON.parse(fs.readFileSync(playwrightPkg, "utf8")).version,

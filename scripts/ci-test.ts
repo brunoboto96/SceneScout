@@ -21,6 +21,7 @@ import { z } from "zod";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
+import { retentionDaysOf } from "../action/check-action.mjs";
 import { expectedJobs, FULL_CI_LABEL, FULL_CI_PATHS, FULL_PLATFORMS, isDocsPath, plan, PULL_REQUEST_PLATFORMS, verdict } from "./test-plan.mjs";
 import {
   agentLoop,
@@ -1900,6 +1901,44 @@ test("action: findings never fail the step; only a run that could not run does",
   const declared = action.outputs as Record<string, { value: string }>;
   for (const name of ["exit-code", "stop", "high", "medium", "low", "worth-a-look", "turns", "tokens", "estimated-cost", "report", "summary", "json", "sarif"])
     assert.equal(declared[name]?.value, `\${{ steps.run.outputs.${name} }}`, name);
+});
+
+test("action: the upload keeps a fixed list of the run's files, never the whole output folder", () => {
+  const steps = action.runs.steps as Array<{ uses?: string; with?: Record<string, unknown> }>;
+  const upload = steps.find((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""))!;
+  const out = "${{ steps.resolve.outputs.out-dir }}";
+  const paths = String(upload.with?.path)
+    .trim()
+    .split("\n")
+    .map((l) => l.trim());
+  assert.ok(!paths.includes(out), "the folder itself would carry whatever a hidden path beside it holds, such as saved sign-ins");
+  for (const p of paths) assert.ok(p.startsWith(`${out}/`) && !p.includes("*"), `${p} is a named file under the output folder`);
+  assert.deepEqual(paths.map((p) => p.slice(out.length + 1)).sort(), [
+    "ci.json",
+    "ci.sarif",
+    "report.html",
+    "report.md",
+    "shots/base.png",
+    "shots/diff.png",
+    "shots/preview.png",
+    "summary.md",
+  ]);
+  const described = (action.inputs as Record<string, { description: string }>)["upload-artifact"].description;
+  for (const name of ["report.md", "report.html", "summary.md", "ci.json", "ci.sarif", "shots/"])
+    assert.ok(described.includes(name), `the description names ${name}`);
+});
+
+test("action: artifact-retention-days reaches the upload, and only a whole number of 1 to 90 days or nothing is accepted", () => {
+  const steps = action.runs.steps as Array<{ uses?: string; with?: Record<string, unknown> }>;
+  const upload = steps.find((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""))!;
+  assert.equal(upload.with?.["retention-days"], "${{ steps.resolve.outputs.retention-days }}");
+  assert.equal(defaultInputs()["artifact-retention-days"], "", "the repository's setting unless asked");
+  assert.ok(CI_ACTION_ONLY_INPUTS.includes("artifact-retention-days"), "an action input, not a CLI option");
+  assert.ok(!ciArgs({ ...defaultInputs(), url: "http://127.0.0.1:3000", "artifact-retention-days": "7" }).some((a: string) => a.includes("retention")));
+  assert.equal(retentionDaysOf({}), "");
+  assert.equal(retentionDaysOf({ "artifact-retention-days": " 14 " }), "14");
+  for (const bad of ["0", "91", "-1", "1.5", "7d", "1e1", "abc"])
+    assert.throws(() => retentionDaysOf({ "artifact-retention-days": bad }), /artifact-retention-days/, bad);
 });
 
 test("action: third-party steps are pinned by commit, and no input is pasted into a script", () => {

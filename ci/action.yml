@@ -155,11 +155,15 @@ inputs:
     required: false
     default: "true"
   upload-artifact:
-    description: Keep the report, summary.md, ci.json and ci.sarif as a workflow artifact.
+    description: Keep report.md, report.html, summary.md, ci.json and ci.sarif as a workflow artifact, with the pictures in shots/ of a run that was asked to show an element. Nothing else in the output folder is uploaded.
     required: false
     default: "true"
   artifact-name:
     description: The artifact's name. Empty means scenescout-ci-<job id>, with -2, -3 … for later uses in the same job.
+    required: false
+    default: ""
+  artifact-retention-days:
+    description: How many days to keep the artifact, 1 to 90. Empty keeps the repository's setting.
     required: false
     default: ""
   cache:
@@ -319,8 +323,16 @@ runs:
       with:
         name: ${{ steps.resolve.outputs.artifact-name }}
         path: |
-          ${{ steps.resolve.outputs.out-dir }}
+          ${{ steps.resolve.outputs.out-dir }}/report.md
+          ${{ steps.resolve.outputs.out-dir }}/report.html
+          ${{ steps.resolve.outputs.out-dir }}/summary.md
+          ${{ steps.resolve.outputs.out-dir }}/ci.json
+          ${{ steps.resolve.outputs.out-dir }}/ci.sarif
+          ${{ steps.resolve.outputs.out-dir }}/shots/preview.png
+          ${{ steps.resolve.outputs.out-dir }}/shots/base.png
+          ${{ steps.resolve.outputs.out-dir }}/shots/diff.png
         include-hidden-files: true
+        retention-days: ${{ steps.resolve.outputs.retention-days }}
         if-no-files-found: warn
 
     - name: Upload to code scanning
