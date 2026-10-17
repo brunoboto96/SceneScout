@@ -17,6 +17,10 @@
  * What RE2 cannot do is refused, so a pattern that needs it is written for
  * LinearRegex by hand: a lookahead or a lookbehind, a back reference, a named
  * group, `\b` or `\B` inside a class, `\S` inside a class beside other items.
+ * So is what RE2 would read otherwise than JavaScript: an escaped letter
+ * JavaScript reads as the letter itself (`\a`, `\z`, `\A`, `\Q`; RE2 reads a
+ * bell, an end, a start, a quote), `\p{…}` (without the `u` flag JavaScript
+ * reads the letter p), and with `i` a class range the flag folds past its ends.
  *
  * Every pattern built here is kept (`jsPatterns`) with the source and flags
  * it was read from, so memory-test can hold each to a JavaScript RegExp of the
@@ -31,18 +35,35 @@ const isAsciiLetter = (c: string) => (c >= "a" && c <= "z") || (c >= "A" && c <=
 const isHex = (c: string) => "0123456789abcdefABCDEF".includes(c);
 
 /**
- * The characters JavaScript's `i` flag (no `u`) treats as the same as `c`:
- * its upper and lower case, when each is one code unit, and not a letter of
- * ASCII for a character outside it (the long s is not an `s`).
+ * What JavaScript's `i` flag (no `u`) compares a code unit by: its upper case
+ * when that is one code unit, and not a letter of ASCII for a character outside
+ * it (the long s is not an `s`).
  */
+function canonical(c: string): string {
+  const upper = c.toUpperCase();
+  if (upper.length !== 1) return c;
+  if (c.charCodeAt(0) >= 128 && upper.charCodeAt(0) < 128) return c;
+  return upper;
+}
+
+/** Every code unit, grouped by `canonical`; built once, on the first pattern with `i`. */
+let foldGroups: Map<string, string[]> | null = null;
+
+/** The characters JavaScript's `i` flag (no `u`) treats as the same as `c`: those of the same canonical form (µ, μ and Μ). */
 function caseVariants(c: string): string[] {
-  const out = new Set([c]);
-  for (const v of [c.toUpperCase(), c.toLowerCase()]) {
-    if (v.length !== c.length || [...v].length !== 1) continue;
-    if (c.charCodeAt(0) >= 128 && v.charCodeAt(0) < 128) continue;
-    out.add(v);
+  if (c.length !== 1) return [c];
+  if (!foldGroups) {
+    foldGroups = new Map();
+    for (let code = 0; code <= 0xffff; code++) {
+      const ch = String.fromCharCode(code);
+      const key = canonical(ch);
+      const group = foldGroups.get(key);
+      if (group) group.push(ch);
+      else foldGroups.set(key, [ch]);
+    }
   }
-  return [...out];
+  // The character itself first, then the others.
+  return [c, ...(foldGroups.get(canonical(c)) ?? []).filter((v) => v !== c)];
 }
 
 /** A literal character as RE2 reads it, escaped when it is punctuation. */
@@ -71,8 +92,11 @@ export function jsToRe2(source: string, flags = ""): string {
   const fail = (what: string): never => {
     throw new Error(`a pattern RE2 cannot run is written by hand, not read by fromJs (${what}): ${source}`);
   };
+  /** The character the last escape stands for, when it stands for one character (`\x41`, `\u00e9`, `\.`, `\n`), so `i` can fold it and a range can be checked. */
+  let escaped: string | undefined;
   /** The escape at `i` (a backslash and what follows); `inClass` says where it stands. Moves `i` past it. */
   const escape = (inClass: boolean): string => {
+    escaped = undefined;
     const n = source[i + 1];
     if (n === undefined) return fail("a trailing backslash");
     if (n === "s") {
@@ -87,32 +111,36 @@ export function jsToRe2(source: string, flags = ""): string {
     if (n === "u") {
       const hex = source.slice(i + 2, i + 6);
       if (hex.length !== 4 || ![...hex].every(isHex)) return fail("\\u without four digits");
+      escaped = String.fromCharCode(parseInt(hex, 16));
       i += 6;
       return `\\x{${hex}}`;
     }
     if (n === "x") {
       const hex = source.slice(i + 2, i + 4);
       if (hex.length !== 2 || ![...hex].every(isHex)) return fail("\\x without two digits");
+      escaped = String.fromCharCode(parseInt(hex, 16));
       i += 4;
       return `\\x${hex}`;
     }
-    if (n === "p" || n === "P") {
-      const close = source.indexOf("}", i);
-      if (source[i + 2] !== "{" || close < 0) return fail("\\p without braces");
-      const text = source.slice(i, close + 1);
-      i = close + 1;
-      return text;
-    }
+    // Without the u flag JavaScript reads \p{L} as the letter p and "{L}"; RE2 reads a Unicode property.
+    if (n === "p" || n === "P") return fail(`\\${n} without the u flag`);
     if ((n >= "1" && n <= "9") || n === "k") return fail("a back reference");
     if (inClass && (n === "b" || n === "B")) return fail("\\b in a class");
     if (n === "c" || n === "0") return fail(`\\${n}`);
+    const isAlnum = isAsciiLetter(n) || (n >= "0" && n <= "9");
+    // A letter JavaScript reads as itself that RE2 reads as something else (\a a bell, \z an end, \Q a quote).
+    if (isAlnum && !"dDwWbBnrtfv".includes(n)) return fail(`\\${n}, the letter itself to JavaScript`);
+    const control: Record<string, string> = { n: "\n", r: "\r", t: "\t", f: "\f", v: "\v" };
+    escaped = isAlnum ? control[n] : n;
     i += 2;
     return `\\${n}`;
   };
   while (i < source.length) {
     const c = source[i];
     if (c === "\\") {
-      out += escape(false);
+      const text = escape(false);
+      const variants = fold && escaped !== undefined ? caseVariants(escaped) : [];
+      out += variants.length > 1 ? `[${variants.map(literal).join("")}]` : text;
     } else if (c === "(") {
       if (source[i + 1] === "?") {
         const kind = source.slice(i + 2, i + 4);
@@ -143,7 +171,8 @@ export function jsToRe2(source: string, flags = ""): string {
         const m = source[i];
         if (m === "\\") {
           const single = !"sSdDwWpP".includes(source[i + 1] ?? "");
-          return { text: escape(true), single };
+          const text = escape(true);
+          return { text, single, plain: escaped };
         }
         i += 1;
         return { text: literal(m), single: true, plain: m };
@@ -162,13 +191,22 @@ export function jsToRe2(source: string, flags = ""): string {
             body += `${a.text}-${b.text}`;
             if (fold && a.plain !== undefined && b.plain !== undefined && isAsciiLetter(a.plain) && isAsciiLetter(b.plain))
               body += foldedRange(a.plain, b.plain);
+            else if (fold && a.plain !== undefined && b.plain !== undefined) {
+              // Any other range is kept only when the i flag folds nothing in it to a character outside it.
+              const lo = a.plain.charCodeAt(0);
+              const hi = b.plain.charCodeAt(0);
+              for (let code = lo; code <= hi; code++)
+                if (caseVariants(String.fromCharCode(code)).some((v) => v.charCodeAt(0) < lo || v.charCodeAt(0) > hi))
+                  return fail("a range the i flag folds past its ends");
+            }
           } else {
             // A range to a set is not a range: the hyphen stands for itself.
             body += `${a.text}\\-${b.text}`;
           }
           continue;
         }
-        body += fold && a.plain !== undefined ? caseVariants(a.plain).map(literal).join("") : a.text;
+        const variants = fold && a.plain !== undefined ? caseVariants(a.plain) : [];
+        body += variants.length > 1 ? variants.map(literal).join("") : a.text;
       }
       out += `[${negated ? "^" : ""}${body}]`;
     } else if (c === ".") {

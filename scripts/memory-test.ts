@@ -1722,11 +1722,27 @@ test("fromJs reads a JavaScript pattern the way JavaScript does, and refuses wha
   same(String.raw`[k]`, "i", ["K", "\u212a"]);
   same(String.raw`ö`, "i", ["Ö", "ö", "o"]);
   same(String.raw`[\w.-]+`, "", ["", "-", "a.b"]);
+  // A letter written as an escape folds as the letter does; an escaped mark stands for itself.
+  same(String.raw`\x41\u00e9`, "i", ["aÉ", "Aé", "ae"]);
+  same(String.raw`[\x41-\x43]+$`, "i", ["abc", "ABC", "abd"]);
+  same(String.raw`[\u00e0]`, "i", ["À", "à", "a"]);
+  same(String.raw`\.[.\]]`, "i", [".]", "..", "a]"]);
+  same(String.raw`[à-þ]`, "", ["à", "À"]);
+  same(String.raw`[0-z]`, "i", ["A", "a", "~"]);
+  // Every character of the same canonical form, not only a letter's own two cases.
+  same(String.raw`µ[σ]`, "i", ["μΣ", "Μς", "µσ", "mσ"]);
   // The folding of a letter RE2 would fold further is only what JavaScript folds.
   assert.equal(jsToRe2("s", "i"), "[sS]");
   for (const source of ["a(?=b)", "(?<=a)b", "(?!a)b", "(a)\\1", "[\\S\\d]", "[\\b]", "(?<n>a)", "\\k<n>", "[]", "[a"]) {
     assert.throws(() => fromJs(source), /written by hand/, source);
   }
+  // What RE2 would read otherwise than JavaScript is refused too: an escaped letter JavaScript reads as itself (RE2: a
+  // bell, an end, a start, a quote), \p without the u flag (JavaScript: the letter p), a range i folds past its ends.
+  for (const source of ["\\a", "x\\z", "\\Ax", "\\Qa", "[\\a]", "\\p{L}", "[\\P{L}]"]) {
+    assert.throws(() => fromJs(source), /written by hand/, source);
+  }
+  assert.throws(() => fromJs("[à-þ]", "i"), /folds past its ends/);
+  assert.throws(() => fromJs("[\\n-Z]", "i"), /folds past its ends/);
   assert.throws(() => fromJs("a", "g"), /i flag only/);
 });
 

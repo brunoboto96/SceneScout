@@ -23,7 +23,10 @@ JavaScript's sets, the `i` flag folds the letters JavaScript folds without `u`
 (and not the long s or the Kelvin sign), `\uXXXX` becomes `\x{XXXX}`, and `[\s\S]`
 becomes any character. What RE2 cannot run (a lookaround, a back reference, a
 named group, `\b` in a class) is refused, and such a pattern is written for
-`LinearRegex` by hand.
+`LinearRegex` by hand. So is what RE2 would read otherwise than JavaScript: an
+escaped letter JavaScript reads as the letter itself (`\a`, `\z`, `\A`, `\Q`),
+`\p{…}` (the letter p to JavaScript without `u`), and with `i` a class range the
+flag folds past its ends (`[à-þ]`).
 
 Every pattern `fromJs` builds is kept with the JavaScript source it stands for
 (a hand-rewritten lookaround passes the original as well). memory-test holds each
