@@ -27,6 +27,13 @@
       "title": "SceneScout server name",
       "description": "The SceneScout MCP server's name as /mcp lists it, when it is not 'scenescout' or the plugin's own 'plugin:scenescout:scenescout'. Empty tries those two.",
       "default": ""
+    },
+    "game": {
+      "type": "string",
+      "title": "Game layer",
+      "description": "On draws a bestiary of the open problems in the guided panel, defeated by a re-check that finds one gone. Off by default. It changes no word on a card, the report or a ticket, and is never in anything shared.",
+      "options": ["off", "on"],
+      "default": "off"
     }
   }
 }

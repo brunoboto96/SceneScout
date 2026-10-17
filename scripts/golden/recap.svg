@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360" font-family="system-ui, -apple-system, Segoe UI, sans-serif" role="img" aria-label="SceneScout check: https://staging.example.com/shop">
+<rect width="640" height="360" rx="16" fill="#ffffff" stroke="#d1d5db"/>
+<rect width="640" height="8" rx="4" fill="#2563eb"/>
+<text x="40" y="56" font-size="24" font-weight="700" fill="#111827">SceneScout check</text>
+<text x="40" y="88" font-size="16" fill="#1f2937">https://staging.example.com/shop</text>
+<text x="40" y="114" font-size="13" fill="#6b7280">2026-10-17</text>
+<text x="40" y="160" font-size="15" fill="#4b5563">Pages checked</text><text x="290" y="160" font-size="20" font-weight="700" text-anchor="end">14</text>
+<text x="40" y="200" font-size="15" fill="#4b5563">Problems found</text><text x="290" y="200" font-size="20" font-weight="700" text-anchor="end">6</text>
+<text x="40" y="240" font-size="15" fill="#4b5563">Block users</text><text x="290" y="240" font-size="20" font-weight="700" text-anchor="end">2</text>
+<text x="40" y="280" font-size="15" fill="#4b5563">Annoying</text><text x="290" y="280" font-size="20" font-weight="700" text-anchor="end">3</text>
+<text x="340" y="160" font-size="15" fill="#4b5563">Cosmetic</text><text x="590" y="160" font-size="20" font-weight="700" text-anchor="end">1</text>
+<text x="340" y="200" font-size="15" fill="#4b5563">Worth a look</text><text x="590" y="200" font-size="20" font-weight="700" text-anchor="end">4</text>
+<text x="340" y="240" font-size="15" fill="#4b5563">Confirmed fixed</text><text x="590" y="240" font-size="20" font-weight="700" text-anchor="end">2</text>
+<text x="340" y="280" font-size="15" fill="#4b5563">Time taken</text><text x="590" y="280" font-size="20" font-weight="700" text-anchor="end">17 min</text>
+</svg>

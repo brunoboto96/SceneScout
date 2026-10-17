@@ -92,6 +92,7 @@ import { FEEDBACK_VERDICTS, type Finding } from "../src/engine/memory.ts";
 import * as mod from "../mods/scenescout-mod/hooks/pane.js";
 import * as guided from "../mods/scenescout-mod/hooks/guided.js";
 import * as around from "../mods/scenescout-mod/hooks/run.js";
+import * as game from "../mods/scenescout-mod/hooks/game.js";
 import { register as registerMod } from "../mods/scenescout-mod/hooks/register.js";
 import {
   COULD_NOT_OPEN,
@@ -3618,7 +3619,12 @@ test("the queue and the card labels draw on every surface, and each button asks 
 
 type Hook = ($: unknown, e: any, next: (e: unknown) => Promise<unknown>) => Promise<unknown>;
 /** The mod loaded on a stand-in `$`: its hooks, its state, and what it called, sent, set and said. A second load with the same state is a reload. */
-function modHarness(withStatus: boolean, register: typeof registerMod = registerMod, state = new Map<string, { value: unknown; version: number }>()) {
+function modHarness(
+  withStatus: boolean,
+  register: typeof registerMod = registerMod,
+  state = new Map<string, { value: unknown; version: number }>(),
+  options: Record<string, unknown> = {},
+) {
   const hooks = new Map<string, Array<{ matcher: unknown; hook: Hook }>>();
   const on = (event: string, ...rest: unknown[]) => {
     hooks.set(event, [...(hooks.get(event) ?? []), { matcher: rest.length > 1 ? rest[0] : null, hook: rest[rest.length - 1] as Hook }]);
@@ -3629,7 +3635,7 @@ function modHarness(withStatus: boolean, register: typeof registerMod = register
   const lines: Array<string | undefined> = [];
   const logged: string[] = [];
   const toasts: string[] = [];
-  const server = { status: STATUS_RUNNING as unknown, tickets: null as unknown, usage: null as unknown };
+  const server = { status: STATUS_RUNNING as unknown, tickets: null as unknown, usage: null as unknown, recap: null as unknown };
   const timers: Array<{ ms: number; fn: () => unknown }> = [];
   const stored = new Map<string, unknown>([["tourSeen", true]]);
   /** A tool whose answer waits until its promise settles: a server still building a plan. */
@@ -3655,6 +3661,7 @@ function modHarness(withStatus: boolean, register: typeof registerMod = register
           return { isError: true, content: [{ type: "text", text: "Error: \u001b[2J\u001b[31mbad\u0007 address\r\u202e from the page" }] };
         if (tool === guided.SAVED_TOOL) return savedResult(args.action === "run" ? looks : undefined);
         await held.get(tool);
+        if (tool === "scout_recap") return server.recap ?? { isError: true, content: [{ type: "text", text: "Error: No guided check has ended yet" }] };
         if (tool === "scout_ticket_status") return server.tickets ?? { isError: true, content: [{ type: "text", text: "Error: No project is open yet" }] };
         if (tool === guided.PLAN_TOOL)
           return { content: [{ type: "text", text: "plan" }], structuredContent: planFor(args.choices as Record<string, unknown>) };
@@ -3686,7 +3693,7 @@ function modHarness(withStatus: boolean, register: typeof registerMod = register
       ...(withStatus ? { status: (t: string | undefined) => lines.push(t) } : {}),
     },
   };
-  register(on as never, {});
+  register(on as never, options);
   const raise = async (event: string, e: unknown) => {
     for (const { hook } of hooks.get(event) ?? []) await hook($, e, async (x) => x);
   };
@@ -4358,4 +4365,147 @@ test("register.js: a check is measured from its start, warned at 80% and stopped
   old.state.set("wizard", { value: { ...guided.initialWizard(), step: "configuring" }, version: 1 });
   const [oldPane] = old.hooks.get("ui.render")!;
   assert.ok(shown(await oldPane.hook(old.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x)).includes(around.COST_WORDS.noFigures));
+});
+
+// ---- The end-of-check card in the panel, and the optional game layer (#511 PR 12) ----
+
+test("the game layer is off unless set to on, counts from the cards and the confirmed fixed, and never changes a card's words", () => {
+  assert.equal(game.gameOn(undefined), false, "off by default");
+  for (const v of ["", "off", "On", "true", true, 1]) assert.equal(game.gameOn(v), false, String(v));
+  assert.equal(game.gameOn("on"), true);
+  const cards = [
+    cardFixture("0a1b2c3d4e", { severity: "high", category: "false_success" }),
+    cardFixture("1a1b2c3d4e", { severity: "low", category: "visual", title: "A label is cut off" }),
+    { ...cardFixture("2a1b2c3d4e"), feedback: { verdict: "not-a-bug" as const, at: "2026-10-03T10:00:00.000Z" } },
+  ];
+  const b = game.bestiary(cards, 2);
+  assert.equal(b.about.length, 2, "a card marked not a bug is no creature");
+  assert.equal(game.GAME_WORDS.count(b.defeated, b.about.length), "2 defeated, 2 still about");
+  assert.equal(game.bestiary(null, Number.NaN).defeated, 0);
+  const svg = game.bestiarySvg(b);
+  assert.doesNotMatch(svg, /<text|href|<script/, "the picture holds shapes only, no words from a card");
+  // The layer is drawn beside the cards, never into them: every surface's results with it on hold the same card rows.
+  for (const surface of SURFACES) {
+    const plain = drawGuided(surface, wizard({ step: "results", cards, cardsTotal: 3 }), STATUS_IDLE);
+    const els = elsFor(surface);
+    const withGame = guided.renderGuided(
+      els as never,
+      wizard({ step: "results", cards, cardsTotal: 3 }),
+      { surface, status: STATUS_IDLE, game: b },
+      () => undefined,
+    );
+    assertDrawable(withGame, surface, "results with the bestiary");
+    const cardRows = (t: string) => t.split("\n").filter((l) => !/Bestiary|defeated|still about|×/.test(l));
+    assert.deepEqual(cardRows(shown(withGame)), plain.text.split("\n"), `${surface}: the cards' words are unchanged`);
+    assert.match(shown(withGame), /2 defeated, 2 still about/);
+    assert.equal(
+      elementsOf(withGame).some((e) => e.type === "Svg"),
+      "Svg" in els,
+      `${surface}: the picture only where Svg draws`,
+    );
+    assert.ok(!/Bestiary/.test(plain.text), "off: nothing drawn");
+  }
+});
+
+const RECAP_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><text>x</text></svg>\n';
+const recapResult = (planId: string, over: Record<string, unknown> = {}) => ({
+  content: [{ type: "text", text: "SceneScout check" }],
+  structuredContent: {
+    planId,
+    title: "SceneScout check",
+    address: "https://staging.example.com",
+    date: "2026-10-17",
+    rows: [
+      ["Pages checked", "14"],
+      ["Confirmed fixed", "2"],
+    ],
+    svg: RECAP_SVG,
+    file: null,
+    ...over,
+  },
+});
+
+test("the end-of-check card: read from scout_recap, drawn as a picture where Svg draws and as lines elsewhere, once the check has ended", () => {
+  const card = guided.readRecap(recapResult(GUIDED_PLAN_ID))!;
+  assert.deepEqual([card.planId, card.rows.length, card.svg === RECAP_SVG], [GUIDED_PLAN_ID, 2, true]);
+  // Only an SVG document the server made is drawn; anything else keeps the lines.
+  assert.equal(guided.readRecap(recapResult(GUIDED_PLAN_ID, { svg: "<img src=x onerror=alert(1)>" }))!.svg, null);
+  assert.equal(guided.readRecap(recapResult(GUIDED_PLAN_ID, { svg: `${RECAP_SVG}${"x".repeat(guided.SVG_SOURCE_MAX)}` }))!.svg, null);
+  assert.equal(guided.readRecap(recapResult(GUIDED_PLAN_ID, { title: "Check\u001b[31m" }))!.title, "Check [31m");
+  assert.equal(guided.readRecap({ isError: true, content: [{ type: "text", text: "No guided check has ended yet" }] }), null);
+  for (const surface of SURFACES) {
+    const els = elsFor(surface);
+    const draw = (w: ReturnType<typeof wizard>, status: typeof STATUS_DONE, g: unknown = null) => {
+      const acts: Acted[] = [];
+      const tree = guided.renderGuided(els as never, w, { surface, status, recap: card, game: g as never }, (type, payload) => acts.push({ type, payload }));
+      assertDrawable(tree, surface, "with the card");
+      return { tree, acts };
+    };
+    const ended = draw(wizard({ step: "running", planId: GUIDED_PLAN_ID }), STATUS_DONE);
+    const picture = elementsOf(ended.tree).some((e) => e.type === "Svg" && e.props.source === RECAP_SVG);
+    assert.equal(picture, "Svg" in els, `${surface}: the picture only where Svg draws`);
+    if (!("Svg" in els)) assert.match(shown(ended.tree), /Pages checked: 14/);
+    (elementsOf(ended.tree).find((e) => e.props.key === "guided-recap-save")!.props.onPress as () => void)();
+    assert.deepEqual(ended.acts.at(-1), { type: "saveRecap", payload: undefined });
+    // While the check runs, or for another plan, no card.
+    assert.ok(!elementsOf(draw(wizard({ step: "running", planId: GUIDED_PLAN_ID }), STATUS_RUNNING).tree).some((e) => e.props.key === "guided-recap-save"));
+    assert.ok(
+      !elementsOf(draw(wizard({ step: "results", planId: "gp-other000001", cards: [] }), STATUS_DONE).tree).some((e) => e.props.key === "guided-recap-save"),
+    );
+    // On the results of that check, the card too; with the game layer on, its count under the card and nothing in the card's words.
+    const results = draw(wizard({ step: "results", planId: GUIDED_PLAN_ID, cards: [] }), STATUS_DONE, game.bestiary([], 2));
+    assert.match(shown(results.tree), /2 defeated, 0 still about/);
+  }
+});
+
+test("register.js: the card is asked for once when a check ends, Save as picture saves it, and the game layer is off unless set", async () => {
+  const m = modHarness(true);
+  m.server.recap = recapResult(GUIDED_PLAN_ID);
+  m.server.status = statusWith({ phase: "done" });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  assert.equal(m.calls.filter((c) => c.tool === "scout_recap").length, 1, "once per ended check");
+  // A server that cannot make the card is asked a few times, not on every poll.
+  const failing = modHarness(true);
+  failing.server.status = statusWith({ planId: "gp-nocard00001", phase: "done" });
+  for (let i = 0; i < 6; i++) await failing.raise("command.run", { command: "scenescout-guided" });
+  assert.equal(failing.calls.filter((c) => c.tool === "scout_recap").length, 3);
+  assert.equal((m.state.get("recap")?.value as { planId: string }).planId, GUIDED_PLAN_ID);
+  m.state.set("wizard", { value: { ...guided.initialWizard(), step: "running", planId: GUIDED_PLAN_ID }, version: 40 });
+  const [pane] = m.hooks.get("ui.render")!;
+  const drawn = await pane.hook(m.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x);
+  assert.ok(!/Bestiary|defeated/.test(shown(drawn)), "the game layer is off by default");
+  m.server.recap = recapResult(GUIDED_PLAN_ID, { file: "/home/u/site/.scenescout/recap.svg" });
+  (elementsOf(drawn).find((e) => e.props.key === "guided-recap-save")!.props.onPress as () => void)();
+  await until("saved", () => m.toasts.some((t) => /Saved the card as/.test(t)));
+  assert.deepEqual(m.calls.filter((c) => c.tool === "scout_recap").at(-1)?.args, { save: true });
+
+  // Another check ends in a load with the game layer on.
+  const on = modHarness(true, undefined, undefined, { game: "on" });
+  const second = "gp-second00001";
+  on.server.recap = recapResult(second);
+  on.server.status = statusWith({ planId: second, phase: "done" });
+  await on.raise("command.run", { command: "scenescout-guided" });
+  on.state.set("wizard", {
+    value: { ...guided.initialWizard(), step: "results", planId: second, cards: [cardFixture("0a1b2c3d4e")], cardsTotal: 1 },
+    version: 40,
+  });
+  const [onPane] = on.hooks.get("ui.render")!;
+  assert.match(shown(await onPane.hook(on.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x)), /2 defeated, 1 still about/);
+});
+
+test("register.js: the bestiary counts as defeated only the problems confirmed fixed in the check its results show", async () => {
+  const on = modHarness(true, undefined, undefined, { game: "on" });
+  // The card held is an earlier check's, with 2 confirmed fixed; the results on show are another check's.
+  on.server.recap = recapResult(GUIDED_PLAN_ID);
+  on.server.status = statusWith({ phase: "done" });
+  await on.raise("command.run", { command: "scenescout-guided" });
+  const other = "gp-other000002";
+  on.state.set("wizard", {
+    value: { ...guided.initialWizard(), step: "results", planId: other, cards: [cardFixture("0a1b2c3d4e")], cardsTotal: 1 },
+    version: 41,
+  });
+  const [pane] = on.hooks.get("ui.render")!;
+  const text = shown(await pane.hook(on.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x));
+  assert.match(text, /0 defeated, 1 still about/, "another check's fixed problems are not this one's defeated");
 });

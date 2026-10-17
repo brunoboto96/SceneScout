@@ -557,9 +557,10 @@ With the plugin in Claude Code, set the same variables in the environment Claude
 
 ## Claude Code mod settings
 
-The optional `scenescout-mod` plugin ([The Claude Code mod](Ways-to-use-it.md#the-claude-code-mod)) asks for these when it is installed, and `/plugin configure scenescout-mod@scenescout-marketplace` or its `/config` rows change them. Both are empty by default, and neither is a credential. `guide-test` holds this table to the mod's manifest.
+The optional `scenescout-mod` plugin ([The Claude Code mod](Ways-to-use-it.md#the-claude-code-mod)) asks for these when it is installed, and `/plugin configure scenescout-mod@scenescout-marketplace` or its `/config` rows change them. `lane_model` and `mcp_server` are empty by default, `game` is `off`, and none is a credential. `guide-test` holds this table to the mod's manifest.
 
 | Setting | Default | What it does |
 |---|---|---|
 | `lane_model` | empty: subagents are left alone | The model a SceneScout lane agent starts on, as an alias (`sonnet`, `haiku`, `opus`) or a full model id. A subagent counts as a lane when its prompt names `scout_attach` or `scout_lane_report`; a fork keeps its parent's model |
 | `mcp_server` | empty: tries `scenescout`, then `plugin:scenescout:scenescout` | The SceneScout server's name as `/mcp` lists it, tried first when the pane polls |
+| `game` | `off` | `on` draws a bestiary of the open problems in the guided panel, defeated by a re-check that finds one gone, with its count under the end-of-check card. It changes no word on a card, the report or a ticket, and is never in the saved card or anything else shared |
