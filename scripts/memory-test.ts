@@ -887,6 +887,46 @@ test("a store cleaned by an earlier redaction is cleaned again with the redactio
   assert.ok(REDACTION_VERSION > 1, "the redaction learned to hide more, so its version is raised");
 });
 
+test("a store cleaned before a secret set after a refused one was masked is cleaned again; one cleaned since is left alone (#619)", () => {
+  const leaks = ["password\t:secret ＝Abc123def456xyz", "Basic ============4111 1111 1111 1111"];
+  const write = (redactedWith: number) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+    dirs.push(dir);
+    const memDir = path.join(dir, MEMORY_DIRNAME);
+    fs.mkdirSync(memDir, { recursive: true });
+    const finding = {
+      id: "f1",
+      severity: "high",
+      category: "privacy",
+      title: "Error page echoes the request",
+      detail: `the page printed ${leaks[0]}`,
+      evidence: `Authorization: ${leaks[1]}`,
+      url: "http://localhost:3000/login",
+      state: "/login#1",
+      repro: ['click button "Sign in"'],
+      foundAt: "2025-01-01T00:00:00.000Z",
+      runs: 1,
+    };
+    fs.writeFileSync(path.join(memDir, "memory.json"), JSON.stringify({ version: 1, states: {}, findings: [finding], redactedWith }));
+    const log = path.join(memDir, "session-2025-01-01T00-00-00-000Z.jsonl");
+    const line = { at: "2025-01-01T00:00:01.000Z", action: "note", target: "", result: leaks.join(" and "), url: "http://localhost:3000/login" };
+    fs.writeFileSync(log, JSON.stringify(line) + "\n");
+    openStore(dir).flush();
+    return [fs.readFileSync(path.join(memDir, "memory.json"), "utf8"), fs.readFileSync(log, "utf8")];
+  };
+  // Marked as cleaned by redaction 2, which let both through.
+  const [memory, log] = write(2);
+  for (const text of [memory, log]) {
+    assert.ok(!text.includes("Abc123def456xyz"), text);
+    assert.ok(!text.includes("1111 1111 1111"), text);
+  }
+  assert.equal((JSON.parse(memory) as { redactedWith?: number }).redactedWith, REDACTION_VERSION);
+  assert.ok(REDACTION_VERSION >= 3, "the redaction learned to hide more in #619, so its version is raised");
+  // Marked as cleaned by this redaction: nothing is read again, so what it holds stays as written.
+  const [kept] = write(REDACTION_VERSION).slice(1);
+  assert.ok(kept.includes("Abc123def456xyz") && kept.includes("1111 1111 1111"), "a store this redaction already cleaned is not cleaned again");
+});
+
 test("opening a store it cannot clean leaves it as it was: a memory.json of an unknown version, a folder it may not write", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
   dirs.push(dir);
