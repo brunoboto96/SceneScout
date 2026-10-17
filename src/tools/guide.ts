@@ -206,7 +206,7 @@ const SAVED_CHECKS_OUTPUT = {
  * address, the project a session attached to; else the folder an attach
  * there would choose (the client's workspace, or the folder kept per site).
  */
-async function projectDirFor(address: string | undefined, planId?: string): Promise<string> {
+export async function projectDirFor(address: string | undefined, planId?: string): Promise<string> {
   const carrying = planId ? [...guidedSessions.entries()].find(([, s]) => s.planId === planId) : undefined;
   const carried = carrying ? engines.get(carrying[0])?.memory : undefined;
   if (carried) return path.dirname(carried.dir);

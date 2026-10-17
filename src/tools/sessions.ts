@@ -16,7 +16,8 @@ import { DedupJudge, dedupArgumentRefusal, planDedup, samplingAsk } from "../eng
 import { httpJudgeAsk } from "../ci-run.js";
 import { laneCloseGuard } from "../engine/lane.js";
 import { liveViewUrl } from "../engine/status-pane.js";
-import { decideOpen, OPEN_CHOICES, OPEN_ENV, openChoiceFromEnv, type OpenChoice } from "../engine/open.js";
+import { LIVE_ENV } from "../engine/live.js";
+import { decideOpen, OPEN_CHOICES, OPEN_ENV, openChoiceFromEnv, opensLiveView, type OpenChoice } from "../engine/open.js";
 import { parseLoginArgs } from "../engine/profiles.js";
 import type { BrowserEngineName } from "../browsers.js";
 import { LOGIN_WINDOW_MAX_MS, savedLine, startLoginWindow } from "../login-run.js";
@@ -553,6 +554,8 @@ export function registerSessionTools(): void {
             await ensureLive(eng.memory.dir);
             writeStatus(target, "idle", "scout_attach");
           }
+          // With the live view running, a frame of each step is held in its memory for the timeline (never on disk).
+          eng.frameHolder = live ? live.frameHolderFor(target) : null;
           // Which plan this session carries out, for scout_session {area}; a new attach starts with no area.
           // A plan no session carries any more is spent, so the next check with it asks the person again.
           // Whether a session already carried the plan: then this attach is part of the same check.
@@ -570,9 +573,12 @@ export function registerSessionTools(): void {
           openDecisions.set(target, opening);
           // The address holds the token, and goes only to this machine's opener: the live view's loopback and token rules are unchanged.
           let openNote = "";
-          if (opening.live && liveAddress && !liveOpened) {
+          if (liveAddress && opensLiveView(opening, open !== undefined, liveOpened)) {
             setLiveOpened(true);
             openNote = openForUser("the live view", liveViewUrl(liveAddress.port, liveAddress.token));
+          } else if (opening.live && open !== undefined && !liveAddress) {
+            // Asked for by this attach and not there to open: say why rather than nothing.
+            openNote = `\nThe live view was not opened: ${process.env[LIVE_ENV] === "off" ? `${LIVE_ENV}=off keeps it from running` : "it is not running"}.`;
           } else if (!opening.live && liveAddress && !openWhySaid) {
             // Once per server, so a person wondering why no window appeared is told how to change it.
             setOpenWhySaid(true);

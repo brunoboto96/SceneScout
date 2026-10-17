@@ -79,6 +79,17 @@ export function decideOpen(choice: OpenChoice | undefined, ctx: OpenContext): Op
 }
 
 /**
+ * Whether this attach opens the live view. One address shows every session,
+ * so a choice from the environment or the default opens it once per server and
+ * a run of many lanes opens one window. An attach that asks for it itself
+ * (scout_attach open) is answered every time: the person may have closed the
+ * window since.
+ */
+export function opensLiveView(decision: OpenDecision, askedByAttach: boolean, openedBefore: boolean): boolean {
+  return decision.live && (askedByAttach || !openedBefore);
+}
+
+/**
  * Only what the engine itself produced may be opened: the live view's
  * loopback address (plain http, no credentials) or an absolute path to a file.
  * Anything else — a remote URL, a relative path, something that could read as

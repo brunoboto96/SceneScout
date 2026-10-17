@@ -526,14 +526,17 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   assert.equal(mod.mcpServers, undefined, "the mod polls the scenescout plugin's server; a second server would be a second engine");
   // userConfig options are strict objects: an unknown key stops the plugin loading.
   const allowed = new Set(["type", "title", "description", "required", "default", "options", "multiple", "sensitive", "min", "max"]);
-  assert.deepEqual(Object.keys(mod.userConfig).sort(), ["lane_model", "mcp_server"]);
+  assert.deepEqual(Object.keys(mod.userConfig).sort(), ["game", "lane_model", "mcp_server"]);
   for (const [key, option] of Object.entries(mod.userConfig)) {
     assert.match(key, /^[A-Za-z_][A-Za-z0-9_]*$/, `${key}: a userConfig key is an identifier`);
     for (const field of Object.keys(option)) assert.ok(allowed.has(field), `${key}.${field} is not a userConfig field`);
     assert.equal(option.type, "string");
     assert.ok(option.title && option.description, `${key} has the title and description the dialog shows`);
     assert.notEqual(option.sensitive, true, `${key}: the mod asks for no secret`);
-    assert.equal(option.default, "", `${key}: empty by default, so the mod does nothing until it is set`);
+    // The game layer is a picker whose default is off; every other option is empty, so the mod does nothing until it is set.
+    if (key === "game")
+      assert.deepEqual([option.default, (option as { options?: unknown }).options], ["off", ["off", "on"]], "the game layer is off by default");
+    else assert.equal(option.default, "", `${key}: empty by default, so the mod does nothing until it is set`);
   }
   // hooks.json names one module, inside the plugin, and that module exists.
   const hooks = read(path.join(entry.source, "hooks", "hooks.json")) as { modules: string[]; hooks?: unknown };
@@ -542,7 +545,7 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   const register = fs.readFileSync(path.join(dir, "hooks", "register.js"), "utf8");
   // A hooks module may import only its own files by relative path, and the bare `claude-code`.
   const imports = [...register.matchAll(/^import[^"']*["']([^"']+)["']/gm)].map((m) => m[1]);
-  assert.deepEqual(imports, ["./pane.js", "./guided.js", "./run.js"], "register.js imports only its own rules, by relative path");
+  assert.deepEqual(imports, ["./pane.js", "./guided.js", "./run.js", "./game.js"], "register.js imports only its own rules, by relative path");
   // The mod presents itself in plain words, with somewhere to ask for help and to read what it reaches.
   const shown = read(path.join(entry.source, ".claude-plugin", "plugin.json")) as Record<string, unknown>;
   assert.equal(typeof shown.displayName, "string");
@@ -555,12 +558,12 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   // Its $.state values are declared in the contract the manifest names.
   assert.equal(shown.types, "./types/index.d.ts");
   const contract = fs.readFileSync(path.join(dir, "types", "index.d.ts"), "utf8");
-  for (const key of ["wizard", "status", "picture", "confirmed"]) {
+  for (const key of ["wizard", "status", "picture", "confirmed", "tickets", "cost", "recap"]) {
     assert.match(contract, new RegExp(`\\b${key}: `), `the contract declares ${key}`);
     assert.ok(register.includes(`{ plugin: "scenescout-mod", key: "${key}" }`), `register.js keeps ${key} in $.state`);
   }
   // The rules modules use no mods API, so live-test can run them in Node.
-  for (const file of ["pane.js", "guided.js", "run.js"]) {
+  for (const file of ["pane.js", "guided.js", "run.js", "game.js"]) {
     const code = fs
       .readFileSync(path.join(dir, "hooks", file), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -596,6 +599,8 @@ test("the mod registers its hooks as the settings say: the panel and its guard a
     ["ui.render", { component: "AbovePrompt" }],
     // The question before Claude's own SceneScout call that would send things to a site.
     ["tool.call", null],
+    // Each change in the session's usage, for the limit the person set on a check.
+    ["session.measure", null],
   ];
   assert.equal(COMMAND, "scenescout-pane");
   assert.equal(GUIDED_COMMAND, "scenescout-guided");

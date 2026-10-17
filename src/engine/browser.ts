@@ -989,6 +989,12 @@ export class BrowserEngine {
   private framesKept = 0;
   /** How many frames could not be written. The first one says so in the log; the rest are counted. */
   private framesFailed = 0;
+  /**
+   * Where a frame of each step goes on a run that does not record: the live
+   * view's memory (live.ts FrameRing), so its timeline can show a past step.
+   * Set by the server while the live view runs; never the disk.
+   */
+  frameHolder: ((jpeg: Buffer) => string | null) | null = null;
 
   /**
    * The Authorization header the app itself last sent to its own origin, on
@@ -1116,10 +1122,19 @@ export class BrowserEngine {
    * caller that is not going through afterAction can still record what the
    * page looked like: `...(await this.frameFor("crawl"))`.
    */
-  private async frameFor(action: string): Promise<{ frame?: string; framePastCap?: true }> {
+  private async frameFor(action: string): Promise<{ frame?: string; framePastCap?: true; heldFrame?: string }> {
     const pastCap = this.framePastCap();
     const frame = await this.recordFrame(action);
-    return frame ? { frame } : pastCap ? { framePastCap: true } : {};
+    return frame ? { frame } : pastCap ? { framePastCap: true } : await this.holdFrame();
+  }
+
+  /** On a run that does not record, a frame of the page held in the live view's memory, as the log entry's field. */
+  private async holdFrame(): Promise<{ heldFrame?: string }> {
+    if (this.recording || !this.frameHolder) return {};
+    const jpeg = await this.liveShot(RECORD_SHOT_TIMEOUT_MS);
+    // Read again after the picture: a close while it was taken clears the holder.
+    const key = jpeg ? (this.frameHolder?.(jpeg) ?? null) : null;
+    return key ? { heldFrame: key } : {};
   }
 
   /** On a recorded session, whether the next step gets no frame because the session already keeps as many as it may. */
@@ -2858,7 +2873,7 @@ export class BrowserEngine {
       );
     }
     const frame = await this.recordFrame(action);
-    this.logAction({ action, target, url, ...(frame ? { frame } : {}) });
+    this.logAction({ action, target, url, ...(frame ? { frame } : await this.holdFrame()) });
     await this.scanForInjections();
     await this.scanForContradictions();
     if (click) await this.rankRouteCancellations(click, url);
@@ -6193,6 +6208,7 @@ export class BrowserEngine {
       mode: this.mode,
       browser: this.engineName,
       headed: this.headed,
+      recording: this.recording,
       ...(this.sessionObjective ? { objective: this.sessionObjective } : {}),
       // A journey is a whole user task being measured, so its goal is what the
       // session is doing while it runs.

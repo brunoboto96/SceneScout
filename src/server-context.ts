@@ -191,7 +191,7 @@ const liveProvider: LiveProvider = {
   }),
   // The engine holds no reasoning — it never sees one — so the feed is what the
   // session DID: the action log, which is the same trail a finding's repro uses.
-  activity: (session, limit) => feedForSession(engines.get(session)?.memory?.actionLog ?? [], session, limit, redactSecrets),
+  activity: (session, limit) => feedForSession(engines.get(session)?.memory?.actionLog ?? [], session, limit, redactSecrets, true),
   // The same document scout_report writes at the end, rendered now and not
   // written: what the run has found so far, its scores and its gap ledger.
   // Findings and coverage are project-wide; the route, audit and mode figures
