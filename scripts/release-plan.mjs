@@ -35,7 +35,7 @@ export function distTagFor(preState) {
 
 /**
  * The decision. A real run publishes exactly when npm lacks the version, so a version a failed run
- * left unpublished is published by the next run on main, and one npm already has is never sent
+ * left unpublished is published by the next run on main with no pending changesets, and one npm already has is never sent
  * again. A rehearsal always goes through to `npm publish --dry-run` with the current version.
  * @param {{ version: string, published: string[], preState: { tag?: unknown } | null, dryRun: boolean, publishEnabled: boolean }} input
  * @returns {{ version: string, distTag: string, publish: boolean, reason: string }}

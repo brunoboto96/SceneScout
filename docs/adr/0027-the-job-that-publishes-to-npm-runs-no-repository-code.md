@@ -39,7 +39,8 @@ The release workflow is a chain of jobs, each holding only what it needs:
 
 - **npm decides.** `build` runs `scripts/release-plan.mjs`, which publishes
   exactly when npm does not have `package.json`'s version. A version a failed
-  run left unpublished is published by the next run on `main`; one npm has is
+  run left unpublished is published by the next run on `main` that finds no
+  pending changesets; one npm has is
   never sent again. A git tag plays no part in the decision.
 - **One tarball.** `build` packs it once (`npm pack --pack-destination` into a
   folder made first) and uploads it. `publish` downloads it and runs
@@ -73,9 +74,11 @@ changesets/action are used.
   merge publishes automatically: changesets/action words it from whether it
   was given a publish script.
 - If the publish succeeds and `release` fails, the next run finds the version on
-  npm and does nothing; the tag and release are then made by hand, as before
-  (docs/RELEASING.md). Re-running the failed job also works: each of its
-  steps skips what already exists.
+  npm and does nothing. Re-running the failed jobs finishes it: each step of
+  `release` skips what already exists, and a `publish` whose request failed
+  after npm stored the version passes on a re-run when npm holds that exact
+  tarball (same sha512 integrity). Otherwise the tag and release are made by
+  hand, as before (docs/RELEASING.md).
 - The attestation job still holds `id-token`. It needs it to sign, and it
   downloads one file and runs one GitHub action.
 

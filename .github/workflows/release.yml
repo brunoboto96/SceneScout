@@ -148,7 +148,8 @@ jobs:
 
   # Decides whether to publish by asking npm whether it has this commit's
   # version, not by looking for a git tag: a version a failed run left
-  # unpublished is published by the next run on main. When it publishes, it
+  # unpublished is published by the next run on main that finds no pending
+  # changesets. When it publishes, it
   # builds from a clean dist and packs the tarball once. It can write nothing.
   build:
     needs: [gate, version]
@@ -244,8 +245,14 @@ jobs:
               echo "::error title=Trusted publishing not set up::npm did not accept this job's OIDC token, so a real publish would be refused. Check the trusted publisher on npmjs.com names release.yml."
               exit 1
             fi
-          else
-            npm publish "$tarball" --provenance --access public --tag "$DIST_TAG" --ignore-scripts
+          elif ! npm publish "$tarball" --provenance --access public --tag "$DIST_TAG" --ignore-scripts; then
+            # npm can store the version and still fail the request, and a re-run is then refused as a
+            # publish over it. When npm has this version with this tarball's integrity, this publish
+            # landed: carry on, so re-running the failed jobs finishes the release.
+            want="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"
+            have=$(npm view "scenescout@$VERSION" dist.integrity --prefer-online 2> /dev/null || true)
+            [ "$have" = "$want" ] || exit 1
+            echo "::notice title=Already on npm::npm has scenescout@$VERSION with this tarball's integrity, so it was published; carrying on to the release."
           fi
 
   # Runs only after npm has the version, so the tag, the GitHub Release and the

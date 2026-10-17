@@ -26,7 +26,7 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
    then does the `release` job push the `vX.Y.Z` tag (`changeset git-tag`),
    create the GitHub Release from the version's `CHANGELOG.md` section and
    move the `v3` major tag. A version missing from npm is published by the
-   next run on `main`, whatever tags exist. [ADR 27](adr/0027-the-job-that-publishes-to-npm-runs-no-repository-code.md)
+   next run on `main` that finds no pending changesets, whatever tags exist. [ADR 27](adr/0027-the-job-that-publishes-to-npm-runs-no-repository-code.md)
    records why.
 5. After the release, it builds the Claude Desktop extension bundle from that tag
    (`npm run build && npm run mcpb`, which writes `.mcpb-build/scenescout-X.Y.Z.mcpb`),
@@ -148,12 +148,19 @@ Two repository settings the workflow depends on are already in place:
 
 ## If a publish fails half-way
 
-Whether to publish is decided by what npm has, so a run that failed before or
-during `npm publish` is finished by the next run on `main` (or by re-running
-the workflow). If npm has the version but the tag or GitHub Release is
-missing, re-run the failed `release` job: it skips a tag and a release that
-already exist. Once a later run has started, create them by hand from the
-release commit:
+Whether to publish is decided by what npm has, so a run that failed before
+`npm publish` reached npm is finished by the next run on `main` that finds no
+pending changesets. If npm has the version but the tag or GitHub Release is
+missing, use **Re-run failed jobs** on that run, not a new run (which finds
+the version on npm and does nothing):
+
+- a failed `release` job skips a tag and a release that already exist;
+- a failed `publish` job whose request npm stored anyway passes on the
+  re-run when npm holds that exact tarball (same sha512 integrity), and the
+  release jobs follow it.
+
+Once a later release has been made, do not re-run an older one: it would move
+`v3` back. Create the tag and release by hand from the release commit:
 
 ```bash
 git tag vX.Y.Z <commit> && git push origin vX.Y.Z

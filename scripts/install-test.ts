@@ -10,6 +10,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -2876,7 +2877,12 @@ test("release: npm's answer decides the publish, the tarball is packed once, and
 });
 
 /** Runs one release.yml step's script under bash with `git`, `npx` and `npm` replaced by functions that log their arguments. */
-function runReleaseStep(job: string, pick: (s: ReleaseStep) => boolean, env: Record<string, string>, opts: { npmPrints?: string; tarball?: string } = {}) {
+function runReleaseStep(
+  job: string,
+  pick: (s: ReleaseStep) => boolean,
+  env: Record<string, string>,
+  opts: { npmPrints?: string; tarball?: string; publishFails?: boolean; viewPrints?: string } = {},
+) {
   const dir = tmp("sc-release-step-");
   if (opts.tarball) {
     fs.mkdirSync(path.join(dir, "package"), { recursive: true });
@@ -2889,7 +2895,7 @@ function runReleaseStep(job: string, pick: (s: ReleaseStep) => boolean, env: Rec
   const stubs = [
     `git() { echo "git $*" >> "$CALLS"; case "$1" in rev-parse) [ "$2" = "--verify" ] || echo "\${TAGGED_SHA:-$GITHUB_SHA}";; esac; return 0; }`,
     `npx() { echo "npx $*" >> "$CALLS"; }`,
-    `npm() { echo "npm $*" >> "$CALLS"; printf '%s\\n' "$NPM_PRINTS"; }`,
+    `npm() { echo "npm $*" >> "$CALLS"; case "$1" in view) printf '%s\\n' "$NPM_VIEW_PRINTS";; publish) printf '%s\\n' "$NPM_PRINTS"; [ -z "$NPM_PUBLISH_FAILS" ];; *) printf '%s\\n' "$NPM_PRINTS";; esac; }`,
   ].join("\n");
   const r = execFileSyncSafe("bash", ["-eo", "pipefail", "-c", `${stubs}\n${script}`], {
     cwd: dir,
@@ -2899,6 +2905,8 @@ function runReleaseStep(job: string, pick: (s: ReleaseStep) => boolean, env: Rec
       GITHUB_OUTPUT: out,
       GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567",
       NPM_PRINTS: opts.npmPrints ?? "",
+      NPM_PUBLISH_FAILS: opts.publishFails ? "1" : "",
+      NPM_VIEW_PRINTS: opts.viewPrints ?? "",
       ...env,
     },
   });
@@ -2958,6 +2966,26 @@ test("release: the publish step sends the tarball under its dist-tag, and a rehe
     "npm warn This command requires you to be logged in to https://registry.npmjs.org/ (dry-run)",
   );
   assert.equal(noToken.status, 1);
+});
+
+test("release: a publish npm took but whose answer was lost succeeds on a re-run, so re-running the failed jobs finishes the release", () => {
+  // npm can store a version and still fail the request; a re-run is then refused as a publish over
+  // that version. The step treats npm holding this very tarball (same sha512 integrity) as published,
+  // and anything else as the failure it is.
+  const isPublish = (s: ReleaseStep) => s.name === "Publish to npm";
+  const env = { VERSION: "1.2.3", DIST_TAG: "latest", DRY_RUN: "false" };
+  const tarball = "scenescout-1.2.3.tgz";
+  const ours = `sha512-${crypto.createHash("sha512").update(Buffer.alloc(0)).digest("base64")}`;
+  const same = runReleaseStep("publish", isPublish, env, { tarball, publishFails: true, viewPrints: ours });
+  assert.equal(same.status, 0, "npm has this tarball as 1.2.3: it was published");
+  assert.match(same.calls, /^npm view scenescout@1\.2\.3 dist\.integrity --prefer-online$/m);
+  const other = runReleaseStep("publish", isPublish, env, { tarball, publishFails: true, viewPrints: "sha512-c29tZXRoaW5nIGVsc2U=" });
+  assert.equal(other.status, 1, "npm has a different 1.2.3: the failure stands");
+  const none = runReleaseStep("publish", isPublish, env, { tarball, publishFails: true, viewPrints: "" });
+  assert.equal(none.status, 1, "npm has no 1.2.3: the failure stands");
+  const ok = runReleaseStep("publish", isPublish, env, { tarball, viewPrints: "sha512-unused" });
+  assert.equal(ok.status, 0);
+  assert.doesNotMatch(ok.calls, /npm view/, "a publish that succeeded asks nothing more");
 });
 
 test("release plan: publish exactly when npm lacks the version, under the tag changeset publish would use", () => {
