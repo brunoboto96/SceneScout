@@ -389,6 +389,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
 | `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and `replay.html` with its frames and videos on a recorded check |
 | `artifact-name` | empty | Empty means `scenescout-check-<job id>`; give each matrix cell its own |
+| `artifact-retention-days` | empty | Days to keep the artifact, 1 to 90; empty keeps the repository's setting |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning; needs `security-events: write` |
 
 ### Action: ci
@@ -431,8 +432,9 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `cli` | empty | A built `dist/cli.js` to run instead, for testing the action itself |
 | `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
-| `upload-artifact` | `true` | Keep the output folder as an artifact |
+| `upload-artifact` | `true` | Keep `report.md`, `report.html`, `summary.md`, `ci.json`, `ci.sarif` and the pictures in `shots/` as an artifact; nothing else in the output folder is uploaded |
 | `artifact-name` | empty | Empty means `scenescout-ci-<job id>` |
+| `artifact-retention-days` | empty | Days to keep the artifact, 1 to 90; empty keeps the repository's setting |
 | `cache` | `true` | Keep the browser in the actions cache; `false` for a job that checks out a ref chosen by an input |
 | `upload-sarif` | `false` | Upload `ci.sarif` to code scanning under the category `scenescout-ci` |
 

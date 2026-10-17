@@ -439,7 +439,7 @@ sequenceDiagram
 /scenescout qa check [focus]
 ```
 
-Only the first line of a new comment is read. `show` replies with a picture of the element on the preview. `compare` also captures it on a base URL (`SCENESCOUT_QA_BASE_URL`, else the newest deployment of the base branch) and replies with both pictures, a diff with changed pixels in red and the share of pixels changed. The pictures are pushed to a `scenescout-shots` branch that holds nothing else, because a comment cannot carry files.
+Only the first line of a new comment is read. `show` replies with a picture of the element on the preview. `compare` also captures it on a base URL (`SCENESCOUT_QA_BASE_URL`, else the newest deployment of the base branch) and replies with both pictures, a diff with changed pixels in red and the share of pixels changed. The pictures are pushed to a `scenescout-shots` branch that holds nothing else, because a comment cannot carry files. Nothing prunes that branch: delete the branch, or its older run folders, on your own schedule; the next run recreates it.
 
 ### The project's own check: `/scenescout qa check`
 
