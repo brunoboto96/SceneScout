@@ -38,6 +38,7 @@ import {
   npxServeArgs,
   isNpxServeArgs,
   pinnedVersion,
+  spawnRunner,
   parseRegistration,
   planCommand,
   registerMcp,
@@ -118,12 +119,15 @@ const notRegistered = fail('No MCP server named "scenecraft".');
 const absent: RunResult = { status: null, stdout: "", stderr: "spawn claude ENOENT", missing: true };
 
 /** Scripted runner: replies in order, records every call. */
-function scripted(replies: RunResult[]): { run: Runner; calls: string[][] } {
+function scripted(replies: RunResult[]): { run: Runner; calls: string[][]; options: Array<Parameters<Runner>[2]> } {
   const calls: string[][] = [];
+  const options: Array<Parameters<Runner>[2]> = [];
   return {
     calls,
-    run: (command, args) => {
+    options,
+    run: (command, args, opts) => {
       calls.push([command, ...args]);
+      options.push(opts);
       const next = replies.shift();
       if (!next) throw new Error(`unexpected extra call: ${command} ${args.join(" ")}`);
       return next;
@@ -1176,11 +1180,23 @@ test("diagnose fails a registration that pins a version npm does not have, and o
   assert.deepEqual(names(missingPin), ["registered version is published"]);
   assert.deepEqual(unpublished.calls[1], ["npm", "view", "scenescout@9.9.9", "version"]);
   assert.match(missingPin.find((c) => !c.ok)!.detail, /scenescout@9\.9\.9.*npm does not have/);
+  // A registry that never answers (a firewall that drops the packets) must not hold the doctor for the runner's default minute.
+  const bound = unpublished.options[1]?.timeoutMs;
+  assert.ok(bound !== undefined && bound <= 15_000, `the npm lookup is given a short bound, got ${bound}`);
 
   assert.deepEqual(names(diagnose({ ...base, run: scripted([listing, ok("9.9.9\n")]).run })), []);
   // No npm, or an npm that failed for another reason (offline), is not evidence of a missing release.
   assert.deepEqual(names(diagnose({ ...base, run: scripted([listing, absent]).run })), []);
   assert.deepEqual(names(diagnose({ ...base, run: scripted([listing, fail("npm error network request failed ENOTFOUND")]).run })), []);
+});
+
+test("the real runner stops a command at the bound it is given and says so", () => {
+  const started = Date.now();
+  const r = spawnRunner(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { timeoutMs: 300 });
+  assert.ok(Date.now() - started < 10_000, "stopped at the bound, not after the command's own 20 s");
+  assert.equal(r.missing, false);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /did not finish within 0\.3 s/);
 });
 
 test("the engine-only doctor does not fail a plugin install for lacking a skill link or a registration", () => {

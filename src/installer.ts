@@ -28,7 +28,8 @@ const LEGACY_SKILL_NAMES = ["frontend-tester", "scenecraft"];
 const LEGACY_MCP_NAMES = ["scenecraft"];
 
 export type RunResult = { status: number | null; stdout: string; stderr: string; missing: boolean };
-export type Runner = (command: string, args: string[], opts?: { cwd?: string }) => RunResult;
+/** `timeoutMs` bounds the command (the real runner's default is a minute). */
+export type Runner = (command: string, args: string[], opts?: { cwd?: string; timeoutMs?: number }) => RunResult;
 
 /** What `spawnRunner` starts. A Windows batch shim is `cmd.exe /d /s /c` plus one already-quoted line. */
 export type SpawnPlan = { command: string; args: string[]; windowsVerbatimArguments?: true };
@@ -140,6 +141,9 @@ export function commandSpawnPlan(
   });
 }
 
+/** How long `doctor` waits for npm to say whether a pinned release exists; a normal answer takes about a second. */
+const NPM_VIEW_TIMEOUT_MS = 15_000;
+
 /** Real runner. `missing` separates "the binary is not installed" from "it ran and failed". */
 export const spawnRunner: Runner = (command, args, opts) => {
   const planned = commandSpawnPlan(command, args, {
@@ -150,9 +154,10 @@ export const spawnRunner: Runner = (command, args, opts) => {
     comSpec: process.env.ComSpec,
     exists: (file) => fs.existsSync(file),
   });
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
   const r = spawnSync(planned.command, planned.args, {
     encoding: "utf8",
-    timeout: 60_000,
+    timeout: timeoutMs,
     cwd: opts?.cwd,
     windowsVerbatimArguments: planned.windowsVerbatimArguments,
   });
@@ -161,7 +166,7 @@ export const spawnRunner: Runner = (command, args, opts) => {
   // was spawned directly and nothing ran: the same outcome as a missing binary.
   const missing = code === "ENOENT" || (process.platform === "win32" && code === "EINVAL");
   // With `encoding` set, a command that never ran still yields "" for stderr: the error is the only account of it.
-  const stderr = r.stderr || (code === "ETIMEDOUT" ? "npm did not finish within 60 s" : r.error ? String(r.error.message) : "");
+  const stderr = r.stderr || (code === "ETIMEDOUT" ? `${command} did not finish within ${timeoutMs / 1000} s` : r.error ? String(r.error.message) : "");
   return { status: r.status, stdout: r.stdout ?? "", stderr, missing };
 };
 
@@ -619,7 +624,8 @@ export function diagnose(opts: {
         const pinned = pinnedVersion(serverPath);
         if (pinned !== null) {
           // A pin npm does not have makes every launch fail (a release whose publish did not finish). Only a definite "no such version" fails; no npm, or no network, says nothing.
-          const view = opts.run("npm", ["view", `${CLI_NAME}@${pinned}`, "version"]);
+          // Bounded well under the runner's minute: a registry behind a firewall that drops packets otherwise holds the doctor until the OS gives up on the connection.
+          const view = opts.run("npm", ["view", `${CLI_NAME}@${pinned}`, "version"], { timeoutMs: NPM_VIEW_TIMEOUT_MS });
           if (!view.missing && view.status !== 0 && /E404|No match found|notarget/i.test(view.stderr + view.stdout)) {
             checks.push({
               name: "registered version is published",
