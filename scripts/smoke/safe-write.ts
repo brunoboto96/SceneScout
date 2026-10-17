@@ -5,7 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
-import { check, eventually, settle, until, type SmokeContext } from "./harness.ts";
+import { droppedNavigationErrorPage } from "../../dist/browsers.js";
+import { BROWSER, check, eventually, settle, until, type SmokeContext } from "./harness.ts";
 
 export const title = "cross-run memory, safe-write, uploads";
 
@@ -356,5 +357,53 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
   } finally {
     await engine2.close().catch(() => {});
     if (outsideDir) fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+  await refusedFormOnAPostedPage({ baseUrl, projectDir, stats } as SmokeContext);
+}
+
+/**
+ * A refused form on a page that a form's POST reached. In Chromium the dropped navigation shows the browser's error
+ * page and the engine leaves it; going back to that page re-sent the POST that reached it, with no confirmation,
+ * so the server made the record twice.
+ */
+async function refusedFormOnAPostedPage({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
+  console.log("safe-write: leaving the error page never re-sends the POST that reached the page before it");
+  const posts = (): number => stats.writes["POST /form-landing"] ?? 0;
+  const engine = new BrowserEngine();
+  try {
+    await engine.attach({ url: baseUrl, projectDir, mode: "safe-write" });
+    // Twice: once straight to the refused form, once after a link the server answers with 204, a load that never
+    // replaces the page. The page is still the one the POST loaded, so its 204 must not count as the page's load.
+    for (const via of ["", " after a load that did not replace the page"]) {
+      await engine.navigate("/form-post.html");
+      const before = posts();
+      const addRef = (await engine.snapshot(true)).match(/(e\d+) button "Add thing"/)?.[1];
+      if (!addRef) throw new Error("Add thing button not found");
+      const added = await engine.click(addRef);
+      check(`the form's POST reached the server once${via}`, posts() === before + 1, `${added}\n${JSON.stringify(stats.writes)}`);
+      if (via) {
+        const nothingRef = (await engine.snapshot(true)).match(/(e\d+) link "Nothing happens"/)?.[1];
+        if (!nothingRef) throw new Error("Nothing happens link not found");
+        await engine.click(nothingRef);
+      }
+      const landed = await engine.snapshot(true);
+      const sendRef = landed.match(/(e\d+) button "Send"/)?.[1];
+      if (!sendRef) throw new Error(`Send button not found in:\n${landed}`);
+      const sent = await engine.click(sendRef);
+      check(`the form naming DELETE on a record this run did not make is refused${via}`, sent.includes("WRITE-POLICY blocked"), sent);
+      check("...and never reached the server", (stats.writes["POST /api/things/9"] ?? 0) === 0, JSON.stringify(stats.writes));
+      check("...and the POST that reached the page before it was not sent again", posts() === before + 1, `${sent}\n${JSON.stringify(stats.writes)}`);
+      check(
+        "...and the click says how it left the error page",
+        droppedNavigationErrorPage(BROWSER) === null
+          ? !/error page/.test(sent)
+          : /showed an error page; loaded http[^\s]*\/form-landing again with GET/.test(sent),
+        sent,
+      );
+      const after = await engine.snapshot(true);
+      check("...and the session is on the page, not the browser's error page", after.includes("Thing added"), after.slice(0, 400));
+    }
+  } finally {
+    await engine.close().catch(() => {});
   }
 }

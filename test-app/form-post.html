@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Add a thing</title>
+  </head>
+  <body>
+    <main>
+      <h1>Add a thing</h1>
+      <!-- A native form posting a create: the page it lands on is reached by a POST, so its history entry is one. -->
+      <form method="post" action="/form-landing">
+        <label>Title <input name="title" value="a thing" data-testid="form-post-title" /></label>
+        <button type="submit" data-testid="form-post-submit">Add thing</button>
+      </form>
+    </main>
+  </body>
+</html>

@@ -266,6 +266,21 @@ export function droppedNavigationErrorPage(engine: BrowserEngineName): string | 
   return engine === "chromium" ? "chrome-error://" : null;
 }
 
+/**
+ * How the engine leaves that error page for the page before it. Going back
+ * loads the history entry with the request that loaded it, and Chromium
+ * re-sends a POST without asking: the app receives the form a second time and,
+ * in safe-write, makes the record twice. A page a write loaded is loaded again
+ * from its address with a GET instead ("get"). A page a GET loaded, including
+ * one a form redirected to after its POST, is gone back to ("back"), as is one
+ * whose load the engine did not see (null).
+ */
+export function errorPageExit(documentMethod: string | null): "back" | "get" {
+  if (documentMethod === null) return "back";
+  const method = documentMethod.toUpperCase();
+  return method === "GET" || method === "HEAD" ? "back" : "get";
+}
+
 /** How long an action waits for the error page of a navigation the policy dropped to replace the page. */
 export const DROPPED_NAVIGATION_WAIT_MS = 2000;
 
