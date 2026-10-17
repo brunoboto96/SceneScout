@@ -39,6 +39,7 @@ export const ACTION_ONLY_INPUTS = [
   "upload-sarif",
   "upload-artifact",
   "artifact-name",
+  "artifact-retention-days",
 ];
 
 export const ENGINES = ["chromium", "firefox", "webkit"];
@@ -475,6 +476,23 @@ export function defaultArtifactName(job, use) {
   return use > 1 ? `${base}-${use}` : base;
 }
 
+/**
+ * How many days the artifact is kept, as upload-artifact's `retention-days`:
+ * empty keeps the repository's setting, otherwise a whole number from 1 to 90
+ * (the most GitHub keeps an artifact, and what upload-artifact itself accepts
+ * on a public repository's default plan). Anything else fails before the run.
+ */
+export function retentionDaysOf(inputs) {
+  const raw = String(inputs["artifact-retention-days"] ?? "").trim();
+  if (!raw) return "";
+  if (!/^\d{1,3}$/.test(raw) || Number(raw) < 1 || Number(raw) > 90) {
+    throw new Error(
+      `the artifact-retention-days input must be a whole number of days from 1 to 90, or empty for the repository's setting; got "${raw.slice(0, 20)}"`,
+    );
+  }
+  return String(Number(raw));
+}
+
 /** This job's count of uses of the action so far, kept in the job's own temp directory. */
 function nextUse() {
   const counter = path.join(process.env.RUNNER_TEMP || os.tmpdir(), "scenescout-check-uses");
@@ -491,6 +509,7 @@ function nextUse() {
 function resolve() {
   const inputs = inputsFromEnv();
   checkArgs(inputs); // fail on a missing url before downloading anything
+  retentionDaysOf(inputs);
   const engine = engineOf(inputs);
   const cwd = process.cwd();
   let cli;
@@ -514,6 +533,7 @@ function resolve() {
     cli,
     version,
     "artifact-name": String(inputs["artifact-name"] ?? "").trim() || defaultArtifactName(process.env.GITHUB_JOB, nextUse()),
+    "retention-days": retentionDaysOf(inputs),
     engine,
     "install-target": installTarget(engine),
     "playwright-version": JSON.parse(fs.readFileSync(playwrightPkg, "utf8")).version,

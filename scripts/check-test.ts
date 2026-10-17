@@ -20,6 +20,7 @@ import {
   browsersPath,
   checkArgs,
   defaultArtifactName,
+  retentionDaysOf,
   engineOf,
   explainError,
   hasCheckCommand,
@@ -75,6 +76,7 @@ import {
   splitRefusals,
   statusMatches,
   urlMatches,
+  videoSecretWarning,
   type FlowRun,
   type FlowStep,
 } from "../src/engine/flow.ts";
@@ -1895,6 +1897,19 @@ test("action: each use in a job gets its own artifact name, so a second use does
   assert.equal(defaultInputs()["artifact-name"], "", "a fixed default name collides on the second use");
 });
 
+test("action: artifact-retention-days reaches the upload and is an action input, not a CLI option", () => {
+  const steps = action.runs.steps as Array<{ uses?: string; with?: Record<string, unknown> }>;
+  const upload = steps.find((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""))!;
+  assert.equal(upload.with?.["retention-days"], "${{ steps.resolve.outputs.retention-days }}");
+  assert.equal(defaultInputs()["artifact-retention-days"], "", "the repository's setting unless asked");
+  assert.ok(ACTION_ONLY_INPUTS.includes("artifact-retention-days"));
+  assert.ok(!checkArgs({ ...defaultInputs(), url: "http://127.0.0.1:3000", "artifact-retention-days": "7" }).some((a: string) => a.includes("retention")));
+  assert.equal(retentionDaysOf({}), "");
+  assert.equal(retentionDaysOf({ "artifact-retention-days": " 14 " }), "14");
+  for (const bad of ["0", "91", "-1", "1.5", "7d", "1e1", "abc"])
+    assert.throws(() => retentionDaysOf({ "artifact-retention-days": bad }), /artifact-retention-days/, bad);
+});
+
 test("action: an upload that fails cannot hide the verdict, and a failed gate still saves the browser cache", () => {
   const steps = action.runs.steps as Array<{ name: string; if?: string; uses?: string }>;
   const step = (name: string) => steps.find((s) => s.name === name)!;
@@ -1982,6 +1997,37 @@ const FLOW = {
     { action: "expect-request", request: "GET /api/things/*", status: "2xx" },
   ],
 };
+
+test("video: a filmed check warns about the flows that type into a secret field, and only then", () => {
+  const flow = (name: string, steps: object[]) => {
+    const parsed = parseFlow(JSON.stringify({ name, steps: [{ action: "navigate", target: "/login" }, ...steps] }), `${name}.json`);
+    assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+    return parsed.flow;
+  };
+  const password = flow("sign-in", [{ action: "type", target: "label=Password", value: "x" }]);
+  const viaEnv = flow("sign-in-env", [{ action: "type", target: "label=Field", value: "${env:APP_PASSWORD}" }]);
+  const code = flow("two-step", [
+    {
+      action: "repeat",
+      steps: [{ action: "type", target: 'role=textbox[name="One-time code"]', value: "1" }],
+      until: { action: "expect-text", text: "ok" },
+      max: 3,
+    },
+  ]);
+  // The same step shapes aimed at ordinary fields: the one fact that differs is what the field is.
+  const plain = flow("search", [
+    { action: "type", target: "label=Search", value: "widgets" },
+    { action: "type", target: "label=Username", value: "${env:APP_USER}" },
+    { action: "click", target: 'role=button[name="Password reset"]' },
+  ]);
+  const warning = videoSecretWarning(true, [password, viaEnv, code, plain]);
+  assert.ok(warning && /sign-in\.json/.test(warning) && /sign-in-env\.json/.test(warning) && /two-step\.json/.test(warning), String(warning));
+  assert.ok(!/search\.json/.test(warning!), "an ordinary field is not named");
+  assert.match(warning!, /not painted over/);
+  assert.equal(videoSecretWarning(false, [password]), null, "no video, no warning");
+  assert.equal(videoSecretWarning(true, [plain]), null);
+  assert.equal(videoSecretWarning(true, []), null);
+});
 
 test("flows: a valid flow parses, and takes its file name when it names itself nothing", () => {
   const parsed = parseFlow(JSON.stringify(FLOW), "details.json");

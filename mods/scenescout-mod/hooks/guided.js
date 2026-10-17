@@ -30,6 +30,10 @@ export const PLAN_TOOL = "scout_guided_plan";
 export const CONFIRM_TOOL = "scout_guided_confirm";
 export const CARDS_TOOL = "scout_cards";
 export const FEEDBACK_TOOL = "scout_feedback";
+/** The labels a person may put on a card, as memory.ts's FEEDBACK_VERDICTS. */
+export const FEEDBACK_VERDICTS = ["not-a-bug", "confirmed"];
+/** How many saved checks may wait to start after the one that runs. */
+export const QUEUE_MAX = 5;
 /** The team report: written by the server, with no turn for Claude (design 3.8). Only the results screen's own button calls it. */
 export const TEAM_REPORT_TOOL = "scout_team_report";
 /** A re-check of the open problems: the server builds its plan, and Claude is handed only its id (design 3.8). Only the results screen's own button calls it. */
@@ -283,6 +287,24 @@ export const PANEL_WORDS = {
   neverRun: "never run again",
   lastRun: "last run",
   rechecking: "Planning the re-check...",
+  confirmedBug: "Confirmed",
+  markedNotABug: "You marked this not a bug.",
+  markedConfirmed: "You confirmed this is a bug.",
+  queueAnother: "Queue another check",
+  queuePick: "Which saved check should start when this one ends?",
+  queueIt: "Queue it",
+  queueClose: "Done",
+  queueHeading: "Waiting to start, one at a time:",
+  queueRemove: "Remove",
+  queueWillAsk: "asks you to confirm when it starts",
+  queueNoSaved: "Only a saved check can wait here: save one from its results first.",
+  queueFull: `At most ${QUEUE_MAX} checks can wait.`,
+  queueAlready: (/** @type {string} */ name) => `"${name}" is already waiting.`,
+  queueAdded: (/** @type {string} */ name) => `"${name}" will start when this check ends.`,
+  queuedStarted: (/** @type {string} */ name) => `"${name}" has started from the queue.`,
+  queuedWaits: (/** @type {string} */ name) => `"${name}" is next, and waits for your yes.`,
+  queuePaused: "The queue is paused: nothing in it starts until you go on.",
+  queueResume: "Go on",
 };
 
 /** Impact, as a short mark in front of a card's title. */
@@ -312,9 +334,17 @@ export const IMPACT_MARK = { "Blocks users": "!", Annoying: "~", Cosmetic: ".", 
  *   saved: SavedEntry[] | null,
  *   saveName: string,
  *   deleting: string | null,
+ *   queue: QueuedCheck[],
+ *   queuing: boolean,
+ *   fromQueue: string | null,
+ *   started: string | null,
+ *   queuePaused: boolean,
+ *   results: ResultsPlan | null,
  * }} Wizard
  */
+/** The plan the results screen shows, kept apart from the panel's current one, which a queued check's start replaces. @typedef {{ planId: string | null, plan: any, lastChoices: any }} ResultsPlan */
 /** @typedef {{ name: string, address: string, care: string, lastRunAt: string }} SavedEntry */
+/** A saved check waiting to start, with the care level it had when the person queued it. @typedef {{ name: string, address: string, care: Care }} QueuedCheck */
 
 /** A fresh check's choices: the start form's defaults, Look only and Normal. */
 export function defaultDraft() {
@@ -348,6 +378,12 @@ export function initialWizard() {
     saved: null,
     saveName: "",
     deleting: null,
+    queue: [],
+    queuing: false,
+    fromQueue: null,
+    started: null,
+    queuePaused: false,
+    results: null,
   };
 }
 
@@ -362,6 +398,32 @@ function str(v) {
 /** @param {unknown} v */
 function num(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+// ---- Text from the tested page, made plain ----
+
+/**
+ * C0 and C1 control characters, DEL, and the bidirectional overrides: what a
+ * terminal would read as a code rather than draw. A step's words, a card's
+ * title and a saved check's name can quote the tested page or be typed, so
+ * nothing the mod draws or prints carries them.
+ */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g;
+/** A run of control characters with the spaces on either side of it. */
+const CONTROL_RUN = new RegExp(` *(?:${CONTROL.source})+ *`, "g");
+
+/**
+ * Text as the panel draws it: each run of control characters, with the
+ * spaces beside it, one space. The panel's own spacing (an indent, the gap
+ * between a name and an address) is kept.
+ */
+export function plainText(/** @type {string} */ t) {
+  return t.replace(CONTROL_RUN, " ");
+}
+
+/** A line as plain text: each run of control characters a space, and the spaces it leaves collapsed. */
+export function plainLine(/** @type {string} */ line) {
+  return plainText(line).replace(/ {2,}/g, " ").trim();
 }
 
 /**
@@ -404,7 +466,70 @@ export function wizardOf(value) {
     saved: Array.isArray(value.saved) ? savedEntries(value.saved) : null,
     saveName: str(value.saveName).slice(0, SAVED_NAME_MAX),
     deleting: str(value.deleting).slice(0, SAVED_NAME_MAX) || null,
+    queue: Array.isArray(value.queue) ? queueEntries(value.queue) : [],
+    queuing: value.queuing === true,
+    fromQueue: str(value.fromQueue).slice(0, SAVED_NAME_MAX) || null,
+    started: str(value.started).slice(0, SAVED_NAME_MAX) || null,
+    queuePaused: value.queuePaused === true,
+    results: isRecord(value.results)
+      ? {
+          planId: str(value.results.planId) || null,
+          plan: isRecord(value.results.plan) ? value.results.plan : null,
+          lastChoices: isRecord(value.results.lastChoices) ? value.results.lastChoices : null,
+        }
+      : null,
   };
+}
+
+/**
+ * The plan the results act on: the one they were opened for (Save this
+ * check, Run again and Check them again use it), or, for a wizard saved before
+ * the results kept one, the panel's current plan.
+ *
+ * @param {Wizard} w
+ * @returns {ResultsPlan}
+ */
+export function resultsPlan(w) {
+  return w.results ?? { planId: w.planId, plan: w.plan, lastChoices: w.lastChoices };
+}
+
+/** The results opened for the panel's current plan, which they keep whatever starts after. @param {Wizard} w @returns {Wizard} */
+export function openResults(w) {
+  return { ...w, step: "results", notice: null, results: { planId: w.planId, plan: w.plan, lastChoices: w.lastChoices } };
+}
+
+/**
+ * The queued check whose plan waits on the person's yes, put back at the head
+ * of the queue, from its plan's choices: a preview left with Back, or a plan
+ * of the person's own built over it, never drops it.
+ *
+ * @param {Wizard} w
+ * @returns {Wizard}
+ */
+export function requeued(w) {
+  if (!w.fromQueue) return w;
+  const choices = isRecord(w.plan) && isRecord(w.plan.choices) ? w.plan.choices : {};
+  const entry = { name: w.fromQueue, address: str(choices.address), care: str(choices.care) };
+  return { ...w, queue: queueEntries([entry, ...w.queue.filter((q) => q.name !== w.fromQueue)]), fromQueue: null, started: null };
+}
+
+/**
+ * The queue as the panel keeps it: entries with a name, an address and a
+ * care level the panel knows, each name once, at most QUEUE_MAX.
+ *
+ * @param {unknown[]} list
+ * @returns {QueuedCheck[]}
+ */
+export function queueEntries(list) {
+  /** @type {QueuedCheck[]} */
+  const out = [];
+  for (const q of list.filter(isRecord)) {
+    const name = str(q.name).slice(0, SAVED_NAME_MAX);
+    if (!name || !str(q.address) || !CARES.includes(str(q.care)) || out.some((x) => x.name === name)) continue;
+    out.push({ name, address: str(q.address), care: /** @type {Care} */ (str(q.care)) });
+    if (out.length === QUEUE_MAX) break;
+  }
+  return out;
 }
 
 /**
@@ -454,9 +579,12 @@ export function savedKeys(saved) {
  * @returns {Wizard}
  */
 export function reduce(w, action) {
-  const next = step(w, action);
+  let next = step(w, action);
   // A delete question belongs to the welcome's list: leaving the welcome drops it, so it is not waiting when the person comes back.
-  return w.step === "welcome" && next.step !== "welcome" && next.deleting ? { ...next, deleting: null } : next;
+  if (w.step === "welcome" && next.step !== "welcome" && next.deleting) next = { ...next, deleting: null };
+  // The list to queue from belongs to the running check: leaving it closes the list, and keeps the queue.
+  if (next.step !== w.step && next.queuing) next = { ...next, queuing: false };
+  return next;
 }
 
 /**
@@ -470,9 +598,11 @@ function step(w, action) {
       if (!STEPS.includes(action.step)) return w;
       // The explainer goes back to where it was opened from: the welcome, or a check being set up, whose choices are kept.
       if (action.step === "safety") return { ...w, step: "safety", returnTo: w.step === "safety" ? w.returnTo : w.step, notice: null, busy: null };
-      return { ...w, step: action.step, notice: null, busy: null };
+      // Going to the running check follows it: a queued start's Follow it is then said.
+      return { ...w, step: action.step, notice: null, busy: null, started: action.step === "running" ? null : w.started };
+    // A queued check waiting on a yes keeps its place in the queue: its plan is about to be cleared.
     case "newCheck":
-      return { ...w, step: "configuring", draft: defaultDraft(), planId: null, plan: null, notice: null, busy: null };
+      return { ...requeued(w), step: "configuring", draft: defaultDraft(), planId: null, plan: null, notice: null, busy: null };
     case "address":
       return { ...w, draft: { ...w.draft, address: String(action.value ?? "").slice(0, 2048) } };
     case "journey":
@@ -510,9 +640,63 @@ function step(w, action) {
       return w.step === "tour" ? { ...w, tourPage: Math.max(0, w.tourPage - 1) } : w;
     case "tourDone":
       return w.step === "tour" ? { ...w, step: "welcome", tourPage: 0 } : w;
+    case "queuePick":
+      return { ...w, queuing: !w.queuing, notice: !w.queuing && !(w.saved ?? []).length ? { tone: "info", text: PANEL_WORDS.queueNoSaved } : null };
+    case "queueAdd":
+      return queueAdd(w, str(action.name));
+    case "queueRemove": {
+      const queue = w.queue.filter((q) => q.name !== str(action.name));
+      return { ...w, queue, queuePaused: queue.length > 0 && w.queuePaused, notice: null };
+    }
+    // Follow a queued check that started while the person was elsewhere: its preview when it waits on their yes.
+    case "followQueued":
+      return { ...w, step: w.fromQueue ? "confirm" : "running", started: null, notice: null };
+    // Back on a queued check's preview: kept, first in line, and the queue waits for the person to go on.
+    case "queueBack":
+      return w.fromQueue ? { ...requeued(w), step: "welcome", queuePaused: true, notice: null, busy: null } : w;
+    case "queueResume":
+      return { ...w, queuePaused: false, notice: null };
     default:
       return w;
   }
+}
+
+/**
+ * A saved check put at the end of the queue, with the care level and the
+ * address the saved check has now: those are what it starts with, and a
+ * saved check changed to another care level before it starts does not start
+ * (run.js's afterQueuedRun). A name already waiting, one the welcome does not
+ * list, or a full queue changes nothing but the notice.
+ *
+ * @param {Wizard} w
+ * @param {string} name
+ * @returns {Wizard}
+ */
+function queueAdd(w, name) {
+  const saved = (w.saved ?? []).find((c) => c.name === name);
+  if (!saved || !CARES.includes(saved.care)) return { ...w, notice: { tone: "error", text: PANEL_WORDS.queueNoSaved } };
+  if (w.queue.some((q) => q.name === name) || w.fromQueue === name) return { ...w, notice: { tone: "info", text: PANEL_WORDS.queueAlready(name) } };
+  // A queued check waiting on a yes still holds its place: Back puts it first in line again.
+  if (w.queue.length + (w.fromQueue ? 1 : 0) >= QUEUE_MAX) return { ...w, notice: { tone: "error", text: PANEL_WORDS.queueFull } };
+  const entry = { name, address: saved.address, care: /** @type {Care} */ (saved.care) };
+  return { ...w, queue: [...w.queue, entry], queuing: false, notice: { tone: "info", text: PANEL_WORDS.queueAdded(name) } };
+}
+
+/**
+ * The labels a card offers: Not a bug and Confirmed, less the one the person
+ * already gave it, so they can change their mind but not give the same twice.
+ *
+ * @param {any} card
+ * @returns {string[]}
+ */
+export function feedbackChoices(card) {
+  const given = isRecord(card) && isRecord(card.feedback) ? str(card.feedback.verdict) : "";
+  return FEEDBACK_VERDICTS.filter((v) => v !== given);
+}
+
+/** A label's button text. */
+export function feedbackLabel(/** @type {string} */ verdict) {
+  return verdict === "confirmed" ? PANEL_WORDS.confirmedBug : ACTION_LABEL.notABug;
 }
 
 /**
@@ -620,10 +804,13 @@ export function afterPlan(w, result) {
   const plan = isRecord(result) && isRecord(result.structuredContent) ? result.structuredContent : null;
   if (!plan || result.isError === true || !str(plan.planId)) return { wizard: { ...w, busy: null, notice: { tone: "error", text: errorSentence(result) } } };
   // A re-check's choices name no area, so Run again keeps the last check that did.
+  // A queued check still waiting on a yes goes back to the head of the queue rather than away.
   const next = {
-    ...w,
+    ...requeued(w),
     busy: null,
     notice: null,
+    fromQueue: null,
+    started: null,
     planId: str(plan.planId),
     plan,
     lastChoices: isRecord(plan.choices) && !isRecord(plan.recheck) ? plan.choices : w.lastChoices,
@@ -652,13 +839,18 @@ export function afterConfirm(w, result) {
         ...w,
         busy: null,
         step: "running",
+        fromQueue: null,
+        started: null,
         plan: w.plan ? { ...w.plan, confirm: { ...w.plan.confirm, accepted: true } } : w.plan,
         notice: { tone: "info", text: str(c.tellPerson) },
       },
       send: startPrompt(planId),
     };
   if (c.outcome === "failed")
-    return { wizard: { ...w, busy: null, step: "running", notice: { tone: "info", text: PANEL_WORDS.waitingForm } }, send: confirmByClaudePrompt(planId) };
+    return {
+      wizard: { ...w, busy: null, step: "running", fromQueue: null, started: null, notice: { tone: "info", text: PANEL_WORDS.waitingForm } },
+      send: confirmByClaudePrompt(planId),
+    };
   return { wizard: { ...w, busy: null, step: "confirm", notice: { tone: "error", text: str(c.tellPerson) || errorSentence(result) } } };
 }
 
@@ -959,7 +1151,8 @@ export function renderGuided(els, w, ctx, act) {
   const { Box, Text, Button, Markdown } = els;
   const canType = "Input" in els;
   const canDraw = "Svg" in els;
-  const text = (/** @type {string} */ t, /** @type {Record<string, unknown>} */ style = {}) => Text({ ...style, children: [t] });
+  // Every string drawn passes here or through `button`: a title, a step's words or a name can quote the tested page.
+  const text = (/** @type {string} */ t, /** @type {Record<string, unknown>} */ style = {}) => Text({ ...style, children: [plainText(t)] });
   const dim = (/** @type {string} */ t) => text(t, { dimColor: true });
   const heading = (/** @type {string} */ t) => text(t, { bold: true });
   const button = (
@@ -967,7 +1160,7 @@ export function renderGuided(els, w, ctx, act) {
     /** @type {string} */ label,
     /** @type {() => void} */ onPress,
     /** @type {Record<string, unknown>} */ extra = {},
-  ) => Button({ key, label, onPress, ...extra });
+  ) => Button({ key, label: plainText(label), onPress, ...extra });
   const row = (/** @type {unknown[]} */ children) => Box({ flexDirection: "row", columnGap: 2, flexWrap: "wrap", children });
   const column = (/** @type {unknown[]} */ children, /** @type {Record<string, unknown>} */ extra = {}) => Box({ flexDirection: "column", ...extra, children });
   const link = (/** @type {string} */ label, /** @type {string | null} */ href) =>
@@ -990,6 +1183,17 @@ export function renderGuided(els, w, ctx, act) {
     );
   }
   if (w.notice) rows.push(text(w.notice.text, w.notice.tone === "error" ? { color: "red" } : { color: "green" }));
+  // A queued check that started, or waits on a yes, while the person was elsewhere: said, with Follow it, and nothing moved.
+  // One waiting on a yes is said on every screen but its preview, whatever cleared `started`: the preview is the only place to give the yes.
+  const startedPlan = guidedOf(ctx.status, w.planId);
+  const startedEnded = startedPlan !== null && (startedPlan.phase === "done" || startedPlan.phase === "stopped");
+  if (w.step !== "confirm" && (w.fromQueue || (w.started && !startedEnded)))
+    rows.push(
+      row([
+        text(w.fromQueue ? PANEL_WORDS.queuedWaits(w.fromQueue) : PANEL_WORDS.queuedStarted(w.started ?? ""), { color: "yellow", wrap: "truncate-end" }),
+        button("guided-queued-follow", PANEL_WORDS.follow, () => act("followQueued"), { variant: "primary" }),
+      ]),
+    );
 
   const step = w.step;
   if (step === "welcome") rows.push(...welcomeRows());
@@ -1091,6 +1295,8 @@ export function renderGuided(els, w, ctx, act) {
         ),
       );
     }
+    // Checks waiting to start, and Go on when the queue is paused.
+    if (w.queue.length) out.push(...queueRows(false));
     // A run started some other way: what the run pane shows.
     if (!g && ctx.runPane && ctx.status.kind !== "error") out.push(column([ctx.runPane], { marginTop: 1 }));
     out.push(row([dim(PANEL_WORDS.newHere), button("guided-welcome-tour", PANEL_WORDS.takeTour, () => act("tour"), { plain: true })]));
@@ -1221,18 +1427,25 @@ export function renderGuided(els, w, ctx, act) {
     const recheck = isRecord(plan.recheck);
     out.push(
       row([
-        button("guided-confirm-back", CONFIRM_ANSWER.back, () => act("go", { step: recheck ? "results" : "configuring" }), { autoFocus: true }),
+        button("guided-confirm-back", CONFIRM_ANSWER.back, () => (w.fromQueue ? act("queueBack") : act("go", { step: recheck ? "results" : "configuring" })), {
+          autoFocus: true,
+        }),
         button("guided-confirm-yes", yes, () => act("confirm"), { variant: "primary" }),
       ]),
     );
-    if (w.notice?.tone === "error" && !recheck) out.push(button("guided-confirm-lookonly", PANEL_WORDS.lookOnly, () => act("lookOnly")));
+    if (w.notice?.tone === "error" && !recheck && !w.fromQueue) out.push(button("guided-confirm-lookonly", PANEL_WORDS.lookOnly, () => act("lookOnly")));
     return out;
   }
 
   function runningRows() {
     const g = guidedOf(ctx.status, w.planId);
     if (!g)
-      return [dim(STARTING_SENTENCE), ...signInHealthRows(), row([button("guided-running-back", PANEL_WORDS.back, () => act("go", { step: "welcome" }))])];
+      return [
+        ...(w.fromQueue ? [] : [dim(STARTING_SENTENCE)]),
+        ...signInHealthRows(),
+        ...queueRows(true),
+        row([button("guided-running-back", PANEL_WORDS.back, () => act("go", { step: "welcome" }))]),
+      ];
     const out = [heading(`${str(g.title)} · ${timeLine(g.time)}`), text(`Now: ${str(g.now)}`)];
     if (str(g.phase) === "starting" || str(g.phase) === "signing-in") out.push(...signInHealthRows());
     const story = Array.isArray(g.story) ? g.story.map(str).filter(Boolean) : [];
@@ -1281,8 +1494,75 @@ export function renderGuided(els, w, ctx, act) {
           : []),
       ]),
     );
+    out.push(...queueRows(!finished));
     if (ctx.runPane) out.push(column([ctx.runPane], { marginTop: 1 }));
     return out;
+  }
+
+  /** The checks waiting to start, each with Remove; while a check runs, Queue another check and the saved checks to pick from. */
+  function queueRows(/** @type {boolean} */ canQueue) {
+    const out = [];
+    if (w.queue.length) {
+      const keys = savedKeys(w.queue.map((q) => ({ ...q, lastRunAt: "" })));
+      out.push(
+        column(
+          [
+            text(PANEL_WORDS.queueHeading, { bold: true }),
+            ...(w.queuePaused
+              ? [row([text(PANEL_WORDS.queuePaused, { color: "yellow" }), button("guided-queue-resume", PANEL_WORDS.queueResume, () => act("queueResume"))])]
+              : []),
+            ...w.queue.map((q, i) =>
+              row([
+                text(`${i + 1}. ${q.name} · ${CARE_LABEL[q.care]}${confirmReason(q.care, q.address) ? ` · ${PANEL_WORDS.queueWillAsk}` : ""}`, {
+                  wrap: "truncate-end",
+                }),
+                button(`guided-queue-remove-${keys[i]}`, PANEL_WORDS.queueRemove, () => act("queueRemove", { name: q.name }), { plain: true }),
+              ]),
+            ),
+          ],
+          { marginTop: 1 },
+        ),
+      );
+    }
+    if (!canQueue) return out;
+    if (!w.queuing) {
+      if (w.queue.length < QUEUE_MAX) out.push(row([button("guided-queue-another", PANEL_WORDS.queueAnother, () => act("queuePick"))]));
+      return out;
+    }
+    const saved = w.saved ?? [];
+    const keys = savedKeys(saved);
+    out.push(
+      column(
+        [
+          text(PANEL_WORDS.queuePick, { bold: true }),
+          ...saved.flatMap((c, i) =>
+            w.queue.some((q) => q.name === c.name)
+              ? []
+              : [
+                  row([
+                    text(`${c.name} · ${CARE_LABEL[/** @type {Care} */ (c.care)] ?? ""}`, { wrap: "truncate-end" }),
+                    button(`guided-queue-add-${keys[i]}`, PANEL_WORDS.queueIt, () => act("queueAdd", { name: c.name })),
+                  ]),
+                ],
+          ),
+          row([button("guided-queue-close", PANEL_WORDS.queueClose, () => act("queuePick"), { plain: true })]),
+        ],
+        { marginTop: 1 },
+      ),
+    );
+    return out;
+  }
+
+  /** A card's labels as buttons: Not a bug and Confirmed, less the one already given. */
+  function feedbackButtons(/** @type {any} */ card, /** @type {string} */ prefix) {
+    const id = str(card.id);
+    return feedbackChoices(card).map((verdict) => button(`${prefix}-${verdict}`, feedbackLabel(verdict), () => act("feedback", { id, verdict })));
+  }
+
+  /** What the person already said of a card, or nothing. */
+  function feedbackSaid(/** @type {any} */ card) {
+    if (!isRecord(card.feedback)) return null;
+    return card.feedback.verdict === "not-a-bug" ? PANEL_WORDS.markedNotABug : card.feedback.verdict === "confirmed" ? PANEL_WORDS.markedConfirmed : null;
   }
 
   /** The engine's GuidedActions as buttons: "See all problems" opens the results; the rest call the server or send to Claude. */
@@ -1306,7 +1586,8 @@ export function renderGuided(els, w, ctx, act) {
 
   function resultsRows() {
     const cards = w.cards ?? [];
-    const where = str(w.plan?.choices?.address) || str(w.lastChoices?.address);
+    const own = resultsPlan(w);
+    const where = str(own.plan?.choices?.address) || str(own.lastChoices?.address);
     const out = [heading(`${PANEL_WORDS.results}${where ? `: ${where}` : ""} · ${w.cardsTotal} problem${w.cardsTotal === 1 ? "" : "s"}`)];
     if (w.busy === "cards") out.push(dim("Reading the problems..."));
     else if (cards.length === 0) out.push(dim(PANEL_WORDS.noCards));
@@ -1323,13 +1604,17 @@ export function renderGuided(els, w, ctx, act) {
             wrap: "truncate-end",
           }),
           dim(`  on ${str(card.page)} · seen ${num(card.timesSeen)} time${num(card.timesSeen) === 1 ? "" : "s"}`),
-          row([button(`guided-results-open-${str(card.id)}`, PANEL_WORDS.open, () => act("openCard", { id: str(card.id), surface: ctx.surface }))]),
+          ...(feedbackSaid(card) ? [text(`  ${feedbackSaid(card)}`, { color: "yellow" })] : []),
+          row([
+            button(`guided-results-open-${str(card.id)}`, PANEL_WORDS.open, () => act("openCard", { id: str(card.id), surface: ctx.surface })),
+            ...feedbackButtons(card, `guided-results-${str(card.id)}`),
+          ]),
         ]),
       );
     }
     if (w.busy === "recheck") out.push(dim(PANEL_WORDS.rechecking));
     // Saving keeps the choices of the plan the panel built; a re-check is made from problems, not choices, so it is not saved.
-    if (canType && w.planId && isRecord(w.plan) && !isRecord(w.plan.recheck))
+    if (canType && own.planId && isRecord(own.plan) && !isRecord(own.plan.recheck))
       out.push(
         row([
           els.Input({
@@ -1351,7 +1636,7 @@ export function renderGuided(els, w, ctx, act) {
         ...(w.busy === "team-report" ? [] : [button("guided-results-team-report", ACTION_LABEL.teamReport, () => act("teamReport"))]),
         // Claude previews and files; the server's own form, listing the tickets, is where the person says yes.
         ...(cards.length > 0 ? [button("guided-results-file-tickets", ACTION_LABEL.fileTickets, () => act("send", { text: ACTION_PROMPT.fileTickets }))] : []),
-        ...(w.lastChoices ? [button("guided-results-again", PANEL_WORDS.runAgain, () => act("runAgain"))] : []),
+        ...(own.lastChoices ? [button("guided-results-again", PANEL_WORDS.runAgain, () => act("runAgain", { from: "results" }))] : []),
         ...(canType ? [button("guided-results-new", PANEL_WORDS.newCheck, () => act("newCheck"))] : []),
         button("guided-results-back", PANEL_WORDS.back, () => act("go", { step: w.planId ? "running" : "welcome" })),
       ]),
@@ -1379,7 +1664,7 @@ export function renderGuided(els, w, ctx, act) {
       out.push(
         els.Svg({
           source: ctx.picture.svg,
-          alt: `Picture of the problem: ${str(card.title)}`.slice(0, 200),
+          alt: plainLine(`Picture of the problem: ${str(card.title)}`).slice(0, 200),
           width: ctx.picture.width,
           height: ctx.picture.height,
         }),
@@ -1394,20 +1679,16 @@ export function renderGuided(els, w, ctx, act) {
     if (steps.length) out.push(text(PANEL_WORDS.whatWasDone, { bold: true }), ...steps.map((s, i) => text(`  ${i + 1}. ${s}`)));
     out.push(text(PANEL_WORDS.expected, { bold: true }), text(`  ${str(card.expected)}`));
     out.push(text(PANEL_WORDS.happened, { bold: true }), text(`  ${str(card.happened)}`));
-    if (isRecord(card.feedback))
-      out.push(text(card.feedback.verdict === "not-a-bug" ? "You marked this not a bug." : "You confirmed this is a bug.", { color: "yellow" }));
+    const said = feedbackSaid(card);
+    if (said) out.push(text(said, { color: "yellow" }));
     const t = isRecord(card.technical) ? card.technical : {};
     out.push(dim(`${PANEL_WORDS.technical}: ${str(t.category)} · ${str(t.route)} · id ${id}`));
-    const actions = cardActions(id).filter((a) => !(a.kind === "direct" && isRecord(card.feedback) && card.feedback.verdict === "not-a-bug"));
+    // The engine's buttons, with its Not a bug drawn as the pair of labels the panel offers.
+    const prompts = cardActions(id).filter((a) => a.kind === "prompt");
     out.push(
       row([
-        ...actions.map((a) => {
-          const effect = /** @type {NonNullable<ReturnType<typeof actionEffect>>} */ (actionEffect(a));
-          const slug = a.label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-          return effect.kind === "call"
-            ? button(`guided-card-${slug}`, a.label, () => act("feedback", { id, verdict: "not-a-bug" }))
-            : button(`guided-card-${slug}`, a.label, () => act("send", { text: effect.text }));
-        }),
+        ...feedbackButtons(card, "guided-card"),
+        ...prompts.map((a) => button(`guided-card-${a.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, a.label, () => act("send", { text: str(a.text) }))),
         back,
       ]),
     );
@@ -1444,7 +1725,7 @@ export function needsYouHeading(kind) {
  * @param {{ kind: string, data?: any, error?: string }} status
  */
 export function guidedText(w, status) {
-  if (status.kind === "error") return [SERVER_ERROR_SENTENCE, str(status.error)].filter(Boolean).join("\n");
+  if (status.kind === "error") return [SERVER_ERROR_SENTENCE, plainLine(str(status.error))].filter(Boolean).join("\n");
   const g = guidedOf(status, w.planId);
   const lines = [];
   if (g) {
@@ -1465,5 +1746,6 @@ export function guidedText(w, status) {
       `Here, a check can start only in "${CARE_LABEL["look-only"]}": a care level that writes needs a confirmation this view cannot show. Use the terminal or the desktop Code tab for that.`,
     );
   }
-  return lines.join("\n");
+  // Printed into the transcript: a page's words in it are made plain, line by line.
+  return lines.map(plainText).join("\n");
 }

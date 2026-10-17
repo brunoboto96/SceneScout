@@ -27,6 +27,9 @@ export { checkWorkflowId };
 
 /** The artifact the project's workflow uploads its check's output folder as, unless SCENESCOUT_QA_CHECK_ARTIFACT names another. */
 export const DEFAULT_CHECK_ARTIFACT = "scenescout-check";
+/** How long a dispatch that answered with an error is looked for among the workflow's runs before it is reported as failed. */
+const LANDED_LOOKUP_MS = 30_000;
+
 /** How long the check stage waits for the dispatched run, unless the workflow says otherwise. */
 export const DEFAULT_WAIT_MINUTES = 30;
 /** The bounds on that wait. */
@@ -468,6 +471,24 @@ export async function runDispatch({
 
   const since = now();
   let dispatched;
+  let landed = 0;
+  /** The id of a run carrying this stage's dispatch id, looked for over LANDED_LOOKUP_MS, or 0. */
+  const findLandedRun = async () => {
+    const until = since + LANDED_LOOKUP_MS;
+    for (;;) {
+      await sleep(Math.min(pollMs, 5_000));
+      try {
+        const list = await call("GET", runsRoute());
+        const hit = findDispatchedRun(list?.workflow_runs, { dispatchId, sha: null, since });
+        if (hit?.id) return Number(hit.id);
+      } catch {
+        // A failed lookup is a run not seen yet; the original error is what is reported if nothing turns up.
+      }
+      if (now() >= until) return 0;
+    }
+  };
+  const runsRoute = () =>
+    `/repos/${repo}/actions/workflows/${wf}/runs?event=workflow_dispatch&branch=${encodeURIComponent(ref)}&created=${encodeURIComponent(`>=${new Date(since - 60_000).toISOString()}`)}&per_page=30`;
   try {
     dispatched = await call("POST", `/repos/${repo}/actions/workflows/${wf}/dispatches`, {
       // The full ref: a tag of the same name as the branch can never be the one dispatched on.
@@ -484,20 +505,23 @@ export async function runDispatch({
       );
       return done(dispatchFailedMarkdown({ workflow, status: err.status, detail: err.detail, ref }));
     }
-    throw err;
+    // A 5xx or a lost connection does not say the dispatch failed: GitHub may have started the run before it answered. The run is
+    // looked up by the dispatch id (alone: the head commit would also match another run); only a run that is not there is a failure.
+    landed = await findLandedRun();
+    if (!landed) throw err;
+    log(
+      `Dispatching ${workflow} on ${ref} answered with an error (${err instanceof Error ? err.message : String(err)}), but its run ${landed} started; following it.`,
+    );
   }
-  log(`Dispatched ${workflow} on ${ref} (dispatch id ${dispatchId}).`);
+  if (!landed) log(`Dispatched ${workflow} on ${ref} (dispatch id ${dispatchId}).`);
 
   const deadline = since + minutes * 60_000;
-  let id = Number(dispatched?.workflow_run_id) || 0;
+  let id = landed || Number(dispatched?.workflow_run_id) || 0;
   // Without the id in the answer, look for the run: it appears within seconds of the dispatch.
   const lookUntil = Math.min(deadline, since + 3 * 60_000);
   while (!id && now() < lookUntil) {
     await sleep(Math.min(pollMs, 5_000));
-    const list = await call(
-      "GET",
-      `/repos/${repo}/actions/workflows/${wf}/runs?event=workflow_dispatch&branch=${encodeURIComponent(ref)}&created=${encodeURIComponent(`>=${new Date(since - 60_000).toISOString()}`)}&per_page=30`,
-    );
+    const list = await call("GET", runsRoute());
     id = Number(findDispatchedRun(list?.workflow_runs, { dispatchId, sha, since })?.id) || 0;
   }
   if (!id) return done(runNotFoundMarkdown({ workflow, workflowUrl }));

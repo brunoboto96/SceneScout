@@ -21,6 +21,7 @@ import { z } from "zod";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
+import { retentionDaysOf } from "../action/check-action.mjs";
 import { expectedJobs, FULL_CI_LABEL, FULL_CI_PATHS, FULL_PLATFORMS, isDocsPath, plan, PULL_REQUEST_PLATFORMS, verdict } from "./test-plan.mjs";
 import {
   agentLoop,
@@ -62,6 +63,7 @@ import {
   JUDGE_SYSTEM,
   JUDGE_TOOL,
   judgeSamplingParams,
+  planDedup,
   samplingAsk,
 } from "../src/engine/dedup.ts";
 import {
@@ -310,6 +312,19 @@ test("base URL: https anywhere, plain http only to this machine, never with cred
   assert.ok(!checkBaseUrl("http://10.0.0.5/v1").ok);
   assert.ok(!checkBaseUrl("https://u:p@llm.example.com/v1").ok);
   assert.ok(!checkBaseUrl("ftp://llm.example.com").ok);
+  assert.ok(checkBaseUrl("http://[::1]:8080/v1").ok, "IPv6 loopback is this machine");
+  assert.ok(!checkBaseUrl("http://localhost.attacker.example/v1").ok, "a host that only starts with localhost is not this machine");
+  assert.deepEqual(checkBaseUrl("HTTPS://LLM.Example.com/v1"), { ok: true, url: "https://llm.example.com/v1" });
+  // The API path is appended to the URL: after a query or a fragment it would land inside them, and the request would go to another path.
+  for (const bad of [
+    "https://llm.example.com/v1?api-version=1",
+    "https://llm.example.com/v1#part",
+    "https://llm.example.com/v1?",
+    "https://llm.example.com/v1#",
+  ]) {
+    const r = checkBaseUrl(bad);
+    assert.ok(!r.ok && /--base-url must carry no query or fragment/.test(r.error), bad);
+  }
 });
 
 // ── which provider ──────────────────────────────────────────────────────────
@@ -1900,6 +1915,60 @@ test("action: findings never fail the step; only a run that could not run does",
   const declared = action.outputs as Record<string, { value: string }>;
   for (const name of ["exit-code", "stop", "high", "medium", "low", "worth-a-look", "turns", "tokens", "estimated-cost", "report", "summary", "json", "sarif"])
     assert.equal(declared[name]?.value, `\${{ steps.run.outputs.${name} }}`, name);
+});
+
+test("action: the upload keeps a fixed list of the run's files, never the whole output folder", () => {
+  const steps = action.runs.steps as Array<{ uses?: string; with?: Record<string, unknown> }>;
+  const upload = steps.find((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""))!;
+  const out = "${{ steps.resolve.outputs.out-dir }}";
+  const paths = String(upload.with?.path)
+    .trim()
+    .split("\n")
+    .map((l) => l.trim());
+  assert.ok(!paths.includes(out), "the folder itself would carry whatever a hidden path beside it holds, such as saved sign-ins");
+  for (const p of paths) assert.ok(p.startsWith(`${out}/`) && !p.includes("*"), `${p} is a named file under the output folder`);
+  assert.deepEqual(paths.map((p) => p.slice(out.length + 1)).sort(), [
+    "ci.json",
+    "ci.sarif",
+    "report.html",
+    "report.md",
+    "shots/base.png",
+    "shots/diff.png",
+    "shots/preview.png",
+    "summary.md",
+  ]);
+  const described = (action.inputs as Record<string, { description: string }>)["upload-artifact"].description;
+  for (const name of ["report.md", "report.html", "summary.md", "ci.json", "ci.sarif", "shots/"])
+    assert.ok(described.includes(name), `the description names ${name}`);
+});
+
+test("action: artifact-retention-days reaches the upload, and only a whole number of 1 to 90 days or nothing is accepted", () => {
+  const steps = action.runs.steps as Array<{ uses?: string; with?: Record<string, unknown> }>;
+  const upload = steps.find((s) => /^actions\/upload-artifact@/.test(s.uses ?? ""))!;
+  assert.equal(upload.with?.["retention-days"], "${{ steps.resolve.outputs.retention-days }}");
+  assert.equal(defaultInputs()["artifact-retention-days"], "", "the repository's setting unless asked");
+  assert.ok(CI_ACTION_ONLY_INPUTS.includes("artifact-retention-days"), "an action input, not a CLI option");
+  assert.ok(!ciArgs({ ...defaultInputs(), url: "http://127.0.0.1:3000", "artifact-retention-days": "7" }).some((a: string) => a.includes("retention")));
+  assert.equal(retentionDaysOf({}), "");
+  assert.equal(retentionDaysOf({ "artifact-retention-days": " 14 " }), "14");
+  for (const bad of ["0", "91", "-1", "1.5", "7d", "1e1", "abc"])
+    assert.throws(() => retentionDaysOf({ "artifact-retention-days": bad }), /artifact-retention-days/, bad);
+});
+
+test("action: a bad artifact-retention-days fails the resolve step before anything is installed", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-ci-resolve-"));
+  try {
+    // A cli that does not exist is the first thing resolve would trip on after the inputs: the retention error must come first.
+    const inputs = { ...defaultInputs(), url: "http://127.0.0.1:3000", cli: path.join(dir, "missing.js"), "artifact-retention-days": "abc" };
+    const r = spawnSync(process.execPath, [path.join(REPO, "action", "ci-action.mjs"), "resolve"], {
+      env: { PATH: process.env.PATH ?? "", INPUTS: JSON.stringify(inputs), RUNNER_TEMP: dir },
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stdout, /artifact-retention-days/, r.stdout);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("action: third-party steps are pinned by commit, and no input is pasted into a script", () => {
@@ -3570,6 +3639,54 @@ test("dedup: the judge asks at the lowest effort each API takes; the server's mo
   assert.ok(!missing.ok && /SCENESCOUT_DEDUP_PROVIDER=anthropic needs ANTHROPIC_API_KEY/.test(missing.error));
   assert.throws(() => judgeKeyConfig({ OPENAI_API_KEY: OPENAI_KEY, SCENESCOUT_DEDUP_PROVIDER: "gemini" }), /must be one of anthropic, openai/);
   for (const r of [one, ambiguous, named, none, missing]) assert.ok(!(r.ok ? "" : r.error).includes(OPENAI_KEY), "no message carries a key");
+});
+
+test("dedup: SCENESCOUT_DEDUP_BASE_URL points the judge at a private endpoint under --base-url's rules", () => {
+  const key = { OPENAI_API_KEY: OPENAI_KEY };
+  const custom = judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: " https://llm.internal.example/v1/ " });
+  assert.ok(custom.ok);
+  assert.equal(custom.resolved.baseUrl, "https://llm.internal.example/v1");
+  assert.equal(custom.key, OPENAI_KEY, "the key is still the environment's");
+  const loopback = judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: "http://127.0.0.1:8080/v1" });
+  assert.ok(loopback.ok && loopback.resolved.baseUrl === "http://127.0.0.1:8080/v1");
+  // Unset or blank keeps the provider's own API.
+  for (const blank of [undefined, "", "  "]) {
+    const r = judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: blank });
+    assert.ok(r.ok && r.resolved.baseUrl === "https://api.openai.com/v1");
+  }
+  // Refused, naming the variable and never echoing what was set (it may carry a secret).
+  for (const bad of ["http://10.0.0.5/v1", "https://user:hunter2@llm.example/v1", "ftp://llm.example", "not a url hunter2"]) {
+    assert.throws(
+      () => judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: bad }),
+      (err: Error) => err.message.startsWith("SCENESCOUT_DEDUP_BASE_URL ") && !err.message.includes("hunter2"),
+      bad,
+    );
+  }
+  assert.throws(
+    () => judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: "https://llm.example/v1#x" }),
+    /^Error: SCENESCOUT_DEDUP_BASE_URL must carry no query or fragment/,
+  );
+  // The rule (a project's dedup ceiling, or the default) never reads the variable, so a bad value cannot stop an attach that keeps the judge off.
+  assert.equal(planDedup("rule", { ...key, SCENESCOUT_DEDUP_BASE_URL: "http://10.0.0.5/v1" }, undefined).mode, "rule");
+  // Without a key there is nothing to send, so the missing key is the answer, as before.
+  const none = judgeKeyConfig({ SCENESCOUT_DEDUP_BASE_URL: "https://llm.internal.example/v1" });
+  assert.ok(!none.ok);
+});
+
+test("dedup: the plan names a private endpoint's host, and the pair goes where the variable says", async () => {
+  const plan = planDedup("judge", { OPENAI_API_KEY: OPENAI_KEY, SCENESCOUT_DEDUP_BASE_URL: "https://llm.internal.example/v1" }, undefined);
+  assert.ok(plan.mode === "judge" && plan.via === "key");
+  assert.match(plan.note, /sent to openai at llm\.internal\.example\./);
+  const seen: string[] = [];
+  const api: typeof fetch = async (input) => {
+    seen.push(String(input));
+    return new Response("{}", { status: 400 });
+  };
+  const ask = httpJudgeAsk(plan.resolved, plan.key, { fetch: api, sleep: async () => {} });
+  await ask("s", [], "k", 2000).catch(() => undefined);
+  assert.ok(seen.length > 0 && seen.every((u) => u.startsWith("https://llm.internal.example/v1/")), seen.join());
+  const plain = planDedup("judge", { OPENAI_API_KEY: OPENAI_KEY }, undefined);
+  assert.ok(plain.mode === "judge" && plain.via === "key" && !/ at /.test(plain.note.split("sent to")[1] ?? ""));
 });
 
 test("dedup: the summary and ci.json say how findings were deduplicated and what the judge's calls cost", () => {

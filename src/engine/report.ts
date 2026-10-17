@@ -20,6 +20,7 @@ import { feedForSession } from "./live.js";
 import { buildReplayHtml, evidenceFor, projectKey, type FindingEvidence, type ReplaySession } from "./replay.js";
 import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
+import { formatLoadRetries } from "./limits.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
 import { DEFAULT_REPORT_AUDIENCE, formatPlainSection, pictureOf, type ReportAudience } from "./plain.js";
 import { formatTicketsPlain, formatTicketsTechnical, ticketSummaryLine, type TicketReportInput } from "./tickets.js";
@@ -1158,6 +1159,9 @@ function trailingSections(
     }
     lines.push(``);
   }
+
+  // A load the machine refused a socket for was tried again; said here so a flaky machine stays visible.
+  lines.push(...formatLoadRetries(memory.loadRetriesThisRun()));
 
   // How the run was paced. A reader who sees a session that did four actions
   // in an hour learns more from that than from another coverage percentage.

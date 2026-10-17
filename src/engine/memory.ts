@@ -7,6 +7,7 @@ import type { CheckArea } from "./guided.js";
 import type { DedupMode } from "./ci.js";
 import { laneRoutePaths, normalizePath, shortHash, stripRouteQuery } from "./fingerprint.js";
 import { isFormBookkeeping } from "./forms.js";
+import type { LoadRetry } from "./limits.js";
 import { appendOwnerOnlySync, writeDocumentSync, writeOwnerOnlySync } from "./owner-file.js";
 import { redactSecrets } from "./redact.js";
 import { redactPersonal } from "./sensitive.js";
@@ -795,6 +796,14 @@ export class MemoryStore {
 
   /** When this run began: the store opening, or the last endRun. */
   private runStartedAt = new Date().toISOString();
+
+  /** Page loads any session retried after a refused socket (limits.ts loadRetryCause). Not persisted: a retry is this run's. */
+  readonly loadRetries: LoadRetry[] = [];
+
+  /** The loads this run retried, in order, for the report. */
+  loadRetriesThisRun(): LoadRetry[] {
+    return this.loadRetries.filter((r) => r.at >= this.runStartedAt);
+  }
 
   /** This run's entries in the action log, in order: what a run record's steps are built from. */
   actionsThisRun(): ActionLogEntry[] {

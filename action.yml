@@ -143,6 +143,10 @@ inputs:
     description: The artifact's name. Empty means scenescout-check-<job id>, with -2, -3 … for later uses in the same job. Jobs of a matrix share a job id, so give each cell its own name.
     required: false
     default: ""
+  artifact-retention-days:
+    description: How many days to keep the artifact, 1 to 90. Empty keeps the repository's setting.
+    required: false
+    default: ""
   upload-sarif:
     description: Upload check.sarif to GitHub code scanning. The job needs `permissions` with `security-events write`.
     required: false
@@ -294,6 +298,7 @@ runs:
           ${{ steps.run.outputs.test-report }}
         # The default output folder is .scenescout/, which the upload would otherwise skip as hidden.
         include-hidden-files: true
+        retention-days: ${{ steps.resolve.outputs.retention-days }}
         if-no-files-found: warn
 
     - name: Upload to code scanning

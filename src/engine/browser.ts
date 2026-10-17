@@ -177,17 +177,24 @@ import {
   firstLineOf,
   isTimeoutMessage,
   limitHint,
+  LOAD_RETRY_PAUSE_MS,
+  loadRetryCause,
+  loadRetryNote,
+  loadRetryTimeoutMs,
+  retriedLoadFailure,
   pageTimeouts,
   resolveTimeLimits,
   SCREENSHOT_TIMEOUT_MS,
   TARGET_READ_MS,
   type LimitKind,
+  type RetriedLoadError,
   type TimeLimits,
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { bestEffort, settleWithin } from "./best-effort.js";
 import { marksRouteExercised, pathnameOf, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
+import { readMachineSockets } from "./tcp-table.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
 import {
@@ -1595,7 +1602,7 @@ export class BrowserEngine {
     await this.launchContext(opts, profile);
     await this.wireContext(this.context!);
     const startWarning = await this.firstNavigation(opts.url);
-    return (await this.attachSummary(opts, auth, storageStatePath, profileNote)) + (startWarning ? `\n${startWarning}` : "");
+    return (await this.attachSummary(opts, auth, storageStatePath, profileNote)) + (startWarning ? `\n${startWarning}` : "") + this.drainLoadRetries();
   }
 
   /**
@@ -1983,13 +1990,16 @@ export class BrowserEngine {
   private async firstNavigation(url: string): Promise<string | null> {
     let warning: string | null;
     try {
-      const resp = await this.page!.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
+      const resp = await this.loadPage(this.page!, url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
       warning = startPageWarning(url, resp?.status() ?? null, await BrowserEngine.challengeOf(this.page!, resp));
     } catch (err) {
       // Don't leave a half-attached engine (leaked browser, snapshots of about:blank).
       await this.close();
       const explained = explainTimeout(err, "nav", this.limits.navMs);
-      throw new Error(`Could not load ${url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})`);
+      // A load that was retried and loaded before the attach failed is said here, not in a later attach's result.
+      throw new Error(
+        `Could not load ${url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})${this.drainLoadRetries()}`,
+      );
     }
     await this.settle();
     this.logAction({ action: "attach", url: this.page!.url() });
@@ -2833,6 +2843,7 @@ export class BrowserEngine {
       this.logAction({ action: "write-policy:navigation-blocked", target: dropped.errorUrl.slice(0, 200), url: dropped.errorUrl });
       return (
         `OK: ${action} ${target}\nThe page tried to navigate with a request the write policy blocked, so the browser showed an error page; ${BrowserEngine.leftErrorPage(dropped)}.` +
+        this.drainLoadRetries() +
         this.drainMutations() +
         this.drainBlocked() +
         this.drainRefresh() +
@@ -2852,6 +2863,7 @@ export class BrowserEngine {
         (reload?.destructive
           ? `OK: ${action} ${target}\nNavigated off-origin and was taken to about:blank ${BrowserEngine.blankWords(reload)}. Exploration is fenced to ${this.baseUrl}.`
           : `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}${reload ? ` (loaded again with GET, ${BrowserEngine.reloadWords(reload)})` : ""}. Exploration is fenced to ${this.baseUrl}.`) +
+        this.drainLoadRetries() +
         this.drainMutations() +
         this.drainBlocked() +
         this.drainRefresh() +
@@ -2880,6 +2892,7 @@ export class BrowserEngine {
       `OK: ${action} ${target}\nURL now: ${url}` +
       (navigated ? " (page changed — take a new snapshot)" : moved ? " (same screen, query changed — refs still apply)" : "") +
       rebound +
+      this.drainLoadRetries() +
       this.drainDialogs() +
       mutations +
       formatViolations(violations)
@@ -4077,6 +4090,15 @@ export class BrowserEngine {
     this.leaveChoice = leave;
     try {
       return await this.navigateNow(target);
+    } catch (err) {
+      // A load that was retried and then loaded, before something after it threw: said with this error, not left for
+      // the next action's result.
+      const notes = this.drainLoadRetries();
+      if (!notes || !(err instanceof Error)) throw err;
+      const [first, ...rest] = err.message.split("\n");
+      const out = new Error([first, notes.trim(), ...rest].join("\n"));
+      out.name = err.name;
+      throw out;
     } finally {
       this.leaveChoice = undefined;
       this.onLeaveRefused = null;
@@ -4915,8 +4937,11 @@ export class BrowserEngine {
     const answered = BrowserEngine.watchMainDocument(page, url);
     let resource: { url: string; status: number; contentType: string } | null = null;
     let challenge: string | null = null;
+    // A load retried after a refused socket says so on the route's line, not in a later action's result.
+    const retriesBefore = this.loadRetryNotes.length;
+    let retried: string | null = null;
     try {
-      const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
+      const resp = await this.loadPage(page, url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
       status = resp?.status() ?? "no-response";
       challenge = await BrowserEngine.challengeOf(page, resp);
       const contentType = mediaTypeOf(resp?.headers()["content-type"]);
@@ -4961,6 +4986,9 @@ export class BrowserEngine {
       }
     } finally {
       answered.stop();
+      // Taken here, so a route that ends early cannot leave its note for a later action's result.
+      const retry = this.loadRetryNotes.splice(retriesBefore)[0];
+      if (retry) retried = `retried after ${retry.cause}`;
     }
     // A feed, a file or data: recorded as what it is and left there. It has no controls to collect or audit, and one
     // that answered leaves the route contract, so it is neither a dead end nor a gap.
@@ -4971,7 +4999,7 @@ export class BrowserEngine {
         else memory.markAttempted(normalizePath(url), `status:${resource.status}`, this.role);
       }
       this.oracles.drain(false);
-      summary.push(`${path} — ${resource.status} · not a page (${resource.contentType})`);
+      summary.push(`${path} — ${resource.status} · not a page (${resource.contentType})${retried ? ` · ${retried}` : ""}`);
       if (!isNonPageResource(resource)) problems.push(`${path} → HTTP ${resource.status} (${resource.contentType})`);
       this.crawlHealth.push({
         path,
@@ -5066,6 +5094,7 @@ export class BrowserEngine {
     const stateFlag = mainStateFlag(shows);
 
     const flags = [
+      retried ? retried : null,
       loginRedirect ? "AUTH-REDIRECT" : null,
       challenge ? `BOT-CHALLENGE (${challenge})` : null,
       deadEnd ? "DEAD-END" : null,
@@ -5656,6 +5685,8 @@ export class BrowserEngine {
         const resolved = resolveTarget(this.baseUrl, step.target);
         if (!("url" in resolved)) throw new Error(resolved.problem);
         const url = resolved.url;
+        // A retried load is the report's to list; a flow step has no action result to carry its note.
+        const retriesBefore = this.loadRetryNotes.length;
         const resp = await this.gotoSettlingFailure(current, url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs }).catch((err: unknown) => {
           // A missing file or feed the browser refused to show is the step's failure by its status, as a page's is.
           if (err instanceof AnsweredNavigationError && err.answer.status >= 400) {
@@ -5663,6 +5694,7 @@ export class BrowserEngine {
           }
           return Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs));
         });
+        this.loadRetryNotes.splice(retriesBefore);
         await this.settle();
         const status = resp?.status() ?? null;
         if (status !== null && status >= 400) {
@@ -5933,6 +5965,49 @@ export class BrowserEngine {
     await Promise.race([this.errorPageCommitted(page), answered.download]);
   }
 
+  /** Loads retried since the last action's result, as the lines that result carries (limits.ts loadRetryNote). */
+  private loadRetryNotes: Array<{ url: string; cause: RetriedLoadError }> = [];
+
+  /** The retry notes for an action's result, cleared. */
+  private drainLoadRetries(): string {
+    const notes = this.loadRetryNotes;
+    this.loadRetryNotes = [];
+    return notes.map((n) => `\n${loadRetryNote(n.url, n.cause)}`).join("");
+  }
+
+  /**
+   * page.goto, tried once more when the machine refused the browser a socket (limits.ts loadRetryCause): the failed
+   * load's error page is waited for, the machine's TCP table is logged, and the retry is recorded for the report, and
+   * for the action's result once it has loaded. The retry has what is left of the load's limit (limits.ts
+   * loadRetryTimeoutMs), so both tries keep to it. Any other failure is thrown as it is; a second failure says it
+   * followed a retry.
+   */
+  private async loadPage(page: Page, url: string, options: Parameters<Page["goto"]>[1]): Promise<Response | null> {
+    const startedAt = Date.now();
+    try {
+      return await page.goto(url, options);
+    } catch (err) {
+      const cause = loadRetryCause(err instanceof Error ? err.message : String(err), 0);
+      if (!cause) throw err;
+      await this.errorPageCommitted(page);
+      const sockets = await readMachineSockets();
+      const shown = redactSecrets(url);
+      console.error(`[scenescout] loading ${shown} failed with net::${cause}; trying once more. Sockets: ${sockets}`);
+      this.memory?.loadRetries.push({ at: new Date().toISOString(), url: shown, session: this.sessionKey, cause, sockets });
+      await new Promise((resolve) => setTimeout(resolve, LOAD_RETRY_PAUSE_MS));
+      // A retry that fails is thrown as the load's failure, saying so; only one that loaded leaves a note for the result.
+      const timeout = loadRetryTimeoutMs(options?.timeout, Date.now() - startedAt);
+      let resp: Response | null;
+      try {
+        resp = await page.goto(url, { ...options, timeout });
+      } catch (again) {
+        throw retriedLoadFailure(again, cause);
+      }
+      this.loadRetryNotes.push({ url: shown, cause });
+      return resp;
+    }
+  }
+
   /**
    * page.goto for a navigation the session goes on from: when it throws, the error page its failure may still commit
    * is waited for before the error is passed on, so the session's next navigation is not interrupted by that page.
@@ -5941,7 +6016,7 @@ export class BrowserEngine {
   private async gotoSettlingFailure(page: Page, url: string, options: Parameters<Page["goto"]>[1]): Promise<Response | null> {
     const answered = BrowserEngine.watchMainDocument(page, url);
     try {
-      return await page.goto(url, options);
+      return await this.loadPage(page, url, options);
     } catch (err) {
       const answer = await answered.afterThrow(err);
       await this.afterFailedNavigation(page, err, answered);
@@ -6053,12 +6128,16 @@ export class BrowserEngine {
     // Before the load, so a page that reads the preference once, as it starts, reads it too.
     await page.emulateMedia({ reducedMotion: how.reducedMotion });
     let resp: import("playwright").Response | null;
+    // A retried load is the report's to list; a picture has no action result to carry its note.
+    const retriesBefore = this.loadRetryNotes.length;
     try {
       await page.goto("about:blank", { timeout: this.limits.crawlNavMs });
-      resp = await page.goto(`${this.baseUrl}${pathOnApp}`, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
+      resp = await this.loadPage(page, `${this.baseUrl}${pathOnApp}`, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
     } catch (err) {
       await this.errorPageCommitted(page);
       throw explainTimeout(err, "nav", this.limits.crawlNavMs);
+    } finally {
+      this.loadRetryNotes.splice(retriesBefore);
     }
     const status = resp?.status() ?? null;
     if (status !== null && status >= 400) throw new Error(`the page answered HTTP ${status}`);

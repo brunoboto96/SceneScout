@@ -37,6 +37,8 @@ import {
   manualRegisterCommand,
   npxServeArgs,
   isNpxServeArgs,
+  pinnedVersion,
+  spawnRunner,
   parseRegistration,
   planCommand,
   registerMcp,
@@ -117,12 +119,15 @@ const notRegistered = fail('No MCP server named "scenecraft".');
 const absent: RunResult = { status: null, stdout: "", stderr: "spawn claude ENOENT", missing: true };
 
 /** Scripted runner: replies in order, records every call. */
-function scripted(replies: RunResult[]): { run: Runner; calls: string[][] } {
+function scripted(replies: RunResult[]): { run: Runner; calls: string[][]; options: Array<Parameters<Runner>[2]> } {
   const calls: string[][] = [];
+  const options: Array<Parameters<Runner>[2]> = [];
   return {
     calls,
-    run: (command, args) => {
+    options,
+    run: (command, args, opts) => {
       calls.push([command, ...args]);
+      options.push(opts);
       const next = replies.shift();
       if (!next) throw new Error(`unexpected extra call: ${command} ${args.join(" ")}`);
       return next;
@@ -537,7 +542,7 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   const register = fs.readFileSync(path.join(dir, "hooks", "register.js"), "utf8");
   // A hooks module may import only its own files by relative path, and the bare `claude-code`.
   const imports = [...register.matchAll(/^import[^"']*["']([^"']+)["']/gm)].map((m) => m[1]);
-  assert.deepEqual(imports, ["./pane.js", "./guided.js"], "register.js imports only its own rules, by relative path");
+  assert.deepEqual(imports, ["./pane.js", "./guided.js", "./run.js"], "register.js imports only its own rules, by relative path");
   // The mod presents itself in plain words, with somewhere to ask for help and to read what it reaches.
   const shown = read(path.join(entry.source, ".claude-plugin", "plugin.json")) as Record<string, unknown>;
   assert.equal(typeof shown.displayName, "string");
@@ -555,7 +560,7 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
     assert.ok(register.includes(`{ plugin: "scenescout-mod", key: "${key}" }`), `register.js keeps ${key} in $.state`);
   }
   // The rules modules use no mods API, so live-test can run them in Node.
-  for (const file of ["pane.js", "guided.js"]) {
+  for (const file of ["pane.js", "guided.js", "run.js"]) {
     const code = fs
       .readFileSync(path.join(dir, "hooks", file), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -587,6 +592,8 @@ test("the mod registers its hooks as the settings say: the panel and its guard a
     ["turn.start", null],
     ["turn.complete", null],
     ["ui.render", { component: "Pane" }],
+    // The band above the prompt while a guided check runs; a build without the band never raises it.
+    ["ui.render", { component: "AbovePrompt" }],
     // The question before Claude's own SceneScout call that would send things to a site.
     ["tool.call", null],
   ];
@@ -1123,6 +1130,12 @@ test("an install run through npx registers the npx launcher, never a path inside
   assert.equal(isNpxServeArgs("-y scenescout@3.25.0 serve"), true);
   assert.equal(isNpxServeArgs("-y other-pkg serve"), false);
   assert.equal(isNpxServeArgs("-y scenescout@evil serve"), false);
+  // A pre-release pin is this launcher too, so a registration made from one is replaced, not reported as something else.
+  assert.equal(isNpxServeArgs("-y scenescout@3.26.0-beta.1 serve"), true);
+  assert.equal(isNpxServeArgs("-y scenescout@3.26.0-beta.1; rm serve"), false);
+  assert.equal(pinnedVersion("-y scenescout@3.26.0-beta.1 serve"), "3.26.0-beta.1");
+  assert.equal(pinnedVersion("-y scenescout@3.26.0 serve"), "3.26.0");
+  assert.equal(pinnedVersion("-y scenescout serve"), null);
   assert.ok(path.isAbsolute(launch[0]) && /npx(\.cmd)?$/.test(launch[0]), "an absolute npx beside the running node, so it starts under nvm too");
   assert.ok(!launch.join(" ").includes("_npx"), "nothing in the registration points into the cache");
   // A node that ships without npm: a bare npx on PATH beats an absolute path to nothing.
@@ -1149,6 +1162,41 @@ test("diagnose accepts an npx registration and vets its launcher", () => {
   const bare = diagnose({ ...base, run: scripted([ok("scenescout:\n  Command: npx\n  Args: -y scenescout serve\n")]).run }).filter((c) => !c.ok);
   assert.equal(bare.length, 1);
   assert.match(bare[0].detail, /bare `npx`/);
+});
+
+test("diagnose fails a registration that pins a version npm does not have, and only on a definite answer", () => {
+  const packageRoot = fakePackage();
+  const claudeDir = tmp("sc-claude-");
+  installSkill({ packageRoot, claudeDir });
+  const chromiumPath = path.join(packageRoot, "chromium");
+  fs.writeFileSync(chromiumPath, "");
+  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
+  const listing = ok("scenescout:\n  Command: /opt/node/bin/npx\n  Args: -y scenescout@9.9.9 serve\n");
+  const names = (checks: ReturnType<typeof diagnose>) => checks.filter((c) => !c.ok).map((c) => c.name);
+
+  // Contrastive pair: the same pin, once unknown to npm and once published.
+  const unpublished = scripted([listing, fail("npm error code E404\nnpm error 404 No match found for version 9.9.9")]);
+  const missingPin = diagnose({ ...base, run: unpublished.run });
+  assert.deepEqual(names(missingPin), ["registered version is published"]);
+  assert.deepEqual(unpublished.calls[1], ["npm", "view", "scenescout@9.9.9", "version"]);
+  assert.match(missingPin.find((c) => !c.ok)!.detail, /scenescout@9\.9\.9.*npm does not have/);
+  // A registry that never answers (a firewall that drops the packets) must not hold the doctor for the runner's default minute.
+  const bound = unpublished.options[1]?.timeoutMs;
+  assert.ok(bound !== undefined && bound <= 15_000, `the npm lookup is given a short bound, got ${bound}`);
+
+  assert.deepEqual(names(diagnose({ ...base, run: scripted([listing, ok("9.9.9\n")]).run })), []);
+  // No npm, or an npm that failed for another reason (offline), is not evidence of a missing release.
+  assert.deepEqual(names(diagnose({ ...base, run: scripted([listing, absent]).run })), []);
+  assert.deepEqual(names(diagnose({ ...base, run: scripted([listing, fail("npm error network request failed ENOTFOUND")]).run })), []);
+});
+
+test("the real runner stops a command at the bound it is given and says so", () => {
+  const started = Date.now();
+  const r = spawnRunner(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], { timeoutMs: 300 });
+  assert.ok(Date.now() - started < 10_000, "stopped at the bound, not after the command's own 20 s");
+  assert.equal(r.missing, false);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /did not finish within 0\.3 s/);
 });
 
 test("the engine-only doctor does not fail a plugin install for lacking a skill link or a registration", () => {

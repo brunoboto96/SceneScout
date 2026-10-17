@@ -71,6 +71,8 @@ const DEFAULT_CI_DEDUP: DedupMode = "judge";
 export const DEDUP_ENV = "SCENESCOUT_DEDUP";
 /** Which provider the MCP server's dedup judge uses when both keys are in its environment. */
 const DEDUP_PROVIDER_ENV = "SCENESCOUT_DEDUP_PROVIDER";
+/** A compatible endpoint for the MCP server's dedup judge, in place of the provider's own API root. Held to the rules of `--base-url`. */
+export const DEDUP_BASE_URL_ENV = "SCENESCOUT_DEDUP_BASE_URL";
 
 export interface Caps {
   /** Model calls. */
@@ -172,18 +174,20 @@ export interface CiOptions {
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
-/** A base URL a key may be sent to: https, or plain http only to this machine. */
-export function checkBaseUrl(raw: string): { ok: true; url: string } | { ok: false; error: string } {
+/** A base URL a key may be sent to: https, or plain http only to this machine. `name` is what the error calls it (the flag or the variable). */
+export function checkBaseUrl(raw: string, name = "--base-url"): { ok: true; url: string } | { ok: false; error: string } {
   let u: URL;
   try {
     u = new URL(raw);
   } catch {
-    return { ok: false, error: `--base-url is not a URL: ${raw}` };
+    return { ok: false, error: `${name} is not a URL` };
   }
-  if (u.username || u.password) return { ok: false, error: "--base-url must carry no credentials: the key is read from the environment" };
+  if (u.username || u.password) return { ok: false, error: `${name} must carry no credentials: the key is read from the environment` };
+  // The API's path is appended to this URL: after a query or a fragment it would land inside them and the call would go elsewhere.
+  if (/[?#]/.test(u.href)) return { ok: false, error: `${name} must carry no query or fragment: the API's path is added to its end` };
   if (u.protocol === "https:") return { ok: true, url: u.toString().replace(/\/+$/, "") };
   if (u.protocol === "http:" && LOOPBACK_HOSTS.has(u.hostname)) return { ok: true, url: u.toString().replace(/\/+$/, "") };
-  return { ok: false, error: "--base-url must be https (plain http only to 127.0.0.1 or localhost): the API key is sent to it" };
+  return { ok: false, error: `${name} must be https (plain http only to 127.0.0.1 or localhost): the API key is sent to it` };
 }
 
 /** `env` is read for the earlier run alone (SCENESCOUT_FROM_RUN, SCENESCOUT_FROM_RUN_MODE), since a flag wins over it. */
@@ -455,9 +459,17 @@ export function judgeKeyConfig(env: Record<string, string | undefined>): { ok: t
   } else {
     provider = withKey[0];
   }
+  let baseUrl = DEFAULT_BASE_URL[provider];
+  const rawBase = (env[DEDUP_BASE_URL_ENV] ?? "").trim();
+  if (rawBase !== "") {
+    const checked = checkBaseUrl(rawBase, DEDUP_BASE_URL_ENV);
+    // Refused, not ignored: falling back to the provider's own API would send the key somewhere the operator chose not to.
+    if (!checked.ok) throw new Error(checked.error);
+    baseUrl = checked.url;
+  }
   return {
     ok: true,
-    resolved: { provider, model: DEFAULT_MODEL[provider], effort: judgeEffort(provider), baseUrl: DEFAULT_BASE_URL[provider] },
+    resolved: { provider, model: DEFAULT_MODEL[provider], effort: judgeEffort(provider), baseUrl },
     key: (env[KEY_ENV[provider]] ?? "").trim(),
   };
 }

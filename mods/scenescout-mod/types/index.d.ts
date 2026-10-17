@@ -32,7 +32,21 @@ export type ScenescoutModWizard = {
   saveName: string;
   /** The saved check whose Delete was pressed and is waiting on the person's yes. */
   deleting: string | null;
+  /** Saved checks waiting to start, one at a time, each with the care level it had when it was queued. */
+  queue: ScenescoutModQueued[];
+  /** Whether the list of saved checks to queue is open. */
+  queuing: boolean;
+  /** The queued check whose plan waits on the person's yes, previewed or not yet opened, or null. */
+  fromQueue: string | null;
+  /** A queued check that started, or waits on a yes, while the person was on another screen: the panel offers Follow it. */
+  started: string | null;
+  /** Whether the queue waits for the person's Go on, after Back on a queued check's preview. */
+  queuePaused: boolean;
+  /** The plan the results were opened for, which Save this check, Run again and Check them again act on. */
+  results: { planId: string | null; plan: Record<string, unknown> | null; lastChoices: Record<string, unknown> | null } | null;
 };
+
+export type ScenescoutModQueued = { name: string; address: string; care: ScenescoutModDraft["care"] };
 
 export type ScenescoutModStatus = {
   kind: "loading" | "data" | "text" | "error";
