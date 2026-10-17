@@ -720,9 +720,12 @@ test("the desktop extension's description claims no more than the write policy e
   assert.match(text, /unsubscribe link/, "says a link that acts when opened is followed");
 });
 
-/** Wording that claims more than the write policy enforces (Safety model, "What is a guarantee and what is best effort"). */
+/**
+ * Wording that claims more than the write policy enforces (Safety model, "What is a guarantee and what is best effort").
+ * Each phrase is tied to a mode or a page, so an ordinary "changes nothing" or "reads only" elsewhere is not caught.
+ */
 const OVERCLAIM_RE =
-  /nothing (?:existing )?is changed|changes nothing[,.]|nothing but `?(?:GETs?|reads)`?(?: requests)? leaves?|reads only|blocks edits and deletions|blocks mutations on anything else|with credentials redacted/i;
+  /nothing (?:existing )?is changed|(?:reads|loads|opens) pages, changes nothing|nothing but `?(?:GETs?|reads)`?(?: requests)? leaves?|(?:<p>|\| )reads only\b|blocks edits and deletions|blocks mutations on anything else|scout_network`?[^\n]*read-only, with credentials redacted/i;
 
 test("the README, the website and the skill claim no more than the write policy enforces", () => {
   for (const file of ["README.md", "site/index.html", "skills/scenescout/SKILL.md"]) {
