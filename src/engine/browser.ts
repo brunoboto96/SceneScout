@@ -5004,6 +5004,10 @@ export class BrowserEngine {
       return "resource";
     }
     await this.settle();
+    // With a saved sign-in, the address is watched until it holds still before the route is read: a guard that sends
+    // a signed-out visitor to sign-in from its scripts a moment after load would otherwise pass as a healthy route.
+    // Without one, there is no sign-in to lose and nothing is waited for (landedUrl).
+    await this.landedUrl(page);
     this.harvestPaused = opts.measureOnly === true;
     const { elements, forms, aliases } = await this.snapshots.collect().finally(() => (this.harvestPaused = false));
     const finalUrl = page.url();
