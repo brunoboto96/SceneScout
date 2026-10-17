@@ -122,6 +122,20 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       slowNavFlow.outcome.status === "failed" && /page-load limit \(1000 ms\) ran out/.test(slowNavFlow.outcome.reason),
       JSON.stringify(slowNavFlow.outcome).slice(0, 400),
     );
+    // A plan step's target that is there when it is looked for and gone for a moment while it would be named: its
+    // name is read when it is found, so a read-only plan still refuses the destructive control rather than clicking
+    // it unnamed once it is back.
+    await engine.attach({ url: `${baseUrl}/vanishing-target.html`, projectDir, mode: "read-only" });
+    const vanishingPage = (engine as unknown as { page: import("playwright").Page }).page;
+    await vanishingPage.evaluate("window.__redrawOnRead = true");
+    const vanishing = await engine.runPlan([{ action: "click", target: "testid=thing-remove" }]);
+    check(
+      "a read-only plan refuses a destructive control that vanishes for a moment while it is named, rather than clicking it unnamed",
+      /1\. click testid=thing-remove → REFUSED/.test(vanishing) &&
+        (await vanishingPage.locator("[data-testid=thing-status]").textContent()) === "Nothing removed",
+      vanishing.slice(0, 600),
+    );
+
     await engine.attach({ url: baseUrl, projectDir, navTimeoutMs: HIGH_MS, actionTimeoutMs: HIGH_MS });
     const passingFlow = await engine.replayFlow([...flowSteps], "observe");
     check("...while the same flow passes under raised limits", passingFlow.outcome.status === "passed", JSON.stringify(passingFlow.outcome).slice(0, 400));

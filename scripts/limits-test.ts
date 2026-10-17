@@ -1,8 +1,9 @@
 /**
  * Table tests for the time limits in src/engine/limits.ts: how long an action
  * and a page load may take, where each is set (option > environment >
- * default), the bounds each is held to, and what a timeout says (including a
- * scroll of a named target that could not run).
+ * default), the bounds each is held to, what a timeout says (including a
+ * scroll of a named target that could not run), and the waits a page gets
+ * when a call names none.
  *
  *   npx tsx --test scripts/limits-test.ts
  */
@@ -16,11 +17,15 @@ import {
   explainTimeout,
   explicitLimits,
   isTimeoutMessage,
+  LIMIT_BOUNDS,
   limitHint,
   NAV_TIMEOUT_ENV,
+  pageTimeouts,
   parseLimit,
   parseLimitFlag,
   resolveTimeLimits,
+  SCREENSHOT_TIMEOUT_MS,
+  TARGET_READ_MS,
   watchdogFor,
 } from "../src/engine/limits.ts";
 import { scrollTargetRefusal } from "../src/engine/probes.ts";
@@ -170,4 +175,27 @@ test("a scroll target that matches nothing is not found; any other failure says 
   const slow = scrollTargetRefusal("label=Notes", 1, timeout, 5000);
   assert.ok(slow.startsWith("Could not scroll label=Notes: Timeout 5000ms exceeded. — the action limit (5000 ms)"), slow);
   assert.ok(!slow.includes("Call log"), "only the first line of the driver's error");
+});
+
+test("a wait that names no timeout gets the session's limits, not Playwright's 30 s", () => {
+  const rows: Array<[{ actionTimeoutMs?: number; navTimeoutMs?: number }, number, number]> = [
+    [{}, 5000, 20000],
+    [{ actionTimeoutMs: 15000 }, 15000, 20000],
+    [{ navTimeoutMs: 60000 }, 5000, 60000],
+    [{ actionTimeoutMs: 1000, navTimeoutMs: 1000 }, 1000, 1000],
+  ];
+  for (const [options, timeout, navigationTimeout] of rows) {
+    assert.deepEqual(pageTimeouts(resolveTimeLimits(options, {})), { timeout, navigationTimeout }, JSON.stringify(options));
+  }
+});
+
+test("a bookkeeping read of a target never outlasts the action, whatever the action limit", () => {
+  // At the smallest action limit a read is still no longer than the action, so a missing target costs one action limit.
+  assert.ok(TARGET_READ_MS <= LIMIT_BOUNDS.action.min, `${TARGET_READ_MS} > ${LIMIT_BOUNDS.action.min}`);
+  assert.ok(TARGET_READ_MS < DEFAULT_TIME_LIMITS.actionMs);
+});
+
+test("a screenshot keeps Playwright's own 30 s rather than the action limit the page now defaults to", () => {
+  assert.equal(SCREENSHOT_TIMEOUT_MS, 30_000);
+  assert.ok(SCREENSHOT_TIMEOUT_MS > pageTimeouts(DEFAULT_TIME_LIMITS).timeout);
 });

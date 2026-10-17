@@ -170,7 +170,19 @@ import {
   type SelectOption,
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
-import { DEFAULT_TIME_LIMITS, explainTimeout, firstLineOf, isTimeoutMessage, limitHint, resolveTimeLimits, type LimitKind, type TimeLimits } from "./limits.js";
+import {
+  DEFAULT_TIME_LIMITS,
+  explainTimeout,
+  firstLineOf,
+  isTimeoutMessage,
+  limitHint,
+  pageTimeouts,
+  resolveTimeLimits,
+  SCREENSHOT_TIMEOUT_MS,
+  TARGET_READ_MS,
+  type LimitKind,
+  type TimeLimits,
+} from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { bestEffort, settleWithin } from "./best-effort.js";
 import { marksRouteExercised, pathnameOf, RouteGuard, type BlockedRequest } from "./route-guard.js";
@@ -515,7 +527,6 @@ interface PlanRun {
   continuedPast: number[];
   onViolation: PlanViolationRule;
   locatePlanTarget: (target: string) => Locator;
-  liveLabel: (loc: Locator) => Promise<string>;
   /** Last state captured this plan — reused as the next step's pre-state while the page has not moved. */
   lastCapture: PlanCapture | null;
 }
@@ -585,12 +596,40 @@ function describeSelect(node: Element): Array<{ value: string; label: string; se
     .filter((o) => o.label !== "");
 }
 
+/** What a step's safety check and coverage name a target by, read from the element in one go (readTargetFacts). */
+interface TargetFacts {
+  /** aria-label, else the text, else the test id; trimmed, not capped, so the read-only check sees all of it. */
+  label: string;
+  testid: string | null;
+  isSelect: boolean;
+}
+
+/**
+ * A target's name, test id and kind, read in one call once the target has been
+ * found. It waits up to `ms` and throws rather than coming back empty: a target
+ * gone for a moment between being found and being named would otherwise be
+ * acted on unnamed, past the read-only check on its label.
+ */
+async function readTargetFacts(loc: Locator, ms: number): Promise<TargetFacts> {
+  const facts = await loc.evaluate(
+    (n) => ({
+      aria: n.getAttribute("aria-label"),
+      testid: n.getAttribute("data-testid"),
+      text: n.textContent,
+      isSelect: n.tagName.toLowerCase() === "select",
+    }),
+    undefined,
+    { timeout: ms },
+  );
+  return { label: (facts.aria ?? facts.text ?? facts.testid ?? "").trim(), testid: facts.testid, isSelect: facts.isSelect };
+}
+
 /**
  * A dropdown's options, read without waiting: a select that is not there to
  * read is not worth stalling the action for.
  */
 async function readSelectOptions(loc: Locator): Promise<Array<{ value: string; label: string; selected: boolean }> | null> {
-  return bestEffort(loc.evaluate(describeSelect, undefined, { timeout: 1000 }), null);
+  return bestEffort(loc.evaluate(describeSelect, undefined, { timeout: TARGET_READ_MS }), null);
 }
 
 /**
@@ -1696,6 +1735,7 @@ export class BrowserEngine {
       await this.context.exposeBinding(POSTMESSAGE_BINDING, (source, entries: unknown) => this.noteTokenPosts(source.frame, entries));
       await this.context.addInitScript(postMessageCaptureScript());
       this.page = await this.context.newPage();
+      this.applyPageTimeouts(this.page);
     } catch (err) {
       await this.close();
       throw err;
@@ -1856,12 +1896,20 @@ export class BrowserEngine {
     }
   }
 
+  /** A wait on the page that names no timeout gets the session's limits rather than Playwright's 30 s (limits.ts pageTimeouts). */
+  private applyPageTimeouts(page: Page): void {
+    const { timeout, navigationTimeout } = pageTimeouts(this.limits);
+    page.setDefaultTimeout(timeout);
+    page.setDefaultNavigationTimeout(navigationTimeout);
+  }
+
   /** Wire the context, part 3: a same-origin popup becomes the session's page; another site's is closed. */
   private adoptPopups(context: BrowserContext): void {
     // Popups / target=_blank: adopt same-origin pages as the active page (with
     // oracles attached); close foreign-origin popups so exploration cannot
     // silently escape the app under test.
     context.on("page", (newPage) => {
+      this.applyPageTimeouts(newPage);
       newPage
         .waitForLoadState("domcontentloaded", { timeout: this.limits.backNavMs })
         .then(() => {
@@ -3609,7 +3657,7 @@ export class BrowserEngine {
     await locator.hover({ timeout: this.limits.actionMs });
     // Wiggle inside the element: pointer-tracking libraries distinguish real
     // movement from a single synthetic hover event.
-    const box = await bestEffort(locator.boundingBox(), null);
+    const box = await bestEffort(locator.boundingBox({ timeout: TARGET_READ_MS }), null);
     if (box) {
       await page.mouse.move(box.x + box.width / 2 + 2, box.y + box.height / 2 + 1);
       await page.mouse.move(box.x + box.width / 2 - 2, box.y + box.height / 2 - 1);
@@ -3646,11 +3694,15 @@ export class BrowserEngine {
   private static async chosenOptionLabel(loc: import("playwright").Locator, value: string | undefined): Promise<string | null> {
     if (value === undefined) return "";
     return bestEffort(
-      loc.evaluate((node, v) => {
-        const opts = Array.from((node as HTMLSelectElement).options ?? []);
-        const o = opts.find((x) => x.value === v || x.label === v || (x.textContent || "").trim() === v);
-        return o ? (o.label || o.textContent || "").trim().slice(0, 120) : "";
-      }, value),
+      loc.evaluate(
+        (node, v) => {
+          const opts = Array.from((node as HTMLSelectElement).options ?? []);
+          const o = opts.find((x) => x.value === v || x.label === v || (x.textContent || "").trim() === v);
+          return o ? (o.label || o.textContent || "").trim().slice(0, 120) : "";
+        },
+        value,
+        { timeout: TARGET_READ_MS },
+      ),
       null,
     );
   }
@@ -3667,7 +3719,7 @@ export class BrowserEngine {
     loc: import("playwright").Locator,
     value: string,
   ): Promise<{ refused: string } | { arg: string | { index: number }; label: string | null; option: SelectOption | null }> {
-    const options = await bestEffort(loc.evaluate(listSelectOptions, undefined, { timeout: 1000 }), null);
+    const options = await bestEffort(loc.evaluate(listSelectOptions, undefined, { timeout: TARGET_READ_MS }), null);
     if (!options) return { arg: value, label: await BrowserEngine.chosenOptionLabel(loc, value), option: null };
     const match = matchOption(options, value);
     if ("refused" in match) return match;
@@ -4916,16 +4968,7 @@ export class BrowserEngine {
       if (!parsed) throw new Error(`Plan targets must be ${TARGET_HELP} (got: ${target})`);
       return BrowserEngine.locatorFor(page, parsed).first();
     };
-    const liveLabel = async (loc: ReturnType<typeof locatePlanTarget>): Promise<string> => {
-      const [aria, testid, txt] = await Promise.all([
-        bestEffort(loc.getAttribute("aria-label"), null),
-        bestEffort(loc.getAttribute("data-testid"), null),
-        bestEffort(loc.textContent({ timeout: 1000 }), null),
-      ]);
-      return (aria ?? txt ?? testid ?? "").trim().slice(0, 120);
-    };
-
-    const run: PlanRun = { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget, liveLabel, lastCapture: null };
+    const run: PlanRun = { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget, lastCapture: null };
     for (const [i, step] of steps.slice(0, 20).entries()) {
       if ((await this.runPlanStep(run, step, i)) === "stop") break;
     }
@@ -4944,7 +4987,7 @@ export class BrowserEngine {
 
   /** One step of a plan: act, settle, record coverage and report it on the transcript. "stop" ends the plan. */
   private async runPlanStep(run: PlanRun, step: PlanStep, i: number): Promise<"next" | "stop"> {
-    const { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget, liveLabel } = run;
+    const { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget } = run;
     this.actionStartedAt = Date.now();
     // A navigation or a scroll is not input: navigate() moves the action mark itself, and what a scroll loads is the page's own doing.
     if (step.action !== "navigate" && step.action !== "scroll") await this.beginInput();
@@ -5004,6 +5047,15 @@ export class BrowserEngine {
       } else {
         if (!step.target) throw new Error(`${step.action} needs a target`);
         const loc = locatePlanTarget(step.target);
+        // One wait for the target, at the action limit: a target the page no longer has fails here, through the
+        // timeout hint below, instead of each read of it after this waiting out Playwright's own 30 s.
+        await loc.waitFor({ state: "attached", timeout: this.limits.actionMs });
+        // Named as found, before the capture below gives the page time to redraw it: the read-only check and the
+        // coverage record need its name, and a target gone for a moment is waited for rather than named "".
+        const { label: name, testid, isSelect: selectTarget } = await readTargetFacts(loc, this.limits.actionMs);
+        const label = name.slice(0, 120);
+        preTestid = testid;
+        preLabel = label;
         // Coverage is recorded against the state the element LIVED IN, so it
         // has to be captured before the action changes the page. Marking it
         // afterwards (as this did) recorded against the state the click
@@ -5019,16 +5071,8 @@ export class BrowserEngine {
           // watchdog for a result identical to the one just taken.
           preState = run.lastCapture?.url === page.url() ? run.lastCapture : await bestEffort(this.captureCoverageState(), null);
         }
-        preTestid = await bestEffort(loc.getAttribute("data-testid"), null);
-        const label = await liveLabel(loc);
-        preLabel = label;
         // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
-        const isSelect =
-          step.action === "select" &&
-          (await bestEffort(
-            loc.evaluate((n) => n.tagName.toLowerCase() === "select"),
-            false,
-          ));
+        const isSelect = step.action === "select" && selectTarget;
         // The option a select step means, settled before anything is picked: one naming none fails the step at once.
         const pick = step.action === "select" ? await BrowserEngine.resolveSelectPick(loc, step.value ?? "") : null;
         if (pick && "refused" in pick) {
@@ -5065,7 +5109,7 @@ export class BrowserEngine {
           if (step.pressEnter) {
             if (this.readOnly) {
               const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
-              const submitLabel = (await bestEffort(submit.textContent({ timeout: 1000 }), "")) ?? "";
+              const submitLabel = (await bestEffort(submit.textContent({ timeout: TARGET_READ_MS }), "")) ?? "";
               if (isDestructive(submitLabel)) {
                 transcript.push(`${desc} → filled, Enter withheld: ${destructiveRefusal(submitLabel.trim(), this.mode)}`);
                 return "stop";
@@ -5240,8 +5284,8 @@ export class BrowserEngine {
   private async waitUntilActionable(loc: import("playwright").Locator, action: "click" | "type" | "select"): Promise<string | null> {
     const read = async () =>
       notActionable(action, {
-        enabled: await bestEffort(loc.isEnabled({ timeout: 1000 }), true),
-        editable: action === "type" ? await bestEffort(loc.isEditable({ timeout: 1000 }), null) : null,
+        enabled: await bestEffort(loc.isEnabled({ timeout: TARGET_READ_MS }), true),
+        editable: action === "type" ? await bestEffort(loc.isEditable({ timeout: TARGET_READ_MS }), null) : null,
       });
     const until = Date.now() + this.limits.actionMs;
     let reason = await read();
@@ -5264,9 +5308,9 @@ export class BrowserEngine {
     const visible = matches.filter({ visible: true });
     const anyVisible = (await bestEffort(visible.count(), 0)) > 0;
     const el = anyVisible ? visible.first() : matches.first();
-    const enabled = await bestEffort(el.isEnabled({ timeout: 1000 }), null);
+    const enabled = await bestEffort(el.isEnabled({ timeout: TARGET_READ_MS }), null);
     // isChecked throws for an element that is not a checkbox, radio or [role=checkbox]: it has no checked state.
-    const checked = await bestEffort(el.isChecked({ timeout: 1000 }), null);
+    const checked = await bestEffort(el.isChecked({ timeout: TARGET_READ_MS }), null);
     return { visible: anyVisible, enabled, checked };
   }
 
@@ -5463,15 +5507,10 @@ export class BrowserEngine {
           // The state first, since it is what is true; the hint still applies when the app enables it late.
           failure = `${step.target} ${blocked} after ${actionMs / 1000}s — ${limitHint("action", actionMs)}`;
         } else {
-          const label = ((await bestEffort(loc.getAttribute("aria-label"), null)) ?? (await bestEffort(loc.textContent({ timeout: 1000 }), null)) ?? "").trim();
-          // A dropdown is named by all its options; a select step is judged by the option it picks (destructiveLabelOf).
-          const isSelect =
-            step.action === "select" &&
-            (await bestEffort(
-              loc.evaluate((n) => n.tagName.toLowerCase() === "select"),
-              false,
-            ));
-          const testid = await bestEffort(loc.getAttribute("data-testid"), null);
+          // Named in one read that waits rather than coming back empty (readTargetFacts). A dropdown is named by all its
+          // options; a select step is judged by the option it picks (destructiveLabelOf).
+          const { label, testid, isSelect: selectTarget } = await readTargetFacts(loc, actionMs);
+          const isSelect = step.action === "select" && selectTarget;
           if (
             this.readOnly &&
             step.action !== "type" &&
@@ -5489,7 +5528,7 @@ export class BrowserEngine {
             await this.fillOrAppend(loc, step.value, step.replace ?? false);
             if (step.pressEnter) {
               const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
-              const submitLabel = ((await bestEffort(submit.textContent({ timeout: 1000 }), "")) ?? "").trim();
+              const submitLabel = ((await bestEffort(submit.textContent({ timeout: TARGET_READ_MS }), "")) ?? "").trim();
               if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
               else await loc.press("Enter", { timeout: actionMs });
             }
@@ -5615,7 +5654,7 @@ export class BrowserEngine {
 
   async screenshot(): Promise<{ base64: string; mimeType: string }> {
     const page = this.requirePage();
-    const buf = await maskedScreenshot(page, { type: "jpeg", quality: 60, fullPage: false }, this.limits.actionMs);
+    const buf = await maskedScreenshot(page, { type: "jpeg", quality: 60, fullPage: false, timeout: SCREENSHOT_TIMEOUT_MS }, this.limits.actionMs);
     this.logAction({ action: "screenshot", url: page.url() });
     return { base64: buf.toString("base64"), mimeType: "image/jpeg" };
   }
@@ -5654,7 +5693,7 @@ export class BrowserEngine {
     const viewport = page.viewportSize() ?? ((await page.evaluate("({ width: innerWidth, height: innerHeight })")) as { width: number; height: number });
     const clip = captureClip(box, margin, viewport);
     if (!clip) throw new Error(`${el.name || el.key} is outside the viewport, so it has no picture.`);
-    const png = await maskedScreenshot(page, { type: "png", clip, animations: "disabled" }, this.limits.actionMs);
+    const png = await maskedScreenshot(page, { type: "png", clip, animations: "disabled", timeout: SCREENSHOT_TIMEOUT_MS }, this.limits.actionMs);
     if (log) this.logAction({ action: "capture", target: el.key.slice(0, 200), url: page.url() });
     // Found by key, the refs were rebuilt without a snapshot: none of them may be acted on.
     if (target.key) this.snapshots.dropRefs("an element was captured by its key");

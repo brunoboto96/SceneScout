@@ -130,6 +130,34 @@ export function resolveTimeLimits(options: { actionTimeoutMs?: number; navTimeou
 }
 
 /**
+ * A read of an element for bookkeeping (its test id, its label, whether it is
+ * a select) rather than the action on it. It is never the step's real wait, and
+ * on a target the page no longer has it must not hold the step for
+ * Playwright's own 30 s. No longer than the smallest action limit, so a read never
+ * outlasts the action it serves.
+ */
+export const TARGET_READ_MS = 1000;
+
+/**
+ * A screenshot is not an action on the page: it keeps the 30 s Playwright has
+ * always given it, which the page's own default (pageTimeouts) no longer does.
+ */
+export const SCREENSHOT_TIMEOUT_MS = 30_000;
+
+/**
+ * The defaults a session's page gets, for a wait on it that names no timeout
+ * of its own: the action limit for an action or a read of an element, the
+ * page-load limit for a load. Without them such a wait falls to Playwright's
+ * 30 s, so a missing target held a step for several times the action limit.
+ * They are set on each page rather than the context, because the context's
+ * default also bounds the requests the route handler sends for the app
+ * (route.fetch), which are not actions.
+ */
+export function pageTimeouts(limits: TimeLimits): { timeout: number; navigationTimeout: number } {
+  return { timeout: limits.actionMs, navigationTimeout: limits.navMs };
+}
+
+/**
  * A tool call's watchdog, given the session's limits. The watchdogs are sized
  * for the default limits; a session that raised them gets the watchdog
  * lengthened by as much, so a raised limit is what ends a slow call, with its
