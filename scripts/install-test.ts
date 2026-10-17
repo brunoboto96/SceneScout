@@ -91,7 +91,7 @@ import {
   reportFolderProblem,
   writeFirstRunReport,
 } from "../src/first-run.ts";
-import { MAX_CHECK_ROUTES } from "../src/engine/check.ts";
+import { MAX_CHECK_ROUTES, parseCheckArgs } from "../src/engine/check.ts";
 import { firstMessageHint, manualFor, parseClients, registerInFile, registerWithClient, vscodeAddArgs, vscodeBinary } from "../src/clients.ts";
 
 function tmp(prefix: string): string {
@@ -717,6 +717,58 @@ test("the desktop extension's description claims no more than the write policy e
   assert.match(text, /signing in, signing out and refreshing a token/, "says what observe lets out besides page loads");
   assert.match(text, /WebSocket/, "and that only HTTP is inspected");
   assert.match(text, /Check my site/, "names the guided prompt a person starts from");
+  assert.match(text, /unsubscribe link/, "says a link that acts when opened is followed");
+});
+
+/**
+ * Wording that claims more than the write policy enforces (Safety model, "What is a guarantee and what is best effort").
+ * Each phrase is tied to a mode or a page, so an ordinary "changes nothing" or "reads only" elsewhere is not caught.
+ */
+const OVERCLAIM_RE =
+  /nothing (?:existing )?is changed|(?:reads|loads|opens) pages, changes nothing|nothing but `?(?:GETs?|reads)`?(?: requests)? leaves?|(?:<p>|\| )reads only\b|blocks edits and deletions|blocks mutations on anything else|scout_network`?[^\n]*read-only, with credentials redacted/i;
+
+test("the README, the website and the skill claim no more than the write policy enforces", () => {
+  for (const file of ["README.md", "site/index.html", "skills/scenescout/SKILL.md"]) {
+    const text = fs.readFileSync(path.join(repoRoot, file), "utf8");
+    assert.doesNotMatch(text, OVERCLAIM_RE, `${file} claims more than the policy enforces`);
+    assert.match(text, /WebSocket/, `${file} says messages over a WebSocket are not inspected`);
+    assert.match(text, /unsubscribe link/, `${file} says a link that acts when opened is followed`);
+  }
+  const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
+  const observe = readme.split("\n").find((l) => l.startsWith("| 🔵 `observe` |")) ?? "";
+  assert.match(observe, /`HEAD` and `OPTIONS`/, "the README's observe row names every method it lets out");
+  assert.match(observe, /signing in, signing out and refreshing a token/, "and the sign-in exemption");
+  assert.match(observe, /name as a read/, "and the POSTs named as reads");
+  const readOnly = readme.split("\n").find((l) => l.startsWith("| 🟢 `read-only` |")) ?? "";
+  assert.match(readOnly, /can create a record or change one that was there/, "the README says what a plain POST in read-only can do");
+  // Each row names the commands it is the default for, as the parsers default them.
+  const check = parseCheckArgs(["http://127.0.0.1:3000"], "/p");
+  assert.ok(check.ok);
+  assert.ok(
+    (check.options.mode === "observe" ? observe : readOnly).includes("`scenescout check`"),
+    `the README names check under its default, ${check.options.mode}`,
+  );
+  assert.ok(!(check.options.mode === "observe" ? readOnly : observe).includes("`scenescout check`"), "and under no other mode");
+  // The guide's own summaries of the modes hold to the same rule.
+  for (const page of ["Start-here.md", "Ways-to-use-it.md"]) {
+    const text = fs.readFileSync(path.join(repoRoot, "docs", "guide", page), "utf8");
+    assert.doesNotMatch(text, OVERCLAIM_RE, `${page} claims more than the policy enforces`);
+  }
+});
+
+test("the plugin and the desktop extension link to what they reach", () => {
+  const anchor = "https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md#what-it-reaches";
+  const plugin = JSON.parse(fs.readFileSync(path.join(repoRoot, ".claude-plugin", "plugin.json"), "utf8")) as Record<string, unknown>;
+  assert.equal(plugin.privacyPolicyUrl, anchor, "the plugin's privacy link lands on the What it reaches table");
+  assert.ok((readManifest().long_description ?? "").includes(anchor), "the extension's description links to it");
+  // A Windows checkout ends lines with \r\n; the heading is found on either.
+  const guide = fs.readFileSync(path.join(repoRoot, "docs", "guide", "Ways-to-use-it.md"), "utf8").replace(/\r\n/g, "\n");
+  const reach = guide.slice(guide.indexOf("\n## What it reaches\n"));
+  assert.ok(reach.length > 1 && guide.includes("\n## What it reaches\n"), "the heading the links name is there");
+  const header = reach.split("\n").find((l) => l.startsWith("| |")) ?? "";
+  for (const install of ["The plugin", "The desktop extension", "The mod"]) assert.ok(header.includes(install), `its table has a column for ${install}`);
+  for (const row of ["Network: the app", "Network: downloads", "Network: a model", "A port", "Processes", "Files written", "Files read", "The project folder"])
+    assert.match(reach, new RegExp(`^\\| ${row} \\|`, "m"), `and a row for ${row}`);
 });
 
 test("the build's declaration files stay out of the npm package and the bundle", () => {

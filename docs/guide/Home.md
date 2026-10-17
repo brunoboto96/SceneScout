@@ -14,7 +14,7 @@ All it takes is Node 20 or newer and an app you are allowed to test. No account,
 npx -y scenescout http://localhost:3000
 ```
 
-It opens pages in a mode that sends nothing but reads, then writes `scenescout-report/report.md` and prints the three issues to look at first. [Start here](Start-here.md#a-first-look-with-nothing-set-up) explains what it does and does not do.
+It opens pages in a mode that sends no form, then writes `scenescout-report/report.md` and prints the three issues to look at first. [Start here](Start-here.md#a-first-look-with-nothing-set-up) explains what it does and does not do.
 
 When you want your agent to click, fill forms and compare roles, install it for the agent and ask in plain words:
 

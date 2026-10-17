@@ -177,7 +177,7 @@ For a gate on every deploy, `scenescout check` is usually the better fit, and ne
 npx -y scenescout check https://www.example.com --mode observe --max-routes 150
 ```
 
-**What to expect.** Routes come from links. `observe` mode lets nothing but `GET` requests out, so the newsletter form is filled but never submitted, and the gap ledger says so. Typical findings: broken images, contrast failures, headings out of order, unnamed icon links, a page that scrolls sideways on a phone viewport, dead ends with no navigation. Under "Worth a look" the check may list links styled like body text or spacing off a 4px grid; those count only if your site uses that convention.
+**What to expect.** Routes come from links. `observe` mode lets only `GET`, `HEAD` and `OPTIONS` requests out, signing in apart, so the newsletter form is filled but never submitted, and the gap ledger says so. Typical findings: broken images, contrast failures, headings out of order, unnamed icon links, a page that scrolls sideways on a phone viewport, dead ends with no navigation. Under "Worth a look" the check may list links styled like body text or spacing off a 4px grid; those count only if your site uses that convention.
 
 **Pitfalls.**
 
