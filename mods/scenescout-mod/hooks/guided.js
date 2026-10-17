@@ -171,6 +171,7 @@ export const ACTION_LABEL = {
   recheck: "Check them again",
   plainReport: "Write the report in plain words",
   teamReport: "Make a team report",
+  fileTickets: "File as tickets",
   confirm: "Confirm the care level",
   notABug: "Not a bug",
   explain: "Explain more",
@@ -183,6 +184,8 @@ export const ACTION_PROMPT = {
   stop: "Stop the SceneScout run now and write what you have.",
   recheck: "Check the open SceneScout problems again with scout_verify and tell me which are gone.",
   plainReport: 'Write the SceneScout report in plain words: scout_report {report: "qa"}.',
+  fileTickets:
+    "File SceneScout problems as tickets: show me the open ones with scout_cards, ask me which and where (GitHub or Jira), preview them with scout_ticket_preview, then call scout_ticket_file so I confirm in SceneScout's own form.",
   explain: (/** @type {string} */ id) =>
     `Explain SceneScout finding ${id} to me in more detail, in plain words, from its evidence and steps only (scout_cards {ids: ["${id}"]}).`,
   again: (/** @type {string} */ id) => `Check SceneScout finding ${id} again with scout_verify, and tell me whether it is still there.`,
@@ -1183,6 +1186,8 @@ export function renderGuided(els, w, ctx, act) {
         button("guided-results-report", ACTION_LABEL.plainReport, () => act("send", { text: ACTION_PROMPT.plainReport })),
         // Hidden while one is being written, so a second press cannot start another; Back clears a stuck one.
         ...(w.busy === "team-report" ? [] : [button("guided-results-team-report", ACTION_LABEL.teamReport, () => act("teamReport"))]),
+        // Claude previews and files; the server's own form, listing the tickets, is where the person says yes.
+        ...(cards.length > 0 ? [button("guided-results-file-tickets", ACTION_LABEL.fileTickets, () => act("send", { text: ACTION_PROMPT.fileTickets }))] : []),
         ...(w.lastChoices ? [button("guided-results-again", PANEL_WORDS.runAgain, () => act("runAgain"))] : []),
         ...(canType ? [button("guided-results-new", PANEL_WORDS.newCheck, () => act("newCheck"))] : []),
         button("guided-results-back", PANEL_WORDS.back, () => act("go", { step: w.planId ? "running" : "welcome" })),

@@ -70,6 +70,26 @@ import {
 import type { Finding } from "../src/engine/memory.ts";
 import { backoffMs } from "../src/engine/provider.ts";
 import { runExport, type ExportDeps } from "../src/export-run.ts";
+import type { ConfirmFormOutcome } from "../src/engine/guided.ts";
+import { TICKET_ANSWER, TICKET_SAYS, ticketNoSignIn } from "../src/engine/guided-words.ts";
+import {
+  checkPreview,
+  checkTicketTarget,
+  isPreviewId,
+  MAX_KEPT_PREVIEWS,
+  newPreviewId,
+  PREVIEW_TTL_MS,
+  previewDigest,
+  TICKET_CONFIRM_VALUES,
+  ticketConfirmForm,
+  ticketConfirmVerdict,
+  ticketExportArgs,
+  TicketPreviews,
+  trackerEnv,
+  type KeptPreview,
+  type TicketPreview,
+} from "../src/engine/ticket-preview.ts";
+import { fileTickets, previewTickets, type TicketDeps } from "../src/ticket-run.ts";
 
 const REPO = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const GH_TOKEN = "test-gh-token-0123456789";
@@ -2727,6 +2747,487 @@ test("Jira: --from a ci.json lists an issue the run's memory filed and never rew
       [undefined, undefined, undefined],
     );
     assert.match(fromCi.out.join("\n"), /Filed 0; 2 already filed\./);
+  } finally {
+    await jira.close();
+  }
+});
+
+// ── Tickets from the guided surfaces: scout_ticket_preview and scout_ticket_file ──
+
+test("ticket preview: an id is tp- and 16 random characters, and nothing else has its shape", () => {
+  const ids = new Set(Array.from({ length: 200 }, () => newPreviewId()));
+  assert.equal(ids.size, 200, "no two alike");
+  for (const id of ids) assert.ok(isPreviewId(id), id);
+  for (const bad of ["tp-short", "gp-abcdefghij", `tp-${"a".repeat(17)}`, "tp-abc def ghi jklm", 42, undefined])
+    assert.equal(isPreviewId(bad), false, String(bad));
+});
+
+test("ticket preview: the tracker and the place in it are checked, and a refusal never repeats what it refused", () => {
+  assert.deepEqual(checkTicketTarget("github", " acme/shop "), { ok: true, to: "github", target: "acme/shop" });
+  assert.deepEqual(checkTicketTarget("jira", "QA"), { ok: true, to: "jira", target: "QA" });
+  const token = "ghp_A1b2C3d4E5f6G7h8I9j0";
+  for (const [to, target] of [
+    ["github", token],
+    ["github", "acme/shop/extra"],
+    ["github", "../x"],
+    ["jira", "qa"],
+    ["jira", token],
+    ["gitlab", "acme/shop"],
+    [undefined, "acme/shop"],
+  ] as const) {
+    const got = checkTicketTarget(to, target);
+    assert.equal(got.ok, false, `${to} ${target}`);
+    if (!got.ok) assert.ok(!got.error.includes(target) || target === "acme/shop", got.error);
+  }
+});
+
+test("ticket preview: it is a dry run of exactly the picked findings, whatever their tier", () => {
+  const args = ticketExportArgs({ ok: true, to: "github", target: "acme/shop" }, ["aaa0000001", "ccc0000003"], "/p");
+  const parsed = parseExportArgs(args, "/p", {});
+  assert.ok(parsed.ok);
+  assert.equal(parsed.options.dryRun, true);
+  assert.deepEqual(parsed.options.only, ["aaa0000001", "ccc0000003"]);
+  assert.equal(parsed.options.includeWorthALook, true, "the person ticked it, so its tier does not leave it out");
+  assert.equal(parsed.options.minSeverity, "low");
+  assert.equal(parsed.options.to === "github" && parsed.options.github.repo, "acme/shop");
+  const jira = parseExportArgs(ticketExportArgs({ ok: true, to: "jira", target: "QA" }, ["aaa0000001"], "/p"), "/p", {
+    JIRA_BASE_URL: "https://example.atlassian.net",
+  });
+  assert.ok(jira.ok && jira.options.to === "jira" && jira.options.jira.projectKey === "QA");
+});
+
+test("ticket preview: a setting left empty, or a placeholder the host never filled, is not a credential", () => {
+  const env = trackerEnv({
+    GH_TOKEN: "${user_config.github_token}",
+    JIRA_EMAIL: " ",
+    JIRA_API_TOKEN: "",
+    JIRA_BASE_URL: "https://example.atlassian.net",
+    GITHUB_TOKEN: "real-token-0123456789",
+  });
+  assert.deepEqual(env, { JIRA_BASE_URL: "https://example.atlassian.net", GITHUB_TOKEN: "real-token-0123456789" });
+  assert.equal(trackerCredentials("github", trackerEnv({ GH_TOKEN: "${user_config.github_token}" })).ok, false);
+  // Contrast: the same variable holding a value is kept.
+  assert.equal(trackerCredentials("github", trackerEnv({ GH_TOKEN: "ghp_real0123456789" })).ok, true);
+});
+
+test("ticket preview: its digest moves with the tracker and with every fact the issue would say, and with nothing else", () => {
+  const a = finding({ id: "aaa0000001" });
+  const b = finding({ id: "bbb0000002", title: "The list keeps a deleted row", severity: "medium" });
+  const base = previewDigest("GitHub acme/shop", [a, b]);
+  assert.equal(previewDigest("GitHub acme/shop", [finding({ id: "aaa0000001" }), b]), base, "the same findings, the same digest");
+  // A field the issue does not show leaves it alone.
+  assert.equal(previewDigest("GitHub acme/shop", [{ ...a, session: "other" }, b]), base);
+  for (const [why, digest] of [
+    ["another repository", previewDigest("GitHub acme/other", [a, b])],
+    ["another order", previewDigest("GitHub acme/shop", [b, a])],
+    ["a new title", previewDigest("GitHub acme/shop", [{ ...a, title: "Saving a thing answers 502" }, b])],
+    ["found again", previewDigest("GitHub acme/shop", [{ ...a, runs: 3 }, b])],
+    ["another severity", previewDigest("GitHub acme/shop", [{ ...a, severity: "low" }, b])],
+    ["resolved", previewDigest("GitHub acme/shop", [{ ...a, status: "resolved" }, b])],
+    ["one fewer", previewDigest("GitHub acme/shop", [a])],
+  ] as const)
+    assert.notEqual(digest, base, why);
+});
+
+function keptPreview(over: Partial<TicketPreview> = {}, createdMs = 1_000_000): KeptPreview {
+  const options = options_([...GH]);
+  return {
+    preview: {
+      previewId: "tp-abcdefghijklmnop",
+      to: "github",
+      where: "GitHub owner/app",
+      createdAt: new Date(createdMs).toISOString(),
+      expiresAt: new Date(createdMs + PREVIEW_TTL_MS).toISOString(),
+      toFile: [{ id: "aaa0000001", severity: "high", title: "Saving a thing answers 500" }],
+      alreadyFiled: [],
+      later: [],
+      cap: 20,
+      leftOut: [],
+      ...over,
+    },
+    options,
+    digest: "d1",
+    createdMs,
+  };
+}
+const options_ = (args: string[]) => options(args, {});
+
+test("ticket preview: filing is allowed only from a held preview, inside its ten minutes, with something to file and unchanged", () => {
+  const k = keptPreview();
+  const t0 = k.createdMs;
+  const cases: Array<[string, KeptPreview | undefined, number, string | null, ReturnType<typeof checkPreview>]> = [
+    ["held, fresh and unchanged", k, t0 + 1000, "d1", { ok: true }],
+    ["the last moment", k, t0 + PREVIEW_TTL_MS - 1, "d1", { ok: true }],
+    ["ten minutes on", k, t0 + PREVIEW_TTL_MS, "d1", { ok: false, why: "expired" }],
+    ["a clock set back", k, t0 - 1, "d1", { ok: false, why: "expired" }],
+    ["not held", undefined, t0, "d1", { ok: false, why: "unknown" }],
+    ["changed since", k, t0 + 1000, "d2", { ok: false, why: "altered" }],
+    ["a finding gone or resolved", k, t0 + 1000, null, { ok: false, why: "altered" }],
+    ["nothing to file", keptPreview({ toFile: [] }), t0 + 1000, "d1", { ok: false, why: "empty" }],
+  ];
+  for (const [why, kept, now, current, want] of cases) assert.deepEqual(checkPreview(kept, now, current), want, why);
+});
+
+test("ticket preview: the confirmation form lists where, each ticket, what is filed already and what waits, and asks one question with no default", () => {
+  const form = ticketConfirmForm(
+    keptPreview({
+      toFile: [
+        { id: "aaa0000001", severity: "high", title: "Saving a thing answers 500" },
+        { id: "bbb0000002", severity: "medium", title: "The list keeps a deleted row" },
+      ],
+      alreadyFiled: [{ id: "ccc0000003", severity: "low", title: "x", ref: "#4", url: "https://github.example/4", open: true }],
+      later: [{ id: "ddd0000004", severity: "low", title: "y" }],
+    }).preview,
+  );
+  assert.match(form.message, /^You are about to file 2 tickets in GitHub owner\/app:/);
+  assert.match(form.message, /1\. Saving a thing answers 500 \(high\)/);
+  assert.match(form.message, /2\. The list keeps a deleted row \(medium\)/);
+  assert.match(form.message, /1 already filed, so not filed again\./);
+  assert.match(form.message, /1 more wait for the next filing: one filing sends at most 20\./);
+  assert.ok(form.message.includes(`Nothing is sent until you choose "${TICKET_ANSWER.file(2)}".`));
+  assert.deepEqual(Object.keys(form.requestedSchema.properties), ["answer"], "one field, and no place to type a token");
+  assert.deepEqual(form.requestedSchema.required, ["answer"]);
+  assert.deepEqual(
+    form.requestedSchema.properties.answer.oneOf.map((o) => o.const),
+    [TICKET_CONFIRM_VALUES.file, TICKET_CONFIRM_VALUES.back],
+  );
+  assert.ok(!("default" in form.requestedSchema.properties.answer), "no answer is chosen for the person");
+  // One ticket reads as one.
+  assert.match(ticketConfirmForm(keptPreview().preview).message, /^You are about to file 1 ticket in GitHub owner\/app:/);
+});
+
+test("ticket preview: only the person's 'file' in an accepted form files; every other ending files nothing", () => {
+  const cases: Array<[ConfirmFormOutcome, boolean, string]> = [
+    [{ kind: "accepted", content: { answer: "file" } }, true, "confirmed"],
+    [{ kind: "accepted", content: { answer: "back" } }, false, "went-back"],
+    [{ kind: "accepted", content: {} }, false, "went-back"],
+    [{ kind: "accepted", content: { answer: "yes" } }, false, "went-back"],
+    [{ kind: "declined" }, false, "declined"],
+    [{ kind: "cancelled" }, false, "cancelled"],
+    [{ kind: "failed", error: "timed out" }, false, "failed"],
+    [{ kind: "unsupported" }, false, "unsupported"],
+  ];
+  for (const [outcome, confirmed, said] of cases) {
+    const v = ticketConfirmVerdict(outcome);
+    assert.equal(v.confirmed, confirmed, JSON.stringify(outcome));
+    assert.equal(v.outcome, said);
+    if (!confirmed) assert.equal(v.tellPerson, TICKET_SAYS[said as keyof typeof TICKET_SAYS]);
+  }
+});
+
+test("ticket preview: the server keeps at most twenty, each taken once, and forgets one long expired", () => {
+  const store = new TicketPreviews();
+  const ids = Array.from({ length: MAX_KEPT_PREVIEWS + 1 }, () => newPreviewId());
+  for (const id of ids) store.add(keptPreview({ previewId: id }, 0));
+  assert.equal(store.size, MAX_KEPT_PREVIEWS);
+  assert.equal(store.get(ids[0], 0), undefined, "the oldest went first");
+  assert.ok(store.get(ids[1], 0));
+  assert.equal(store.take(ids[1]), true);
+  assert.equal(store.take(ids[1]), false, "used once");
+  assert.ok(store.get(ids[2], PREVIEW_TTL_MS), "an expired one still reads as held, so it is refused as expired");
+  assert.equal(store.get(ids[2], 2 * PREVIEW_TTL_MS), undefined, "and is forgotten later");
+  store.add(keptPreview({ previewId: null }));
+  assert.equal(store.size, 0, "a preview with nothing to file is never kept");
+});
+
+/** The deps a preview or a filing runs with against a stand-in: no pauses, a fixed clock unless given one. */
+function ticketDeps(env: Record<string, string | undefined>, now: () => number = () => Date.parse("2026-10-17T10:00:00.000Z")): TicketDeps {
+  return { env, pauseMs: 0, random: () => 0, timeoutMs: 5000, wait: async () => {}, now };
+}
+
+/** A confirmation that records the forms it was shown and answers each with `answer`. */
+function confirmWith(answer: ConfirmFormOutcome | ((form: { message: string }) => ConfirmFormOutcome)) {
+  const forms: Array<{ message: string }> = [];
+  return {
+    forms,
+    confirm: async (form: { message: string }) => {
+      forms.push(form);
+      return typeof answer === "function" ? answer(form) : answer;
+    },
+  };
+}
+const FILE_IT: ConfirmFormOutcome = { kind: "accepted", content: { answer: "file" } };
+
+test("tickets: GitHub: a preview reads the tracker and sends nothing; the person's yes files exactly the previewed ones, once", async () => {
+  const gh = await standInGitHub();
+  try {
+    gh.issues.push({ number: 1, title: "x", body: `${githubMarker("bbb0000002")}\nfiled by hand`, labels: ["scenescout"], state: "open" });
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = projectWith(THREE);
+    const store = new TicketPreviews();
+    const got = await previewTickets({ ids: ["aaa0000001", "bbb0000002", "ccc0000003"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env));
+    assert.ok(got.ok, got.ok ? "" : got.error);
+    assert.equal(posts(gh).length, 0, "a preview creates nothing");
+    assert.ok(isPreviewId(got.preview.previewId));
+    assert.deepEqual(
+      got.preview.toFile.map((t) => t.id),
+      ["aaa0000001", "ccc0000003"],
+    );
+    assert.deepEqual(
+      got.preview.alreadyFiled.map((t) => [t.id, t.ref]),
+      [["bbb0000002", "#1"]],
+    );
+    assert.equal(got.preview.where, "GitHub owner/app");
+    assert.match(got.text, /call scout_ticket_file with previewId/);
+
+    // A finding filed after the preview is not in it, and is not filed by it.
+    const memoryPath = path.join(dir, ".scenescout", "memory.json");
+    const memory = JSON.parse(fs.readFileSync(memoryPath, "utf8")) as { findings: Finding[] };
+    memory.findings.push(finding({ id: "eee0000005", title: "A newer problem" }));
+    fs.writeFileSync(memoryPath, JSON.stringify(memory));
+
+    const asked = confirmWith(FILE_IT);
+    const filed = await fileTickets(got.preview.previewId, dir, store, asked.confirm, ticketDeps(env));
+    assert.equal(asked.forms.length, 1, "the person was asked once");
+    assert.match(asked.forms[0].message, /You are about to file 2 tickets in GitHub owner\/app:/);
+    assert.equal(filed.filed, true, filed.text);
+    assert.equal(filed.outcome, "confirmed");
+    assert.deepEqual(
+      filed.tickets.map((t) => [t.id, t.ref]),
+      [
+        ["aaa0000001", "#2"],
+        ["ccc0000003", "#3"],
+      ],
+    );
+    assert.equal(filed.tickets[0].url, "https://github.example/owner/app/issues/2");
+    assert.match(filed.tellPerson, /^Filed 2 tickets in GitHub owner\/app\./);
+    assert.deepEqual(
+      gh.issues.slice(1).map((i) => findingIdsInGithubBody(i.body)[0]),
+      ["aaa0000001", "ccc0000003"],
+      "the issues are export.ts's, with their marker",
+    );
+
+    // Used once: the same preview files nothing again.
+    const again = confirmWith(FILE_IT);
+    const second = await fileTickets(got.preview.previewId, dir, store, again.confirm, ticketDeps(env));
+    assert.equal(second.outcome, "unknown");
+    assert.equal(again.forms.length, 0);
+    assert.equal(posts(gh).length, 2);
+    // A new preview of the same findings has nothing left to file.
+    const after = await previewTickets({ ids: ["aaa0000001", "ccc0000003"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env));
+    assert.ok(after.ok && after.preview.previewId === null && after.preview.toFile.length === 0 && after.preview.alreadyFiled.length === 2);
+  } finally {
+    await gh.close();
+  }
+});
+
+test("tickets: Jira: preview then file against the stand-in, with the site from the settings and the key as the target", async () => {
+  const jira = await standInJira();
+  try {
+    const env = { JIRA_EMAIL, JIRA_API_TOKEN: JIRA_TOKEN, JIRA_BASE_URL: jira.url };
+    const dir = projectWith(THREE);
+    const store = new TicketPreviews();
+    const got = await previewTickets({ ids: ["aaa0000001", "bbb0000002"], to: "jira", target: "QA" }, dir, store, ticketDeps(env));
+    assert.ok(got.ok, got.ok ? "" : got.error);
+    assert.deepEqual(
+      jira.seen.map((s) => `${s.method} ${s.url}`),
+      ["POST /rest/api/3/search/jql"],
+      "one read, no create",
+    );
+    assert.equal(got.preview.where, "Jira QA");
+    const filed = await fileTickets(got.preview.previewId, dir, store, confirmWith(FILE_IT).confirm, ticketDeps(env));
+    assert.equal(filed.filed, true, filed.text);
+    assert.deepEqual(
+      filed.tickets.map((t) => t.ref),
+      ["QA-1", "QA-2"],
+    );
+    assert.equal(filed.tickets[0].url, new URL("/browse/QA-1", jira.url).href);
+    assert.deepEqual(findingIdsInJiraDescription(jira.issues[0].fields.description), ["aaa0000001"]);
+    assert.equal(jira.issues.length, 2);
+  } finally {
+    await jira.close();
+  }
+});
+
+test("tickets: a preview past its ten minutes, or whose problems changed, is refused before the form and files nothing", async () => {
+  const gh = await standInGitHub();
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    let now = Date.parse("2026-10-17T10:00:00.000Z");
+    const clock = () => now;
+    const dir = projectWith(THREE);
+    const store = new TicketPreviews();
+    const preview = async () => {
+      const got = await previewTickets({ ids: ["aaa0000001"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env, clock));
+      assert.ok(got.ok);
+      return got.preview.previewId!;
+    };
+
+    const old = await preview();
+    now += PREVIEW_TTL_MS;
+    const late = confirmWith(FILE_IT);
+    const expired = await fileTickets(old, dir, store, late.confirm, ticketDeps(env, clock));
+    assert.deepEqual([expired.filed, expired.outcome, expired.tellPerson], [false, "expired", TICKET_SAYS.expired]);
+    assert.equal(late.forms.length, 0, "the person is not asked about a stale list");
+
+    // Contrast: one minute short of that is filed... after the next case shows a change refusing it.
+    const fresh = await preview();
+    const memoryPath = path.join(dir, ".scenescout", "memory.json");
+    const original = fs.readFileSync(memoryPath, "utf8");
+    fs.writeFileSync(memoryPath, original.replace("Saving a thing answers 500", "Saving a thing answers 502"));
+    const changed = confirmWith(FILE_IT);
+    const altered = await fileTickets(fresh, dir, store, changed.confirm, ticketDeps(env, clock));
+    assert.deepEqual([altered.filed, altered.outcome, altered.tellPerson], [false, "altered", TICKET_SAYS.altered]);
+    assert.equal(changed.forms.length, 0);
+
+    // A change made while the form waits is caught too: nothing is sent after the person's yes.
+    fs.writeFileSync(memoryPath, original);
+    const waited = await preview();
+    const during = await fileTickets(
+      waited,
+      dir,
+      store,
+      confirmWith(() => {
+        fs.writeFileSync(memoryPath, original.replace('"runs":2', '"runs":3'));
+        return FILE_IT;
+      }).confirm,
+      ticketDeps(env, clock),
+    );
+    assert.deepEqual([during.filed, during.outcome], [false, "altered"]);
+
+    // And a form that is answered after the preview's ten minutes are up.
+    fs.writeFileSync(memoryPath, original);
+    const slow = await preview();
+    const tooLate = await fileTickets(
+      slow,
+      dir,
+      store,
+      confirmWith(() => {
+        now += PREVIEW_TTL_MS;
+        return FILE_IT;
+      }).confirm,
+      ticketDeps(env, clock),
+    );
+    assert.deepEqual([tooLate.filed, tooLate.outcome], [false, "expired"]);
+    assert.equal(posts(gh).length, 0, "not one create in any of these");
+
+    // Contrast: the same preview, fresh and unchanged, files.
+    const good = await preview();
+    now += PREVIEW_TTL_MS - 60_000;
+    const ok = await fileTickets(good, dir, store, confirmWith(FILE_IT).confirm, ticketDeps(env, clock));
+    assert.equal(ok.filed, true, ok.text);
+    assert.equal(posts(gh).length, 1);
+  } finally {
+    await gh.close();
+  }
+});
+
+test("tickets: without the person's yes nothing is filed: going back, a decline, a close, a failed form or no form at all", async () => {
+  const gh = await standInGitHub();
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = projectWith(THREE);
+    const store = new TicketPreviews();
+    const endings: Array<[ConfirmFormOutcome, string]> = [
+      [{ kind: "accepted", content: { answer: "back" } }, "went-back"],
+      [{ kind: "accepted", content: {} }, "went-back"],
+      [{ kind: "declined" }, "declined"],
+      [{ kind: "cancelled" }, "cancelled"],
+      [{ kind: "failed", error: "the client timed out" }, "failed"],
+      [{ kind: "unsupported" }, "unsupported"],
+    ];
+    for (const [answer, outcome] of endings) {
+      const got = await previewTickets({ ids: ["aaa0000001"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env));
+      assert.ok(got.ok);
+      const asked = confirmWith(answer);
+      const r = await fileTickets(got.preview.previewId, dir, store, asked.confirm, ticketDeps(env));
+      assert.deepEqual([r.filed, r.outcome, r.tickets], [false, outcome, []], JSON.stringify(answer));
+      assert.equal(asked.forms.length, 1);
+      assert.match(r.text, /Nothing was filed/);
+      // The preview is used: retrying it on the person's behalf gets nowhere.
+      const retry = await fileTickets(got.preview.previewId, dir, store, confirmWith(FILE_IT).confirm, ticketDeps(env));
+      assert.equal(retry.outcome, "unknown", "a declined preview cannot be filed by calling again");
+    }
+    assert.equal(posts(gh).length, 0);
+    assert.equal(
+      (await fileTickets("tp-AAAAAAAAAAAAAAAA", dir, store, confirmWith(FILE_IT).confirm, ticketDeps(env))).outcome,
+      "unknown",
+      "an id the server never made",
+    );
+  } finally {
+    await gh.close();
+  }
+});
+
+test("tickets: with no sign-in set up, a preview says so in plain words and asks the tracker nothing", async () => {
+  const gh = await standInGitHub();
+  try {
+    const dir = projectWith(THREE);
+    for (const env of [{ GITHUB_API_URL: gh.url }, { GITHUB_API_URL: gh.url, GH_TOKEN: "${user_config.github_token}", GITHUB_TOKEN: "" }]) {
+      const got = await previewTickets({ ids: ["aaa0000001"], to: "github", target: "owner/app" }, dir, new TicketPreviews(), ticketDeps(env));
+      assert.equal(got.ok, false);
+      if (!got.ok) {
+        assert.ok(got.error.startsWith(ticketNoSignIn("GitHub")), got.error);
+        assert.match(got.error, /GH_TOKEN or GITHUB_TOKEN/, "names the variables, for whoever sets it up");
+      }
+    }
+    assert.equal(gh.seen.length, 0);
+    const unknown = await previewTickets({ ids: ["nosuchid01"], to: "github", target: "owner/app" }, dir, new TicketPreviews(), ticketDeps({ GH_TOKEN }));
+    assert.ok(!unknown.ok && /no finding with id nosuchid01/.test(unknown.error));
+  } finally {
+    await gh.close();
+  }
+});
+
+test("tickets: the token never reaches a preview, a filing, a refusal or the person, even when the tracker quotes it back", async () => {
+  const wrong = "wrong-token-that-is-long-enough";
+  const refusing = await standInGitHub();
+  const quoting = await standInGitHub({ urlSuffix: `?t=${GH_TOKEN}` });
+  try {
+    const dir = projectWith(THREE);
+    const refused = await previewTickets(
+      { ids: ["aaa0000001"], to: "github", target: "owner/app" },
+      dir,
+      new TicketPreviews(),
+      ticketDeps({ GH_TOKEN: wrong, GITHUB_API_URL: refusing.url }),
+    );
+    assert.equal(refused.ok, false);
+    if (!refused.ok) {
+      assert.match(refused.error, /\[redacted key\]/, "the stand-in quoted the header back");
+      assert.ok(!refused.error.includes(wrong));
+    }
+
+    const store = new TicketPreviews();
+    const env = { GH_TOKEN, GITHUB_API_URL: quoting.url };
+    quoting.issues.push({ number: 1, title: "x", body: githubMarker("bbb0000002"), labels: ["scenescout"], state: "open" });
+    const got = await previewTickets({ ids: ["aaa0000001", "bbb0000002"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env));
+    assert.ok(got.ok);
+    const asked = confirmWith(FILE_IT);
+    const filed = await fileTickets(got.preview.previewId, dir, store, asked.confirm, ticketDeps(env));
+    assert.equal(filed.filed, true, filed.text);
+    const everything = JSON.stringify({ got, filed, forms: asked.forms });
+    assert.ok(!everything.includes(GH_TOKEN), "nothing a tool returns, or the form shows, holds the token");
+    assert.match(everything, /\[redacted key\]/, "the addresses that quoted it are redacted, not dropped");
+  } finally {
+    await refusing.close();
+    await quoting.close();
+  }
+});
+
+test("tickets: Jira: a finding held back after a create that may have gone through is listed as left out, with why, not dropped", async () => {
+  const jira = await standInJira({ lag: true });
+  try {
+    const env = { JIRA_EMAIL, JIRA_API_TOKEN: JIRA_TOKEN, JIRA_BASE_URL: jira.url };
+    const dir = projectWith(THREE);
+    const at = Date.parse("2026-10-03T10:00:00.000Z");
+    jira.faults.push({ method: "POST", path: /\/rest\/api\/3\/issue$/, status: 500, body: { errorMessages: ["Internal error"] }, then: "answer" });
+    await exportOnce(["--to", "jira", "--yes", "--only", "aaa0000001"], JIRA_ENV(jira.url), dir, { now: () => at });
+    const got = await previewTickets(
+      { ids: ["aaa0000001", "bbb0000002"], to: "jira", target: "QA" },
+      dir,
+      new TicketPreviews(),
+      ticketDeps(env, () => at + 60_000),
+    );
+    assert.ok(got.ok, got.ok ? "" : got.error);
+    assert.deepEqual(
+      got.preview.toFile.map((t) => t.id),
+      ["bbb0000002"],
+    );
+    assert.deepEqual(
+      got.preview.leftOut.map((x) => x.id),
+      ["aaa0000001"],
+    );
+    assert.match(got.preview.leftOut[0].reason, /^held back/);
   } finally {
     await jira.close();
   }

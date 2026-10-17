@@ -63,6 +63,8 @@ const EXPECTED_TOOLS = [
   "scout_cards",
   "scout_feedback",
   "scout_team_report",
+  "scout_ticket_preview",
+  "scout_ticket_file",
 ];
 
 type ToolText = { content: Array<{ type: string; text?: string }> };
@@ -1294,6 +1296,51 @@ async function guidedCheck(): Promise<void> {
 }
 
 /**
+ * scout_ticket_preview and scout_ticket_file as served: their annotations
+ * (the preview reads a tracker and writes nothing; filing writes to one),
+ * their input and output schemas, that neither takes a token, and that with
+ * no project open both refuse before reading anything. Previewing and filing
+ * against stand-in trackers is export-test's.
+ */
+async function ticketToolsCheck(): Promise<void> {
+  type Result = { content: Array<{ type: string; text?: string }>; isError?: boolean };
+  const { out } = await withFormClient({ form: {} }, { action: "cancel" }, async (client) => {
+    const { tools } = await client.listTools();
+    const tool = (name: string) => tools.find((t) => t.name === name);
+    const expect: Array<[string, boolean, string[], string[]]> = [
+      [
+        "scout_ticket_preview",
+        true,
+        ["ids", "to", "target"],
+        ["previewId", "to", "where", "createdAt", "expiresAt", "toFile", "alreadyFiled", "later", "cap", "leftOut"],
+      ],
+      ["scout_ticket_file", false, ["previewId"], ["filed", "outcome", "tellPerson", "tickets", "problems"]],
+    ];
+    for (const [name, readOnly, inputs, outputs] of expect) {
+      const t = tool(name);
+      const a = t?.annotations;
+      if (a?.readOnlyHint !== readOnly || a?.destructiveHint !== false || a?.openWorldHint !== true)
+        fail(`${name} is not annotated readOnlyHint ${readOnly}, destructiveHint false, openWorldHint true: ${JSON.stringify(a)}`);
+      const props = Object.keys((t?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
+      if (JSON.stringify(props) !== JSON.stringify(inputs)) fail(`${name} takes ${JSON.stringify(props)}, expected ${JSON.stringify(inputs)}`);
+      if (props.some((p) => /token|password|secret|credential/i.test(p))) fail(`${name} takes a credential`);
+      const required = (t?.inputSchema as { required?: string[] }).required ?? [];
+      if (JSON.stringify([...required].sort()) !== JSON.stringify([...inputs].sort())) fail(`${name} requires ${JSON.stringify(required)}`);
+      const outProps = Object.keys((t?.outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {});
+      if (JSON.stringify(outProps) !== JSON.stringify(outputs))
+        fail(`${name}'s output schema is ${JSON.stringify(outProps)}, expected ${JSON.stringify(outputs)}`);
+    }
+    const call = async (name: string, args: Record<string, unknown>): Promise<Result> => (await client.callTool({ name, arguments: args })) as Result;
+    const preview = await call("scout_ticket_preview", { ids: ["a1b2c3d4e5"], to: "github", target: "acme/shop" });
+    const file = await call("scout_ticket_file", { previewId: "tp-AAAAAAAAAAAAAAAA" });
+    return { preview, file };
+  });
+  for (const [name, r] of Object.entries(out))
+    if (!r.isError || !/No project is open yet/.test(textOf(r))) fail(`${name} with no project open did not say to attach first: ${textOf(r)}`);
+  console.log("✓ scout_ticket_preview and scout_ticket_file are annotated and schema'd, take no credential, and refuse with no project open");
+}
+
+/**
  * A guided check's progress and its cards over the wire: a Look only plan
  * attached with, an area set, a finding filed there; the pane's poll carries
  * the progress; scout_cards shows the card with its picture inline; a
@@ -2010,6 +2057,7 @@ async function main(): Promise<void> {
   await openCheck();
   await intakeCheck();
   await guidedCheck();
+  await ticketToolsCheck();
   await configCheck();
   await guidedCardsCheck();
   await abandonedCallCheck();
