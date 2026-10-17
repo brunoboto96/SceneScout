@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { CASE_BOUND_MS, runLinearTimeCases } from "./linear-time-child.ts";
 import {
   buildGuidedPlan,
   CARE_MODE,
@@ -301,6 +302,16 @@ test("credentials: the near misses of those pass: a field's name before a colon,
     assert.equal(holdsCredential(text), false, text);
   for (const address of ["https://x.example.com/products?page=2&sort=name", "https://x.example.com/search?q=shoes&lang=en"])
     assert.equal(ok({ address, areas: ["forms"] }).address, address);
+});
+
+test("credentials: the check reads a crafted 1 MB text in linear time (#578, #610)", async () => {
+  // On JavaScript's engine four of these did not finish in a minute: one long word, and one before a scheme's
+  // "://" (the pattern that removes addresses before colon pairs are read, about 5 s at 50k characters), names and
+  // colons inside words, and "use" before a long word. Every pattern now runs on the linear-time engine.
+  const { done, stoppedIn } = await runLinearTimeCases("credential");
+  assert.equal(stoppedIn, null, `still running after ${CASE_BOUND_MS} ms: ${stoppedIn}`);
+  assert.ok(done.length > 0);
+  for (const { name, ms } of done) assert.ok(ms < CASE_BOUND_MS, `${name}: ${ms} ms`);
 });
 
 test("credentials: a sign-in written as a pair, after 'pass' or as 'enter X when' is refused; test data for a password check is not", () => {
