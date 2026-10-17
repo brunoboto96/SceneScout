@@ -1922,7 +1922,8 @@ test("saved check: a name is letters, digits, spaces and dashes, and its file is
     assert.equal(got.value, name);
     assert.equal(savedCheckSlug(name), slug);
   }
-  for (const raw of ["", "   ", "../escape", "a/b", "a\\b", "dots.json", "-leading", "x".repeat(61), "con", "password=hunter2", 42]) {
+  // Windows also keeps COM and LPT with a superscript digit for devices.
+  for (const raw of ["", "   ", "../escape", "a/b", "a\\b", "dots.json", "-leading", "x".repeat(61), "con", "COM¹", "lpt³", "password=hunter2", 42]) {
     const got = checkSavedName(raw);
     assert.equal(got.ok, false, String(raw));
     if (!got.ok && typeof raw === "string" && raw.includes("hunter2")) assert.ok(!got.error.includes("hunter2"));
@@ -1930,6 +1931,8 @@ test("saved check: a name is letters, digits, spaces and dashes, and its file is
   const dir = path.join(os.tmpdir(), "no-such-project");
   assert.equal(path.dirname(savedCheckPath(dir, "Admin area")), savedChecksDir(dir));
   assert.equal(savedCheckPath(dir, "Admin area"), savedCheckPath(dir, "admin  AREA"), "two names that read the same are one check");
+  // A folder that ignores case folds more than lower case does (ß and SS): two names it would store as one file are one check here too.
+  assert.equal(savedCheckPath(dir, "Straße"), savedCheckPath(dir, "STRASSE"));
   assert.throws(() => savedCheckPath(dir, "../x"));
 });
 

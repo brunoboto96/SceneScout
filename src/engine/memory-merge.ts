@@ -11,8 +11,8 @@ import { laneRoutePaths } from "./fingerprint.js";
 import { readFromRunNotes, readRunRecords, unionFromRunNotes, unionRecords } from "./from-run.js";
 import {
   isWorthALook,
+  foldedMode,
   judgedMergesOf,
-  knownMode,
   MAX_JUDGED_MERGES,
   MAX_LANE_DECISIONS,
   mergeTier,
@@ -25,7 +25,6 @@ import {
   type MemoryFile,
   type StateRecord,
 } from "./memory.js";
-import { stricterMode, type WriteMode } from "./policy.js";
 import { mergeTicketData } from "./tickets.js";
 
 /**
@@ -149,9 +148,9 @@ export function mergeMemory(mine: MemoryFile, theirs: MemoryFile): MemoryFile {
     const area = older.area ?? newer.area;
     if (area) merged.area = area;
     else delete merged.area;
-    // The mode it is known to reproduce in is the strictest either side filed it in.
-    const modes = [knownMode(older.foundInMode), knownMode(newer.foundInMode)].filter((m): m is WriteMode => m !== undefined);
-    if (modes.length > 0) merged.foundInMode = modes.reduce(stricterMode);
+    // The mode it is known to reproduce in is the strictest either side filed it in; a side with none recorded counts as observe.
+    const mode = foldedMode(older.foundInMode, newer.foundInMode);
+    if (mode) merged.foundInMode = mode;
     else delete merged.foundInMode;
     // A picture and its shot travel together, from whichever side has one, the newer first.
     const pictured = newer.picture ? newer : older.picture ? older : null;

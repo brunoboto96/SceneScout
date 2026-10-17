@@ -277,6 +277,9 @@ export const PANEL_WORDS = {
   saveHint: "Shop sign-up on a phone",
   saveCheck: "Save this check",
   deleteSaved: "Delete",
+  deleteAsk: (/** @type {string} */ name) => `Delete "${name}"?`,
+  deleteYes: "Yes, delete it",
+  deleteKeep: "Keep it",
   neverRun: "never run again",
   lastRun: "last run",
   rechecking: "Planning the re-check...",
@@ -308,6 +311,7 @@ export const IMPACT_MARK = { "Blocks users": "!", Annoying: "~", Cosmetic: ".", 
  *   returnTo: string | null,
  *   saved: SavedEntry[] | null,
  *   saveName: string,
+ *   deleting: string | null,
  * }} Wizard
  */
 /** @typedef {{ name: string, address: string, care: string, lastRunAt: string }} SavedEntry */
@@ -343,6 +347,7 @@ export function initialWizard() {
     returnTo: null,
     saved: null,
     saveName: "",
+    deleting: null,
   };
 }
 
@@ -398,6 +403,7 @@ export function wizardOf(value) {
     returnTo: STEPS.includes(str(value.returnTo)) && str(value.returnTo) !== "safety" ? str(value.returnTo) : null,
     saved: Array.isArray(value.saved) ? savedEntries(value.saved) : null,
     saveName: str(value.saveName).slice(0, SAVED_NAME_MAX),
+    deleting: str(value.deleting).slice(0, SAVED_NAME_MAX) || null,
   };
 }
 
@@ -480,6 +486,11 @@ export function reduce(w, action) {
       return { ...w, notice: null };
     case "saveName":
       return { ...w, saveName: String(action.value ?? "").slice(0, SAVED_NAME_MAX) };
+    // Delete asks first, so a misplaced press deletes nothing.
+    case "askDelete":
+      return { ...w, deleting: str(action.name).slice(0, SAVED_NAME_MAX) || null, notice: null };
+    case "keepSaved":
+      return { ...w, deleting: null };
     case "tour":
       return { ...w, step: "tour", tourPage: 0, notice: null, busy: null };
     case "tourNext":
@@ -1053,10 +1064,16 @@ export function renderGuided(els, w, ctx, act) {
                 `${c.name}   ${c.address} · ${CARE_LABEL[/** @type {Care} */ (c.care)] ?? ""} · ${c.lastRunAt ? `${PANEL_WORDS.lastRun} ${c.lastRunAt.slice(0, 10)}` : PANEL_WORDS.neverRun}`,
                 { wrap: "truncate-end" },
               ),
-              row([
-                button(`guided-saved-run-${keys[i]}`, PANEL_WORDS.runAgain, () => act("runSaved", { name: c.name })),
-                button(`guided-saved-delete-${keys[i]}`, PANEL_WORDS.deleteSaved, () => act("deleteSaved", { name: c.name }), { plain: true }),
-              ]),
+              w.deleting === c.name
+                ? row([
+                    text(PANEL_WORDS.deleteAsk(c.name), { wrap: "truncate-end" }),
+                    button(`guided-saved-delete-yes-${keys[i]}`, PANEL_WORDS.deleteYes, () => act("deleteSaved", { name: c.name })),
+                    button(`guided-saved-delete-keep-${keys[i]}`, PANEL_WORDS.deleteKeep, () => act("keepSaved"), { plain: true }),
+                  ])
+                : row([
+                    button(`guided-saved-run-${keys[i]}`, PANEL_WORDS.runAgain, () => act("runSaved", { name: c.name })),
+                    button(`guided-saved-delete-${keys[i]}`, PANEL_WORDS.deleteSaved, () => act("askDelete", { name: c.name }), { plain: true }),
+                  ]),
             ]),
           ],
           { marginTop: 1 },

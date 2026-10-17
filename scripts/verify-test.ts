@@ -343,16 +343,49 @@ test("re-check: a finding keeps the strictest write mode it was filed in, in thi
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-found-in-"));
   try {
     const store = new MemoryStore(dir);
-    const [filed] = store.addFinding({ severity: "medium", category: "http-error", url: "http://x/a", state: "/a#f1", title: "A mode is kept", detail: "d" });
-    assert.equal(filed.foundInMode, undefined, "none recorded until a session says");
-    assert.equal(store.setFoundInMode(filed.id, "read-only")?.foundInMode, "read-only");
-    assert.equal(store.setFoundInMode(filed.id, "safe-write")?.foundInMode, "read-only", "a looser filing does not loosen it");
-    assert.equal(store.setFoundInMode(filed.id, "observe")?.foundInMode, "observe", "a stricter one tightens it");
-    assert.equal(store.setFoundInMode("no-such-id", "observe"), null);
+    const filing = { severity: "medium" as const, category: "http-error", url: "http://x/a", state: "/a#f1", title: "A mode is kept", detail: "d" };
+    const [filed] = store.addFinding({ ...filing, foundInMode: "read-only" });
+    // Born with it: written in the same flush as the finding, so no other process can read the finding without its mode.
+    assert.equal(new MemoryStore(dir).findings.find((f) => f.id === filed.id)?.foundInMode, "read-only");
+    assert.equal(store.addFinding({ ...filing, foundInMode: "safe-write" })[0].foundInMode, "read-only", "a looser filing does not loosen it");
+    assert.equal(store.addFinding({ ...filing, foundInMode: "observe" })[0].foundInMode, "observe", "a stricter one tightens it");
     store.flush();
     assert.equal(new MemoryStore(dir).findings.find((f) => f.id === filed.id)?.foundInMode, "observe");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // A finding filed before modes were kept counts as found in observe: filed again in a looser mode, it stays observe.
+  const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-found-in-legacy-"));
+  try {
+    const store = new MemoryStore(legacyDir);
+    const filing = { severity: "medium" as const, category: "http-error", url: "http://x/a", state: "/a#f1", title: "Filed by an older engine", detail: "d" };
+    const [old] = store.addFinding(filing);
+    assert.equal(old.foundInMode, undefined);
+    assert.equal(store.addFinding({ ...filing, foundInMode: "safe-write" })[0].foundInMode, "observe");
+  } finally {
+    fs.rmSync(legacyDir, { recursive: true, force: true });
+  }
+  // Two copies of one finding folded at load keep the strictest mode of the two, whichever is kept.
+  for (const order of [
+    ["safe-write", "observe"],
+    ["observe", "safe-write"],
+    ["safe-write", undefined],
+  ] as const) {
+    const foldDir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-found-in-fold-"));
+    try {
+      const copy = (id: string, mode: WriteMode | undefined) =>
+        finding({ id, title: "Same defect", category: "http-error", url: "http://x/a", state: "/a#f1", ...(mode ? { foundInMode: mode } : {}) });
+      fs.mkdirSync(path.join(foldDir, ".scenescout"), { recursive: true });
+      fs.writeFileSync(
+        path.join(foldDir, ".scenescout", "memory.json"),
+        JSON.stringify({ version: 1, states: {}, findings: [copy("c1", order[0]), copy("c2", order[1])] }),
+      );
+      const folded = new MemoryStore(foldDir).findings;
+      assert.equal(folded.length, 1, "the two copies fold into one");
+      assert.equal(folded[0].foundInMode, "observe", `folded ${JSON.stringify(order)}`);
+    } finally {
+      fs.rmSync(foldDir, { recursive: true, force: true });
+    }
   }
   const base = {
     id: "x",
@@ -373,10 +406,11 @@ test("re-check: a finding keeps the strictest write mode it was filed in, in thi
   });
   const cases: Array<[Record<string, unknown>, Record<string, unknown>, string | undefined]> = [
     [{ foundInMode: "safe-write" }, { foundInMode: "observe" }, "observe"],
-    [{ foundInMode: "read-only" }, {}, "read-only"],
+    // A copy with none recorded was filed before modes were kept: it counts as observe.
+    [{ foundInMode: "read-only" }, {}, "observe"],
     [{}, {}, undefined],
-    // A value this engine does not know (a newer version's, or a hand edit) is not carried on.
-    [{ foundInMode: "everything" }, { foundInMode: "safe-write" }, "safe-write"],
+    // A value this engine does not know (a newer version's, or a hand edit) is not carried on, and counts as observe too.
+    [{ foundInMode: "everything" }, { foundInMode: "safe-write" }, "observe"],
     [{ foundInMode: "everything" }, {}, undefined],
   ];
   for (const [a, b, want] of cases)

@@ -2855,8 +2855,19 @@ test("the panel's saved checks: listed on the welcome with Run again and Delete 
     assert.match(drawn.text, /Admin area {3}http:\/\/localhost:3000 · Look only · never run again/);
     // Mobile has buttons alone, and these are buttons: a saved check runs there as well.
     assert.deepEqual(drawn.press("guided-saved-run-shop-sign-up-on-a-phone"), { type: "runSaved", payload: { name: "Shop sign-up on a phone" } });
-    assert.deepEqual(drawn.press("guided-saved-delete-admin-area"), { type: "deleteSaved", payload: { name: "Admin area" } });
+    // Delete asks first: a misplaced press deletes nothing.
+    assert.deepEqual(drawn.press("guided-saved-delete-admin-area"), { type: "askDelete", payload: { name: "Admin area" } });
+    const asking = drawGuided(surface, guided.reduce(w, { type: "askDelete", name: "Admin area" }), STATUS_IDLE);
+    assertDrawable(asking.tree, surface, "a saved check's delete, asked");
+    assert.match(asking.text, /Delete "Admin area"\?/);
+    assert.deepEqual(asking.press("guided-saved-delete-yes-admin-area"), { type: "deleteSaved", payload: { name: "Admin area" } });
+    assert.deepEqual(asking.press("guided-saved-delete-keep-admin-area"), { type: "keepSaved", payload: undefined });
+    const keys = elementsOf(asking.tree).map((e) => e.props.key);
+    assert.ok(!keys.includes("guided-saved-delete-admin-area") && keys.includes("guided-saved-delete-shop-sign-up-on-a-phone"), surface);
   }
+  assert.equal(guided.reduce(guided.reduce(w, { type: "askDelete", name: "Admin area" }), { type: "keepSaved" }).deleting, null);
+  assert.equal(guided.wizardOf({ deleting: "Admin area" }).deleting, "Admin area");
+  assert.equal(guided.wizardOf({ deleting: 5 }).deleting, null);
   // None saved, or none read: no heading.
   for (const saved of [null, []]) assert.doesNotMatch(drawGuided("desktop", wizard({ saved }), STATUS_IDLE).text, /Saved checks/);
   // Test ids stay unique when two names read alike, and a name with no ASCII letter still has one.
@@ -3002,13 +3013,16 @@ test("register.js: the welcome lists the saved checks, Run again and Delete call
   assert.deepEqual([w().step, w().planId], ["running", GUIDED_PLAN_ID]);
   assert.deepEqual(submitted, [guided.startPrompt(GUIDED_PLAN_ID)]);
   state.set("wizard", { value: { ...w(), step: "welcome" }, version: 99 });
+  const before = calls.length;
   await press("guided-saved-delete-admin-area");
+  assert.equal(calls.length, before, "the first press only asks");
+  await press("guided-saved-delete-yes-admin-area");
   assert.deepEqual(calls.at(-1), { tool: guided.SAVED_TOOL, args: { action: "delete", name: "Admin area" } });
-  assert.equal(w().notice?.text, 'Deleted the saved check "Admin area".');
-  // From the results: the re-check is built by the server, with how the last check signed in, and Claude is handed its id.
+  assert.deepEqual([w().notice?.text, w().deleting], ['Deleted the saved check "Admin area".', null]);
+  // From the results: the re-check is built by the server, on the last check's site and with how it signed in, and Claude is handed its id.
   state.set("wizard", { value: { ...w(), step: "results", cards: [], lastChoices: { ...looks.choices, signIn: "sso" } }, version: 100 });
   await press("guided-results-recheck");
-  assert.deepEqual(calls.at(-1), { tool: guided.RECHECK_TOOL, args: { signIn: "sso" } });
+  assert.deepEqual(calls.at(-1), { tool: guided.RECHECK_TOOL, args: { signIn: "sso", address: "http://localhost:3000" } });
   assert.deepEqual([w().step, w().planId, submitted.at(-1)], ["running", "gp-recheck001", guided.startPrompt("gp-recheck001")]);
   // Save: the name typed, the plan the panel built.
   state.set("wizard", { value: { ...w(), step: "results", planId: GUIDED_PLAN_ID, plan: looks, saveName: "Admin area" }, version: 101 });

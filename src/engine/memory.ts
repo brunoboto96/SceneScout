@@ -213,6 +213,18 @@ export function knownMode(mode: unknown): WriteMode | undefined {
   return (WRITE_MODES as readonly unknown[]).includes(mode) ? (mode as WriteMode) : undefined;
 }
 
+/**
+ * The mode two filings or copies of one finding are known to reproduce in:
+ * the stricter of the two. A side with no mode this engine knows was filed
+ * before modes were kept (or edited by hand), and counts as observe; with
+ * neither known, none is recorded, which a re-check also reads as observe.
+ */
+export function foldedMode(a: unknown, b: unknown): WriteMode | undefined {
+  const [x, y] = [knownMode(a), knownMode(b)];
+  if (x === undefined && y === undefined) return undefined;
+  return stricterMode(x ?? "observe", y ?? "observe");
+}
+
 /** Most other routes one finding records it was seen on; the oldest go first. */
 export const MAX_SEEN_ON = 20;
 
@@ -272,7 +284,10 @@ export function judgedMergesOf(f: Pick<Finding, "judgedMerges">): JudgedMerge[] 
 }
 
 /** What a finding is filed with. Everything else on a finding is the store's to set. */
-export type FindingInput = Pick<Finding, "severity" | "category" | "title" | "detail" | "evidence" | "url" | "state" | "session" | "tier" | "convention">;
+export type FindingInput = Pick<
+  Finding,
+  "severity" | "category" | "title" | "detail" | "evidence" | "url" | "state" | "session" | "tier" | "convention" | "foundInMode"
+>;
 
 /** The dedup judge's answer: the stored finding a filing is the same defect as, and how sure it is; or null for none. */
 export type JudgeVerdict = { sameAs: string; pSame: number } | null;
@@ -1021,6 +1036,8 @@ export class MemoryStore {
       if (dupOf) {
         dupOf.runs += f.runs;
         if (!dupOf.evidence && f.evidence) dupOf.evidence = f.evidence;
+        const mode = foldedMode(dupOf.foundInMode, f.foundInMode);
+        if (mode) dupOf.foundInMode = mode;
         // Each copy's judged merges are filings: folding the copies keeps them all.
         const trail = unionJudgedMerges(dupOf, f);
         if (trail) dupOf.judgedMerges = trail;
@@ -1479,22 +1496,6 @@ export class MemoryStore {
     return f;
   }
 
-  /**
-   * Record the write mode a filing of this finding was made in, keeping the
-   * strictest one seen. Returns the finding, or null when there is no such id.
-   */
-  setFoundInMode(id: string, mode: WriteMode): Finding | null {
-    const f = this.data.findings.find((x) => x.id === id);
-    if (!f) return null;
-    const kept = knownMode(f.foundInMode);
-    const next = kept ? stricterMode(kept, mode) : mode;
-    if (next !== f.foundInMode) {
-      f.foundInMode = next;
-      this.flush();
-    }
-    return f;
-  }
-
   /** Mark a finding resolved; returns it or null. */
   resolveFinding(id: string): Finding | null {
     const f = this.data.findings.find((x) => x.id === id);
@@ -1910,6 +1911,9 @@ export class MemoryStore {
     existing.lastRun = this.runId;
     existing.foundAt = new Date().toISOString();
     if (!existing.evidence && f.evidence) existing.evidence = f.evidence;
+    // Filed again: the mode it is known to reproduce in is the stricter of the two filings'.
+    const mode = foldedMode(existing.foundInMode, f.foundInMode);
+    if (mode) existing.foundInMode = mode;
     // A filing from another page is another place the defect shows.
     const route = findingRoute(f);
     const knew = route === findingRoute(existing) || seenOnOf(existing).includes(route);

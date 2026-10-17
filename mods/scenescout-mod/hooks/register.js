@@ -314,8 +314,11 @@ async function perform($, servers, type, payload) {
     case "recheck": {
       // The server builds the re-check's plan in the care level the problems were found in; Claude is handed only its id.
       const w = wizardOf((await $.state.get(WIZARD)).value);
+      // On the last check's site: a project that kept findings for several sites re-checks the one whose results these are.
       const signIn = w.lastChoices?.signIn;
-      return planAndStart($, servers, "recheck", () => callServer($, servers, RECHECK_TOOL, typeof signIn === "string" ? { signIn } : {}), afterPlan);
+      const address = w.lastChoices?.address;
+      const args = { ...(typeof signIn === "string" ? { signIn } : {}), ...(typeof address === "string" && address ? { address } : {}) };
+      return planAndStart($, servers, "recheck", () => callServer($, servers, RECHECK_TOOL, args), afterPlan);
     }
     case "runSaved":
       return planAndStart($, servers, "plan", () => callServer($, servers, SAVED_TOOL, { action: "run", name: String(payload.name ?? "") }), afterSavedRun);
@@ -331,7 +334,9 @@ async function perform($, servers, type, payload) {
     case "deleteSaved": {
       const read = readSaved(await callServer($, servers, SAVED_TOOL, { action: "delete", name: String(payload.name ?? "") }));
       return updateWizard($, (x) =>
-        read.ok ? { ...x, saved: read.saved, notice: { tone: "info", text: read.said } } : { ...x, notice: { tone: "error", text: read.error } },
+        read.ok
+          ? { ...x, saved: read.saved, deleting: null, notice: { tone: "info", text: read.said } }
+          : { ...x, deleting: null, notice: { tone: "error", text: read.error } },
       );
     }
     case "cards":

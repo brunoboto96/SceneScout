@@ -50,8 +50,14 @@ export const SAVED_FIELDS = ["name", "choices", "savedAt", "lastRunAt"] as const
 /** Field names that would carry sign-in material, beyond what secretWordKind reads as a secret. */
 const SIGN_IN_FIELD = /cookie|storage.?state|authori[sz]ation|credential|^auth|^headers?$/i;
 
-/** Names Windows refuses as a file, whatever the extension. */
-const RESERVED_FILE_NAMES = new Set(["con", "prn", "aux", "nul", ...Array.from({ length: 9 }, (_, i) => [`com${i + 1}`, `lpt${i + 1}`]).flat()]);
+/** Names Windows refuses as a file, whatever the extension: COM and LPT take a superscript 1 to 3 as well as a digit. */
+const RESERVED_FILE_NAMES = new Set([
+  "con",
+  "prn",
+  "aux",
+  "nul",
+  ...["1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³"].flatMap((d) => [`com${d}`, `lpt${d}`]),
+]);
 
 const NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N} -]*$/u;
 
@@ -68,9 +74,14 @@ export function checkSavedName(raw: unknown): Checked<string> {
   return { ok: true, value: name };
 }
 
-/** The file name a saved check is kept under: its name in lower case, spaces as dashes. Two names that differ only so are one check. */
+/**
+ * The file name a saved check is kept under: its name case-folded, spaces as
+ * dashes. Two names that differ only so are one check. Upper then lower case
+ * folds as a case-insensitive folder can (ß and SS alike), so two names such
+ * a folder would store as one file are one check here too.
+ */
 export function savedCheckSlug(name: string): string {
-  return name.normalize("NFC").toLowerCase().replace(/[ -]+/g, "-").replace(/^-|-$/g, "");
+  return name.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC").replace(/[ -]+/g, "-").replace(/^-|-$/g, "");
 }
 
 /** Where a project's saved checks live. */
