@@ -25,6 +25,7 @@ import { beaconResourceType, BROWSER_ENGINES } from "../browsers.js";
 import type { RouteHealth } from "./check.js";
 import { FIXTURE_KINDS } from "./fixtures.js";
 import { MEMORY_DIRNAME, SELF_IGNORE_KEEP } from "./memory.js";
+import { secretWordKind } from "./sensitive.js";
 import { validateRoleName } from "./profiles.js";
 
 /** Most steps one flow may hold. A longer flow is several flows, and each would fail more usefully on its own. */
@@ -633,6 +634,37 @@ const MIN_MASKED_ENV_VALUE = 4;
 function valueSteps(steps: readonly FlowStep[]): Array<Extract<FlowStep, { value: string }>> {
   return steps.flatMap((s) =>
     s.action === "repeat" ? valueSteps(s.steps) : "value" in s && s.action !== "press" ? [s as Extract<FlowStep, { value: string }>] : [],
+  );
+}
+
+/** Every step of a flow that types, the steps inside a repeat included. */
+function typeSteps(steps: readonly FlowStep[]): Array<Extract<FlowStep, { action: "type" }>> {
+  return steps.flatMap((s) => (s.action === "repeat" ? typeSteps(s.steps) : s.action === "type" ? [s] : []));
+}
+
+/** Whether a flow types into a field named like a secret: its target's label, name or test id, or the environment variable its value comes from. */
+function typesIntoSecret(flow: Pick<Flow, "steps">): boolean {
+  return typeSteps(flow.steps).some((s) => {
+    const target = parseTarget(s.target);
+    const words = [target?.by === "role" ? (target.name ?? "") : (target?.value ?? ""), ...[...s.value.matchAll(ENV_REF)].map((m) => m[1].replace(/_/g, " "))];
+    return words.some((w) => secretWordKind(w) !== null);
+  });
+}
+
+/**
+ * The warning a filmed check (`--video`) prints when a flow types into a
+ * secret field, or null. A video is a recording of the screen: the field's
+ * contents are not painted over in it as they are in a picture, so a typed
+ * code or an unmasked field shows in the file, and in the artifact that holds it.
+ */
+export function videoSecretWarning(video: boolean, flows: ReadonlyArray<Pick<Flow, "steps" | "file">>): string | null {
+  if (!video) return null;
+  const files = flows.filter(typesIntoSecret).map((f) => f.file);
+  if (files.length === 0) return null;
+  return (
+    `--video films flows that type into a field named like a secret (${files.join(", ")}). ` +
+    `Secret fields are not painted over in a video, so what is typed can show in the file and in any artifact that keeps it. ` +
+    `Use a throwaway account, or leave --video off for these flows.`
   );
 }
 
