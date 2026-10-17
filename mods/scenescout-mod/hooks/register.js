@@ -24,6 +24,7 @@ import {
   FEEDBACK_VERDICTS,
   PANEL_WORDS,
   PLAN_TOOL,
+  RECAP_TOOL,
   RECHECK_TOOL,
   RESULTS_LIMIT,
   SAVED_TOOL,
@@ -40,6 +41,7 @@ import {
   openResults,
   pictureSvg,
   readCards,
+  readRecap,
   readSaved,
   readTeamReport,
   reduce,
@@ -77,12 +79,15 @@ import {
   ticketToasts,
   ticketsDue,
 } from "./run.js";
+import { bestiary, gameOn } from "./game.js";
 
 // What a drawing reads lives in $.state (types/index.d.ts), so a reload of the mod keeps the panel where it was.
 const WIZARD = { plugin: "scenescout-mod", key: "wizard" };
 const STATUS = { plugin: "scenescout-mod", key: "status" };
 const PICTURE = { plugin: "scenescout-mod", key: "picture" };
 const CONFIRMED = { plugin: "scenescout-mod", key: "confirmed" };
+/** The end-of-check card of the last guided check seen ended, as scout_recap sent it. */
+const RECAP = { plugin: "scenescout-mod", key: "recap" };
 /** The tickets SceneScout filed for the project, as the last scout_ticket_status reading had them. */
 const TICKETS = { plugin: "scenescout-mod", key: "tickets" };
 /** The check being measured against the person's limit (design 2.11), or null. */
@@ -102,6 +107,9 @@ let ticketTimer = null;
 let ticketsAsked = true;
 /** The last guided check seen ended, so its end re-arms the ticket watch once. */
 let endedPlan = null;
+/** Failed asks for each ended check's card, so a server that cannot make it is asked at most RECAP_TRIES times, not on every poll. */
+const recapFailed = new Map();
+const RECAP_TRIES = 3;
 /** The limit the person set for a plan still waiting on their yes, by plan id. In this load only: a reload starts that check with no limit. */
 const capFor = new Map();
 /** Whether a model turn is running: a message then goes into it rather than waiting for a turn of its own. */
@@ -126,6 +134,8 @@ let isBuilding = false;
 
 export function register(on, options) {
   const lane = laneModelSetting(options?.lane_model);
+  // The game layer (design 2.10): off unless the person set it to on; drawn in the panel only.
+  const game = gameOn(options?.game);
   const servers = serverCandidates(options?.mcp_server);
 
   on("session.start", async ($, e, next) => {
@@ -195,7 +205,11 @@ export function register(on, options) {
     const shown = picture && picture.id === wizard.cardId ? picture : null;
     const tickets = (await $.state.get(TICKETS)).value ?? null;
     const cost = wizard.step === "configuring" ? await costOfferNow($, wizard.draft.thoroughness) : null;
-    return renderGuided(els, wizard, { surface: e.surface, status, picture: shown, runPane, cost, tickets }, (type, payload = {}) => {
+    const recap = (await $.state.get(RECAP)).value ?? null;
+    // Defeated counts only the check whose results are on show: another check's card says nothing about these problems.
+    const fixed = recap?.planId === resultsPlan(wizard).planId ? Number(recap?.rows?.find((r) => r[0] === "Confirmed fixed")?.[1] ?? 0) : 0;
+    const creatures = game ? bestiary(wizard.cards, fixed) : null;
+    return renderGuided(els, wizard, { surface: e.surface, status, picture: shown, runPane, cost, tickets, recap, game: creatures }, (type, payload = {}) => {
       // Fired, never awaited: a press must not hold anything up while the server or a form answers.
       void perform($, servers, type, payload).catch((err) => toast($, `SceneScout: ${err instanceof Error ? err.message : String(err)}`));
     });
@@ -512,6 +526,13 @@ async function perform($, servers, type, payload) {
     }
     case "send":
       return sendToClaude($, String(payload.text ?? ""));
+    case "saveRecap": {
+      // Written by the server inside .scenescout/, from the check's figures only.
+      const result = await callServer($, servers, RECAP_TOOL, { save: true });
+      const card = readRecap(result);
+      if (card) await $.state.set(RECAP, card);
+      return toast($, card?.file ? `SceneScout: ${PANEL_WORDS.recapSaved(card.file)}` : `SceneScout: ${errorSentence(result)}`);
+    }
     case "teamReport": {
       // Written by the server with no turn for Claude; the panel then offers the page and its folder.
       await updateWizard($, (w) => ({ ...w, busy: "team-report", notice: null }));
@@ -652,6 +673,13 @@ async function afterPoll($, servers) {
   if (g && isFinished(g) && g.planId !== endedPlan) {
     endedPlan = g.planId;
     ticketsAsked = true;
+  }
+  // The end-of-check card of a check that ended, asked for until it is held.
+  if (g && isFinished(g) && (await $.state.get(RECAP)).value?.planId !== g.planId && (recapFailed.get(g.planId) ?? 0) < RECAP_TRIES) {
+    const card = readRecap(await callServer($, servers, RECAP_TOOL, {}));
+    // A card for another check than the one the poll showed ended counts as a miss, so a moved focus cannot make every poll ask again.
+    if (card) await $.state.set(RECAP, card);
+    if (!card || card.planId !== g.planId) recapFailed.set(g.planId, (recapFailed.get(g.planId) ?? 0) + 1);
   }
   const now = await $.clock.now();
   sentAt ??= now;

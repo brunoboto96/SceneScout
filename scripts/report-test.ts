@@ -42,6 +42,17 @@ import {
   type ReportTemplate,
 } from "../src/engine/check-report.ts";
 import { parseFlow, type Flow, type FlowOutcome } from "../src/engine/flow.ts";
+import {
+  RECAP_ADDRESS_MAX,
+  RECAP_FILE,
+  recapAddress,
+  recapDuration,
+  recapFigures,
+  recapLines,
+  recapSvg,
+  writeRecap,
+  type RecapFigures,
+} from "../src/engine/recap.ts";
 import { assertSavedPagePolicy, pagePolicy } from "./saved-page-csp.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import { MODE_CARE_LABEL, TEAM_REPORT_WORDS } from "../src/engine/guided-words.ts";
@@ -992,4 +1003,151 @@ test("team report: the sign-off table fits a phone's width", () => {
   // Three blank columns at 9em each are wider than a phone: the page scrolled sideways and the role was broken a letter per line.
   assert.match(html, /@media \(max-width: ?600px\) \{[^}]*table\.sign td\.blank \{ ?min-width: ?0/);
   assert.match(html, /table\.sign td:first-child \{ ?white-space: ?nowrap/);
+});
+
+// ---- The end-of-check card (design 2.9): src/engine/recap.ts ----
+
+const RECAP_GOLDEN = path.join(ROOT, "scripts", "golden", "recap.svg");
+const RECAP: RecapFigures = {
+  address: "https://staging.example.com/shop",
+  pagesChecked: 14,
+  problems: { blocksUsers: 2, annoying: 3, cosmetic: 1, worthALook: 4 },
+  fixed: 2,
+  durationMs: 17 * 60_000 + 5_000,
+  endedAt: "2026-10-17T10:20:00.000Z",
+  ended: "done",
+};
+
+test("recap: the same figures always draw the same SVG, held to scripts/golden/recap.svg", () => {
+  const svg = recapSvg(RECAP);
+  assert.equal(recapSvg(RECAP), svg, "two renders are identical");
+  if (process.env.UPDATE_GOLDEN === "1") fs.writeFileSync(RECAP_GOLDEN, svg);
+  assert.equal(svg, readText(RECAP_GOLDEN), "the recap matches scripts/golden/recap.svg (UPDATE_GOLDEN=1 rewrites it after an intended change)");
+  assert.ok(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg"'));
+  // No script, no link out, no outside resource: a picture the person can forward.
+  assert.doesNotMatch(svg, /<script|href=|xlink|<foreignObject|url\(|on[a-z]+=/i);
+  // Every figure is drawn: pages, the problems by impact and their total (worth a look is not a problem), fixed, time and date.
+  const lines = recapLines(RECAP);
+  assert.deepEqual(lines.rows, [
+    ["Pages checked", "14"],
+    ["Problems found", "6"],
+    ["Block users", "2"],
+    ["Annoying", "3"],
+    ["Cosmetic", "1"],
+    ["Worth a look", "4"],
+    ["Confirmed fixed", "2"],
+    ["Time taken", "17 min"],
+  ]);
+  for (const [label, value] of lines.rows) assert.ok(svg.includes(`>${label}<`) && svg.includes(`>${value}<`), label);
+  assert.ok(svg.includes(">2026-10-17<"));
+  assert.match(recapSvg({ ...RECAP, ended: "stopped" }), />SceneScout check, stopped early</);
+});
+
+test("recap: the address and every figure are escaped, a figure that is not a count draws 0, and a long address is cut", () => {
+  const hostile = recapSvg({
+    ...RECAP,
+    address: `https://x.example/<script>alert("1")</script>&'\u001b[31m`,
+    pagesChecked: Number.NaN,
+    problems: { blocksUsers: -3, annoying: 1.7, cosmetic: Infinity, worthALook: "9" as unknown as number },
+    fixed: Number.POSITIVE_INFINITY,
+    durationMs: -1,
+    endedAt: "<b>yesterday</b>",
+  });
+  assert.doesNotMatch(hostile, /<script|<b>|\u001b/);
+  assert.ok(hostile.includes("&lt;script&gt;alert(&quot;1&quot;)&lt;/script&gt;&amp;&#39;"));
+  assert.ok(!hostile.includes("yesterday"), "a date that is not one is left out");
+  const rows = recapLines({ ...RECAP, pagesChecked: Number.NaN, problems: { blocksUsers: -3, annoying: 1.7, cosmetic: Infinity, worthALook: 0 } }).rows;
+  assert.deepEqual(rows.slice(0, 5), [
+    ["Pages checked", "0"],
+    ["Problems found", "1"],
+    ["Block users", "0"],
+    ["Annoying", "1"],
+    ["Cosmetic", "0"],
+  ]);
+  const long = recapLines({ ...RECAP, address: `https://staging.example.com/${"a".repeat(200)}` }).address;
+  assert.equal(long.length, RECAP_ADDRESS_MAX);
+  assert.ok(long.endsWith("…"));
+  assert.deepEqual(
+    [recapDuration(0), recapDuration(59_000), recapDuration(60_000), recapDuration(65 * 60_000)],
+    ["under a minute", "under a minute", "1 min", "1 h 5 min"],
+  );
+});
+
+test("recap: the figures are a guided check's own once it has ended, and confirmed fixed counts only re-checks during it", () => {
+  const progress = {
+    phase: "done" as const,
+    pages: { checked: 9, found: 12 },
+    problems: { blocksUsers: 1, annoying: 0, cosmetic: 2, worthALook: 0 },
+    time: { usedMs: 600_000, budgetMs: 1_200_000 },
+  };
+  const started = Date.parse("2026-10-17T10:00:00.000Z");
+  const findings = [
+    { verdict: "gone" as const, verifiedAt: "2026-10-17T10:05:00.000Z" },
+    { verdict: "gone" as const, verifiedAt: "2026-10-16T10:05:00.000Z" },
+    // Re-checked gone after the check ended: not this check's.
+    { verdict: "gone" as const, verifiedAt: "2026-10-17T11:00:00.000Z" },
+    { verdict: "present" as const, verifiedAt: "2026-10-17T10:06:00.000Z" },
+    {},
+  ];
+  const f = recapFigures(progress, "https://staging.example.com", findings, started, started + 600_000);
+  assert.deepEqual(f, {
+    address: "https://staging.example.com",
+    pagesChecked: 9,
+    problems: progress.problems,
+    fixed: 1,
+    durationMs: 600_000,
+    endedAt: "2026-10-17T10:10:00.000Z",
+    ended: "done",
+  });
+  assert.equal(recapFigures({ ...progress, phase: "stopped" }, "x", [], started, started)?.ended, "stopped");
+  for (const phase of ["starting", "signing-in", "exploring", "needs-you", "writing-report"] as const)
+    assert.equal(recapFigures({ ...progress, phase }, "x", [], started, started), null, `${phase}: not ended`);
+});
+
+test("recap: an address an XML reader would refuse, or one cut inside a character, still draws a picture that parses", () => {
+  // U+FFFE and U+FFFF pass the address check but are not XML characters: the whole SVG would fail to open.
+  assert.equal(recapAddress("https://x.example/\uFFFEa\uFFFF"), "https://x.example/ a");
+  // A cut at RECAP_ADDRESS_MAX never leaves half of a character drawn outside the basic plane.
+  const cut = recapAddress(`https://x.example/${"a".repeat(RECAP_ADDRESS_MAX - 19)}\u{1F600}${"b".repeat(40)}`);
+  assert.doesNotMatch(cut, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/, "no lone surrogate");
+  assert.ok(cut.endsWith("…"));
+  // The same address in the attribute and the text: a quote or angle bracket never closes either.
+  const svg = recapSvg({ ...RECAP, address: `https://x.example/"><script>alert(1)</script><a href="javascript:alert(1)">` });
+  // Every tag is one the recap draws, and every attribute value is closed by its own quote: nothing the address carried became markup.
+  const tags = svg.match(/<[^>]*>/g) ?? [];
+  for (const tag of tags) assert.match(tag, /^<\/?(svg|rect|text)(\s+[A-Za-z-]+="[^"<>]*")*\s*\/?>$/, tag);
+  assert.equal(svg.replace(/<[^>]*>/g, "").includes("<"), false);
+  assert.match(svg, /aria-label="SceneScout check: https:\/\/x\.example\/&quot;&gt;&lt;script&gt;/);
+});
+
+test("recap: a save writes recap.svg inside .scenescout only, replacing a link at the name rather than writing through it", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-recap-"));
+  try {
+    const project = path.join(root, "site");
+    const dir = path.join(project, ".scenescout");
+    fs.mkdirSync(dir, { recursive: true });
+    const outside = path.join(root, "outside.txt");
+    fs.writeFileSync(outside, "keep me");
+    fs.symlinkSync(outside, path.join(dir, RECAP_FILE));
+    const svg = recapSvg(RECAP);
+    assert.equal(writeRecap(dir, svg), path.join(dir, RECAP_FILE));
+    assert.equal(fs.readFileSync(outside, "utf8"), "keep me", "the file the link pointed at is untouched");
+    assert.ok(fs.lstatSync(path.join(dir, RECAP_FILE)).isFile(), "the link was replaced by the picture");
+    assert.equal(fs.readFileSync(path.join(dir, RECAP_FILE), "utf8"), svg);
+    // A .scenescout that is itself a link to another folder is refused, writing nothing there.
+    const elsewhere = path.join(root, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    const linked = path.join(root, "linked");
+    fs.mkdirSync(linked);
+    fs.symlinkSync(elsewhere, path.join(linked, ".scenescout"));
+    assert.throws(() => writeRecap(path.join(linked, ".scenescout"), svg), /link/);
+    assert.deepEqual(fs.readdirSync(elsewhere), []);
+    // Only a project's .scenescout folder; one not there yet is made.
+    assert.throws(() => writeRecap(project, svg), /\.scenescout/);
+    const fresh = path.join(root, "fresh", ".scenescout");
+    fs.mkdirSync(path.dirname(fresh));
+    assert.equal(writeRecap(fresh, svg), path.join(fresh, RECAP_FILE));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -68,6 +68,7 @@ const EXPECTED_TOOLS = [
   "scout_ticket_preview",
   "scout_ticket_file",
   "scout_ticket_status",
+  "scout_recap",
 ];
 
 type ToolText = { content: Array<{ type: string; text?: string }> };
@@ -1305,6 +1306,32 @@ async function guidedCheck(): Promise<void> {
  * no project open both refuse before reading anything. Previewing and filing
  * against stand-in trackers is export-test's.
  */
+/**
+ * scout_recap as served: it writes a file only when asked (save), so it is
+ * not read-only but never destructive and touches nothing outside the
+ * machine; its one input is optional; and with no guided check ended it
+ * refuses, saving nothing. The picture itself is report-test's (a golden file).
+ */
+async function recapToolCheck(): Promise<void> {
+  type Result = { content: Array<{ type: string; text?: string }>; isError?: boolean };
+  const { out } = await withFormClient({ form: {} }, { action: "cancel" }, async (client) => {
+    const { tools } = await client.listTools();
+    const t = tools.find((x) => x.name === "scout_recap");
+    const a = t?.annotations;
+    if (a?.readOnlyHint !== false || a?.destructiveHint !== false || a?.idempotentHint !== true || a?.openWorldHint !== false)
+      fail(`scout_recap is not annotated as writing one file of its own: ${JSON.stringify(a)}`);
+    const input = t?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+    if (JSON.stringify(Object.keys(input.properties ?? {})) !== JSON.stringify(["save"]) || (input.required ?? []).length > 0)
+      fail(`scout_recap takes ${JSON.stringify(input)}, expected an optional save only`);
+    const outProps = Object.keys((t?.outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {});
+    if (JSON.stringify(outProps) !== JSON.stringify(["planId", "title", "address", "date", "rows", "svg", "file"]))
+      fail(`scout_recap's output schema is ${JSON.stringify(outProps)}`);
+    return (await client.callTool({ name: "scout_recap", arguments: { save: true } })) as Result;
+  });
+  if (!out.isError || !/No guided check has ended yet/.test(textOf(out))) fail(`scout_recap with no guided check did not refuse: ${textOf(out)}`);
+  console.log("✓ scout_recap is annotated and schema'd, and refuses, saving nothing, while no guided check has ended");
+}
+
 async function ticketToolsCheck(): Promise<void> {
   type Result = { content: Array<{ type: string; text?: string }>; isError?: boolean };
   const { out } = await withFormClient({ form: {} }, { action: "cancel" }, async (client) => {
@@ -2134,6 +2161,7 @@ async function main(): Promise<void> {
   await intakeCheck();
   await guidedCheck();
   await ticketToolsCheck();
+  await recapToolCheck();
   await configCheck();
   await guidedCardsCheck();
   await abandonedCallCheck();
