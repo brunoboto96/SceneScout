@@ -11,6 +11,11 @@ import { z } from "zod";
 import { formElicitationSupported, INTAKE_FORM_MESSAGE, INTAKE_TOOL, intakeFormSchema, intakeFromForm, intakeReplyText, type FormOutcome } from "../intake.js";
 import {
   buildGuidedPlan,
+  buildRecheckPlan,
+  checkAddress,
+  recheckCandidates,
+  recheckSpec,
+  SIGN_INS,
   CARES,
   checkGuidedChoices,
   savedSignInHealth,
@@ -33,7 +38,20 @@ import {
   type ConfirmVerdict,
   type GuidedPlan,
 } from "../engine/guided.js";
-import { CONFIRM_SAYS } from "../engine/guided-words.js";
+import { CONFIRM_SAYS, SAVED_WORDS } from "../engine/guided-words.js";
+import { MEMORY_DIRNAME } from "../engine/memory-dir.js";
+import type { Finding } from "../engine/memory.js";
+import {
+  deleteSavedCheckReply,
+  listSavedChecks,
+  MAX_SAVED_NAME,
+  readSavedCheck,
+  savedCheckFrom,
+  savedChecksDir,
+  writeSavedCheck,
+  type SavedCheck,
+} from "../engine/saved-checks.js";
+import { MAX_WORKLIST, wellFormedFindings } from "../engine/verify.js";
 import { EXPLORE_PROMPT_ARGUMENTS, explorePrompt, loadPlaybook, PLAYBOOK_PROMPT, PLAYBOOK_TOOL } from "../playbook.js";
 import {
   GUIDED_PROMPTS,
@@ -47,7 +65,7 @@ import {
   LIVE_PROMPT_ARGUMENTS,
 } from "../prompts.js";
 
-import { PACKAGE_ROOT, server, errorText, guidedPlans, guidedRuns, operatorPolicy } from "../server-context.js";
+import { PACKAGE_ROOT, server, engines, errorText, guidedPlans, guidedRuns, guidedSessions, operatorPolicy, projectEngine } from "../server-context.js";
 import { projectFolderFor } from "./sessions.js";
 
 // The guided start as one form, where the client can show one (MCP
@@ -60,16 +78,18 @@ const FORM_WAIT_MS = 10 * 60_000;
 
 export const GUIDED_PLAN_TOOL = "scout_guided_plan";
 export const GUIDED_CONFIRM_TOOL = "scout_guided_confirm";
+export const RECHECK_PLAN_TOOL = "scout_recheck_plan";
+export const SAVED_CHECKS_TOOL = "scout_saved_checks";
 
 /** What the SDK hands a handler that a form needs: the call's signal and id, so the form ends with the call. */
-type FormExtra = { signal: AbortSignal; requestId: string | number };
+export type FormExtra = { signal: AbortSignal; requestId: string | number };
 
 /**
  * Show the person a form through the client and report how it ended. Only a
  * client that declared form-mode elicitation is sent one; a failed form is
  * reported, never retried, and never read as an answer.
  */
-async function askWithForm(message: string, requestedSchema: object, extra: FormExtra, tool: string): Promise<ConfirmFormOutcome> {
+export async function askWithForm(message: string, requestedSchema: object, extra: FormExtra, tool: string): Promise<ConfirmFormOutcome> {
   if (!formElicitationSupported(server.server.getClientCapabilities())) return { kind: "unsupported" };
   try {
     const result = await server.server.elicitInput(
@@ -128,20 +148,26 @@ async function judgedNow(plan: GuidedPlan): Promise<GuidedPlan> {
   return plan.choices.signIn === "none" ? plan : withSignInHealth(plan, await signInHealthFor(plan.choices));
 }
 
-const GUIDED_CALL_OUTPUT = z.object({ tool: z.enum(["scout_login", "scout_attach", "scout_tickets", "scout_session"]), args: z.record(z.unknown()) });
+const GUIDED_CALL_OUTPUT = z.object({
+  tool: z.enum(["scout_login", "scout_attach", "scout_tickets", "scout_session", "scout_verify"]),
+  args: z.record(z.unknown()),
+});
+
+/** A guided choice set, as a plan and a saved check carry it. */
+const CHOICES_OUTPUT = z.object({
+  address: z.string(),
+  areas: z.array(z.enum(CHECK_AREAS)),
+  journey: z.string().optional(),
+  tickets: z.array(z.string()).optional(),
+  signIn: z.enum(["none", "sso", "password", "one-time-code"]),
+  care: z.enum(CARES),
+  thoroughness: z.enum(THOROUGHNESSES),
+});
 
 /** A GuidedPlan, as scout_guided_plan's structuredContent. */
 const GUIDED_PLAN_OUTPUT = {
   planId: z.string(),
-  choices: z.object({
-    address: z.string(),
-    areas: z.array(z.enum(CHECK_AREAS)),
-    journey: z.string().optional(),
-    tickets: z.array(z.string()).optional(),
-    signIn: z.enum(["none", "sso", "password", "one-time-code"]),
-    care: z.enum(CARES),
-    thoroughness: z.enum(THOROUGHNESSES),
-  }),
+  choices: CHOICES_OUTPUT,
   mode: z.enum(["observe", "read-only", "safe-write"]),
   level: z.enum(["minimal", "medium", "extensive"]),
   objective: z.string(),
@@ -157,7 +183,91 @@ const GUIDED_PLAN_OUTPUT = {
       signInAgain: z.object({ label: z.string(), prompt: z.string(), command: z.string() }),
     })
     .optional(),
+  recheck: z
+    .object({
+      ids: z.array(z.string()),
+      foundIn: z.enum(CARES),
+      leftOut: z.array(z.object({ id: z.string(), title: z.string(), why: z.enum(["looser-care", "other-site"]), care: z.enum(CARES) })),
+    })
+    .optional(),
 };
+
+/** scout_saved_checks' structuredContent: the project's saved checks, and the plan a run built. */
+const SAVED_CHECKS_OUTPUT = {
+  folder: z.string(),
+  saved: z.array(z.object({ name: z.string(), choices: CHOICES_OUTPUT, savedAt: z.string(), lastRunAt: z.string().optional() })),
+  refused: z.array(z.string()),
+  plan: z.object(GUIDED_PLAN_OUTPUT).optional(),
+};
+
+/**
+ * The project folder a re-check or a saved check reads, in this order: the
+ * session carrying `planId`; an open session on `address`'s site; with no
+ * address, the project a session attached to; else the folder an attach
+ * there would choose (the client's workspace, or the folder kept per site).
+ */
+async function projectDirFor(address: string | undefined, planId?: string): Promise<string> {
+  const carrying = planId ? [...guidedSessions.entries()].find(([, s]) => s.planId === planId) : undefined;
+  const carried = carrying ? engines.get(carrying[0])?.memory : undefined;
+  if (carried) return path.dirname(carried.dir);
+  let site: string | undefined;
+  if (address !== undefined) {
+    const checked = checkAddress(address);
+    if (!checked.ok) throw new Error(checked.error);
+    site = new URL(checked.value).origin;
+    for (const eng of engines.values()) {
+      let origin = "";
+      try {
+        origin = new URL(eng.baseUrl).origin;
+      } catch {
+        // An engine with no base address is not on this site.
+      }
+      if (eng.memory && origin === site) return path.dirname(eng.memory.dir);
+    }
+  } else {
+    const open = projectEngine()?.memory;
+    if (open) return path.dirname(open.dir);
+  }
+  const folder = await projectFolderFor(site ?? "", undefined);
+  if ("refused" in folder)
+    throw new Error(
+      site ? folder.refused : "No project is open yet: pass the site's address (address), so SceneScout can find the folder it keeps for that site.",
+    );
+  return path.resolve(folder.dir);
+}
+
+/** The findings kept in a project: an open session's memory, else its memory.json read as it is, never written. */
+function findingsIn(projectDir: string): Finding[] {
+  const dir = path.join(projectDir, MEMORY_DIRNAME);
+  for (const eng of engines.values()) if (eng.memory && path.resolve(eng.memory.dir) === path.resolve(dir)) return eng.memory.findings;
+  const file = path.join(dir, "memory.json");
+  if (!fs.existsSync(file)) return [];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (err) {
+    throw new Error(`the project's memory.json could not be read (${err instanceof Error ? err.message : String(err)}): attach once to repair it`);
+  }
+  const list = (raw as { findings?: unknown }).findings;
+  return Array.isArray(list) ? wellFormedFindings(list) : [];
+}
+
+/** The saved checks of a folder, as the tool returns them. */
+function savedList(dir: string): { folder: string; saved: SavedCheck[]; refused: string[] } {
+  const { checks, refused } = listSavedChecks(dir);
+  return { folder: savedChecksDir(dir), saved: checks, refused };
+}
+
+function savedListText(list: { saved: SavedCheck[]; refused: string[] }): string {
+  const lines =
+    list.saved.length === 0
+      ? [SAVED_WORDS.none]
+      : list.saved.map(
+          (c) => `- ${c.name}: ${c.choices.address}, ${c.choices.care}${c.lastRunAt ? `, last run ${c.lastRunAt.slice(0, 10)}` : ", never run again"}`,
+        );
+  if (list.refused.length > 0) lines.push(`Not read, because they are not saved checks SceneScout can use: ${list.refused.join(", ")}.`);
+  return lines.join("\n");
+}
 
 /** scout_guided_confirm's structuredContent. */
 const GUIDED_CONFIRM_OUTPUT = {
@@ -318,6 +428,140 @@ export function registerGuideTools(): void {
         return {
           content: [{ type: "text" as const, text: confirmedText(now, verdict) }],
           structuredContent: { planId: now.planId, accepted: verdict.accepted, outcome: verdict.outcome, tellPerson: verdict.tellPerson, mode: now.mode },
+        };
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    RECHECK_PLAN_TOOL,
+    {
+      title: "Plan a re-check after a fix",
+      description:
+        "Build a guided plan that checks again the problems earlier checks left open, and says which are gone, still there or changed. " +
+        "It runs in the care level the problems were found in, never a looser one: problems found in a looser care level are left for a re-check of their own, and problems on another site for a re-check of that site. " +
+        "It is a new plan: where its care level needs the person's confirmation, scout_guided_confirm asks them again, whatever an earlier check was given. Follow it as you would scout_guided_plan's: attach with its planId, then scout_verify. " +
+        "By default every open problem but those the person marked not a bug, worst route first, at most 25; pass ids for exactly those. Touches no browser.",
+      inputSchema: {
+        ids: z
+          .array(z.string().max(40))
+          .max(MAX_WORKLIST)
+          .optional()
+          .describe("Re-check exactly these finding ids. Default: every open one but those marked not a bug"),
+        signIn: z
+          .enum(SIGN_INS as [string, ...string[]])
+          .optional()
+          .describe("How the person signs in to the site, as in the check that found them (default none). Never a password"),
+        address: z
+          .string()
+          .max(MAX_ADDRESS)
+          .optional()
+          .describe(
+            "The site, when no check has run in this conversation: its problems are read from the folder SceneScout keeps for it, and only those on it are re-checked",
+          ),
+      },
+      outputSchema: GUIDED_PLAN_OUTPUT,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ ids, signIn, address }: { ids?: string[]; signIn?: string; address?: string }) => {
+      try {
+        const dir = await projectDirFor(address);
+        const { candidates, missing } = recheckCandidates(findingsIn(dir), ids, address);
+        const maxMode = operatorPolicy.policy.maxMode;
+        const spec = recheckSpec(candidates, {
+          maxMode,
+          ...(signIn ? { signIn: signIn as GuidedChoices["signIn"] } : {}),
+          ...(address !== undefined ? { address } : {}),
+        });
+        if (!spec.ok) throw new Error(missing.length > 0 ? `${spec.error} No open finding has the id ${missing.join(", ")}.` : spec.error);
+        const health = await signInHealthFor({
+          address: spec.value.address,
+          areas: [],
+          signIn: spec.value.signIn,
+          care: spec.value.care,
+          thoroughness: "quick",
+        });
+        const plan = guidedPlans.add(buildRecheckPlan(spec.value, undefined, { maxMode, ...(health ? { signInHealth: health } : {}) }));
+        guidedRuns.focus(plan.planId);
+        const note = missing.length > 0 ? `\nNo open finding has the id ${missing.join(", ")}: it may already be fixed, or belong to another project.` : "";
+        return { content: [{ type: "text" as const, text: guidedPlanText(plan) + note }], structuredContent: { ...plan } };
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    SAVED_CHECKS_TOOL,
+    {
+      title: "The person's saved checks",
+      description:
+        "List, save, run or delete the person's saved guided checks. A saved check keeps the choices of a guided plan under a name (the address, what to check, the journey, how they sign in, the care level and how thorough), never a password, code, token or cookie, in the project's .scenescout/guided/ folder, readable by its owner only. " +
+        '"save" takes a name and the planId of a plan built from choices (a re-check is not saved). "run" builds a new plan from a saved check, unaccepted: where its care level needs the person\'s confirmation, scout_guided_confirm asks them again. Follow that plan as scout_guided_plan\'s. ' +
+        "\"delete\" removes one saved check's file and nothing else. With no check open in this conversation, pass the site's address so SceneScout finds its folder. Touches no browser.",
+      inputSchema: {
+        action: z.enum(["list", "save", "run", "delete"]).describe('"list", "save" (name and planId), "run" (name) or "delete" (name)'),
+        name: z.string().max(MAX_SAVED_NAME).optional().describe("The saved check's name: letters, digits, spaces and dashes"),
+        planId: z.string().max(20).optional().describe('With "save": the plan whose choices to keep'),
+        address: z
+          .string()
+          .max(MAX_ADDRESS)
+          .optional()
+          .describe("The site, when no check has run in this conversation: its saved checks are in the folder SceneScout keeps for it"),
+      },
+      outputSchema: SAVED_CHECKS_OUTPUT,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ action, name, planId, address }: { action: "list" | "save" | "run" | "delete"; name?: string; planId?: string; address?: string }) => {
+      try {
+        if (action !== "save" && planId !== undefined) throw new Error(`planId is for "save" only`);
+        if (action === "list") {
+          const list = savedList(await projectDirFor(address));
+          return { content: [{ type: "text" as const, text: savedListText(list) }], structuredContent: { ...list } };
+        }
+        if (name === undefined) throw new Error(`"${action}" needs the saved check's name`);
+        if (action === "save") {
+          const plan = planId !== undefined && isPlanId(planId) ? guidedPlans.get(planId) : undefined;
+          if (!plan) throw new Error("this server holds no guided plan with that id: save a check from its plan's id");
+          const made = savedCheckFrom(plan, name, new Date().toISOString());
+          if (!made.ok) throw new Error(made.error);
+          const dir = await projectDirFor(address ?? plan.choices.address, plan.planId);
+          const { replaced } = writeSavedCheck(dir, made.saved);
+          const list = savedList(dir);
+          return {
+            content: [{ type: "text" as const, text: replaced ? SAVED_WORDS.replaced(made.saved.name) : SAVED_WORDS.saved(made.saved.name) }],
+            structuredContent: { ...list },
+          };
+        }
+        const dir = await projectDirFor(address);
+        if (action === "delete") {
+          const gone = deleteSavedCheckReply(dir, name);
+          if (!gone.ok) throw new Error(gone.error);
+          const list = savedList(dir);
+          return { content: [{ type: "text" as const, text: gone.text }], structuredContent: { ...list } };
+        }
+        const read = readSavedCheck(dir, name);
+        if (!read.ok) throw new Error(read.error);
+        const maxMode = operatorPolicy.policy.maxMode;
+        const health = await signInHealthFor(read.saved.choices);
+        const built = guidedPlan(read.saved.choices, undefined, { maxMode, health: () => health });
+        if (!built.ok) throw new Error(`the saved check "${read.saved.name}" cannot run here: ${built.error}`);
+        // When it last ran is a convenience: a folder that cannot be written to does not stop the run.
+        try {
+          writeSavedCheck(dir, { ...read.saved, lastRunAt: new Date().toISOString() });
+        } catch (err) {
+          console.error(
+            `[scenescout] ${SAVED_CHECKS_TOOL}: when "${read.saved.name}" last ran could not be kept: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        const plan = guidedPlans.add(built.plan);
+        guidedRuns.focus(plan.planId);
+        const list = savedList(dir);
+        return {
+          content: [{ type: "text" as const, text: `${SAVED_WORDS.run(read.saved.name)}\n\n${guidedPlanText(plan)}` }],
+          structuredContent: { ...list, plan: { ...plan } },
         };
       } catch (err) {
         return errorText(err);

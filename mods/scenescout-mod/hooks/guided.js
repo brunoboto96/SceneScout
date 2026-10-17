@@ -32,6 +32,12 @@ export const CARDS_TOOL = "scout_cards";
 export const FEEDBACK_TOOL = "scout_feedback";
 /** The team report: written by the server, with no turn for Claude (design 3.8). Only the results screen's own button calls it. */
 export const TEAM_REPORT_TOOL = "scout_team_report";
+/** A re-check of the open problems: the server builds its plan, and Claude is handed only its id (design 3.8). Only the results screen's own button calls it. */
+export const RECHECK_TOOL = "scout_recheck_plan";
+/** The person's saved checks: listed on the welcome, saved from the results, run again or deleted, with no turn for Claude. */
+export const SAVED_TOOL = "scout_saved_checks";
+/** The longest name a saved check takes, as saved-checks.ts's MAX_SAVED_NAME. */
+export const SAVED_NAME_MAX = 60;
 /** How many cards the results show at once. */
 export const RESULTS_LIMIT = 20;
 /** The longest `Svg` source a surface draws. */
@@ -171,6 +177,7 @@ export const ACTION_LABEL = {
   recheck: "Check them again",
   plainReport: "Write the report in plain words",
   teamReport: "Make a team report",
+  fileTickets: "File as tickets",
   confirm: "Confirm the care level",
   notABug: "Not a bug",
   explain: "Explain more",
@@ -181,8 +188,10 @@ export const ACTION_LABEL = {
 
 export const ACTION_PROMPT = {
   stop: "Stop the SceneScout run now and write what you have.",
-  recheck: "Check the open SceneScout problems again with scout_verify and tell me which are gone.",
+  recheck: "Check the open SceneScout problems again: call scout_recheck_plan, follow the plan it returns, and tell me which are gone.",
   plainReport: 'Write the SceneScout report in plain words: scout_report {report: "qa"}.',
+  fileTickets:
+    "File SceneScout problems as tickets: show me the open ones with scout_cards, ask me which and where (GitHub or Jira), preview them with scout_ticket_preview, then call scout_ticket_file so I confirm in SceneScout's own form.",
   explain: (/** @type {string} */ id) =>
     `Explain SceneScout finding ${id} to me in more detail, in plain words, from its evidence and steps only (scout_cards {ids: ["${id}"]}).`,
   again: (/** @type {string} */ id) => `Check SceneScout finding ${id} again with scout_verify, and tell me whether it is still there.`,
@@ -263,6 +272,17 @@ export const PANEL_WORDS = {
   openReport: "Open the report",
   showFolder: "Show the folder",
   fallbackNext: "Say one of these to Claude:",
+  savedChecks: "Saved checks",
+  saveName: "Name this check",
+  saveHint: "Shop sign-up on a phone",
+  saveCheck: "Save this check",
+  deleteSaved: "Delete",
+  deleteAsk: (/** @type {string} */ name) => `Delete "${name}"?`,
+  deleteYes: "Yes, delete it",
+  deleteKeep: "Keep it",
+  neverRun: "never run again",
+  lastRun: "last run",
+  rechecking: "Planning the re-check...",
 };
 
 /** Impact, as a short mark in front of a card's title. */
@@ -289,8 +309,12 @@ export const IMPACT_MARK = { "Blocks users": "!", Annoying: "~", Cosmetic: ".", 
  *   lastChoices: any,
  *   tourPage: number,
  *   returnTo: string | null,
+ *   saved: SavedEntry[] | null,
+ *   saveName: string,
+ *   deleting: string | null,
  * }} Wizard
  */
+/** @typedef {{ name: string, address: string, care: string, lastRunAt: string }} SavedEntry */
 
 /** A fresh check's choices: the start form's defaults, Look only and Normal. */
 export function defaultDraft() {
@@ -321,6 +345,9 @@ export function initialWizard() {
     lastChoices: null,
     tourPage: 0,
     returnTo: null,
+    saved: null,
+    saveName: "",
+    deleting: null,
   };
 }
 
@@ -374,7 +401,47 @@ export function wizardOf(value) {
     lastChoices: isRecord(value.lastChoices) ? value.lastChoices : null,
     tourPage: Math.min(TOUR.length - 1, Math.max(0, Math.floor(num(value.tourPage)))),
     returnTo: STEPS.includes(str(value.returnTo)) && str(value.returnTo) !== "safety" ? str(value.returnTo) : null,
+    saved: Array.isArray(value.saved) ? savedEntries(value.saved) : null,
+    saveName: str(value.saveName).slice(0, SAVED_NAME_MAX),
+    deleting: str(value.deleting).slice(0, SAVED_NAME_MAX) || null,
   };
+}
+
+/**
+ * Saved checks as the panel lists them, from the server's answer or the
+ * panel's state: only entries with a name and an address are kept.
+ *
+ * @param {unknown[]} list
+ * @returns {SavedEntry[]}
+ */
+export function savedEntries(list) {
+  return list
+    .filter(isRecord)
+    .map((c) => {
+      const choices = isRecord(c.choices) ? c.choices : c;
+      return { name: str(c.name).slice(0, SAVED_NAME_MAX), address: str(choices.address), care: str(choices.care), lastRunAt: str(c.lastRunAt) };
+    })
+    .filter((c) => c.name && c.address);
+}
+
+/**
+ * Each saved check's test id part: its name in lower case with anything but
+ * letters and digits as dashes, made unique by its place where two read alike.
+ *
+ * @param {SavedEntry[]} saved
+ */
+export function savedKeys(saved) {
+  /** @type {string[]} */
+  const keys = [];
+  saved.forEach((c, i) => {
+    const slug =
+      c.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "") || "check";
+    keys.push(keys.includes(slug) ? `${slug}-${i}` : slug);
+  });
+  return keys;
 }
 
 /**
@@ -387,6 +454,17 @@ export function wizardOf(value) {
  * @returns {Wizard}
  */
 export function reduce(w, action) {
+  const next = step(w, action);
+  // A delete question belongs to the welcome's list: leaving the welcome drops it, so it is not waiting when the person comes back.
+  return w.step === "welcome" && next.step !== "welcome" && next.deleting ? { ...next, deleting: null } : next;
+}
+
+/**
+ * @param {Wizard} w
+ * @param {{ type: string, [k: string]: any }} action
+ * @returns {Wizard}
+ */
+function step(w, action) {
   switch (action.type) {
     case "go":
       if (!STEPS.includes(action.step)) return w;
@@ -417,6 +495,13 @@ export function reduce(w, action) {
       return { ...w, step: "card", cardId: str(action.id) || null, notice: null };
     case "dismiss":
       return { ...w, notice: null };
+    case "saveName":
+      return { ...w, saveName: String(action.value ?? "").slice(0, SAVED_NAME_MAX) };
+    // Delete asks first, so a misplaced press deletes nothing.
+    case "askDelete":
+      return { ...w, deleting: str(action.name).slice(0, SAVED_NAME_MAX) || null, notice: null };
+    case "keepSaved":
+      return { ...w, deleting: null };
     case "tour":
       return { ...w, step: "tour", tourPage: 0, notice: null, busy: null };
     case "tourNext":
@@ -534,7 +619,15 @@ export function confirmByClaudePrompt(/** @type {string} */ planId) {
 export function afterPlan(w, result) {
   const plan = isRecord(result) && isRecord(result.structuredContent) ? result.structuredContent : null;
   if (!plan || result.isError === true || !str(plan.planId)) return { wizard: { ...w, busy: null, notice: { tone: "error", text: errorSentence(result) } } };
-  const next = { ...w, busy: null, notice: null, planId: str(plan.planId), plan, lastChoices: isRecord(plan.choices) ? plan.choices : w.lastChoices };
+  // A re-check's choices name no area, so Run again keeps the last check that did.
+  const next = {
+    ...w,
+    busy: null,
+    notice: null,
+    planId: str(plan.planId),
+    plan,
+    lastChoices: isRecord(plan.choices) && !isRecord(plan.recheck) ? plan.choices : w.lastChoices,
+  };
   if (isRecord(plan.confirm) && plan.confirm.accepted !== true) return { wizard: { ...next, step: "confirm" } };
   return { wizard: { ...next, step: "running", notice: { tone: "info", text: PANEL_WORDS.starting } }, send: startPrompt(str(plan.planId)) };
 }
@@ -567,6 +660,34 @@ export function afterConfirm(w, result) {
   if (c.outcome === "failed")
     return { wizard: { ...w, busy: null, step: "running", notice: { tone: "info", text: PANEL_WORDS.waitingForm } }, send: confirmByClaudePrompt(planId) };
   return { wizard: { ...w, busy: null, step: "confirm", notice: { tone: "error", text: str(c.tellPerson) || errorSentence(result) } } };
+}
+
+/**
+ * What scout_saved_checks answered: the project's saved checks, and the plan
+ * a run built, or the server's refusal.
+ *
+ * @param {any} result
+ * @returns {{ ok: true, saved: SavedEntry[], plan: any, said: string } | { ok: false, error: string }}
+ */
+export function readSaved(result) {
+  const s = isRecord(result) && isRecord(result.structuredContent) ? result.structuredContent : null;
+  if (!s || result.isError === true || !Array.isArray(s.saved)) return { ok: false, error: errorSentence(result) };
+  return { ok: true, saved: savedEntries(s.saved), plan: isRecord(s.plan) ? s.plan : null, said: resultText(result).split("\n")[0] };
+}
+
+/**
+ * After a saved check was run again: the list as it now stands, then the plan
+ * as any other the panel built, so its confirmation is asked again where its
+ * care level needs one.
+ *
+ * @param {Wizard} w
+ * @param {any} result
+ * @returns {{ wizard: Wizard, send?: string }}
+ */
+export function afterSavedRun(w, result) {
+  const read = readSaved(result);
+  if (!read.ok || !read.plan) return { wizard: { ...w, busy: null, notice: { tone: "error", text: read.ok ? errorSentence(result) : read.error } } };
+  return afterPlan({ ...w, saved: read.saved }, { structuredContent: read.plan });
 }
 
 /**
@@ -943,6 +1064,33 @@ export function renderGuided(els, w, ctx, act) {
           { marginTop: 1 },
         ),
       );
+    if (w.saved && w.saved.length > 0) {
+      const keys = savedKeys(w.saved);
+      out.push(
+        column(
+          [
+            text(PANEL_WORDS.savedChecks, { bold: true }),
+            ...w.saved.flatMap((c, i) => [
+              text(
+                `${c.name}   ${c.address} · ${CARE_LABEL[/** @type {Care} */ (c.care)] ?? ""} · ${c.lastRunAt ? `${PANEL_WORDS.lastRun} ${c.lastRunAt.slice(0, 10)}` : PANEL_WORDS.neverRun}`,
+                { wrap: "truncate-end" },
+              ),
+              w.deleting === c.name
+                ? row([
+                    text(PANEL_WORDS.deleteAsk(c.name), { wrap: "truncate-end" }),
+                    button(`guided-saved-delete-yes-${keys[i]}`, PANEL_WORDS.deleteYes, () => act("deleteSaved", { name: c.name })),
+                    button(`guided-saved-delete-keep-${keys[i]}`, PANEL_WORDS.deleteKeep, () => act("keepSaved"), { plain: true }),
+                  ])
+                : row([
+                    button(`guided-saved-run-${keys[i]}`, PANEL_WORDS.runAgain, () => act("runSaved", { name: c.name })),
+                    button(`guided-saved-delete-${keys[i]}`, PANEL_WORDS.deleteSaved, () => act("askDelete", { name: c.name }), { plain: true }),
+                  ]),
+            ]),
+          ],
+          { marginTop: 1 },
+        ),
+      );
+    }
     // A run started some other way: what the run pane shows.
     if (!g && ctx.runPane && ctx.status.kind !== "error") out.push(column([ctx.runPane], { marginTop: 1 }));
     out.push(row([dim(PANEL_WORDS.newHere), button("guided-welcome-tour", PANEL_WORDS.takeTour, () => act("tour"), { plain: true })]));
@@ -1069,13 +1217,15 @@ export function renderGuided(els, w, ctx, act) {
       return out;
     }
     const yes = reason === "creates-data" ? CONFIRM_ANSWER.testCopy : CONFIRM_ANSWER.yes;
+    // A re-check has no choices to go back to or to run as Look only: it goes back to the results it came from.
+    const recheck = isRecord(plan.recheck);
     out.push(
       row([
-        button("guided-confirm-back", CONFIRM_ANSWER.back, () => act("go", { step: "configuring" }), { autoFocus: true }),
+        button("guided-confirm-back", CONFIRM_ANSWER.back, () => act("go", { step: recheck ? "results" : "configuring" }), { autoFocus: true }),
         button("guided-confirm-yes", yes, () => act("confirm"), { variant: "primary" }),
       ]),
     );
-    if (w.notice?.tone === "error") out.push(button("guided-confirm-lookonly", PANEL_WORDS.lookOnly, () => act("lookOnly")));
+    if (w.notice?.tone === "error" && !recheck) out.push(button("guided-confirm-lookonly", PANEL_WORDS.lookOnly, () => act("lookOnly")));
     return out;
   }
 
@@ -1177,12 +1327,30 @@ export function renderGuided(els, w, ctx, act) {
         ]),
       );
     }
+    if (w.busy === "recheck") out.push(dim(PANEL_WORDS.rechecking));
+    // Saving keeps the choices of the plan the panel built; a re-check is made from problems, not choices, so it is not saved.
+    if (canType && w.planId && isRecord(w.plan) && !isRecord(w.plan.recheck))
+      out.push(
+        row([
+          els.Input({
+            key: "guided-save-name",
+            label: PANEL_WORDS.saveName,
+            placeholder: PANEL_WORDS.saveHint,
+            value: w.saveName,
+            onInput: (/** @type {string} */ v) => act("saveName", { value: v }),
+            onSubmit: (/** @type {string} */ v) => act("saveName", { value: v }),
+          }),
+          button("guided-save-check", PANEL_WORDS.saveCheck, () => act("saveCheck")),
+        ]),
+      );
     out.push(
       row([
-        button("guided-results-recheck", ACTION_LABEL.recheck, () => act("send", { text: ACTION_PROMPT.recheck })),
+        ...(w.busy === "recheck" ? [] : [button("guided-results-recheck", ACTION_LABEL.recheck, () => act("recheck"))]),
         button("guided-results-report", ACTION_LABEL.plainReport, () => act("send", { text: ACTION_PROMPT.plainReport })),
         // Hidden while one is being written, so a second press cannot start another; Back clears a stuck one.
         ...(w.busy === "team-report" ? [] : [button("guided-results-team-report", ACTION_LABEL.teamReport, () => act("teamReport"))]),
+        // Claude previews and files; the server's own form, listing the tickets, is where the person says yes.
+        ...(cards.length > 0 ? [button("guided-results-file-tickets", ACTION_LABEL.fileTickets, () => act("send", { text: ACTION_PROMPT.fileTickets }))] : []),
         ...(w.lastChoices ? [button("guided-results-again", PANEL_WORDS.runAgain, () => act("runAgain"))] : []),
         ...(canType ? [button("guided-results-new", PANEL_WORDS.newCheck, () => act("newCheck"))] : []),
         button("guided-results-back", PANEL_WORDS.back, () => act("go", { step: w.planId ? "running" : "welcome" })),

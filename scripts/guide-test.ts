@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { CHECK_OPTION_NAMES, CHECK_RULES, parseCheckArgs, WORTH_A_LOOK_RULES } from "../src/engine/check.ts";
 import { CI_OPTION_NAMES, DEDUP_MODES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
-import { CONFIG_KEYS, PRESET_POLICY, PRESETS } from "../src/engine/project-config.ts";
+import { CONFIG_KEYS, PRESET_POLICY, PRESETS, UPLOAD_MODES } from "../src/engine/project-config.ts";
 import { WRITE_MODES } from "../src/engine/policy.ts";
 import { EVIDENCE_MODES } from "../src/engine/capture.ts";
 import { EXPORT_OPTION_NAMES, parseExportArgs } from "../src/engine/export.ts";
@@ -558,6 +558,7 @@ test("the config file's tables are its keys, each key's values and every preset'
   assert.deepEqual(valuesOf("maxMode"), [...WRITE_MODES]);
   assert.deepEqual(valuesOf("dedup"), [...DEDUP_MODES]);
   assert.deepEqual(valuesOf("evidence"), [...EVIDENCE_MODES]);
+  assert.deepEqual(valuesOf("uploads"), [...UPLOAD_MODES]);
   assert.deepEqual(valuesOf("requireGuidedPlan"), ["true", "false"]);
   const presets = tables(section(REFERENCE, "## The config file")).tables[1];
   assert.ok(presets, "a second table, of the presets");
@@ -725,14 +726,15 @@ test("the wiki workflow: release or by hand, a build job that cannot write, a pu
 
 test("the release workflow dispatches the wiki publish for the exact tag it released, from a job that can do nothing else", () => {
   const wf = readYaml(".github/workflows/release.yml");
-  assert.equal(wf.jobs.release.outputs.published, "${{ steps.changesets.outputs.published }}");
-  assert.equal(wf.jobs.release.outputs.tag, "${{ steps.major.outputs.tag }}");
-  const major = (wf.jobs.release.steps as Array<{ id?: string; run?: string }>).find((s) => s.id === "major");
-  assert.match(major?.run ?? "", /echo "tag=v\$version" >> "\$GITHUB_OUTPUT"/, "the tag is the version just published");
+  assert.equal(wf.jobs.release.outputs.tag, "${{ steps.tag.outputs.tag }}");
+  const tag = (wf.jobs.release.steps as Array<{ id?: string; run?: string }>).find((s) => s.id === "tag");
+  const script = tag?.run ?? "";
+  assert.match(script, /echo "tag=\$tag" >> "\$GITHUB_OUTPUT"/, "the tag is the version just published");
+  assert.ok(script.indexOf('echo "tag=$tag"') > script.indexOf('git push origin "refs/tags/$tag"'), "and is handed on only once it is pushed");
   const job = wf.jobs["publish-guide"];
   assert.ok(job, "release.yml has a publish-guide job");
   assert.equal(job.needs, "release");
-  assert.equal(job.if, "needs.release.outputs.published == 'true' && needs.release.outputs.tag != ''", "only when something was published");
+  assert.equal(job.if, "${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.tag != '' }}", "only when something was released");
   assert.deepEqual(job.permissions, { actions: "write" });
   const steps = job.steps as Array<{ run?: string; uses?: string; env?: Record<string, string> }>;
   assert.ok(!steps.some((s) => s.uses), "no checkout, no action: it only dispatches");
@@ -1058,6 +1060,42 @@ test("the Safety model page gives the safety explainer word for word, as the pan
   const end = section.findIndex((line) => /^#{1,3} /.test(line));
   const quoted = (end < 0 ? section : section.slice(0, end)).filter((line) => line.startsWith("> ")).map((line) => line.slice(2));
   assert.deepEqual(quoted, [...SAFETY_EXPLAINER], "the section's quote is the explainer, paragraph for paragraph, and nothing more");
+});
+
+test("the Safety model's guarantee table names modules and functions the code has", () => {
+  const page = pages.get("Safety-model.md")!;
+  const found = tables(section(page, "## What is a guarantee and what is best effort")).tables;
+  const byMode = found.find((t) => t.header[0] === "Request");
+  assert.deepEqual(byMode?.header, ["Request", "`observe`", "`read-only`", "`safe-write`", "`destructive`"], "one column per mode");
+  const guarantees = found.find((t) => t.header[0] === "Protection");
+  assert.deepEqual(guarantees?.header, ["Protection", "Kind", "Where it acts", "Module"]);
+  const kinds = guarantees!.rows.map((r) => r[1]);
+  for (const [i, kind] of kinds.entries()) assert.match(kind, /^(?:Guarantee|Best effort)\b/, `${guarantees!.rows[i][0]}: a guarantee or best effort`);
+  assert.ok(kinds.some((k) => k.startsWith("Guarantee")) && kinds.some((k) => k.startsWith("Best effort")), "it separates guarantees from best effort");
+  const missing: string[] = [];
+  for (const row of guarantees!.rows) {
+    // `file.ts` (`name`, `name`), ...: each file is in src/ or src/engine/, and each name is exported by one of the row's files.
+    const files = [...row[3].matchAll(/`([\w-]+\.ts)`/g)].map((m) => m[1]);
+    assert.ok(files.length > 0, `${row[0]}: names a module`);
+    const sources = files.map((f) => {
+      const at = [`src/engine/${f}`, `src/${f}`].find((p) => fs.existsSync(path.join(REPO, p)));
+      if (!at) missing.push(`${row[0]}: ${f}`);
+      return at ? read(at) : "";
+    });
+    for (const m of row[3].matchAll(/\(([^)]*)\)/g))
+      for (const name of [...m[1].matchAll(/`(\w+)`/g)].map((n) => n[1]))
+        if (!sources.some((src) => new RegExp(`export (?:async )?(?:function|const|class) ${name}\\b`).test(src))) missing.push(`${row[0]}: ${name}`);
+  }
+  assert.deepEqual(missing, [], "every module and function the table cites exists");
+});
+
+test("the Safety model's mode table gives the skill's arguments as skill arguments, not command options", () => {
+  const rows = tableIn(pages.get("Safety-model.md")!, "## The four modes");
+  for (const row of rows) {
+    assert.doesNotMatch(row[1], /`--(?:observe|read-only|safe-write)`/, `${row[0]}: a skill argument is not a scenescout option`);
+    if (row[1].includes("--allow-destructive"))
+      assert.match(row[1], /`--mode destructive --allow-destructive`/, `${row[0]}: the switch only beside --mode destructive`);
+  }
 });
 
 test("the suite is wired into npm test and listed in AGENTS.md", () => {

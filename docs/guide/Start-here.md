@@ -23,7 +23,7 @@ npx -y scenescout http://localhost:3000
 No model, no API key, no MCP client and no setup step. It does three things:
 
 1. **The browser, if it is missing.** It downloads the headless Chromium build once (about 200 MB) and changes nothing else on the machine: no skill, no MCP server registration, no command on your PATH.
-2. **A look that sends nothing.** It runs in `observe` mode, so nothing but reads leaves the page, signing in and refreshing a token apart. It visits the start page and the pages it finds by following links, up to 20 pages and starting none after 3 minutes, and measures each one by the [check rules](Configuration-reference.md#check-rules): failed requests, uncaught errors, dead ends, controls covered or out of reach, fields with no label, contrast and more. It fills in no form and reads nothing from the folder it runs in.
+2. **A look that sends no form.** It runs in `observe` mode, so only `GET`, `HEAD` and `OPTIONS` requests leave the page, signing in, refreshing a token and any `POST` named as a read in `SCENESCOUT_READ_POSTS` apart. It visits the start page and the pages it finds by following links, up to 20 pages and starting none after 3 minutes, and measures each one by the [check rules](Configuration-reference.md#check-rules): failed requests, uncaught errors, dead ends, controls covered or out of reach, fields with no label, contrast and more. It fills in no form, and reads nothing from the folder it runs in but the [config file](Configuration-reference.md#the-config-file), which can only make it stricter. A link is opened like any page, so a link that changes something just by being opened (an unsubscribe link) would act: point a first look at pages whose links are safe to open.
 3. **A report.** It writes `scenescout-report/report.md` (and `check.json`) in the current folder, then prints a summary that opens with the three issues to look at first. It writes only into a `scenescout-report/` that is new, empty or an earlier first look's; any other folder of that name is left alone, and `--out` names another. On the demo app below:
 
 ```text
@@ -56,7 +56,7 @@ What the engine adds to an agent with a browser:
 
 - **A structured view instead of screenshots.** A snapshot lists every element with its role, name, state (pressed, selected, checked, expanded) and layout box, what the page announces in its alert and status regions, and a line on what the main area holds. Overlapping controls, a button pushed off-screen or an image that failed to load are computed from the page, not guessed from pixels.
 - **Checks after every action.** Console errors, uncaught exceptions, failed requests and HTTP errors are reported with each tool result, along with checks for a page that contradicts the server (an empty list after a refused request, "Saved" after a refused save).
-- **A write policy on the network.** By default nothing existing is changed or deleted, whatever the agent clicks. See the [safety model](Safety-model.md).
+- **A write policy on the network.** Every request the page sends is judged against the session's write mode, whatever the agent clicks, and a refused one never reaches the server. On a local app the default, `read-only`, refuses `PUT`, `PATCH`, `DELETE` and requests that look destructive, and lets an ordinary form post through, which can create a record or change one. See the [safety model](Safety-model.md) for each mode and what none of them sees.
 - **Memory across runs.** Pages, findings and notes are kept in `.scenescout/` in the project, so the next run starts from what the last one learned.
 - **A report that says what was not tested.** Its gap ledger lists routes never visited, forms never submitted and pages never audited, and at the `extensive` level the report refuses to finish while any remain.
 
@@ -248,6 +248,14 @@ When the report is for other people, ask for the team report: say "make a team r
 Making it again replaces the last team report, and removes only the evidence files the last one listed. Nothing is sent anywhere. The layout is built in for now: a template like `scenescout check --template` uses for a recorded check is not read for it.
 
 `scout_report {report}` chooses which parts a report carries: `both` (default) the plain section and then the technical report, `qa` the plain section alone, `dev` the technical report alone. It applies to the files `scout_report` writes; the live view's report always shows both.
+
+### Filing problems as tickets
+
+To put problems where the team works, say "file these as tickets", pick *File problems as tickets* in the chat's prompt menu, or press **File as tickets** on the guided panel's results. Claude asks which problems and where (a GitHub repository, or a Jira project), and `scout_ticket_preview` shows what would happen: each ticket it would file, the ones already filed, and any over the limit of one filing (20), which wait for the next. Nothing is sent yet.
+
+When you want them filed, `scout_ticket_file` shows you SceneScout's own form listing the tickets, and files them only if you say yes there. Claude can ask for that form but cannot answer it, so text on the site under test cannot talk it into filing. A preview lasts 10 minutes and is used once; if one of its problems is found again or changes after it was made, nothing is filed until you make a new preview. Each ticket's link comes back once it is filed. The tickets are the same ones [`scenescout export`](Ways-to-use-it.md#filing-findings-as-issues) files, with the same marker, so neither files a problem twice.
+
+The tracker's sign-in is set up once, where whoever installed SceneScout keeps settings: the desktop extension's settings in Claude Desktop, or the environment Claude Code starts in ([Desktop extension settings](Configuration-reference.md#desktop-extension-settings)). It is never typed into the chat, and never shown in a result.
 
 ### The technical report
 

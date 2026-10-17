@@ -15,12 +15,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { CASE_BOUND_MS, runLinearTimeCases } from "./linear-time-child.ts";
 import {
   buildGuidedPlan,
   CARE_MODE,
   confirmForm,
   confirmVerdict,
   GuidedPlans,
+  guidedAttachVerdict,
   guidedPlanText,
   MAX_PLANS,
   newConfirmCode,
@@ -61,7 +63,12 @@ import {
   HELD_BACK,
   NEEDS_YOU_SENTENCE,
   NOW_SENTENCE,
-  NOT_YET,
+  TICKET_ANSWER,
+  TICKET_SAYS,
+  ticketFormIntro,
+  ticketFormLines,
+  ticketNoSignIn,
+  ticketsFiled,
   PROMPT_TITLE,
   ACTION_PROMPT,
   AREA_NOT_REACHED,
@@ -75,7 +82,25 @@ import {
   ERROR_HEADING,
   ERROR_KINDS,
   SCREEN_HEADING,
+  RECHECK_WORDS,
+  SAVED_WORDS,
 } from "../src/engine/guided-words.ts";
+import {
+  checkSavedCheck,
+  checkSavedName,
+  deleteSavedCheck,
+  deleteSavedCheckReply,
+  listSavedChecks,
+  MAX_SAVED_CHECKS,
+  readSavedCheck,
+  SAVED_FIELDS,
+  savedCheckFrom,
+  savedCheckPath,
+  savedChecksDir,
+  savedCheckSlug,
+  writeSavedCheck,
+  type SavedCheck,
+} from "../src/engine/saved-checks.ts";
 import {
   areaStates,
   cardText,
@@ -301,6 +326,23 @@ test("credentials: the near misses of those pass: a field's name before a colon,
     assert.equal(holdsCredential(text), false, text);
   for (const address of ["https://x.example.com/products?page=2&sort=name", "https://x.example.com/search?q=shoes&lang=en"])
     assert.equal(ok({ address, areas: ["forms"] }).address, address);
+});
+
+test("credentials: a link's scheme is ASCII letters, so a value starting with a long s or a Kelvin sign before :// is still a value (#610)", () => {
+  // The linear-time engine folds the long s (\u017f) to s and the Kelvin sign (\u212a) to k when it ignores case; the
+  // scheme's letters must not, or the value reads as a link and the check lets it through. Each pair differs in that letter.
+  for (const letter of ["\u017f", "\u212a"]) assert.equal(holdsCredential(`The password is ${letter}://hunter22`), true, letter);
+  for (const letter of ["s", "k", "S", "K"]) assert.equal(holdsCredential(`The password is ${letter}://hunter22`), false, letter);
+});
+
+test("credentials: the check reads a crafted 1 MB text in linear time (#578, #610)", async () => {
+  // On JavaScript's engine four of these did not finish in a minute: one long word, and one before a scheme's
+  // "://" (the pattern that removes addresses before colon pairs are read, about 5 s at 50k characters), names and
+  // colons inside words, and "use" before a long word. Every pattern now runs on the linear-time engine.
+  const { done, stoppedIn } = await runLinearTimeCases("credential");
+  assert.equal(stoppedIn, null, `still running after ${CASE_BOUND_MS} ms: ${stoppedIn}`);
+  assert.ok(done.length > 0);
+  for (const { name, ms } of done) assert.ok(ms < CASE_BOUND_MS, `${name}: ${ms} ms`);
 });
 
 test("credentials: a sign-in written as a pair, after 'pass' or as 'enter X when' is refused; test data for a password check is not", () => {
@@ -1699,7 +1741,7 @@ test("prompts: an argument named for a credential, or one a prompt does not take
   assert.throws(() => guidedPromptText("check-everything", undefined), /no guided prompt/);
 });
 
-test("prompts: File problems as tickets takes github or jira, refuses anything else unrepeated, and files nothing from the chat yet", () => {
+test("prompts: File problems as tickets takes github or jira, refuses anything else unrepeated, and files only through the preview and the person's form", () => {
   for (const to of ["ghp_A1b2C3d4E5f6G7h8", "gitlab", "GitHub "]) {
     const error = promptRefusal(() => guidedPromptText(FILE_TICKETS_PROMPT, { to }));
     assert.match(error, /to must be github or jira/);
@@ -1709,19 +1751,29 @@ test("prompts: File problems as tickets takes github or jira, refuses anything e
   const github = guidedPromptText(FILE_TICKETS_PROMPT, { to: "github" });
   const jira = guidedPromptText(FILE_TICKETS_PROMPT, { to: "jira" });
   for (const text of [bare, github, jira]) {
-    assert.ok(text.includes(NOT_YET["file-tickets"]), "says plainly that the guided version is not here yet");
-    assert.match(text, /Do not file anything/);
-    assert.match(text, /never paste a token into the chat/i);
-    assert.match(text, /scout_cards/);
+    assert.ok(!/coming in a later version/.test(text), "filing from the chat is no longer promised for later");
+    // The order: the cards, the preview, then the filing the person confirms.
+    const cards = text.indexOf("Call scout_cards");
+    const preview = text.indexOf("Call scout_ticket_preview");
+    const file = text.indexOf("call scout_ticket_file");
+    assert.ok(cards >= 0 && cards < preview && preview < file, "cards, then the preview, then the filing");
+    assert.match(text, /files only if they say yes there/);
+    assert.match(text, /you cannot answer it/);
+    assert.match(text, /do not call it again unless they ask/);
+    assert.ok(text.includes(TICKET_SAYS.unsupported), "where no form can be shown, the plain sentence");
+    assert.ok(text.includes(ticketNoSignIn("GitHub or Jira")), "and where the tracker has no sign-in");
+    assert.match(text, /Never ask for a token, and never pass one to a tool/);
   }
+  assert.ok(github.includes('to "github", with target the repository as owner/name') && !github.includes('to "jira"'));
+  assert.ok(jira.includes('to "jira", with target the project key') && !jira.includes('to "github"'));
+  assert.ok(bare.includes('to "github"') && bare.includes('to "jira"'), "with no tracker named, both");
+  // The command line stays the way where the form cannot be shown.
   assert.ok(github.includes("npx -y scenescout export --to github --repo owner/app") && !github.includes("--to jira"));
   assert.ok(jira.includes("--to jira --jira-url") && !jira.includes("--to github"));
-  assert.ok(bare.includes("--to github") && bare.includes("--to jira"), "with no tracker named, both commands");
-  assert.match(github, /a dry run/);
   assert.equal(guidedPromptText(FILE_TICKETS_PROMPT, { to: "" }), bare, "a tracker field left empty is one left out");
 });
 
-test("prompts: Make a team report calls scout_team_report and says where the page is; Re-check never attaches above Look only", () => {
+test("prompts: Make a team report calls scout_team_report and says where the page is; Re-check follows scout_recheck_plan's plan and asks again where it writes", () => {
   const report = guidedPromptText(TEAM_REPORT_PROMPT, undefined);
   assert.match(report, /Call scout_team_report with no arguments/);
   assert.ok(!/coming in a later version/.test(report), "the team report is no longer promised for later");
@@ -1730,12 +1782,14 @@ test("prompts: Make a team report calls scout_team_report and says where the pag
   assert.match(report, /nothing is sent anywhere/);
   const recheck = guidedPromptText(RECHECK_PROMPT, undefined);
   assert.ok(recheck.includes(ACTION_PROMPT.recheck), "the same request the panel's re-check button sends");
-  assert.match(recheck, /scout_verify with no arguments/);
-  assert.match(recheck, /mode "observe"/);
-  assert.match(recheck, /Never attach in another mode/);
+  assert.match(recheck, /Call scout_recheck_plan with no arguments/);
+  // The plan, not the prompt, decides the mode: the prompt never names one to attach in.
+  assert.ok(!/scout_attach|mode "/.test(recheck), "the prompt attaches in no mode of its own");
+  assert.match(recheck, /never a looser one/);
+  assert.match(recheck, /scout_guided_confirm with its planId/);
+  assert.match(recheck, /a confirmation an earlier check had does not carry over/);
   assert.match(recheck, /verdict/);
-  // scout_verify answers "Not attached." until a session is open, so the attach comes first.
-  assert.ok(recheck.indexOf("scout_attach") < recheck.indexOf("Call scout_verify"), "attaches before it asks for the worklist");
+  assert.ok(recheck.indexOf("scout_recheck_plan") < recheck.indexOf("scout_verify"), "the plan comes before the worklist");
   // With nothing open yet, the report and the cards are refused the same way: each says how to open it, in Look only.
   for (const text of [report, guidedPromptText(FILE_TICKETS_PROMPT, undefined)])
     assert.match(text, /no project is open, or "Not attached\.", open one with scout_attach in mode "observe"/);
@@ -1784,7 +1838,229 @@ test("prompts: under the operator's maxMode a guided prompt never offers a care 
 });
 
 test("prompts: every sentence the chat shows a person from them is plain", () => {
-  for (const s of [...Object.values(PROMPT_TITLE), ...Object.values(NOT_YET), ...CARES.map(careCapSentence)]) {
+  for (const s of [
+    ...Object.values(PROMPT_TITLE),
+    ...Object.values(TICKET_SAYS),
+    ticketNoSignIn("GitHub"),
+    ticketsFiled(2, "GitHub acme/shop"),
+    ticketFormIntro(2, "Jira QA"),
+    ...ticketFormLines({ toFile: [{ severity: "high", title: "A title" }], alreadyFiled: [1], later: [1], cap: 20 }),
+    TICKET_ANSWER.file(1),
+    TICKET_ANSWER.file(3),
+    ...CARES.map(careCapSentence),
+  ]) {
     assert.doesNotMatch(s, /scout_|observe|read-only|safe-write|destructive|\bPOST\b|\bGET\b|\bHTTP\b|\bAPI\b|_/, `"${s}" is not plain`);
   }
+});
+
+// ---- Saved checks (design 2.8) ----
+
+const SAVED_AT = "2026-10-17T09:00:00.000Z";
+const SAVED: SavedCheck = {
+  name: "Shop sign-up on a phone",
+  choices: { address: "https://staging.example.com", areas: ["sign-in", "phone"], signIn: "password", care: "may-submit-forms", thoroughness: "quick" },
+  savedAt: SAVED_AT,
+};
+const withField = (over: Record<string, unknown>) => ({ ...SAVED, ...over });
+
+test("saved check: the schema keeps the choices and nothing else; each refusal is the same file with one fact changed", () => {
+  const good = checkSavedCheck(SAVED);
+  assert.ok(good.ok, JSON.stringify(good));
+  assert.deepEqual(good.saved, SAVED);
+  assert.deepEqual([...SAVED_FIELDS], ["name", "choices", "savedAt", "lastRunAt"]);
+  assert.ok(checkSavedCheck(withField({ lastRunAt: "2026-10-17T10:00:00.000Z" })).ok, "a time it was last run is a field");
+  // A field it does not take is refused, never read, and the refusal does not repeat its name.
+  const notes = checkSavedCheck(withField({ notes: "remember the staging password" }));
+  assert.ok(
+    !notes.ok && /does not take/.test(notes.error) && !notes.error.includes("notes") && !notes.error.includes("staging password"),
+    JSON.stringify(notes),
+  );
+  // No field for sign-in material: each is refused as such, without repeating what was in it.
+  const said = new Set<string>();
+  for (const key of ["password", "token", "apiKey", "otp", "cookie", "cookies", "storageState", "authorization", "sessionId"]) {
+    const got = checkSavedCheck(withField({ [key]: "hunter2-not-a-real-one" }));
+    assert.ok(!got.ok && /no field for a password, code, token or cookie/.test(got.error), `${key}: ${JSON.stringify(got)}`);
+    said.add(got.error);
+  }
+  assert.equal(said.size, 1, "one fixed sentence for every such field: nothing of the field or its value is repeated");
+  assert.ok(![...said][0].includes("hunter2"));
+  // Inside the choices, the same: an unknown field, or a credential in a value.
+  const pair: Array<[string, object, object]> = [
+    ["a field in the choices", SAVED.choices, { ...SAVED.choices, password: "hunter2" }],
+    ["a password in the address", SAVED.choices, { ...SAVED.choices, address: "https://me:hunter2@staging.example.com" }],
+    [
+      "a token in the journey",
+      { ...SAVED.choices, areas: ["journey"], journey: "Buy the cheapest item" },
+      { ...SAVED.choices, areas: ["journey"], journey: "Buy it with the key ghp_abcdefghijklmnop0123456789" },
+    ],
+  ];
+  for (const [what, ok, bad] of pair) {
+    assert.ok(checkSavedCheck(withField({ choices: ok })).ok, `${what}: the near miss is kept`);
+    const refused = checkSavedCheck(withField({ choices: bad }));
+    assert.ok(!refused.ok && !refused.error.includes("hunter2") && !refused.error.includes("ghp_"), `${what}: ${JSON.stringify(refused)}`);
+  }
+  for (const [what, over] of [
+    ["no time it was saved", { savedAt: undefined }],
+    ["a time that is not one", { savedAt: "yesterday" }],
+    ["a last run that is not a time", { lastRunAt: 5 }],
+    ["not an object", null],
+  ] as const) {
+    const got = over === null ? checkSavedCheck(null) : checkSavedCheck(withField(over));
+    assert.equal(got.ok, false, what);
+  }
+  assert.equal(checkSavedCheck([SAVED]).ok, false, "a list is not a saved check");
+});
+
+test("saved check: a name is letters, digits, spaces and dashes, and its file is the name in lower case", () => {
+  const ok: Array<[string, string, string]> = [
+    ["Shop sign-up on a phone", "Shop sign-up on a phone", "shop-sign-up-on-a-phone"],
+    ["  Admin   area ", "Admin area", "admin-area"],
+    ["Café 2", "Café 2", "café-2"],
+  ];
+  for (const [raw, name, slug] of ok) {
+    const got = checkSavedName(raw);
+    assert.ok(got.ok, raw);
+    assert.equal(got.value, name);
+    assert.equal(savedCheckSlug(name), slug);
+  }
+  // Windows also keeps COM and LPT with a superscript digit for devices.
+  for (const raw of ["", "   ", "../escape", "a/b", "a\\b", "dots.json", "-leading", "x".repeat(61), "con", "COM¹", "lpt³", "password=hunter2", 42]) {
+    const got = checkSavedName(raw);
+    assert.equal(got.ok, false, String(raw));
+    if (!got.ok && typeof raw === "string" && raw.includes("hunter2")) assert.ok(!got.error.includes("hunter2"));
+  }
+  const dir = path.join(os.tmpdir(), "no-such-project");
+  assert.equal(path.dirname(savedCheckPath(dir, "Admin area")), savedChecksDir(dir));
+  assert.equal(savedCheckPath(dir, "Admin area"), savedCheckPath(dir, "admin  AREA"), "two names that read the same are one check");
+  // A folder that ignores case folds more than lower case does (ß and SS): two names it would store as one file are one check here too.
+  assert.equal(savedCheckPath(dir, "Straße"), savedCheckPath(dir, "STRASSE"));
+  assert.throws(() => savedCheckPath(dir, "../x"));
+});
+
+test("saved check: a plan's choices are saved, a re-check is not", () => {
+  const built = guidedPlan(SAVED.choices, "gp-0123456789");
+  assert.ok(built.ok);
+  const made = savedCheckFrom(built.plan, "Shop sign-up on a phone", SAVED_AT);
+  assert.deepEqual(made, { ok: true, saved: SAVED });
+  const recheck = { ...built.plan, recheck: { ids: ["a1b2c3d4e5"], foundIn: "look-only" as const, leftOut: [] } };
+  assert.deepEqual(savedCheckFrom(recheck, "Shop", SAVED_AT), { ok: false, error: SAVED_WORDS.noRecheck });
+  assert.equal(savedCheckFrom(built.plan, "bad/name", SAVED_AT).ok, false);
+});
+
+test("saved check: run again from its file, a check that writes is a new plan the gate refuses until the person confirms it again", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ss-saved-run-"));
+  try {
+    const writes: SavedCheck = { ...SAVED, choices: { ...SAVED.choices, care: "may-create-test-data" } };
+    const plans = new GuidedPlans();
+    // The check it was saved from ran, and the person confirmed it.
+    const first = guidedPlan(writes.choices);
+    assert.ok(first.ok);
+    plans.add(first.plan);
+    plans.accept(first.plan.planId, { accepted: true, outcome: "accepted", tellPerson: "" });
+    const saved = savedCheckFrom(plans.get(first.plan.planId)!, writes.name, SAVED_AT);
+    assert.ok(saved.ok);
+    writeSavedCheck(project, saved.saved);
+    // Run again: read back, built as scout_saved_checks' run builds it, kept in the same store.
+    const read = readSavedCheck(project, writes.name);
+    assert.ok(read.ok);
+    const again = guidedPlan(read.saved.choices);
+    assert.ok(again.ok);
+    const kept = plans.add(again.plan);
+    assert.notEqual(kept.planId, first.plan.planId);
+    assert.deepEqual([kept.confirm?.reason, kept.confirm?.accepted], ["creates-data", false]);
+    const url = writes.choices.address;
+    const refused = guidedAttachVerdict(plans, { planId: kept.planId, mode: "safe-write", url });
+    assert.ok(!refused.ok && /needs the person's confirmation/.test(refused.why), JSON.stringify(refused));
+    assert.equal(guidedAttachVerdict(plans, { planId: first.plan.planId, mode: "safe-write", url }).ok, true, "the earlier yes is that plan's alone");
+    plans.accept(kept.planId, { accepted: true, outcome: "accepted", tellPerson: "" });
+    assert.equal(guidedAttachVerdict(plans, { planId: kept.planId, mode: "safe-write", url }).ok, true);
+    // Under a cap set since it was saved, the saved check is still read, and running it is refused with the cap's sentence.
+    const capped = guidedPlan(read.saved.choices, undefined, { maxMode: "read-only" });
+    assert.ok(!capped.ok && /allows no care level above/.test(capped.error));
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("saved check: kept in .scenescout/guided/ owner-only and git-ignored; a file that is not one is listed by name and never read", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ss-saved-"));
+  try {
+    assert.deepEqual(listSavedChecks(project), { checks: [], refused: [] }, "no folder, none");
+    const first = writeSavedCheck(project, SAVED);
+    assert.equal(first.replaced, false);
+    assert.equal(first.path, path.join(project, ".scenescout", "guided", "shop-sign-up-on-a-phone.json"));
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(first.path).mode & 0o777, 0o600, "the file is the owner's only");
+      assert.equal(fs.statSync(path.dirname(first.path)).mode & 0o777, 0o700, "so is its folder");
+    }
+    assert.match(fs.readFileSync(path.join(project, ".scenescout", ".gitignore"), "utf8"), /^\*$/m, ".scenescout/ ignores itself, saved checks with it");
+    assert.deepEqual(JSON.parse(fs.readFileSync(first.path, "utf8")), SAVED);
+    const second = writeSavedCheck(project, { ...SAVED, name: "SHOP sign-up on a phone", lastRunAt: "2026-10-17T11:00:00.000Z" });
+    assert.equal(second.replaced, true, "the same name in other case is the same check");
+    // A file edited by hand with a field it does not take, or one that is not JSON, is not read.
+    fs.writeFileSync(
+      path.join(savedChecksDir(project), "edited.json"),
+      JSON.stringify({ ...SAVED, name: "Edited", cookies: [{ name: "sid", value: "s3cr3t" }] }),
+    );
+    fs.writeFileSync(path.join(savedChecksDir(project), "broken.json"), "{");
+    // A file whose name is not its check's is not one either: it could shadow another.
+    fs.writeFileSync(path.join(savedChecksDir(project), "elsewhere.json"), JSON.stringify({ ...SAVED, name: "Admin area" }));
+    const listed = listSavedChecks(project);
+    assert.deepEqual(
+      listed.checks.map((c) => c.name),
+      ["SHOP sign-up on a phone"],
+    );
+    assert.deepEqual(listed.refused, ["broken.json", "edited.json", "elsewhere.json"]);
+    assert.ok(!JSON.stringify(listed).includes("s3cr3t"));
+    const read = readSavedCheck(project, "shop sign-up on a phone");
+    assert.ok(read.ok && read.saved.lastRunAt === "2026-10-17T11:00:00.000Z");
+    assert.deepEqual(readSavedCheck(project, "Admin area"), { ok: false, error: 'there is no saved check called "Admin area"' });
+    const edited = readSavedCheck(project, "edited");
+    assert.ok(!edited.ok && !edited.error.includes("s3cr3t") && /no field for a password, code, token or cookie/.test(edited.error), JSON.stringify(edited));
+    assert.throws(() => writeSavedCheck(project, { ...SAVED, choices: { ...SAVED.choices, address: "https://me:pw@x.example.com" } }));
+    assert.deepEqual(deleteSavedCheck(project, "Shop sign-up on a phone"), { ok: true, deleted: true, name: "Shop sign-up on a phone" });
+    assert.deepEqual(deleteSavedCheck(project, "Shop sign-up on a phone"), { ok: true, deleted: false, name: "Shop sign-up on a phone" });
+    // Deleting twice is not an error: a second tab, or a double press, finds it already gone and is told so.
+    assert.deepEqual(deleteSavedCheckReply(project, "Shop sign-up on a phone"), { ok: true, text: SAVED_WORDS.alreadyGone("Shop sign-up on a phone") });
+    writeSavedCheck(project, SAVED);
+    assert.deepEqual(deleteSavedCheckReply(project, "Shop sign-up on a phone"), { ok: true, text: SAVED_WORDS.deleted("Shop sign-up on a phone") });
+    assert.equal(deleteSavedCheckReply(project, "../edited").ok, false, "a name that climbs out is still refused");
+    assert.equal(deleteSavedCheck(project, "../edited").ok, false, "a name that climbs out deletes nothing");
+    assert.ok(fs.existsSync(path.join(savedChecksDir(project), "edited.json")));
+    // The most a project keeps.
+    for (let i = 0; i < MAX_SAVED_CHECKS; i++) writeSavedCheck(project, { ...SAVED, name: `Check ${i}` });
+    assert.throws(() => writeSavedCheck(project, { ...SAVED, name: "One more" }), /already keeps 50 saved checks/);
+    writeSavedCheck(project, { ...SAVED, name: "Check 3", lastRunAt: SAVED_AT });
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("saved checks and re-checks: every sentence a person reads is plain", () => {
+  for (const s of [
+    ...CARES.flatMap((c) => [
+      RECHECK_WORDS.tellPerson(1, c),
+      RECHECK_WORDS.tellPerson(3, c),
+      RECHECK_WORDS.looserCare(1, c),
+      RECHECK_WORDS.looserCare(2, c),
+      RECHECK_WORDS.capped(c),
+    ]),
+    RECHECK_WORDS.objective(1),
+    RECHECK_WORDS.otherSite(1),
+    RECHECK_WORDS.otherSite(4),
+    RECHECK_WORDS.none,
+    RECHECK_WORDS.noneOnSite("staging.example.com"),
+    SAVED_WORDS.saved("Shop"),
+    SAVED_WORDS.replaced("Shop"),
+    SAVED_WORDS.deleted("Shop"),
+    SAVED_WORDS.none,
+    SAVED_WORDS.run("Shop"),
+    SAVED_WORDS.noRecheck,
+  ]) {
+    assert.doesNotMatch(s, /scout_|observe|read-only|safe-write|destructive|\bPOST\b|\bGET\b|\bHTTP\b|\bAPI\b|_/, `"${s}" is not plain`);
+  }
+  assert.equal(
+    RECHECK_WORDS.looserCare(1, "may-submit-forms"),
+    `1 other problem was found in May submit forms, so it is left for a re-check of its own, which asks you to confirm that care level where it needs it.`,
+  );
 });

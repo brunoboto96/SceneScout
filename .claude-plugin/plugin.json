@@ -1,7 +1,7 @@
 {
   "name": "scenescout",
   "description": "Exploratory UI testing: browser tools that let Claude explore a running web app like a curious user, find what is broken or confusing, and write a coverage-checked report.",
-  "version": "3.25.0",
+  "version": "3.27.0",
   "author": {
     "name": "brunoboto96",
     "url": "https://github.com/brunoboto96"
@@ -9,11 +9,13 @@
   "homepage": "https://github.com/brunoboto96/SceneScout#readme",
   "repository": "https://github.com/brunoboto96/SceneScout",
   "license": "MIT",
+  "supportUrl": "https://github.com/brunoboto96/SceneScout/issues",
+  "privacyPolicyUrl": "https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md#what-it-reaches",
   "keywords": ["testing", "qa", "exploratory-testing", "playwright", "mcp", "ui"],
   "mcpServers": {
     "scenescout": {
       "command": "npx",
-      "args": ["-y", "scenescout@3.25.0", "serve"]
+      "args": ["-y", "scenescout@3.27.0", "serve"]
     }
   }
 }

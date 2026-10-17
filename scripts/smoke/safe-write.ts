@@ -436,6 +436,55 @@ async function refusedFormOnAPostedPage({ baseUrl, projectDir, stats }: SmokeCon
         : /answered HTTP 405 to that GET/.test(onlySent) && !/http_error|console_error/.test(onlySent),
       onlySent,
     );
+    // A page a POST reached at an address that reads as a command (/things/9/cancel). Loading it again with GET is a
+    // request a server may act on, and safe-write does not judge GETs, so the engine sends none and leaves for about:blank.
+    await engine.navigate("/form-post.html");
+    const commandRef = (await engine.snapshot(true)).match(/(e\d+) button "Cancel thing 9"/)?.[1];
+    if (!commandRef) throw new Error("Cancel thing 9 button not found");
+    await engine.click(commandRef);
+    check(
+      "a form's POST to a command-like address is allowed in safe-write and reaches the server",
+      (stats.writes["POST /things/9/cancel"] ?? 0) === 1,
+      JSON.stringify(stats.writes),
+    );
+    const commandSend = (await engine.snapshot(true)).match(/(e\d+) button "Send"/)?.[1];
+    if (!commandSend) throw new Error("Send button not found after the command-like form");
+    const commandSent = await engine.click(commandSend);
+    check("...and the refused form on the page it reached is refused", commandSent.includes("WRITE-POLICY blocked"), commandSent);
+    check(
+      "...and leaving the error page does not send that POST again",
+      (stats.writes["POST /things/9/cancel"] ?? 0) === 1,
+      `${commandSent}\n${JSON.stringify(stats.writes)}`,
+    );
+    check(
+      "...and leaving the error page sends no GET to that address",
+      (stats.loads["GET /things/9/cancel"] ?? 0) === 0,
+      `${commandSent}\n${JSON.stringify(stats.loads)}`,
+    );
+    check(
+      "...and the click says it left for about:blank because the address reads as a destructive command",
+      droppedNavigationErrorPage(BROWSER) === null
+        ? !/error page/.test(commandSent)
+        : /showed an error page; left it for about:blank without loading http[^\s]*\/things\/9\/cancel again/.test(commandSent) &&
+            /reads as a destructive command/.test(commandSent),
+      commandSent,
+    );
+    // Going back from about:blank reaches the error page's entry and, behind it, the one the POST made: neither may send
+    // the POST again or GET the address.
+    const commandBack = await engine.goBack();
+    check(
+      "...and going back from about:blank sends neither that POST again nor a GET to its address",
+      (stats.writes["POST /things/9/cancel"] ?? 0) === 1 && (stats.loads["GET /things/9/cancel"] ?? 0) === 0,
+      `${commandBack}\n${JSON.stringify(stats.writes)}\n${JSON.stringify(stats.loads)}`,
+    );
+    // From about:blank a navigation by path goes on in the app.
+    const resumed = await engine.navigate("/form-post.html");
+    const resumedPage = await engine.snapshot(true);
+    check(
+      "...and a navigation by path from about:blank goes on in the app",
+      /URL now: http[^\s]*\/form-post\.html/.test(resumed) && resumedPage.includes("Cancel thing 9"),
+      `${resumed}\n${resumedPage.slice(0, 400)}`,
+    );
   } finally {
     await engine.close().catch(() => {});
   }

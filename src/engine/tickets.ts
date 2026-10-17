@@ -20,6 +20,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Finding } from "./memory.js";
+import { fromJs } from "./js-regex.js";
+import { type LinearMatch, LinearRegex } from "./linear-regex.js";
 
 /** The shape a criterion was written in. */
 type CriterionShape = "given-when-then" | "checklist" | "numbered" | "labelled" | "bullet";
@@ -191,7 +193,7 @@ export function ticketFileFor(file: string, projectDir: string, env: NodeJS.Proc
     refused: `Not read: ${typed} is outside the project folder. Paste it as \`text\`, or add ${path.dirname(typed)} to ${TICKET_DIRS_ENV} where the server is configured and restart it.`,
   };
   // A network path on Windows is never inside the project, and resolving it would reach out to the host it names.
-  if (path.sep === "\\" && /^[\\/]{2}/.test(typed)) return outside;
+  if (path.sep === "\\" && (typed.startsWith("\\\\") || typed.startsWith("//") || typed.startsWith("\\/") || typed.startsWith("/\\"))) return outside;
   let configured: string[] | undefined;
   /** Whether a real path is in the project or a configured folder; the setting is read only when a path leaves the project. */
   const allowed = (real: string): boolean | { refused: string } => {
@@ -237,44 +239,59 @@ export function ticketFileFor(file: string, projectDir: string, env: NodeJS.Proc
 // ── Reading ───────────────────────────────────────────────────────────────────
 
 /** A heading that opens the criteria. */
-const AC_HEADING = /^(?:(?:acceptance criteria|acceptance criterion|acceptance tests?|definition of done)\b.*|acs?|criteria|dod|scenarios?)$/i;
+const AC_HEADING = fromJs(
+  String.raw`^(?:(?:acceptance criteria|acceptance criterion|acceptance tests?|definition of done)\b.*|acs?|criteria|dod|scenarios?)$`,
+  "i",
+);
 /** A heading whose lists are not criteria: how to reproduce a bug, what is excluded. */
-const EXCLUDED_HEADING =
-  /^(steps|steps to reproduce|reproduction steps|repro|repro steps|to reproduce|how to reproduce|expected|expected result|expected behaviou?r|actual|actual result|actual behaviou?r|environment|out of scope|not in scope|non-goals?)$/i;
+const EXCLUDED_HEADING = fromJs(
+  String.raw`^(steps|steps to reproduce|reproduction steps|repro|repro steps|to reproduce|how to reproduce|expected|expected result|expected behaviou?r|actual|actual result|actual behaviou?r|environment|out of scope|not in scope|non-goals?)$`,
+  "i",
+);
 /** A heading that belongs to a ticket rather than starting one. */
-const PART_HEADING =
-  /^(description|summary|background|context|notes?|details|user story|story|design|technical notes|implementation notes|dependencies|links?|attachments?|screenshots?|comments?|testing notes|how to test|why|goal|problem)$/i;
+const PART_HEADING = fromJs(
+  String.raw`^(description|summary|background|context|notes?|details|user story|story|design|technical notes|implementation notes|dependencies|links?|attachments?|screenshots?|comments?|testing notes|how to test|why|goal|problem)$`,
+  "i",
+);
 
-const TICKET_KEY = /\b([A-Z][A-Z0-9]{1,9}-\d{1,7})\b/;
-const ISSUE_NUMBER = /(?:^|[\s([])#(\d{1,7})\b/;
+const TICKET_KEY = fromJs(String.raw`\b([A-Z][A-Z0-9]{1,9}-\d{1,7})\b`);
+const ISSUE_NUMBER = fromJs(String.raw`(?:^|[\s([])#(\d{1,7})\b`);
 
-const STEP = /^(?:[-*+•]\s+)?(?:\*\*|__)?(Given|When|Then|And|But|GIVEN|WHEN|THEN|AND|BUT)(?:\*\*|__)?\s+(.+)$/;
-const SCENARIO = /^(?:[-*+•]\s+)?(?:\*\*|__)?(?:Scenario Outline|Scenario Template|Scenario|Example)(?:\*\*|__)?\s*:\s*(.*)$/i;
-const BACKGROUND = /^(?:\*\*|__)?Background(?:\*\*|__)?\s*:\s*$/i;
-const FEATURE = /^(?:\*\*|__)?Feature(?:\*\*|__)?\s*:\s*(.*)$/i;
-const LABELLED = /^(?:[-*+•]\s+|\d{1,3}[.)]\s+)?(?:\*\*|__)?AC\s*[-#]?\s*(\d{1,3})(?:\*\*|__)?\s*[:.)\-–—]\s*(?:\*\*|__)?\s*(.*)$/i;
-const CHECK = /^(?:[-*+•]\s+)?\[( |x|X)\]\s+(.+)$/;
-const NUMBERED = /^(\d{1,3})[.)]\s+(.+)$/;
-const BULLET = /^[-*+•]\s+(.+)$/;
-const MD_HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
-const BOLD_LINE = /^(?:\*\*|__)([^*_]+?)(?:\*\*|__)\s*:?\s*$/;
-const LABEL_LINE = /^([A-Za-z][A-Za-z /&'-]{0,40}):\s*$/;
-const RULE = /^(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$/;
+const STEP = fromJs(String.raw`^(?:[-*+•]\s+)?(?:\*\*|__)?(Given|When|Then|And|But|GIVEN|WHEN|THEN|AND|BUT)(?:\*\*|__)?\s+(.+)$`);
+const SCENARIO = fromJs(String.raw`^(?:[-*+•]\s+)?(?:\*\*|__)?(?:Scenario Outline|Scenario Template|Scenario|Example)(?:\*\*|__)?\s*:\s*(.*)$`, "i");
+const BACKGROUND = fromJs(String.raw`^(?:\*\*|__)?Background(?:\*\*|__)?\s*:\s*$`, "i");
+const FEATURE = fromJs(String.raw`^(?:\*\*|__)?Feature(?:\*\*|__)?\s*:\s*(.*)$`, "i");
+const LABELLED = fromJs(String.raw`^(?:[-*+•]\s+|\d{1,3}[.)]\s+)?(?:\*\*|__)?AC\s*[-#]?\s*(\d{1,3})(?:\*\*|__)?\s*[:.)\-–—]\s*(?:\*\*|__)?\s*(.*)$`, "i");
+const CHECK = fromJs(String.raw`^(?:[-*+•]\s+)?\[( |x|X)\]\s+(.+)$`);
+const NUMBERED = fromJs(String.raw`^(\d{1,3})[.)]\s+(.+)$`);
+const BULLET = fromJs(String.raw`^[-*+•]\s+(.+)$`);
+const MD_HEADING = fromJs(String.raw`^(#{1,6})\s+(.*?)\s*#*\s*$`);
+const BOLD_LINE = fromJs(String.raw`^(?:\*\*|__)([^*_]+?)(?:\*\*|__)\s*:?\s*$`);
+const LABEL_LINE = fromJs(String.raw`^([A-Za-z][A-Za-z /&'-]{0,40}):\s*$`);
+const RULE = fromJs(String.raw`^(?:-{3,}|\*{3,}|_{3,}|={3,})\s*$`);
+const LINE_BREAK = fromJs(String.raw`\r?\n`);
+const EMPHASIS = fromJs(String.raw`\*\*|__`);
+const WHITE_SPACE = fromJs(String.raw`\s+`);
+const HEADING_TAIL = fromJs(String.raw`[:.\s]+$`);
+const KEYED_LINE = fromJs(String.raw`^(?:\[[A-Z][A-Z0-9]{1,9}-\d{1,7}\]\s*|[A-Z][A-Z0-9]{1,9}-\d{1,7}(?:\s*:\s*|\s+[-–—]\s+))(.+)$`);
+const EXAMPLES_LINE = fromJs(String.raw`^Examples\s*:`, "i");
+const EMPTY_BRACKETS = fromJs(String.raw`\(\s*\)|\[\s*\]`);
+const TITLE_EDGE = fromJs(String.raw`^[\s:\-–—|]+|[\s:\-–—|]+$`);
+const COMMENT_LINE = fromJs(String.raw`^\s*[#@]`);
+const AUTO_ID = fromJs(String.raw`^T\d+(~\d+)?$`);
+const CRITERION_NAME = fromJs(String.raw`^\s*(?:ac\s*[-#]?\s*)?(\d{1,3})\s*$`, "i");
+const BRACKET = fromJs(String.raw`[[\]]`);
+/** Group `i` of a match, or "" for one that took no part, as an element of a JavaScript match array is. */
+const group = (m: LinearMatch, i: number): string => m.groups[i] ?? "";
 
 /** Markdown emphasis and runs of space taken out of a line of a criterion. */
 function clean(text: string): string {
-  return text
-    .replace(/\*\*|__/g, "")
-    .replace(/`/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  return WHITE_SPACE.replace(EMPHASIS.replace(text, "").replaceAll("`", ""), " ").trim();
 }
 
 /** A heading's words, without the ticket key, numbering or a trailing colon. */
 function headingWords(text: string): string {
-  return clean(text)
-    .replace(/[:.\s]+$/, "")
-    .trim();
+  return HEADING_TAIL.replace(clean(text), "").trim();
 }
 
 type Region = "open" | "ac" | "part" | "excluded";
@@ -318,7 +335,7 @@ function splitTickets(text: string, gherkin: boolean): RawTicket[] {
     if (current.heading !== undefined || current.lines.some((l) => l.trim())) out.push(current);
     current = { heading, headingLevel: level, lines: [] };
   };
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of LINE_BREAK.splitText(text)) {
     const trimmed = line.trim();
     if (RULE.test(trimmed)) {
       start();
@@ -327,25 +344,25 @@ function splitTickets(text: string, gherkin: boolean): RawTicket[] {
     if (gherkin && trimmed.startsWith("#")) continue; // a comment in a .feature file
     const h = gherkin ? null : MD_HEADING.exec(trimmed);
     if (h) {
-      const level = h[1].length;
+      const level = group(h, 1).length;
       // A heading below the ticket's own is part of it; one at its level or
       // above, and not a known part's name, is the next ticket. So is one that
       // carries a ticket key, or that follows a heading with nothing under it
       // (stories under an epic).
-      const within = current.headingLevel !== undefined && level > current.headingLevel && !ticketKey(h[2]) && current.lines.some((l) => l.trim());
-      if (!within && regionOf(h[2]) === "ticket") {
-        start(h[2], level);
+      const within = current.headingLevel !== undefined && level > current.headingLevel && !ticketKey(group(h, 2)) && current.lines.some((l) => l.trim());
+      if (!within && regionOf(group(h, 2)) === "ticket") {
+        start(group(h, 2), level);
         continue;
       }
     }
     const feature = FEATURE.exec(trimmed);
     if (feature && line === line.trimStart()) {
-      start(feature[1] || "Feature");
+      start(group(feature, 1) || "Feature");
       continue;
     }
     // A line that opens with a ticket key ("PROJ-12: Export is empty") starts a ticket.
     // It needs a separator after the key: "UTF-8 names round-trip" is a sentence, not a ticket.
-    const keyed = /^(?:\[[A-Z][A-Z0-9]{1,9}-\d{1,7}\]\s*|[A-Z][A-Z0-9]{1,9}-\d{1,7}(?:\s*:\s*|\s+[-–—]\s+))(.+)$/.exec(trimmed);
+    const keyed = KEYED_LINE.exec(trimmed);
     if (keyed && line === line.trimStart()) {
       start(trimmed);
       continue;
@@ -370,7 +387,7 @@ function draftsOf(lines: readonly string[], gherkin: boolean): { drafts: Draft[]
     current = d;
   };
   for (const raw of lines) {
-    const line = raw.replace(/\t/g, "  ");
+    const line = raw.replaceAll("\t", "  ");
     const trimmed = line.trim();
     const indent = indentOf(line);
     if (!trimmed) {
@@ -384,12 +401,12 @@ function draftsOf(lines: readonly string[], gherkin: boolean): { drafts: Draft[]
       if (current?.shape !== "given-when-then") current = null;
       continue;
     }
-    if (/^Examples\s*:/i.test(trimmed) && current?.shape === "given-when-then") continue;
+    if (EXAMPLES_LINE.test(trimmed) && current?.shape === "given-when-then") continue;
     const h = MD_HEADING.exec(trimmed);
     const label = h ? null : (BOLD_LINE.exec(trimmed) ?? LABEL_LINE.exec(trimmed));
     if (h || (label && !STEP.test(trimmed) && !SCENARIO.test(trimmed))) {
-      const words = h ? h[2] : label![1];
-      const level = h ? h[1].length : 7;
+      const words = h ? group(h, 2) : group(label!, 1);
+      const level = h ? group(h, 1).length : 7;
       const kind = regionOf(words);
       current = null;
       if (kind === "ticket") {
@@ -402,26 +419,26 @@ function draftsOf(lines: readonly string[], gherkin: boolean): { drafts: Draft[]
       }
       continue;
     }
-    let m: RegExpExecArray | null;
+    let m: LinearMatch | null;
     if (BACKGROUND.test(trimmed)) {
       // Steps every scenario shares: context, not a criterion. Kept out of the list.
       current = { shape: "given-when-then", parts: [], region, indent, background: true };
       continue;
     }
     if ((m = SCENARIO.exec(trimmed))) {
-      open({ shape: "given-when-then", parts: [], region, indent, title: clean(m[1]) || undefined });
+      open({ shape: "given-when-then", parts: [], region, indent, title: clean(group(m, 1)) || undefined });
       continue;
     }
     if ((m = STEP.exec(trimmed))) {
-      const keyword = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
-      const step = `${keyword} ${clean(m[2])}`;
+      const keyword = group(m, 1)[0].toUpperCase() + group(m, 1).slice(1).toLowerCase();
+      const step = `${keyword} ${clean(group(m, 2))}`;
       const phase = keyword === "Given" ? "given" : keyword === "When" ? "when" : keyword === "Then" ? "then" : undefined;
       const cur = current;
       if (cur && cur.shape === "given-when-then" && !(phase === "given" && (cur.phase === "when" || cur.phase === "then"))) {
         cur.parts.push(step);
         if (phase) cur.phase = phase;
         if (phase) (cur.keywords ??= new Set()).add(phase);
-      } else if (cur && cur.shape !== "given-when-then" && (indent > cur.indent || /:$/.test(cur.parts[cur.parts.length - 1] ?? ""))) {
+      } else if (cur && cur.shape !== "given-when-then" && (indent > cur.indent || (cur.parts[cur.parts.length - 1] ?? "").endsWith(":"))) {
         // Steps written under a numbered or labelled criterion spell that criterion out.
         cur.parts.push(step);
       } else {
@@ -429,23 +446,23 @@ function draftsOf(lines: readonly string[], gherkin: boolean): { drafts: Draft[]
       }
       continue;
     }
-    if ((m = LABELLED.exec(trimmed)) && m[2].trim()) {
-      open({ shape: "labelled", parts: [clean(m[2])], region, indent, label: Number(m[1]) });
+    if ((m = LABELLED.exec(trimmed)) && group(m, 2).trim()) {
+      open({ shape: "labelled", parts: [clean(group(m, 2))], region, indent, label: Number(group(m, 1)) });
       continue;
     }
     if ((m = CHECK.exec(trimmed))) {
-      open({ shape: "checklist", parts: [clean(m[2])], region, indent });
+      open({ shape: "checklist", parts: [clean(group(m, 2))], region, indent });
       continue;
     }
     const cur = current;
     if ((m = NUMBERED.exec(trimmed))) {
-      if (cur && indent > cur.indent) cur.parts.push(clean(m[2]));
-      else open({ shape: "numbered", parts: [clean(m[2])], region, indent });
+      if (cur && indent > cur.indent) cur.parts.push(clean(group(m, 2)));
+      else open({ shape: "numbered", parts: [clean(group(m, 2))], region, indent });
       continue;
     }
     if ((m = BULLET.exec(trimmed))) {
-      if (cur && indent > cur.indent) cur.parts.push(clean(m[1]));
-      else open({ shape: "bullet", parts: [clean(m[1])], region, indent });
+      if (cur && indent > cur.indent) cur.parts.push(clean(group(m, 1)));
+      else open({ shape: "bullet", parts: [clean(group(m, 1))], region, indent });
       continue;
     }
     if (cur) {
@@ -515,19 +532,17 @@ function numberCriteria(drafts: readonly Draft[]): Criterion[] {
 
 /** The key a ticket's heading carries, if any: "PROJ-12" or "#12". */
 function ticketKey(heading: string): string | undefined {
-  const key = TICKET_KEY.exec(heading)?.[1];
+  const key = TICKET_KEY.exec(heading)?.groups[1];
   if (key) return key;
-  const issue = ISSUE_NUMBER.exec(heading)?.[1];
+  const issue = ISSUE_NUMBER.exec(heading)?.groups[1];
   return issue ? `#${issue}` : undefined;
 }
 
 function titleOf(heading: string, key: string | undefined): string {
   let t = clean(heading);
-  if (key) t = t.replace(key.startsWith("#") ? key : new RegExp(`\\[?${key}\\]?`), "");
-  return t
-    .replace(/\(\s*\)|\[\s*\]/g, "")
-    .replace(/^[\s:\-–—|]+|[\s:\-–—|]+$/g, "")
-    .trim();
+  // A key is letters, digits and a hyphen, or "#" and digits: it is written into the pattern as it stands.
+  if (key) t = key.startsWith("#") ? t.replace(key, "") : new LinearRegex(String.raw`\[?${key}\]?`).replaceFirst(t, "");
+  return TITLE_EDGE.replace(EMPTY_BRACKETS.replace(t, ""), "").trim();
 }
 
 /**
@@ -545,7 +560,7 @@ function titleOf(heading: string, key: string | undefined): string {
 export function parseTickets(text: string, source = "pasted text"): Ticket[] {
   const body = text.slice(0, MAX_TICKET_TEXT);
   // A Gherkin file, where "#" starts a comment rather than a heading: named .feature, or opening with Feature:.
-  const firstLine = body.split(/\r?\n/).find((l) => l.trim() && !/^\s*[#@]/.test(l)) ?? "";
+  const firstLine = LINE_BREAK.splitText(body).find((l) => l.trim() && !COMMENT_LINE.test(l)) ?? "";
   const gherkin = source.toLowerCase().endsWith(".feature") || FEATURE.test(firstLine.trim());
   const raws = splitTickets(body, gherkin);
   const tickets: Ticket[] = [];
@@ -588,7 +603,7 @@ export function addReading(existing: readonly StoredTicket[], parsed: readonly T
   const added: StoredTicket[] = [];
   const same = (a: Ticket, b: Ticket): boolean =>
     a.title === b.title && a.criteria.length === b.criteria.length && a.criteria.every((c, i) => c.text === b.criteria[i].text);
-  const isAuto = (id: string): boolean => /^T\d+(~\d+)?$/.test(id);
+  const isAuto = (id: string): boolean => AUTO_ID.test(id);
   for (const t of parsed) {
     const index = isAuto(t.id) ? out.findIndex((e) => isAuto(e.id) && same(e, t)) : out.findIndex((e) => e.id === t.id);
     let id = t.id;
@@ -608,7 +623,7 @@ export function addReading(existing: readonly StoredTicket[], parsed: readonly T
 
 /** A criterion by what the agent called it: "AC2", "ac 2", "AC-2" or "2". */
 export function findCriterion(ticket: Pick<Ticket, "criteria">, name: string): Criterion | undefined {
-  const n = /^\s*(?:ac\s*[-#]?\s*)?(\d{1,3})\s*$/i.exec(name)?.[1];
+  const n = CRITERION_NAME.exec(name)?.groups[1];
   return n ? ticket.criteria.find((c) => c.id === `AC${Number(n)}`) : undefined;
 }
 
@@ -660,7 +675,7 @@ export function judgeCriterion(input: CriterionInput, ctx: JudgeContext): { ok: 
     };
   }
   if (!(input.confidence >= 0 && input.confidence <= 1)) return { ok: false, reason: "confidence is a number from 0 to 1" };
-  const reason = input.reason.trim().replace(/\s+/g, " ");
+  const reason = WHITE_SPACE.replace(input.reason.trim(), " ");
   if (!reason) return { ok: false, reason: "say in a sentence what you saw, or why it could not be tried" };
   const findings = [...new Set((input.findings ?? []).map((f) => f.trim()).filter(Boolean))];
   if (findings.length > MAX_CRITERION_FINDINGS) return { ok: false, reason: `at most ${MAX_CRITERION_FINDINGS} findings per criterion` };
@@ -819,7 +834,7 @@ export interface TicketReportInput {
 }
 
 /** A table cell: the HTML renderer splits rows on every "|", so none may be inside one. */
-const cell = (text: string): string => text.replace(/\|/g, "/").replace(/\r?\n/g, " ");
+const cell = (text: string): string => LINE_BREAK.replace(text.replaceAll("|", "/"), " ");
 
 function findingWords(id: string, input: TicketReportInput): string {
   const f = input.findings.find((x) => x.id === id);
@@ -873,12 +888,7 @@ export function formatTicketsPlain(input: TicketReportInput): string[] {
         const f = input.findings.find((x) => x.id === id);
         const picture = f && input.pictureOf?.(f);
         if (picture)
-          lines.push(
-            `What the page showed when ${a.criterion.id} failed:`,
-            ``,
-            `![${a.criterion.id} failed: ${f.title.replace(/[[\]]/g, "")}](${picture})`,
-            ``,
-          );
+          lines.push(`What the page showed when ${a.criterion.id} failed:`, ``, `![${a.criterion.id} failed: ${BRACKET.replace(f.title, "")}](${picture})`, ``);
       }
     }
   }

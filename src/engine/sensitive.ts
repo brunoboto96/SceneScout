@@ -7,7 +7,12 @@
  * Masking errs towards hiding. A field wrongly taken for a secret costs a repro
  * one typed value; a password wrongly taken for an ordinary field is published
  * in the action log, the report and every issue exported from it.
+ *
+ * Every pattern here reads text the app controls, so each runs on the
+ * linear-time engine (linear-regex.ts); memory-test holds this file to no
+ * JavaScript regular expression.
  */
+import { LINE_END, LinearRegex, type LinearMatch, SPACE } from "./linear-regex.js";
 
 /** What the page says about a field, read in one evaluate (browser.ts). Every fact is optional. */
 export interface SecretFieldFacts {
@@ -114,23 +119,22 @@ const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; p
  * "ñ" written as "n" and a combining tilde all read alike. A name or an id is
  * usually typed without accents, so the word lists are written without them.
  */
+const MARKS = new LinearRegex(String.raw`\p{M}+`);
 function foldAccents(text: string): string {
-  return text
-    .normalize("NFD")
-    .replace(/\p{M}+/gu, "")
-    .replace(/[łŁ]/g, (c) => (c === "ł" ? "l" : "L"))
-    .replace(/[øØ]/g, (c) => (c === "ø" ? "o" : "O"))
-    .replace(/ß/g, "ss");
+  return MARKS.replace(text.normalize("NFD"), "").replaceAll("ł", "l").replaceAll("Ł", "L").replaceAll("ø", "o").replaceAll("Ø", "O").replaceAll("ß", "ss");
 }
+
+const LOWER_THEN_UPPER = new LinearRegex(String.raw`([a-z0-9])([A-Z])`);
+const UPPER_RUN_THEN_WORD = new LinearRegex(String.raw`([A-Z]+)([A-Z][a-z])`);
+const NOT_LETTER_OR_DIGIT = new LinearRegex(String.raw`[^\p{L}\p{N}]+`);
+const TRAILING_DIGITS = new LinearRegex(String.raw`[0-9]+$`);
+const spaced = (m: LinearMatch) => `${m.groups[1]} ${m.groups[2]}`;
 
 /** A name's words, lower-case: `newPassword` → new password, `PINCode` → pin code, `cvv2` → cvv. */
 function wordsOf(text: string): string[] {
-  return foldAccents(text)
-    .replace(/([a-z\d])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .toLowerCase()
-    .split(/[^\p{L}\p{N}]+/u)
-    .map((w) => w.replace(/\d+$/, ""))
+  const split = UPPER_RUN_THEN_WORD.replace(LOWER_THEN_UPPER.replace(foldAccents(text), spaced), spaced).toLowerCase();
+  return NOT_LETTER_OR_DIGIT.split(split)
+    .map((w) => TRAILING_DIGITS.replace(w ?? "", ""))
     .filter((w) => w.length > 0);
 }
 
@@ -168,10 +172,12 @@ function wordKind(word: string): SecretKind | null {
   return null;
 }
 
+const TWO_FA = new LinearRegex(String.raw`(?:^|[^\p{L}\p{N}])2fa(?:$|[^\p{L}\p{N}])`, { ignoreCase: true, needs: ["2fa"] });
+
 /** Which kind of secret a field's name, label or placeholder names, if any. */
 export function secretWordKind(text: string): SecretKind | null {
   // "2FA" splits into "2" and "fa" below, so it is read before the split.
-  if (/(?:^|[^\p{L}\p{N}])2fa(?![\p{L}\p{N}])/iu.test(text)) return "one-time code";
+  if (TWO_FA.test(text)) return "one-time code";
   const words = wordsOf(text);
   if (words.length === 0) return null;
   // A secret's word followed only by words about it names a setting or a count, not the secret.
@@ -192,11 +198,13 @@ export function secretWordKind(text: string): SecretKind | null {
 /** The input types a split code's boxes use (scripted-login.ts reads the same boxes). */
 const SINGLE_CHARACTER_TYPES = new Set(["", "text", "tel", "number", "password"]);
 
+const WHITESPACE = new LinearRegex(`[${SPACE}]+`);
+
 /** Whether what is typed into this field is a secret, and which kind; null for an ordinary field. */
 export function secretFieldKind(facts: SecretFieldFacts): SecretKind | null {
   if ((facts.type ?? "").trim().toLowerCase() === "password" || facts.wasPassword === true) return "password";
-  for (const token of (facts.autocomplete ?? "").toLowerCase().split(/\s+/)) {
-    const kind = AUTOCOMPLETE_KINDS[token];
+  for (const token of WHITESPACE.split((facts.autocomplete ?? "").toLowerCase())) {
+    const kind = AUTOCOMPLETE_KINDS[token ?? ""];
     if (kind) return kind;
   }
   // One box per character is a split one-time code, whatever each box is called ("Digit 1").
@@ -215,10 +223,11 @@ export function maskedValue(kind: SecretKind): string {
 }
 
 /** A JSON-quoted string, as the type result writes a value. */
-const QUOTED = String.raw`"(?:[^"\\]|\\.)*"`;
+const QUOTED_TEXT = String.raw`(?:[^"\\]|\\[^${LINE_END}])*`;
+const QUOTED = `"${QUOTED_TEXT}"`;
 /** `"<label>" ← "<value>"`, the shape a type entry names its field and value in. */
-const TYPED_INTO_RE = new RegExp(String.raw`"((?:[^"\\]|\\.)*)" ← (${QUOTED})`, "g");
-const EXISTING_RE = new RegExp(String.raw`existing content ${QUOTED}`, "g");
+const TYPED_INTO_RE = new LinearRegex(`"(${QUOTED_TEXT})" ← (${QUOTED})`, { needs: [" ← "] });
+const EXISTING_RE = new LinearRegex(`existing content ${QUOTED}`, { needs: ["existing content"] });
 
 /**
  * Mask the typed value, and any previous content a note quotes, wherever text
@@ -230,17 +239,17 @@ export function maskSecretFieldValues(text: string): { text: string; hits: numbe
   let hits = 0;
   let out = "";
   let last = 0;
-  for (const m of text.matchAll(TYPED_INTO_RE)) {
-    const kind = secretWordKind(m[1]);
+  for (const m of TYPED_INTO_RE.matchAll(text)) {
+    const label = m.groups[1] ?? "";
+    const kind = secretWordKind(label);
     if (!kind) continue;
-    const start = m.index ?? 0;
-    out += text.slice(last, start) + `"${m[1]}" ← ${maskedValue(kind)}`;
-    last = start + m[0].length;
+    out += text.slice(last, m.index) + `"${label}" ← ${maskedValue(kind)}`;
+    last = m.end;
     hits += 1;
     // What the note says the field held before is the same secret's earlier value.
     const next = text.indexOf(" ← ", last);
     const rest = text.slice(last, next === -1 ? text.length : next);
-    const cleaned = rest.replace(EXISTING_RE, () => {
+    const cleaned = EXISTING_RE.replace(rest, () => {
       hits += 1;
       return `existing content (masked: ${kind} field)`;
     });
@@ -255,7 +264,7 @@ export function maskSecretFieldValues(text: string): { text: string; hits: numbe
  * what was typed into the address (`?password=…`), and the address is logged
  * with every action. Group 1 is what precedes it, 2 the name, 3 the value.
  */
-const PARAM_RE = /(^|[?&;#\s"'(])((?:\p{L}|%[\dA-Fa-f]{2})[\p{L}\p{N}_.%[\]-]*)=([^&#;\s"')]+)/gu;
+const PARAM_RE = new LinearRegex(String.raw`(^|[?&;#${SPACE}"'(])((?:\p{L}|%[0-9A-Fa-f]{2})[\p{L}\p{N}_.%[\]-]*)=([^&#;${SPACE}"')]+)`, { needs: ["="] });
 
 /** A parameter's name as a person wrote it: percent-escapes decoded (`has%C5%82o`), or left as they are when they do not decode. */
 function decodedName(name: string): string {
@@ -273,12 +282,15 @@ function decodedName(name: string): string {
  * name's letters only, lower-cased (`X-Amz-Signature` is `xamzsignature`).
  * guided.ts refuses an address carrying one, so the two lists are this one.
  */
-export const SECRET_PARAM = /^(?:code|sig|signature|xamzsignature|xgoogsignature|key|session|sessionid|sid|auth|authorization|pass|nonce|jwt)$/;
+export const SECRET_PARAM = new LinearRegex(
+  "^(?:code|sig|signature|xamzsignature|xgoogsignature|key|session|sessionid|sid|auth|authorization|pass|nonce|jwt)$",
+);
+const NOT_A_TO_Z = new LinearRegex("[^a-z]+");
 
 /** Whether a parameter's name names a secret: a field's word for one, or one of SECRET_PARAM. */
 export function secretParamName(name: string): boolean {
   const decoded = decodedName(name);
-  return secretWordKind(decoded.replace(/[[\]]/g, " ")) !== null || SECRET_PARAM.test(decoded.toLowerCase().replace(/[^a-z]/g, ""));
+  return secretWordKind(decoded.replaceAll("[", " ").replaceAll("]", " ")) !== null || SECRET_PARAM.test(NOT_A_TO_Z.replace(decoded.toLowerCase(), ""));
 }
 
 /**
@@ -301,7 +313,8 @@ export const FIELD_WORDS: ReadonlySet<string> = new Set([
 /** Mask the value of every parameter whose name names a secret (`pin=`, `otp=`, `password=`, `access_token=`), whatever its length. */
 export function maskSecretParams(text: string): { text: string; hits: number } {
   let hits = 0;
-  const out = text.replace(PARAM_RE, (m, before: string, name: string, value: string) => {
+  const out = PARAM_RE.replace(text, ({ text: m, groups }) => {
+    const [, before = "", name = "", value = ""] = groups;
     // A form's nested names (`user[password]`, `user%5Bpassword%5D`) name the field last; a value already masked stays.
     if (value.startsWith("[") || !secretParamName(name)) return m;
     hits += 1;
@@ -309,6 +322,10 @@ export function maskSecretParams(text: string): { text: string; hits: number } {
   });
   return { text: out, hits };
 }
+
+const FILL_CALL = new LinearRegex(`\\b(fill|type|pressSequentially|insertText)\\([^${LINE_END}]*`, {
+  needs: ["fill(", "type(", "presssequentially(", "inserttext("],
+});
 
 /**
  * Playwright's call log names the value an action was given (`- fill("…")`),
@@ -320,7 +337,7 @@ export function maskFillCalls(message: string, values: readonly string[] = []): 
   let out = message;
   // Longest first, so a value inside another is not left behind as part of it.
   for (const value of [...values].sort((a, b) => b.length - a.length)) if (value !== "") out = out.split(value).join("(masked)");
-  return out.replace(/\b(fill|type|pressSequentially|insertText)\(.*$/gm, "$1((masked))");
+  return FILL_CALL.replace(out, (m) => `${m.groups[1]}((masked))`);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,39 +345,58 @@ export function maskFillCalls(message: string, values: readonly string[] = []): 
 // ---------------------------------------------------------------------------
 
 /** Domains reserved for documentation (RFC 2606 / 6761) name nobody, so an address on one stays readable. */
-const RESERVED_DOMAIN_RE = /^(?:[\p{L}\p{N}-]+\.)*(?:example\.(?:com|org|net)|example|test|invalid|localhost)$/iu;
+const RESERVED_DOMAIN_RE = new LinearRegex(String.raw`^(?:[\p{L}\p{N}-]+\.)*(?:example\.(?:com|org|net)|example|test|invalid|localhost)$`, {
+  ignoreCase: true,
+});
 /** An image's pixel-density suffix (`@2x` before its extension), which reads like an address but is a file name. */
-const DENSITY_DOMAIN_RE = /^\d+(?:\.\d+)?x\./i;
+const DENSITY_DOMAIN_RE = new LinearRegex(String.raw`^[0-9]+(?:\.[0-9]+)?x\.`, { ignoreCase: true });
+/** The characters an address's local part is written in (a class's inside); an address starts where the one before is not one. */
+const LOCAL = String.raw`\p{L}\p{N}._%+-`;
 /**
  * An address in any script, its @ written out or percent-encoded (`%40`), as a
  * query string carries it, its local part plain or quoted (`"jo sample"@…`).
  * Group 1 is the domain.
  */
-const EMAIL_RE = /(?<![\p{L}\p{N}._%+-])(?:"[^"\n@]{1,64}"|[\p{L}\p{N}._%+-]+)(?:@|%40)([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:\p{L}{2,}|xn--[a-z0-9-]+))/giu;
+const EMAIL_RE = new LinearRegex(String.raw`(?:"[^"\n@]{1,64}"|[${LOCAL}]+)(?:@|%40)([\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.(?:\p{L}{2,}|xn--[a-z0-9-]+))`, {
+  ignoreCase: true,
+  needs: ["@", "%40"],
+  notAfter: LOCAL,
+});
 /** An address at an IP literal (`jo@[10.1.2.3]`, `jo@[IPv6:…]`). */
-const EMAIL_IP_RE = /(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+@\[(?:IPv6:[\dA-Fa-f:.]+|\d{1,3}(?:\.\d{1,3}){3})\]/gu;
+const EMAIL_IP_RE = new LinearRegex(String.raw`[${LOCAL}]+@\[(?:IPv6:[0-9A-Fa-f:.]+|[0-9]{1,3}(?:\.[0-9]{1,3}){3})\]`, {
+  needs: ["@["],
+  notAfter: LOCAL,
+});
+/** `git@host:team/repo.git`: a path after the colon that follows an address. */
+const SSH_PATH = new LinearRegex(String.raw`^:[A-Za-z0-9_~/.-]`);
 /** "at" and "dot" written out to hide an address from scrapers: bracketed, `(at)` `[dot]`, or bare between spaces. */
-const AT_WORD = String.raw`(?:\s*[([{]\s*at\s*[)\]}]\s*|\s+at\s+)`;
-const DOT_WORD = String.raw`(?:\s*[([{]\s*dot\s*[)\]}]\s*|\s+dot\s+|\.)`;
-/** An address with its @, and perhaps its dots, written as words. Group 1 is the domain as written. */
-const SPELLED_EMAIL_RE = new RegExp(
-  String.raw`(?<![\p{L}\p{N}._%+-])[\p{L}\p{N}._%+-]+${AT_WORD}([\p{L}\p{N}-]+(?:${DOT_WORD}[\p{L}\p{N}-]+)+)(?![\p{L}\p{N}])`,
-  "giu",
-);
+const AT_WORD = String.raw`(?:[${SPACE}]*[([{][${SPACE}]*at[${SPACE}]*[)\]}][${SPACE}]*|[${SPACE}]+at[${SPACE}]+)`;
+const DOT_WORD = String.raw`(?:[${SPACE}]*[([{][${SPACE}]*dot[${SPACE}]*[)\]}][${SPACE}]*|[${SPACE}]+dot[${SPACE}]+|\.)`;
+const DOT_WORD_RE = new LinearRegex(DOT_WORD, { ignoreCase: true });
+/** An address with its @, and perhaps its dots, written as words. Group 1 is the domain as written; the last group is the lookahead. */
+const SPELLED_EMAIL_RE = new LinearRegex(String.raw`[${LOCAL}]+${AT_WORD}([\p{L}\p{N}-]+(?:${DOT_WORD}[\p{L}\p{N}-]+)+)($|[^\p{L}\p{N}])`, {
+  ignoreCase: true,
+  needs: ["at"],
+  lookahead: true,
+  notAfter: LOCAL,
+});
+const LETTERS_ONLY_2 = new LinearRegex(String.raw`^\p{L}{2,}$`);
+const BRACKETED_WORD = new LinearRegex(String.raw`[([{][${SPACE}]*(?:at|dot)[${SPACE}]*[)\]}]`, { ignoreCase: true });
+const BARE_DOT = new LinearRegex(String.raw`[${SPACE}]dot[${SPACE}]`, { ignoreCase: true });
 /**
  * The top-level domains a bare "x at y dot z" must end in to be read as an
  * address: without a bracket, "look at the dot matrix" reads the same way.
  */
 const BARE_SPELLED_TLDS = new Set(["com", "org", "net", "io", "co", "uk", "de", "fr", "es", "it", "nl", "eu", "edu", "gov", "info", "biz", "me", "dev", "app"]);
 
-function redactSpelledEmail(match: string, written: string): string {
-  const domain = written.replace(new RegExp(DOT_WORD, "giu"), ".");
+function redactSpelledEmail({ text: match, groups }: LinearMatch): string {
+  const domain = DOT_WORD_RE.replace(groups[1] ?? "", ".");
   const tld = domain.slice(domain.lastIndexOf(".") + 1).toLowerCase();
-  if (!/^\p{L}{2,}$/u.test(tld) || RESERVED_DOMAIN_RE.test(domain)) return match;
-  const bracketed = /[([{]\s*(?:at|dot)\s*[)\]}]/iu.test(match);
+  if (!LETTERS_ONLY_2.test(tld) || RESERVED_DOMAIN_RE.test(domain)) return match;
+  const bracketed = BRACKETED_WORD.test(match);
   if (!bracketed && !BARE_SPELLED_TLDS.has(tld)) return match;
   // Only the @ spelled out, the dots written as dots, is an address only when the at is bracketed: "meet at noon.today" is not one.
-  if (!bracketed && !/\sdot\s/iu.test(match)) return match;
+  if (!bracketed && !BARE_DOT.test(match)) return match;
   return "[email redacted]";
 }
 /**
@@ -371,10 +407,20 @@ function redactSpelledEmail(match: string, written: string): string {
  * reading as one. A run never starts at a decimal's fraction (`0.4111…`), but
  * does after a word's dot (`no.4111…`).
  */
-const DIGIT_SPACE = "[ \\u00a0\\u2007\\u2009\\u202f]";
+const DIGIT_SPACE = String.raw`[ \x{a0}\x{2007}\x{2009}\x{202f}]`;
 /** One separator: one or two spaces, or a dot, hyphen or slash with up to two spaces either side (`4111 - 1111`, `4111/1111`). */
 const DIGIT_SEPARATOR = `(?:${DIGIT_SPACE}{0,2}[./-]${DIGIT_SPACE}{0,2}|${DIGIT_SPACE}{1,2})`;
-const DIGIT_RUN_RE = new RegExp(String.raw`(?<!\d)(?<!\d\.)\d+(?:${DIGIT_SEPARATOR}\d+)*`, "g");
+const isDigit = (c: string | undefined) => c !== undefined && c >= "0" && c <= "9";
+/**
+ * A run starts after neither a digit nor a digit and a dot. The search never
+ * finds a run that starts so (a run is read whole, through any ".digit"), so
+ * the check never sends it back over a run.
+ */
+const DIGIT_RUN_RE = new LinearRegex(`[0-9]+(?:${DIGIT_SEPARATOR}[0-9]+)*`, {
+  needs: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+  accept: ({ index }, text) => !isDigit(text[index - 1]) && !(text[index - 1] === "." && isDigit(text[index - 2])),
+});
+const DIGIT_SEPARATOR_RE = new LinearRegex(`(${DIGIT_SEPARATOR})`);
 /**
  * The card networks' issuer prefixes (IIN ranges) and the lengths each
  * issues. A digit run is a card number only when a network could have issued
@@ -461,15 +507,17 @@ function cardShaped(groups: readonly string[], seps: readonly string[], i: numbe
 }
 
 /**
- * The card numbers among a run's digit groups, each the longest that starts at
- * its group, so a date or a quantity written just before a card number does
- * not hide it. A group is never split: digits inside a longer id stay.
+ * Where the card numbers among a run's digit groups lie, as offsets into the
+ * run. Each is the longest that starts at its group, so a date or a quantity
+ * written just before a card number does not hide it. A group is never split:
+ * digits inside a longer id stay.
  */
-function redactCardsInRun(run: string): string {
-  const parts = run.split(new RegExp(`(${DIGIT_SEPARATOR})`));
+function cardSpansInRun(run: string): Array<{ from: number; to: number }> {
+  const parts = DIGIT_SEPARATOR_RE.split(run).map((part) => part ?? "");
   const groups = parts.filter((_, i) => i % 2 === 0);
   const seps = parts.filter((_, i) => i % 2 === 1);
-  let out = "";
+  const spans: Array<{ from: number; to: number }> = [];
+  let offset = 0;
   let i = 0;
   while (i < groups.length) {
     let end = -1;
@@ -480,16 +528,53 @@ function redactCardsInRun(run: string): string {
       digits += groups[j];
       if (cardShaped(groups, seps, i, j) && isCardNumber(digits)) end = j;
     }
-    if (i > 0) out += parts[2 * i - 1];
+    if (i > 0) offset += parts[2 * i - 1].length;
     if (end === -1) {
-      out += groups[i];
+      offset += groups[i].length;
       i += 1;
     } else {
-      out += "[card number redacted]";
+      let to = offset;
+      for (let k = i; k <= end; k++) to += groups[k].length + (k > i ? parts[2 * k - 1].length : 0);
+      spans.push({ from: offset, to });
+      offset = to;
       i = end + 1;
     }
   }
-  return out;
+  return spans;
+}
+
+function redactCardsInRun({ text: run }: LinearMatch): string {
+  let out = "";
+  let last = 0;
+  for (const { from, to } of cardSpansInRun(run)) {
+    out += `${run.slice(last, from)}[card number redacted]`;
+    last = to;
+  }
+  return out + run.slice(last);
+}
+
+/** The most a card number can take in text: 19 digits and a separator of up to five characters between groups. */
+const CARD_WINDOW = 130;
+
+/**
+ * Where the card number that spans position `at` ends, or null if none does.
+ * A credential read up to `at` that stops inside a card number leaves the rest
+ * of the card in clear. Only the text within a card's length of `at` is read,
+ * so asking at many places in one text stays linear.
+ */
+export function cardEndAcross(text: string, at: number): number | null {
+  let from = Math.max(0, at - CARD_WINDOW);
+  // A digit run is read whole, so the window starts where a run does.
+  while (from > 0 && from < at && isDigit(text[from - 1])) from += 1;
+  const window = text.slice(from, at + CARD_WINDOW);
+  for (const run of DIGIT_RUN_RE.matchAll(window)) {
+    for (const { from: start, to } of cardSpansInRun(run.text)) {
+      const absStart = from + run.index + start;
+      const absEnd = from + run.index + to;
+      if (absStart < at && absEnd > at) return absEnd;
+    }
+  }
+  return null;
 }
 
 /**
@@ -500,13 +585,11 @@ function redactCardsInRun(run: string): string {
 const PHONE_WORDS = [
   // Not "cell" (a table's) or "gsm" (a radio band): both are followed by lists of numbers more often than by a phone number.
   ...["phone", "telephone", "tel", "tél", "mobile", "cellphone", "call", "whatsapp", "contact", "ph"],
-  // "T" for telephone only with its dot or colon ("T: +44 …"): "don't 0800 …" is not one.
-  "t(?=[.:])",
   ...["telefon", "telefone", "teléfono", "telefono", "téléphone", "telefoon", "telefonu", "móvil", "movil", "celular", "cellulare", "mobil"],
 ];
 /** What may stand between the word and the number: punctuation, the quotes and arrow of a typed value, and a word for "number". */
-const PHONE_GAP = String.raw`[\s:.#\-"'←„“”«»]*`;
-const NUMBER_WORD = String.raw`(?:(?:number|no|nr|num|numero|número|numéro|nummer|numer)\.?${PHONE_GAP})?`;
+const PHONE_GAP = String.raw`[${SPACE}:.#\-"'←„“”«»]`;
+const NUMBER_WORD = String.raw`(?:number|no|nr|num|numero|número|numéro|nummer|numer)\.?${PHONE_GAP}*`;
 /** The same word written onto the word for phone, as "Telefonnummer" and "phonenumber" are. */
 const GLUED_NUMBER_WORD = "(?:number|nummer|nr|numero|número|numéro)?";
 /**
@@ -518,23 +601,41 @@ const GLUED_NUMBER_WORD = "(?:number|nummer|nr|numero|número|numéro)?";
  * (ids, dates, times, versions, prices, card-like numbers, lists) found the
  * word to be what keeps them apart.
  */
-const PHONE_RE = new RegExp(
-  String.raw`(?<!\p{L})(?:${PHONE_WORDS.join("|")})${GLUED_NUMBER_WORD}(?!\p{L})${PHONE_GAP}${NUMBER_WORD}(\+[1-9]\d{0,2}(?:[ .\-]?\(?\d{1,5}\)?){1,5}|\(?\d{1,5}\)?(?:[ .\-]\d{2,8}){1,4})(?![\w.]?\d)`,
-  "giu",
+const PHONE_RE = new LinearRegex(
+  // The word, not after a letter (notAfter), nor before one: the gap and the number never start with a letter, so a
+  // word for "number" comes only after a gap. "T" for telephone only with its dot or colon ("T: +44 …"): "don't 0800 …"
+  // is not one. The last group is the lookahead: no digit next, nor after one more word character or dot.
+  String.raw`(?:(?:${PHONE_WORDS.join("|")})${GLUED_NUMBER_WORD}(?:${PHONE_GAP}+(?:${NUMBER_WORD})?)?|t[.:]${PHONE_GAP}*(?:${NUMBER_WORD})?)` +
+    String.raw`(\+[1-9][0-9]{0,2}(?:[ .\-]?\(?[0-9]{1,5}\)?){1,5}|\(?[0-9]{1,5}\)?(?:[ .\-][0-9]{2,8}){1,4})` +
+    // JavaScript's \w under the i and u flags holds the long s and the Kelvin sign too.
+    String.raw`($|[^A-Za-z0-9_.\x{17f}\x{212a}]|[A-Za-z_.\x{17f}\x{212a}](?:$|[^0-9]))`,
+  {
+    ignoreCase: true,
+    // Every word for a phone, or a part of it every spelling holds.
+    needs: ["ph", "tel", "tél", "mobil", "call", "whatsapp", "contact", "t.", "t:", "vil", "celular", "cellulare"],
+    lookahead: true,
+    notAfter: String.raw`\p{L}`,
+  },
 );
 /** A date after the word ("Phone: 2026-10-11") is not a number to hide. */
-const DATE_SHAPED = /^(?:\d{4}[-./]\d{1,2}[-./]\d{1,2}|\d{1,2}[-./]\d{1,2}[-./]\d{2,4})$/;
+const DATE_SHAPED = new LinearRegex(String.raw`^(?:[0-9]{4}[-./][0-9]{1,2}[-./][0-9]{1,2}|[0-9]{1,2}[-./][0-9]{1,2}[-./][0-9]{2,4})$`);
+const NOT_DIGIT = new LinearRegex("[^0-9]+");
+const STARTS_PLUS_OR_ZERO = new LinearRegex(String.raw`^(?:\+|\(?0)`);
+const STARTS_PLUS_BRACKET_OR_ZERO = new LinearRegex(String.raw`^(?:\+|\(|0)`);
+const NATIONAL_LAYOUT = new LinearRegex(String.raw`^1[ .-][0-9]{3}[ .-][0-9]{3}[ .-][0-9]{4}$|^[6-9][0-9]{2}(?: [0-9]{2}){3}$`);
+const PHONE_GROUP_SEPARATOR = new LinearRegex("[ .-]");
 
-function redactPhone(match: string, number: string): string {
-  const digits = number.replace(/\D/g, "").length;
+function redactPhone({ text: match, groups }: LinearMatch): string {
+  const number = groups[1] ?? "";
+  const digits = NOT_DIGIT.replace(number, "").length;
   if (digits < 7 || digits > 15 || DATE_SHAPED.test(number)) return match;
   // Dots group a French or an international number, which starts with 0 or +; a version or a dotted id does not.
-  if (number.includes(".") && !/^(?:\+|\(?0)/.test(number)) return match;
+  if (number.includes(".") && !STARTS_PLUS_OR_ZERO.test(number)) return match;
   // Without a leading +, 0 or bracket, it is laid out as 555 123 4567 is: at most three groups, the first of three digits
   // and the last of four or more; or as 1-800-555-0199 (a North American number with its country code) or 612 34 56 78
   // (a Spanish one) are. A list of numbers (`Mobile 100 200 300 400`) or of years (`2024 2025 2026`) is not.
-  if (!/^(?:\+|\(|0)/.test(number) && !/^1[ .-]\d{3}[ .-]\d{3}[ .-]\d{4}$|^[6-9]\d{2}(?: \d{2}){3}$/.test(number)) {
-    const groups = number.split(/[ .-]/);
+  if (!STARTS_PLUS_BRACKET_OR_ZERO.test(number) && !NATIONAL_LAYOUT.test(number)) {
+    const groups = PHONE_GROUP_SEPARATOR.split(number).map((group) => group ?? "");
     if (groups.length > 3 || groups[0].length !== 3 || groups[groups.length - 1].length < 4) return match;
   }
   return `${match.slice(0, match.length - number.length)}[phone redacted]`;
@@ -549,15 +650,15 @@ function redactPhone(match: string, number: string): string {
  * Each replacement names what it removed.
  */
 export function redactPersonal(text: string): string {
-  return text
-    .replace(EMAIL_IP_RE, "[email redacted]")
-    .replace(EMAIL_RE, (m, domain: string, offset: number, whole: string) => {
-      if (RESERVED_DOMAIN_RE.test(domain) || DENSITY_DOMAIN_RE.test(domain)) return m;
-      // `git@host:team/repo.git` is a repository's address over SSH, not a person's: a path follows the colon.
-      if (/^:[\w~/.-]/.test(whole.slice(offset + m.length))) return m;
-      return "[email redacted]";
-    })
-    .replace(SPELLED_EMAIL_RE, redactSpelledEmail)
-    .replace(PHONE_RE, redactPhone)
-    .replace(DIGIT_RUN_RE, redactCardsInRun);
+  const withoutIpAddresses = EMAIL_IP_RE.replace(text, "[email redacted]");
+  let out = EMAIL_RE.replace(withoutIpAddresses, ({ text: m, groups, end }) => {
+    const domain = groups[1] ?? "";
+    if (RESERVED_DOMAIN_RE.test(domain) || DENSITY_DOMAIN_RE.test(domain)) return m;
+    // `git@host:team/repo.git` is a repository's address over SSH, not a person's: a path follows the colon.
+    if (SSH_PATH.test(withoutIpAddresses.slice(end, end + 2))) return m;
+    return "[email redacted]";
+  });
+  out = SPELLED_EMAIL_RE.replace(out, redactSpelledEmail);
+  out = PHONE_RE.replace(out, redactPhone);
+  return DIGIT_RUN_RE.replace(out, redactCardsInRun);
 }

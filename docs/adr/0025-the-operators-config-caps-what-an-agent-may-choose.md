@@ -56,6 +56,22 @@ override (issue #546).
   exemption, uploads, hosts, egress) as those land. Until a key exists, the
   file refuses it as unknown rather than accepting a lock it cannot enforce.
 
+## Amendment: keys that limit a folder, and keys the engine reads itself
+
+- **`projectsRoot` is read from the operator's file only.** It limits which
+  project folder an attach may name, and the project's own file lives in that
+  folder, so a project file setting it is refused rather than joined: the
+  folder is checked against the operator's root before its file is read.
+- **`uploads` is checked where the tool is called**, before the engine's own
+  upload fence, so `fixtures` holds whatever `SCENESCOUT_UPLOAD_ALLOW` lists.
+- **`writeClassifier`, `refuseDestructiveGets` and `authPosts` have their rule
+  (`writeRulesSettings`) but are not keys yet.** The browser engine reads
+  them from its environment as a session starts; until it takes them from
+  the attach, a file naming them is refused as unknown, as above. Their rule:
+  the stricter of the file and the environment wins, and while a guided plan
+  is open a sign-in POST must be listed and also look like one to the path
+  rule.
+
 ## Failure direction
 
 When the file cannot be read or understood, nothing runs: the server or the

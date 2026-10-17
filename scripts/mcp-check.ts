@@ -28,6 +28,8 @@ const EXPECTED_TOOLS = [
   "scout_intake",
   "scout_guided_plan",
   "scout_guided_confirm",
+  "scout_recheck_plan",
+  "scout_saved_checks",
   "scout_lane_report",
   "scout_scan",
   "scout_attach",
@@ -63,6 +65,8 @@ const EXPECTED_TOOLS = [
   "scout_cards",
   "scout_feedback",
   "scout_team_report",
+  "scout_ticket_preview",
+  "scout_ticket_file",
 ];
 
 type ToolText = { content: Array<{ type: string; text?: string }> };
@@ -1294,6 +1298,51 @@ async function guidedCheck(): Promise<void> {
 }
 
 /**
+ * scout_ticket_preview and scout_ticket_file as served: their annotations
+ * (the preview reads a tracker and writes nothing; filing writes to one),
+ * their input and output schemas, that neither takes a token, and that with
+ * no project open both refuse before reading anything. Previewing and filing
+ * against stand-in trackers is export-test's.
+ */
+async function ticketToolsCheck(): Promise<void> {
+  type Result = { content: Array<{ type: string; text?: string }>; isError?: boolean };
+  const { out } = await withFormClient({ form: {} }, { action: "cancel" }, async (client) => {
+    const { tools } = await client.listTools();
+    const tool = (name: string) => tools.find((t) => t.name === name);
+    const expect: Array<[string, boolean, string[], string[]]> = [
+      [
+        "scout_ticket_preview",
+        true,
+        ["ids", "to", "target"],
+        ["previewId", "to", "where", "createdAt", "expiresAt", "toFile", "alreadyFiled", "later", "cap", "leftOut"],
+      ],
+      ["scout_ticket_file", false, ["previewId"], ["filed", "outcome", "tellPerson", "tickets", "problems"]],
+    ];
+    for (const [name, readOnly, inputs, outputs] of expect) {
+      const t = tool(name);
+      const a = t?.annotations;
+      if (a?.readOnlyHint !== readOnly || a?.destructiveHint !== false || a?.openWorldHint !== true)
+        fail(`${name} is not annotated readOnlyHint ${readOnly}, destructiveHint false, openWorldHint true: ${JSON.stringify(a)}`);
+      const props = Object.keys((t?.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
+      if (JSON.stringify(props) !== JSON.stringify(inputs)) fail(`${name} takes ${JSON.stringify(props)}, expected ${JSON.stringify(inputs)}`);
+      if (props.some((p) => /token|password|secret|credential/i.test(p))) fail(`${name} takes a credential`);
+      const required = (t?.inputSchema as { required?: string[] }).required ?? [];
+      if (JSON.stringify([...required].sort()) !== JSON.stringify([...inputs].sort())) fail(`${name} requires ${JSON.stringify(required)}`);
+      const outProps = Object.keys((t?.outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {});
+      if (JSON.stringify(outProps) !== JSON.stringify(outputs))
+        fail(`${name}'s output schema is ${JSON.stringify(outProps)}, expected ${JSON.stringify(outputs)}`);
+    }
+    const call = async (name: string, args: Record<string, unknown>): Promise<Result> => (await client.callTool({ name, arguments: args })) as Result;
+    const preview = await call("scout_ticket_preview", { ids: ["a1b2c3d4e5"], to: "github", target: "acme/shop" });
+    const file = await call("scout_ticket_file", { previewId: "tp-AAAAAAAAAAAAAAAA" });
+    return { preview, file };
+  });
+  for (const [name, r] of Object.entries(out))
+    if (!r.isError || !/No project is open yet/.test(textOf(r))) fail(`${name} with no project open did not say to attach first: ${textOf(r)}`);
+  console.log("✓ scout_ticket_preview and scout_ticket_file are annotated and schema'd, take no credential, and refuse with no project open");
+}
+
+/**
  * A guided check's progress and its cards over the wire: a Look only plan
  * attached with, an area set, a finding filed there; the pane's poll carries
  * the progress; scout_cards shows the card with its picture inline; a
@@ -1331,6 +1380,9 @@ async function guidedCardsCheck(): Promise<void> {
         teamOut.join(",") !== "evidenceDir,file,folder,manifest,missingPictures,path,pictures,problems"
       )
         fail(`scout_team_report's schemas are not no input and the TeamReport output: ${JSON.stringify({ input: teamTool?.inputSchema, out: teamOut })}`);
+      const savedBefore = await call("scout_saved_checks", { action: "list" });
+      if (!savedBefore.isError || !/pass the site's address/.test(textOf(savedBefore)))
+        fail(`scout_saved_checks before any attach did not ask for the site's address: ${textOf(savedBefore)}`);
       const teamBefore = await call("scout_team_report", {});
       if (!teamBefore.isError || !/attach first/.test(textOf(teamBefore)))
         fail(`scout_team_report before any attach did not say to attach first: ${textOf(teamBefore)}`);
@@ -1411,6 +1463,57 @@ async function guidedCardsCheck(): Promise<void> {
       }
       if (!fs.readFileSync(path.join(projectDir, ".scenescout", "team-report.html"), "utf8").includes("The send button gives no sign it worked"))
         fail("the team report page does not show the check's problem");
+      // The finding was filed in observe: a re-check of it is a Look only plan of its own, attached with its id, then scout_verify.
+      for (const [name, readOnly] of [
+        ["scout_recheck_plan", true],
+        ["scout_saved_checks", false],
+      ] as const) {
+        const t = tools.find((x) => x.name === name);
+        if (t?.annotations?.readOnlyHint !== readOnly || t.annotations.destructiveHint !== false || !t.outputSchema)
+          fail(`${name} is not annotated readOnlyHint ${readOnly}, destructiveHint false, with an outputSchema: ${JSON.stringify(t?.annotations)}`);
+      }
+      const re = await call("scout_recheck_plan", {});
+      const rePlan = re.structuredContent as
+        | { planId: string; mode: string; confirm: unknown; recheck?: { ids: string[] }; calls: Array<{ tool: string; args: Record<string, unknown> }> }
+        | undefined;
+      if (
+        re.isError ||
+        !rePlan ||
+        rePlan.planId === plan.planId ||
+        rePlan.mode !== "observe" ||
+        rePlan.confirm !== null ||
+        !rePlan.recheck?.ids.includes(id) ||
+        rePlan.calls.find((c) => c.tool === "scout_attach")?.args.planId !== rePlan.planId ||
+        !rePlan.calls.some((c) => c.tool === "scout_verify")
+      )
+        fail(`scout_recheck_plan did not build a Look only re-check of the observe finding: ${JSON.stringify(re).slice(0, 800)}`);
+      // Saved checks: the plan's choices, owner-only, under .scenescout/guided/; run again, a new plan; and no credential field.
+      const saved = await call("scout_saved_checks", { action: "save", name: "Forms and pages", planId: plan.planId });
+      const savedFile = path.join(projectDir, ".scenescout", "guided", "forms-and-pages.json");
+      if (saved.isError || !fs.existsSync(savedFile)) fail(`scout_saved_checks did not save the check: ${textOf(saved)}`);
+      if (process.platform !== "win32" && (fs.statSync(savedFile).mode & 0o777) !== 0o600) fail("a saved check is not owner-only");
+      if (Object.keys(JSON.parse(fs.readFileSync(savedFile, "utf8"))).join(",") !== "name,choices,savedAt")
+        fail(`a saved check holds more than its choices: ${fs.readFileSync(savedFile, "utf8")}`);
+      const reSave = await call("scout_saved_checks", { action: "save", name: "Re-check", planId: rePlan!.planId });
+      if (!reSave.isError || !/re-check is not saved/.test(textOf(reSave))) fail(`a re-check was saved: ${textOf(reSave)}`);
+      const listed = (await call("scout_saved_checks", { action: "list" })).structuredContent as { saved: Array<{ name: string }> };
+      if (listed.saved.map((c) => c.name).join(",") !== "Forms and pages") fail(`scout_saved_checks list: ${JSON.stringify(listed)}`);
+      const rerun = await call("scout_saved_checks", { action: "run", name: "forms and pages" });
+      const rerunPlan = (rerun.structuredContent as { plan?: { planId: string; mode: string } } | undefined)?.plan;
+      if (rerun.isError || !rerunPlan || rerunPlan.planId === plan.planId || rerunPlan.mode !== "observe")
+        fail(`scout_saved_checks run did not build a new plan: ${JSON.stringify(rerun).slice(0, 600)}`);
+      fs.writeFileSync(
+        path.join(projectDir, ".scenescout", "guided", "tampered.json"),
+        JSON.stringify({ name: "Tampered", choices: {}, savedAt: "x", cookies: [] }),
+      );
+      const tampered = await call("scout_saved_checks", { action: "run", name: "Tampered" });
+      if (!tampered.isError || !/no field for a password, code, token or cookie/.test(textOf(tampered)))
+        fail(`a saved check with a cookie field was run: ${textOf(tampered)}`);
+      const deleted = await call("scout_saved_checks", { action: "delete", name: "Forms and pages" });
+      if (deleted.isError || fs.existsSync(savedFile)) fail(`scout_saved_checks did not delete the check: ${textOf(deleted)}`);
+      const deletedAgain = await call("scout_saved_checks", { action: "delete", name: "Forms and pages" });
+      if (deletedAgain.isError || !/already deleted/.test(textOf(deletedAgain)))
+        fail(`deleting a check that was already gone was not a success that says so: ${textOf(deletedAgain)}`);
       const labelled = await call("scout_feedback", { id, verdict: "not-a-bug", reason: "The page reloads on purpose" });
       if (labelled.isError || (labelled.structuredContent as { verdict?: string }).verdict !== "not-a-bug")
         fail(`scout_feedback did not label the finding: ${textOf(labelled)}`);
@@ -1437,7 +1540,7 @@ async function guidedCardsCheck(): Promise<void> {
     fs.rmSync(projectDir, { recursive: true, force: true });
   }
   console.log(
-    "✓ a guided check's progress reaches the pane's poll and the status text, scout_cards shows its card with the area and picture, scout_team_report writes it with its picture and a manifest that matches the files, and a not-a-bug label keeps the finding, leaves it out of the cards and the count, and is exported as a candidate",
+    "✓ a guided check's progress reaches the pane's poll and the status text, scout_cards shows its card with the area and picture, scout_team_report writes it with its picture and a manifest that matches the files, scout_recheck_plan re-checks it in the mode it was found in under a plan of its own, scout_saved_checks saves, lists, runs and deletes a check owner-only and refuses one with a cookie field, and a not-a-bug label keeps the finding, leaves it out of the cards and the count, and is exported as a candidate",
   );
 }
 
@@ -1579,6 +1682,31 @@ async function configCheck(): Promise<void> {
       const above = await attach({ mode: "read-only" });
       if (!above.isError || !/maxMode "observe"/.test(above.text)) fail(`the strict preset did not refuse a read-only attach:\n${above.text}`);
     });
+    // uploads "fixtures": a file from disk is refused before the engine is asked, in scout_upload and in a plan's upload step.
+    await withServer({ SCENESCOUT_CONFIG: configFile("fixtures.json", { uploads: "fixtures" }) }, async (attach, call) => {
+      const r = await attach({ mode: "observe" });
+      if (r.isError) fail(`an observe attach under uploads "fixtures" was refused:\n${r.text}`);
+      const disk = await call("scout_upload", { filePath: "sample.pdf", task: "Uploading a file" });
+      if (!disk.isError || !/uploads "fixtures" allows only generated files/.test(disk.text))
+        fail(`uploads "fixtures" did not refuse a file from disk in scout_upload:\n${disk.text}`);
+      const step = await call("scout_run_plan", { steps: [{ action: "upload", target: "label=File", value: "sample.pdf" }], task: "Uploading a file" });
+      if (!step.isError || !/step 1 refused by the SceneScout config/.test(step.text))
+        fail(`uploads "fixtures" did not refuse a plan's upload step naming a file:\n${step.text}`);
+      const fixture = await call("scout_upload", { fixture: "pdf", task: "Uploading a file" });
+      if (/SceneScout config/.test(fixture.text)) fail(`uploads "fixtures" refused a generated fixture:\n${fixture.text}`);
+    });
+    // projectsRoot: a project folder outside it is refused at attach and at scan; one inside it is taken.
+    const root = path.join(dir, "root");
+    fs.mkdirSync(path.join(root, "app"), { recursive: true });
+    await withServer({ SCENESCOUT_CONFIG: configFile("root.json", { projectsRoot: root }) }, async (attach, call) => {
+      const outside = await attach({ mode: "observe", session: "outside" });
+      if (!outside.isError || !/is outside the config's projectsRoot/.test(outside.text))
+        fail(`an attach whose projectPath is outside projectsRoot was not refused:\n${outside.text}`);
+      const scan = await call("scout_scan", { projectPath: projectDir });
+      if (!scan.isError || !/is outside the config's projectsRoot/.test(scan.text)) fail(`scout_scan outside projectsRoot was not refused:\n${scan.text}`);
+      const inside = await attach({ mode: "observe", session: "inside", projectPath: path.join(root, "app") });
+      if (inside.isError) fail(`an attach whose projectPath is inside projectsRoot was refused:\n${inside.text}`);
+    });
     // requireGuidedPlan alone: the gate holds from the start, before any plan is built.
     await withServer({ SCENESCOUT_CONFIG: configFile("guided.json", { requireGuidedPlan: true }) }, async (attach) => {
       const r = await attach({ mode: "read-only" });
@@ -1586,10 +1714,34 @@ async function configCheck(): Promise<void> {
         fail(`requireGuidedPlan did not hold the guided gate from the server's start:\n${r.text}`);
     });
     // No operator config, a project file that sets one: the project's file tightens; the same attach without it goes ahead.
-    await withServer({}, async (attach) => {
+    await withServer({}, async (attach, call) => {
       const free = await attach({ session: "free" });
       if (free.isError || free.text.includes("CONFIG") || !/read-only/.test(free.text))
         fail(`with no config, an attach naming no mode did not start in read-only as it always has:\n${free.text}`);
+      // The contrast to uploads "fixtures": with no config, a file from disk goes on to the engine's own fence.
+      const disk = await call("scout_upload", { filePath: "sample.pdf", session: "free", task: "Uploading a file" });
+      if (/SceneScout config/.test(disk.text)) fail(`with no config, scout_upload was refused by a config:\n${disk.text}`);
+      // A session's config follows the session it runs: an attach refused before the old one closes keeps the old project's,
+      // and one that fails after the old one closed has started the new project's, whose own file holds uploads to fixtures.
+      const loose = path.join(dir, "loose");
+      const tight = path.join(dir, "tight");
+      fs.mkdirSync(loose, { recursive: true });
+      fs.mkdirSync(path.join(tight, ".scenescout"), { recursive: true });
+      fs.writeFileSync(path.join(tight, ".scenescout", "config.json"), JSON.stringify({ uploads: "fixtures" }));
+      const upload = (session: string) => call("scout_upload", { filePath: "sample.pdf", session, task: "Uploading a file" });
+      for (const s of ["kept", "moved"]) {
+        const first = await attach({ session: s, projectPath: loose });
+        if (first.isError) fail(`an attach to a project with no config file was refused:\n${first.text}`);
+      }
+      const noRole = await attach({ session: "kept", projectPath: tight, role: "nobody-saved-this" });
+      if (!noRole.isError) fail(`an attach naming a role with no saved profile was not refused:\n${noRole.text}`);
+      const kept = await upload("kept");
+      if (/SceneScout config/.test(kept.text)) fail(`an attach refused before the old session closed changed the old session's config:\n${kept.text}`);
+      const gone = await attach({ session: "moved", projectPath: tight, url: "http://127.0.0.1:9/" });
+      if (!gone.isError) fail(`an attach to an address nothing answers was not refused:\n${gone.text}`);
+      const moved = await upload("moved");
+      if (!moved.isError || !/uploads "fixtures" allows only generated files/.test(moved.text))
+        fail(`an attach that failed after the old session closed left the old project's config on the session:\n${moved.text}`);
       fs.mkdirSync(path.join(projectDir, ".scenescout"), { recursive: true });
       fs.writeFileSync(path.join(projectDir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "observe" }));
       const tightened = await attach({ mode: "read-only", session: "tight" });
@@ -1631,7 +1783,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();
@@ -1653,6 +1805,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(`✓ server exposes ${names.length} tools`);
+
+  // observe lets out HEAD and OPTIONS as well as GET; a description that says only GET misleads the agent choosing a mode.
+  const attachDescription = tools.find((t) => t.name === "scout_attach")?.description ?? "";
+  if (!/observe' lets out only GET, HEAD and OPTIONS/.test(attachDescription) || /not a GET|only a GET|only GET requests/.test(attachDescription))
+    fail(`scout_attach's description does not state what observe lets out (GET, HEAD and OPTIONS):\n${attachDescription.slice(0, 600)}`);
 
   // The run-status pane, an MCP App (SEP-1865). The SDK this server is built on
   // has no notion of visibility, so the host is what keeps an app-only tool from
@@ -1961,6 +2118,7 @@ async function main(): Promise<void> {
   await openCheck();
   await intakeCheck();
   await guidedCheck();
+  await ticketToolsCheck();
   await configCheck();
   await guidedCardsCheck();
   await abandonedCallCheck();

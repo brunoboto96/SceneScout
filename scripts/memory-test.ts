@@ -15,7 +15,15 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import ts from "typescript";
+import "../src/engine/calibration.ts";
+import "../src/engine/fingerprint.ts";
+import "../src/engine/policy.ts";
+import "../src/engine/tickets.ts";
+import { fromJs, jsPatterns, jsToRe2 } from "../src/engine/js-regex.ts";
+import { LinearRegex, SPACE } from "../src/engine/linear-regex.ts";
+import { CASE_BOUND_MS, runLinearTimeCases } from "./linear-time-child.ts";
 import {
   chooseProjectFolder,
   documentsDir,
@@ -884,6 +892,46 @@ test("a store cleaned by an earlier redaction is cleaned again with the redactio
   assert.ok(REDACTION_VERSION > 1, "the redaction learned to hide more, so its version is raised");
 });
 
+test("a store cleaned before a secret set after a refused one was masked is cleaned again; one cleaned since is left alone (#619)", () => {
+  const leaks = ["password\t:secret ＝Abc123def456xyz", "Basic ============4111 1111 1111 1111"];
+  const write = (redactedWith: number) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+    dirs.push(dir);
+    const memDir = path.join(dir, MEMORY_DIRNAME);
+    fs.mkdirSync(memDir, { recursive: true });
+    const finding = {
+      id: "f1",
+      severity: "high",
+      category: "privacy",
+      title: "Error page echoes the request",
+      detail: `the page printed ${leaks[0]}`,
+      evidence: `Authorization: ${leaks[1]}`,
+      url: "http://localhost:3000/login",
+      state: "/login#1",
+      repro: ['click button "Sign in"'],
+      foundAt: "2025-01-01T00:00:00.000Z",
+      runs: 1,
+    };
+    fs.writeFileSync(path.join(memDir, "memory.json"), JSON.stringify({ version: 1, states: {}, findings: [finding], redactedWith }));
+    const log = path.join(memDir, "session-2025-01-01T00-00-00-000Z.jsonl");
+    const line = { at: "2025-01-01T00:00:01.000Z", action: "note", target: "", result: leaks.join(" and "), url: "http://localhost:3000/login" };
+    fs.writeFileSync(log, JSON.stringify(line) + "\n");
+    openStore(dir).flush();
+    return [fs.readFileSync(path.join(memDir, "memory.json"), "utf8"), fs.readFileSync(log, "utf8")];
+  };
+  // Marked as cleaned by redaction 2, which let both through.
+  const [memory, log] = write(2);
+  for (const text of [memory, log]) {
+    assert.ok(!text.includes("Abc123def456xyz"), text);
+    assert.ok(!text.includes("1111 1111 1111"), text);
+  }
+  assert.equal((JSON.parse(memory) as { redactedWith?: number }).redactedWith, REDACTION_VERSION);
+  assert.ok(REDACTION_VERSION >= 3, "the redaction learned to hide more in #619, so its version is raised");
+  // Marked as cleaned by this redaction: nothing is read again, so what it holds stays as written.
+  const [kept] = write(REDACTION_VERSION).slice(1);
+  assert.ok(kept.includes("Abc123def456xyz") && kept.includes("1111 1111 1111"), "a store this redaction already cleaned is not cleaned again");
+});
+
 test("opening a store it cannot clean leaves it as it was: a memory.json of an unknown version, a folder it may not write", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
   dirs.push(dir);
@@ -1579,6 +1627,335 @@ test("a redaction announces itself and keeps the matched scheme", () => {
   assert.ok(out.includes("Basic [redacted]"), `the scheme that matched is preserved: ${out}`);
   assert.ok(!out.includes("Bearer"), "and is not rewritten to a different one");
   assert.ok(/\[1 secret redacted\]/.test(out), `the edit is disclosed: ${out}`);
+});
+
+test("every pattern in the route, ticket, calibration and write-policy readers matches what JavaScript's engine did (#618)", () => {
+  // Each of these patterns was a JavaScript regular expression and now runs on the linear-time engine. fromJs keeps the
+  // JavaScript source it stands for (a lookaround is kept as written), so each is held to a RegExp of that source: the
+  // same first match, index and groups, on every string in the suites that exercise them and on generated ones.
+  const scripts = path.dirname(fileURLToPath(import.meta.url));
+  const strings = new Set<string>();
+  for (const file of ["policy-test.ts", "tickets-test.ts", "calibration-test.ts", "contract-test.ts", "memory-test.ts"]) {
+    const source = ts.createSourceFile(file, fs.readFileSync(path.join(scripts, file), "utf8"), ts.ScriptTarget.Latest, true);
+    const visit = (node: ts.Node): void => {
+      if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && node.text.length < 400) strings.add(node.text);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  const pieces = [
+    "delete",
+    "Remove",
+    " filter",
+    "chips",
+    "-",
+    " ",
+    "reset ",
+    "Discard ",
+    "changes",
+    "\n",
+    "\t",
+    "a",
+    "B",
+    "/",
+    "1",
+    "42",
+    ",",
+    ":",
+    "*",
+    "{id}",
+    ":id",
+    "}",
+    "_",
+    ".",
+    "?",
+    "#",
+    "=",
+    "&",
+    "token",
+    "sign off",
+    "Sign-off",
+    "and ",
+    "AC1",
+    "Given x",
+    "Scenario: s",
+    "- [x] y",
+    "**",
+    "## H",
+    "\u00a0",
+    "ſ",
+    "K",
+    "😀",
+    "ö",
+    "löschen",
+    "удалить",
+    "删除",
+    "mutation",
+    "{",
+    "(",
+    ")",
+    "[",
+    "]",
+    '"',
+    "'",
+    "`",
+    "<",
+    "https://h:80/a.html",
+    "127.0.0.1:80/x",
+    "testid=a-b-c",
+    "3.1:1",
+    "PROJ-12",
+    "#7",
+    "|",
+    "→",
+    "->",
+    "\r\n",
+    "\u2028",
+    "\u0001",
+    "POST /x",
+    "_method=DELETE",
+    "index.html",
+    ".pdf",
+    "format=csv",
+  ];
+  let seed = 7;
+  const next = (): number => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  for (let n = 0; n < 6000; n++) {
+    let text = "";
+    for (let k = 1 + Math.floor(next() * 9); k > 0; k--) text += pieces[Math.floor(next() * pieces.length)];
+    strings.add(text);
+  }
+  assert.ok(jsPatterns.length >= 120, `the patterns are registered: ${jsPatterns.length}`);
+  for (const { source, flags, pattern } of jsPatterns) {
+    const js = new RegExp(source, flags);
+    for (const text of strings) {
+      // With both i and u, JavaScript's \b reads the long s and the Kelvin sign as letters of a word; RE2's does not (ADR 28, 29).
+      if (flags.includes("u") && /[\u017f\u212a]/.test(text)) continue;
+      const a = js.exec(text);
+      const b = pattern.exec(text);
+      // A rewrite of a lookahead may hold groups of its own after the pattern's; the pattern's are compared.
+      const mine = a === null ? null : [a.index, a[0], ...a.slice(1).map((g) => g ?? null)];
+      const yours = b === null ? null : [b.index, b.text, ...b.groups.slice(1, a === null ? undefined : a.length).map((g) => g ?? null)];
+      assert.deepEqual(yours, mine, `${source} ${flags} on ${JSON.stringify(text)}`);
+    }
+  }
+});
+
+test("fromJs reads a JavaScript pattern the way JavaScript does, and refuses what RE2 cannot run (#618)", () => {
+  // Ranges, escapes and sets inside a class; \s and . as JavaScript has them; the i flag as JavaScript folds it.
+  const same = (source: string, flags: string, texts: string[]): void => {
+    const js = new RegExp(source, flags);
+    const re = fromJs(source, flags);
+    for (const text of texts) assert.equal(re.test(text), js.test(text), `${source} ${flags} on ${JSON.stringify(text)}`);
+  };
+  same(String.raw`[\u0000-\u0008\u007f]`, "", ["a", "\u0001", "\u007f", "\u0009"]);
+  same(String.raw`^[a-f]+[^\d]$`, "i", ["ABCx", "abc1", "ABCF", "g"]);
+  same(String.raw`a.b`, "", ["a\nb", "a\u2028b", "a\u00a0b", "axb"]);
+  same(String.raw`a\sb`, "", ["a\u00a0b", "a\u3000b", "a\ufeffb", "a_b"]);
+  same(String.raw`[\s\S]+x`, "", ["\n\nx", "x"]);
+  same(String.raw`[\w-]+@`, "", ["a-b@", "-@", "@"]);
+  same(String.raw`s`, "i", ["S", "s", "ſ"]);
+  same(String.raw`k`, "i", ["K", "k", "\u212a"]);
+  same(String.raw`[k]`, "i", ["K", "\u212a"]);
+  same(String.raw`ö`, "i", ["Ö", "ö", "o"]);
+  same(String.raw`[\w.-]+`, "", ["", "-", "a.b"]);
+  // A letter written as an escape folds as the letter does; an escaped mark stands for itself.
+  same(String.raw`\x41\u00e9`, "i", ["aÉ", "Aé", "ae"]);
+  same(String.raw`[\x41-\x43]+$`, "i", ["abc", "ABC", "abd"]);
+  same(String.raw`[\u00e0]`, "i", ["À", "à", "a"]);
+  same(String.raw`\.[.\]]`, "i", [".]", "..", "a]"]);
+  same(String.raw`[à-þ]`, "", ["à", "À"]);
+  same(String.raw`[0-z]`, "i", ["A", "a", "~"]);
+  // Every character of the same canonical form, not only a letter's own two cases.
+  same(String.raw`µ[σ]`, "i", ["μΣ", "Μς", "µσ", "mσ"]);
+  // The folding of a letter RE2 would fold further is only what JavaScript folds.
+  assert.equal(jsToRe2("s", "i"), "[sS]");
+  for (const source of ["a(?=b)", "(?<=a)b", "(?!a)b", "(a)\\1", "[\\S\\d]", "[\\b]", "(?<n>a)", "\\k<n>", "[]", "[a"]) {
+    assert.throws(() => fromJs(source), /written by hand/, source);
+  }
+  // What RE2 would read otherwise than JavaScript is refused too: an escaped letter JavaScript reads as itself (RE2: a
+  // bell, an end, a start, a quote), \p without the u flag (JavaScript: the letter p), a range i folds past its ends.
+  for (const source of ["\\a", "x\\z", "\\Ax", "\\Qa", "[\\a]", "\\p{L}", "[\\P{L}]"]) {
+    assert.throws(() => fromJs(source), /written by hand/, source);
+  }
+  assert.throws(() => fromJs("[à-þ]", "i"), /folds past its ends/);
+  assert.throws(() => fromJs("[\\n-Z]", "i"), /folds past its ends/);
+  assert.throws(() => fromJs("a", "g"), /i flag only/);
+});
+
+test("a rejected name=value match does not hide the next secret's name (#619)", () => {
+  // "secret" after the colon is a word about the field, so the first match is refused; the scan resumes right
+  // after the first name, finds "secret ＝…" and masks its value. Each pair differs in the one fact that flips it.
+  const hidden = redactSecrets("password\t:secret ＝Abc123def456xyz");
+  assert.ok(!hidden.includes("Abc123def456xyz"), `the second secret's value is masked: ${hidden}`);
+  assert.ok(hidden.includes("password\t:secret ＝[redacted]"), `and both names are kept: ${hidden}`);
+  assert.ok(!redactSecrets("password: token = Abc123def456xyz").includes("Abc123def456xyz"));
+  assert.ok(!redactSecrets("token: password;token=Abc123def456xyz").includes("Abc123def456xyz"));
+  // The same words with no value after the second name have nothing to hide and stay as written.
+  assert.equal(redactSecrets("password\t:secret ＝required"), "password\t:secret ＝required");
+  assert.equal(redactSecrets("Password: required. Token: missing after refresh"), "Password: required. Token: missing after refresh");
+});
+
+test("a Basic or Bearer token does not stop inside a card number (#619)", () => {
+  // The token run "============4111" holds the card's first group; read to its end it would leave 12 digits in clear.
+  for (const scheme of ["Basic", "Bearer"]) {
+    const cut = redactSecrets(`${scheme} ============4111 1111 1111 1111`);
+    assert.ok(!/1111/.test(cut), `no group of the card is left: ${cut}`);
+    assert.ok(cut.includes(`${scheme} [redacted]`), `the token is masked: ${cut}`);
+    const dashed = redactSecrets(`${scheme} ============5500-0000-0000-0004`);
+    assert.ok(!/0000/.test(dashed), `${dashed}`);
+  }
+  // Not a card (the groups fail the Luhn check), so the token ends where its run does and the rest stays.
+  assert.equal(redactSecrets("Basic ============4111 1111 1111 1112"), "Basic [redacted] 1111 1111 1112 [1 secret redacted]");
+  // A token followed by a digit group that is not part of any card number is cut where its run ends.
+  assert.equal(redactSecrets("Bearer abcdefgh12345678 42 items"), "Bearer [redacted] 42 items [1 secret redacted]");
+});
+
+test("every redaction pattern reads a crafted 1 MB text in linear time (#610)", async () => {
+  // Each text is shaped to make one pattern backtrack. On JavaScript's engine six of them did not finish in a
+  // minute: the name=value rule's spaces and its full stops, a long parameter name or field label, and a field
+  // name of capitals or of digits. On the linear-time engine each takes about a second or less.
+  const { done, stoppedIn } = await runLinearTimeCases("redaction");
+  assert.equal(stoppedIn, null, `still running after ${CASE_BOUND_MS} ms: ${stoppedIn}`);
+  assert.ok(done.length > 0);
+  for (const { name, ms } of done) assert.ok(ms < CASE_BOUND_MS, `${name}: ${ms} ms`);
+});
+
+/**
+ * Where these files build a JavaScript regular expression: a literal, `RegExp`, or a string's `match`, `matchAll` or
+ * `search`, which turn a string argument into one: read with the type checker, by the method a call resolves to, as
+ * the linear-time engine has a `matchAll` of its own and a receiver may be `string | undefined`.
+ */
+function javaScriptRegexUses(files: readonly string[]): string[] {
+  const program = ts.createProgram(files, {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    strict: true,
+    noEmit: true,
+    // Node's types, for the files that read the file system or hash: without them an import is typed any and a call on it goes unseen.
+    types: ["node"],
+  });
+  // An import the checker cannot resolve is typed any, and a call on it would go unseen.
+  const errors = ts.getPreEmitDiagnostics(program).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n"));
+  if (errors.length > 0) throw new Error(`the type checker could not read these files: ${errors.join("; ")}`);
+  const checker = program.getTypeChecker();
+  const stringMethod = (call: ts.CallExpression): boolean => {
+    const parent = checker.getResolvedSignature(call)?.declaration?.parent;
+    return parent !== undefined && ts.isInterfaceDeclaration(parent) && parent.name.text === "String" && parent.getSourceFile().hasNoDefaultLib;
+  };
+  const found: string[] = [];
+  for (const file of files) {
+    const source = program.getSourceFile(file);
+    if (!source) throw new Error(`the type checker did not read ${file}`);
+    const visit = (node: ts.Node) => {
+      if (node.kind === ts.SyntaxKind.RegularExpressionLiteral) found.push(`${path.basename(file)}: ${node.getText()}`);
+      if (ts.isIdentifier(node) && node.text === "RegExp") found.push(`${path.basename(file)}: RegExp`);
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ["match", "matchAll", "search"].includes(node.expression.name.text) &&
+        stringMethod(node)
+      )
+        found.push(`${path.basename(file)}: ${node.getText()}`);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  return found;
+}
+
+test("redaction, the field checks, the credential check and the ticket, calibration, route and write-policy readers hold no JavaScript regular expression (#610, #618)", () => {
+  // They read text the app controls; a pattern written for JavaScript's backtracking engine would bring back the
+  // time a crafted text can cost. The linear-time engine is linear-regex.ts.
+  const engine = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "engine");
+  const files = [
+    "redact.ts",
+    "sensitive.ts",
+    "credential.ts",
+    "linear-regex.ts",
+    "js-regex.ts",
+    "fingerprint.ts",
+    "calibration.ts",
+    "tickets.ts",
+    "policy.ts",
+  ].map((file) => path.join(engine, file));
+  assert.deepEqual(javaScriptRegexUses(files), [], "these files use JavaScript's engine");
+  // A string's match, matchAll and search turn a string argument into a JavaScript regular expression, with no
+  // literal and no RegExp in sight; split and replace with a string do not. The pair differs only in that.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-regex-guard-"));
+  try {
+    const implicit = path.join(dir, "implicit.ts");
+    const literal = path.join(dir, "literal.ts");
+    // matchAll takes a string at run time; the lib types it as RegExp only, hence the cast.
+    fs.writeFileSync(
+      implicit,
+      'export const a = (t: string, u?: string, v?: "x" | "y") => [t.match("a+"), [...t.matchAll("b+" as never)], t.search("c+"), u?.match("d+"), v?.search("e+")];\n',
+    );
+    fs.writeFileSync(literal, 'export const a = (t: string) => [t.split("a+"), t.replace("b+", ""), t.replaceAll("c+", "")];\n');
+    assert.equal(javaScriptRegexUses([implicit]).length, 5, "a string's match, matchAll and search are found, on an optional string too");
+    assert.deepEqual(javaScriptRegexUses([literal]), [], "a string's split and replace with a string are not");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("every ticket, route, calibration and write-policy pattern reads a crafted 1 MB text in linear time (#618)", async () => {
+  // Each text is shaped to make one pattern's JavaScript form backtrack. Four of them (a heading of colons, a route of
+  // slashes, a route of quotes and a route of hyphenated words) took 0.6 s at 20 KB and 2.6 s at 40 KB on JavaScript's engine,
+  // which is minutes to hours at 1 MB; on the linear-time engine each takes under a second.
+  const { done, stoppedIn } = await runLinearTimeCases("patterns");
+  assert.equal(stoppedIn, null, `still running after ${CASE_BOUND_MS} ms: ${stoppedIn}`);
+  assert.ok(done.length >= 30, `every case ran: ${done.length}`);
+  for (const { name, ms } of done) assert.ok(ms < CASE_BOUND_MS, `${name}: ${ms} ms`);
+});
+
+test("the linear-time engine gives back what JavaScript's would: lookbehinds, lookaheads, \\s, surrogate pairs (#610)", () => {
+  // A lookbehind of one class: the match starts after the character before, never inside the previous match.
+  const word = new LinearRegex("ab", { notAfter: String.raw`\p{L}` });
+  assert.deepEqual(
+    [...word.matchAll("ab xab ab")].map((m) => m.index),
+    [0, 7],
+  );
+  assert.deepEqual(
+    [...word.matchAll("abab")].map((m) => m.index),
+    [0],
+    "the second ab is after a letter the first match holds",
+  );
+  assert.deepEqual(
+    [...word.matchAll("𝐀ab ab")].map((m) => m.index),
+    [5],
+    "a letter outside the BMP is one character before",
+  );
+  // A lookahead as the last group: read, and left out of the match.
+  const ahead = new LinearRegex("pw($|[^a-z])", { lookahead: true });
+  assert.deepEqual(
+    [...ahead.matchAll("pw pwd pw")].map((m) => [m.index, m.end]),
+    [
+      [0, 2],
+      [7, 9],
+    ],
+  );
+  // JavaScript's \s holds the no-break space and the line separator; RE2's \s does not.
+  assert.equal(new LinearRegex(`a[${SPACE}]b`).test("a\u00a0b"), true);
+  assert.equal(new LinearRegex(`a[${SPACE}]b`).test("a\u2028b"), true);
+  assert.equal(new LinearRegex(`a[${SPACE}]b`).test("a_b"), false);
+  // A refused candidate is tried again from the next character, as a backtracking engine would.
+  const evenRun = new LinearRegex("[0-9]+", { accept: ({ text }) => text.length % 2 === 0 });
+  assert.deepEqual(
+    [...evenRun.matchAll("123")].map((m) => m.text),
+    ["23"],
+  );
+  // split keeps the captured separators, as String.prototype.split does.
+  assert.deepEqual(new LinearRegex("(-)").split("a-b"), "a-b".split(/(-)/));
+  assert.deepEqual(new LinearRegex(`[${SPACE}]+`).split(""), "".split(/\s+/));
+  // needs: text with none of them is not read; each must be lower case and fold as its lower case does.
+  assert.equal(new LinearRegex("Bearer x", { ignoreCase: true, needs: ["bearer"] }).test("BEARER X"), true);
+  assert.throws(() => new LinearRegex("x", { needs: ["Bearer"] }), /lower case/);
+  assert.throws(() => new LinearRegex("x", { needs: ["пароль"] }), /lower case/);
 });
 
 test("typed text and URLs are redacted at the log, not just on findings", () => {

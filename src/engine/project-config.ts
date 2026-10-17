@@ -25,12 +25,19 @@
  *
  * The reading is passed in (fsPolicyReader is the real one), so every rule
  * is table-tested in policy-test.
+ *
+ * Three more locks have their rule here but are not keys yet, because the
+ * session reads them from the environment where the browser engine starts
+ * (writeRulesSettings: `writeClassifier`, `refuseDestructiveGets` and
+ * `authPosts`). Until the engine takes them from the attach, a file naming
+ * them is refused as unknown, as ADR 25 asks of a lock that is not enforced.
  */
 import fs from "node:fs";
 import path from "node:path";
 import {
   MAX_READ_POSTS,
   MAX_TRUSTED_EMBEDS,
+  AUTH_POSTS_ENV,
   READ_POSTS_ENV,
   readPostEntries,
   readPostsSetting,
@@ -40,6 +47,7 @@ import {
   WRITE_MODES,
 } from "./policy.js";
 import { EVIDENCE_MODES, type EvidenceMode } from "./capture.js";
+import { REFUSE_DESTRUCTIVE_GETS_ENV, refuseDestructiveGetsSetting, STRICT_WRITES_ENV, writeClassifierSetting, type WriteClassifier } from "./strict-writes.js";
 import { DEDUP_ENV, DEDUP_MODES, type DedupMode } from "./ci.js";
 import { flagName } from "./args.js";
 import { CONFIG_FILE_NAME, MEMORY_DIRNAME } from "./memory-dir.js";
@@ -55,8 +63,12 @@ export const PRESETS = ["strict"] as const;
 export type Preset = (typeof PRESETS)[number];
 
 /** The keys a config file may set; any other key is refused. */
-export const CONFIG_KEYS = ["preset", "maxMode", "requireGuidedPlan", "readPosts", "trustedEmbeds", "dedup", "evidence"] as const;
+export const CONFIG_KEYS = ["preset", "maxMode", "requireGuidedPlan", "readPosts", "trustedEmbeds", "dedup", "evidence", "uploads", "projectsRoot"] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
+
+/** What scout_upload may send: only files it generates, or a file from the project as well (the fence in uploads.ts). */
+export const UPLOAD_MODES = ["fixtures", "project"] as const;
+export type UploadMode = (typeof UPLOAD_MODES)[number];
 
 /**
  * What a config file sets, after its preset is expanded. A key that is
@@ -75,6 +87,15 @@ export interface Policy {
   dedup?: DedupMode;
   /** The most a finding's picture may do: "file" keeps pictures out of the conversation, "off" takes none. */
   evidence?: EvidenceMode;
+  /** The most scout_upload may send: "fixtures" refuses every file from disk, whatever SCENESCOUT_UPLOAD_ALLOW lists. */
+  uploads?: UploadMode;
+  /**
+   * The folder every project folder must sit inside, by its real path: an
+   * attach's projectPath (or the folder it would default to), scout_login's,
+   * scout_scan's, and a command's --project. Read from the operator's file
+   * only, since the project's own file is inside what it limits.
+   */
+  projectsRoot?: string;
 }
 
 /** A policy with where it came from, for every message that names it. */
@@ -87,8 +108,11 @@ export interface LoadedPolicy {
 /** No file: every setting as it is without one. */
 export const NO_POLICY: LoadedPolicy = { policy: {}, sources: [] };
 
+/** What a preset sets: every key but projectsRoot, which names a folder on one machine. */
+export type PresetPolicy = Required<Omit<Policy, "projectsRoot">>;
+
 /** What each preset sets. A key the file sets beside the preset replaces the preset's value for that key. */
-export const PRESET_POLICY: Record<Preset, Required<Policy>> = {
+export const PRESET_POLICY: Record<Preset, PresetPolicy> = {
   strict: {
     maxMode: "observe",
     requireGuidedPlan: true,
@@ -96,6 +120,7 @@ export const PRESET_POLICY: Record<Preset, Required<Policy>> = {
     trustedEmbeds: [],
     dedup: "rule",
     evidence: "file",
+    uploads: "fixtures",
   },
 };
 
@@ -103,6 +128,8 @@ export const PRESET_POLICY: Record<Preset, Required<Policy>> = {
 const EVIDENCE_ORDER: readonly EvidenceMode[] = ["off", "file", "inline"];
 /** Dedup modes from the least that leaves the machine to the most. */
 const DEDUP_ORDER: readonly DedupMode[] = ["rule", "judge"];
+/** Upload modes from the least that reads the disk to the most. */
+const UPLOAD_ORDER: readonly UploadMode[] = ["fixtures", "project"];
 
 const below = <T>(order: readonly T[], a: T, b: T): T => (order.indexOf(a) <= order.indexOf(b) ? a : b);
 
@@ -186,6 +213,11 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
   if (!dedup.ok) return dedup;
   const evidence = oneOf("evidence", EVIDENCE_MODES);
   if (!evidence.ok) return evidence;
+  const uploads = oneOf("uploads", UPLOAD_MODES);
+  if (!uploads.ok) return uploads;
+  const root = obj.projectsRoot;
+  if (root !== undefined && (typeof root !== "string" || !path.isAbsolute(root.trim())))
+    return bad(`"projectsRoot" must be the absolute path of a folder, not ${JSON.stringify(root)}`);
   if (obj.requireGuidedPlan !== undefined && typeof obj.requireGuidedPlan !== "boolean") return bad(`"requireGuidedPlan" must be true or false`);
   const readPosts = list("readPosts", MAX_READ_POSTS, (entries) => readPostEntries(entries).rejected);
   if (!readPosts.ok) return readPosts;
@@ -200,6 +232,8 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
     trustedEmbeds: trustedEmbeds.value,
     dedup: dedup.value,
     evidence: evidence.value,
+    uploads: uploads.value,
+    projectsRoot: typeof root === "string" ? path.resolve(root.trim()) : undefined,
   };
   for (const [k, v] of Object.entries(set)) if (v !== undefined) (base as Record<string, unknown>)[k] = v;
   return { ok: true, policy: base };
@@ -237,6 +271,9 @@ export function tightenPolicy(a: Policy, b: Policy): Policy {
     out.trustedEmbeds = a.trustedEmbeds && b.trustedEmbeds ? intersect(b.trustedEmbeds, a.trustedEmbeds, embedKey) : (a.trustedEmbeds ?? b.trustedEmbeds);
   if (a.dedup || b.dedup) out.dedup = a.dedup && b.dedup ? below(DEDUP_ORDER, a.dedup, b.dedup) : (a.dedup ?? b.dedup);
   if (a.evidence || b.evidence) out.evidence = a.evidence && b.evidence ? below(EVIDENCE_ORDER, a.evidence, b.evidence) : (a.evidence ?? b.evidence);
+  if (a.uploads || b.uploads) out.uploads = a.uploads && b.uploads ? below(UPLOAD_ORDER, a.uploads, b.uploads) : (a.uploads ?? b.uploads);
+  // The operator's only: withProjectPolicy refuses a project's file that sets it.
+  if (a.projectsRoot) out.projectsRoot = a.projectsRoot;
   return out;
 }
 
@@ -262,14 +299,34 @@ export const fsPolicyReader: PolicyReader = {
     }
   },
   read: (file) => fs.readFileSync(file, "utf8"),
-  realpath: (file) => {
-    try {
-      return fs.realpathSync(file);
-    } catch {
-      return path.resolve(file);
-    }
-  },
+  realpath: (file) => realOrWhereItLeads(file, 0),
 };
+
+/**
+ * A path's real path; for a link whose target is not there yet, where it
+ * would lead, so projectsRoot judges a dangling link by its target rather
+ * than by its own name. Anything else that cannot be resolved is its path as
+ * written.
+ */
+function realOrWhereItLeads(file: string, hops: number): string {
+  try {
+    // native: it expands a Windows short name (PROGRA~1), which the JavaScript one leaves as written.
+    return fs.realpathSync.native(file);
+  } catch {
+    const at = path.resolve(file);
+    let link: string | null = null;
+    try {
+      link = fs.lstatSync(at).isSymbolicLink() ? fs.readlinkSync(at) : null;
+    } catch {
+      // Not there: the real path of the folder it would be in, with its name.
+      const up = path.dirname(at);
+      return up === at ? at : path.join(realOrWhereItLeads(up, hops), path.basename(at));
+    }
+    // A relative target is read from the link's real folder, as the system reads it, so `..` cannot step back into the root.
+    // A chain of dangling links is followed for 40 links, as far as Linux follows one.
+    return link !== null && hops < 40 ? realOrWhereItLeads(path.resolve(realOrWhereItLeads(path.dirname(at), hops + 1), link), hops + 1) : at;
+  }
+}
 
 /**
  * The operator's config: the file CONFIG_ENV names (which must exist), else
@@ -319,7 +376,133 @@ export function withProjectPolicy(
   if (launch.sources.some((s) => fsx.realpath(s) === real)) return { ok: true, loaded: launch };
   const project = readOne(file, fsx);
   if (!project.ok) return project;
+  if (project.loaded.policy.projectsRoot !== undefined)
+    return {
+      ok: false,
+      error: `${file}: "projectsRoot" is read from the operator's config only (${CONFIG_ENV}, or the directory the server or command starts in), since the project folder is what it limits`,
+    };
   return { ok: true, loaded: { policy: tightenPolicy(launch.policy, project.loaded.policy), sources: [...launch.sources, file] } };
+}
+
+/**
+ * A folder's real path, for a folder that may not exist yet: the nearest
+ * folder above it that does is resolved through its links, and the rest is
+ * joined on as written.
+ */
+function realFolder(dir: string, fsx: PolicyReader): string {
+  const rest: string[] = [];
+  for (let at = path.resolve(dir); ;) {
+    if (fsx.exists(at)) return path.join(fsx.realpath(at), ...rest.reverse());
+    const up = path.dirname(at);
+    if (up === at) return path.join(at, ...rest.reverse());
+    rest.push(path.basename(at));
+    at = up;
+  }
+}
+
+/** Whether `dir` is `root` or inside it; both real paths. Windows compares without case, as it opens them. */
+function inside(root: string, dir: string): boolean {
+  const rel = process.platform === "win32" ? path.relative(root.toLowerCase(), dir.toLowerCase()) : path.relative(root, dir);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/**
+ * Why a project folder is refused, or null: the config's projectsRoot, when
+ * it sets one, must hold the folder by its real path, so a link inside the
+ * root that leads out of it is outside it. With no projectsRoot, every folder
+ * is allowed, as without a config.
+ */
+export function projectFolderRefusal(loaded: LoadedPolicy, dir: string, fsx: PolicyReader): string | null {
+  const root = loaded.policy.projectsRoot;
+  if (!root) return null;
+  const real = realFolder(dir, fsx);
+  if (inside(realFolder(root, fsx), real)) return null;
+  return refusalText(loaded, [
+    {
+      key: "projectPath",
+      why: `the project folder ${path.resolve(dir)}${real === path.resolve(dir) ? "" : ` (really ${real})`} is outside the config's projectsRoot ${root}: name a project folder inside it`,
+    },
+  ]);
+}
+
+/**
+ * Why scout_upload, or a run plan's upload step (its path from
+ * planUploadOptions), may not send the file from disk it names, or null.
+ * Under `uploads: "fixtures"` only a generated file may be sent: a file from
+ * disk is refused, whatever SCENESCOUT_UPLOAD_ALLOW lists. Anything else is
+ * left to the upload fence (uploads.ts) as without a config.
+ */
+export function uploadRefusal(loaded: LoadedPolicy, filePath: string | undefined): string | null {
+  if (loaded.policy.uploads !== "fixtures" || filePath === undefined) return null;
+  return refusalText(loaded, [
+    {
+      key: "filePath",
+      why: `uploads "fixtures" allows only generated files, so "${filePath}" is not sent: upload a fixture kind (pdf, png, txt, csv, json) instead`,
+    },
+  ]);
+}
+
+/**
+ * The write-judgement locks a config file will set once the browser engine
+ * takes them from the attach, rather than reading its environment itself.
+ * Until then they are not keys: parsePolicy refuses them as unknown.
+ */
+export interface WriteRulesPolicy {
+  /** The least strict classifier any session judges writes with: "strict" turns it on whatever SCENESCOUT_STRICT_WRITES says. */
+  writeClassifier?: WriteClassifier;
+  /** true: page loads whose address is a destructive command are refused in observe and read-only, whatever SCENESCOUT_REFUSE_DESTRUCTIVE_GETS says. */
+  refuseDestructiveGets?: boolean;
+  /** The only POSTs that may count as signing in. SCENESCOUT_AUTH_POSTS may narrow it. [] allows none. */
+  authPosts?: string[];
+}
+
+/** The sign-in allowlist a session judges by: its entries, and whether a POST must also look like a sign-in (policy.ts isAuthExempt). */
+export interface AuthPostsSetting {
+  entries: string[];
+  andSignInPath: boolean;
+}
+
+/**
+ * The write-judgement settings a session runs with: the file's, then the
+ * environment's, where the stricter of the two wins.
+ *
+ * - `writeClassifier` and `refuseDestructiveGets` are on when either turns
+ *   them on; neither can turn off what the other turned on.
+ * - `authPosts`: the file's list, narrowed to the entries
+ *   SCENESCOUT_AUTH_POSTS also names when it is set; with no file list, the
+ *   environment's as before; null when neither sets one (the path rule).
+ * - While a guided plan is open (`guided`), a POST must be both listed and
+ *   look like a sign-in to the path rule, so an operator's stricter list stays
+ *   strict, and the list cannot let out a POST the path rule would refuse.
+ *   With no list, the path rule decides, as before.
+ *
+ * Throws, naming the variable, on an environment value strict-writes.ts
+ * cannot read, as the attach does today.
+ */
+export function writeRulesSettings(
+  file: WriteRulesPolicy,
+  env: Record<string, string | undefined>,
+  guided: boolean,
+): { writeClassifier: WriteClassifier; refuseDestructiveGets: boolean; authPosts: AuthPostsSetting | null; notes: string[] } {
+  const notes: string[] = [];
+  const envClassifier = writeClassifierSetting(env);
+  const envGets = refuseDestructiveGetsSetting(env);
+  const writeClassifier: WriteClassifier = file.writeClassifier === "strict" || envClassifier === "strict" ? "strict" : "standard";
+  if (file.writeClassifier === "standard" && envClassifier === "strict")
+    notes.push(`writeClassifier "strict": ${STRICT_WRITES_ENV} is stricter than the config's "standard"`);
+  const refuseDestructiveGets = file.refuseDestructiveGets === true || envGets;
+  if (file.refuseDestructiveGets === false && envGets) notes.push(`refuseDestructiveGets: ${REFUSE_DESTRUCTIVE_GETS_ENV} is stricter than the config's false`);
+  const fromEnv = readPostsSetting(undefined, env[AUTH_POSTS_ENV]);
+  let entries: string[] | null = null;
+  if (file.authPosts) {
+    entries = [...file.authPosts];
+    if (fromEnv.length > 0) {
+      entries = intersect(fromEnv, file.authPosts, readPostKey);
+      const dropped = fromEnv.filter((e) => !entries!.includes(e));
+      if (dropped.length > 0) notes.push(`${AUTH_POSTS_ENV} entries the config does not list were left out: ${quoted(dropped)}`);
+    }
+  } else if (fromEnv.length > 0) entries = fromEnv;
+  return { writeClassifier, refuseDestructiveGets, authPosts: entries === null ? null : { entries, andSignInPath: guided }, notes };
 }
 
 /** What an attach or a command asked for, before the config is applied. Undefined: not asked. */
@@ -343,7 +526,7 @@ export interface EffectiveSettings {
 
 /** One argument the config refused, and why. */
 export interface Refusal {
-  key: keyof AskedSettings;
+  key: keyof AskedSettings | "projectPath" | "filePath";
   why: string;
 }
 
@@ -519,6 +702,9 @@ export function configureCommand(
 ): { ok: true; mode: WriteMode; dedup?: DedupMode; note: string; readPostsEnv?: string } | { ok: false; error: string } {
   const launch = readLaunchPolicy(env, launchDir, fsx);
   if (!launch.ok) return launch;
+  // Before the project's own file is read: a folder outside the root is not the operator's to read from.
+  const outside = projectFolderRefusal(launch.loaded, projectDir, fsx);
+  if (outside) return { ok: false, error: outside.replace(/ Do not retry with a looser setting\.$/, "") };
   const loaded = withProjectPolicy(launch.loaded, projectDir, fsx);
   if (!loaded.ok) return loaded;
   const applied = applyToCommand(loaded.loaded, env, args, options);

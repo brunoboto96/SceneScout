@@ -34,7 +34,7 @@ import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "../en
 import { RECORD_MAX_FRAMES } from "../engine/replay.js";
 import { describePace, normalizePace } from "../engine/settle.js";
 import { formatScan, scanProject } from "../scan.js";
-import { fsPolicyReader, policyNote, refusalText, resolveSettings, withProjectPolicy } from "../engine/project-config.js";
+import { fsPolicyReader, policyNote, projectFolderRefusal, refusalText, resolveSettings, withProjectPolicy } from "../engine/project-config.js";
 import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, holdGuidedPlan, type CheckArea } from "../engine/guided.js";
 import { AREA_LABEL } from "../engine/guided-words.js";
 import { nowSentence } from "../engine/progress.js";
@@ -68,6 +68,7 @@ import {
   settleGuidedCall,
   guidedSessions,
   operatorPolicy,
+  sessionPolicy,
   callWork,
   CLOSE_WORK_WAIT_MS,
   flushAfterClose,
@@ -141,13 +142,16 @@ export async function projectFolderFor(url: string, given: string | undefined) {
   }
   const userDirsFile = path.join(os.homedir(), ".config", "user-dirs.dirs");
   const userDirs = process.platform === "linux" && fs.existsSync(userDirsFile) ? fs.readFileSync(userDirsFile, "utf8") : undefined;
-  return chooseProjectFolder({
+  const folder = chooseProjectFolder({
     given,
     workspace,
     url,
     home: { platform: process.platform, homedir: os.homedir(), env: process.env, userDirs },
     exists: fs.existsSync,
   });
+  // The operator's projectsRoot holds whichever folder was chosen, the default included (engine/project-config.ts).
+  const outside = "dir" in folder ? projectFolderRefusal(operatorPolicy, folder.dir, fsPolicyReader) : null;
+  return outside ? { refused: outside } : folder;
 }
 
 /**
@@ -207,6 +211,8 @@ export function registerSessionTools(): void {
     },
     serializedControl(async ({ projectPath }: { projectPath: string }) => {
       try {
+        const outside = projectFolderRefusal(operatorPolicy, projectPath, fsPolicyReader);
+        if (outside) return errorText(new Error(`scout_scan ${outside}`));
         return text(formatScan(scanProject(projectPath)), activeName);
       } catch (err) {
         return errorText(err);
@@ -218,7 +224,7 @@ export function registerSessionTools(): void {
     "scout_attach",
     {
       description:
-        "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' blocks EVERY request that is not a GET (login and token refresh excepted, and POSTs the user named in readPosts) — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
+        "Launch a browser and attach to a running web app. First attach in this conversation and you have read neither the SceneScout skill nor scout_playbook? Call scout_playbook before this. Write policy is enforced at the NETWORK layer: mode='observe' lets out only GET, HEAD and OPTIONS, plus signing in, signing out and token refresh, and POSTs the user named in readPosts; every other request is blocked — choose it for a target that holds real data, where even an ordinary form submission would create a record; mode='read-only' (default) blocks destructive-labeled elements AND all PUT/PATCH/DELETE + destructive POSTs, but lets ordinary form POSTs through; mode='safe-write' allows creating data and permits updates/deletes ONLY on resources this session created (use when the user wants create/edit flows tested); mode='destructive' allows everything — ONLY when the user explicitly confirmed a disposable/seeded environment. Pass `role` to sign in with a login the user saved by `scenescout login <url> --role <name>`, or a Playwright storage-state JSON as storageStatePath. Pass `session` to keep MULTIPLE roles alive at once (one browser each, genuinely concurrent) for collaboration testing — target each directly with every tool's `session` param, or use scout_session to set which one is the default; coverage and findings merge into one project memory.",
       inputSchema: {
         url: z.string().describe("Base URL of the running app, e.g. http://localhost:3000"),
         projectPath: z
@@ -536,6 +542,9 @@ export function registerSessionTools(): void {
             actionTimeoutMs,
             navTimeoutMs,
             memoryStore: store,
+            // Set as the old session closes, so the session's uploads follow this attach's config (engine/project-config.ts)
+            // from then on, also when a later step of the attach fails; a refusal before that leaves the old session's.
+            onSessionBegins: () => sessionPolicy.set(eng, config.loaded),
           });
           // Put the session on the board now, so the live view shows it before its
           // first tool call. liveLine() needs the port, so the server is awaited

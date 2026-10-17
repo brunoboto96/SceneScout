@@ -24,7 +24,10 @@ import {
   NO_POLICY,
   parsePolicy,
   PRESET_POLICY,
+  projectFolderRefusal,
   readLaunchPolicy,
+  uploadRefusal,
+  writeRulesSettings,
   refusalText,
   resolveSettings,
   tightenPolicy,
@@ -976,6 +979,23 @@ test("an auth allowlist (SCENESCOUT_AUTH_POSTS) replaces the path rule: only the
   assert.equal(isAuthExempt("observe", "POST", "/api/auth/refresh", false, null), true);
 });
 
+test("in a guided check the auth allowlist only narrows the path rule: a POST must be listed and look like a sign-in (#549)", () => {
+  const app = "https://app.example.com";
+  const listed = authPostsSetting("POST /api/login, POST /api/graphql")!.entries;
+  const exempt = (pathname: string, andSignInPath: boolean) =>
+    isAuthExempt("observe", "POST", pathname, false, { entries: listed, appUrl: app, url: `${app}${pathname}`, andSignInPath });
+  // Listed and a sign-in by its path: out either way.
+  assert.equal(exempt("/api/login", true), true);
+  assert.equal(exempt("/api/login", false), true);
+  // Listed, but no sign-in by its path: the list alone lets it out; in a guided check it does not.
+  assert.equal(exempt("/api/graphql", false), true, "the list replaces the path rule");
+  assert.equal(exempt("/api/graphql", true), false, "a guided check also asks the path rule");
+  // A sign-in by its path, but not listed: refused either way, so the operator's narrower list stays narrow.
+  assert.equal(exempt("/api/auth/refresh", true), false);
+  assert.equal(exempt("/api/auth/refresh", false), false);
+  assert.equal(isAuthExempt("observe", "POST", "/api/auth/refresh", false, null), true, "with no list, the path rule alone");
+});
+
 test("a blocked script request is answered with a refusal; a blocked navigation is dropped", () => {
   assert.equal(answersWithRefusal("fetch"), true);
   assert.equal(answersWithRefusal("xhr"), true);
@@ -1629,12 +1649,13 @@ test("a blocked endpoint is explained once per session; repeats are counted on o
   const first = notices.notice("observe", [beacon, { ...beacon, sig: "POST https://app.test/monitoring/tunnel?key=2" }]);
   assert.match(first, /WRITE-POLICY blocked \(observe\): POST https:\/\/app\.test\/monitoring\/tunnel\?key=1 ×2 \(late/);
   assert.match(first, /NOT an app bug/);
-  assert.match(first, /observe mode blocks every request/);
+  assert.match(first, /observe mode lets out only GET, HEAD and OPTIONS/);
+  assert.doesNotMatch(first, /only a GET\b|not a GET\b/, "the hint does not say only GET leaves");
   assert.match(first, /answered with a 403/);
 
   const second = notices.notice("observe", [beacon, beacon, beacon]);
   assert.match(second, /WRITE-POLICY blocked \(observe\): 3 repeat blocks of 1 known endpoint \(POST https:\/\/app\.test\/monitoring\/tunnel ×3, background\)/);
-  assert.doesNotMatch(second, /NOT an app bug|observe mode blocks|answered with a 403/, "the paragraph is not repeated");
+  assert.doesNotMatch(second, /NOT an app bug|observe mode lets out|answered with a 403/, "the paragraph is not repeated");
   assert.equal(second.trim().split("\n").length, 1, "one line");
 
   const third = notices.notice("observe", [beacon, { sig: "POST https://app.test/api/things", late: false, answered: true }]);
@@ -1642,7 +1663,7 @@ test("a blocked endpoint is explained once per session; repeats are counted on o
   assert.doesNotMatch(third, /api\/things \(late/, "the action's own block is not marked late");
   assert.match(third, /also 1 repeat block of 1 known endpoint/);
   assert.match(third, /explained in full earlier/);
-  assert.doesNotMatch(third, /observe mode blocks/, "the full paragraph is once per rule");
+  assert.doesNotMatch(third, /observe mode lets out/, "the full paragraph is once per rule");
 
   // Nothing blocked, nothing said; a new rule is explained again; a reset starts over.
   assert.equal(notices.notice("observe", []), "");
@@ -2599,6 +2620,7 @@ test("config: the strict preset expands to every lock, and a key beside it repla
     trustedEmbeds: [],
     dedup: "rule",
     evidence: "file",
+    uploads: "fixtures",
   });
   const loosened = parsed('{"preset": "strict", "maxMode": "read-only", "readPosts": ["POST /api/search"]}');
   assert.equal(loosened.maxMode, "read-only");
@@ -2954,4 +2976,175 @@ test("config: check, ci and a first look stop with exit 2 on a --mode above the 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("config: uploads and projectsRoot are checked like every key, and the locks not enforced yet are still unknown keys", () => {
+  const refused: Array<[string, RegExp]> = [
+    ['{"uploads": "none"}', /"uploads" must be one of "fixtures", "project", not "none"/],
+    ['{"projectsRoot": "projects"}', /"projectsRoot" must be the absolute path of a folder, not "projects"/],
+    ['{"projectsRoot": ["/srv/projects"]}', /"projectsRoot" must be the absolute path of a folder/],
+    // Their rule exists (writeRulesSettings), but the browser engine reads them from its environment: a key that did nothing would look like a lock.
+    ['{"writeClassifier": "strict"}', /unknown key "writeClassifier"/],
+    ['{"refuseDestructiveGets": true}', /unknown key "refuseDestructiveGets"/],
+    ['{"authPosts": ["POST /api/login"]}', /unknown key "authPosts"/],
+  ];
+  for (const [text, why] of refused) {
+    const r = parsePolicy(text, "config.json");
+    assert.ok(!r.ok && why.test(r.error), `${text}: ${r.ok ? "taken" : r.error}`);
+  }
+  const root = path.resolve("/srv/projects");
+  assert.deepEqual(parsed(`{"uploads": "project", "projectsRoot": ${JSON.stringify(`${root}${path.sep}`)}}`), { uploads: "project", projectsRoot: root });
+  // The strict preset keeps uploads to fixtures, and a key beside it replaces that.
+  assert.equal(parsed('{"preset": "strict"}').uploads, "fixtures");
+  assert.equal(parsed('{"preset": "strict", "uploads": "project"}').uploads, "project");
+  assert.equal(parsed('{"preset": "strict"}').projectsRoot, undefined, "no preset names a folder");
+});
+
+test("config: uploads fixtures refuses a file from disk, whatever the environment lists; project leaves it to the fence", () => {
+  const fixtures = loadedOf({ uploads: "fixtures" });
+  const refused = uploadRefusal(fixtures, "docs/sample.pdf");
+  assert.match(
+    refused ?? "",
+    /^refused by the SceneScout config \(\/srv\/\.scenescout\/config\.json\): uploads "fixtures" allows only generated files, so "docs\/sample\.pdf" is not sent/,
+  );
+  assert.equal(uploadRefusal(fixtures, undefined), null, "a generated fixture is still sent");
+  // The contrast: the same file under "project", or with no file, goes on to the upload fence as before.
+  assert.equal(uploadRefusal(loadedOf({ uploads: "project" }), "docs/sample.pdf"), null);
+  assert.equal(uploadRefusal(NO_POLICY, "docs/sample.pdf"), null);
+  assert.equal(uploadRefusal(loadedOf(PRESET_POLICY.strict), "docs/sample.pdf") !== null, true, "the strict preset refuses it");
+  // The project's own file can tighten uploads and never loosen them.
+  assert.equal(tightenPolicy({ uploads: "project" }, { uploads: "fixtures" }).uploads, "fixtures");
+  assert.equal(tightenPolicy({ uploads: "fixtures" }, { uploads: "project" }).uploads, "fixtures");
+  assert.equal(tightenPolicy({}, { uploads: "fixtures" }).uploads, "fixtures");
+});
+
+test("config: projectsRoot holds every project folder by its real path, and only the operator's file sets it", () => {
+  const p = (...parts: string[]): string => path.resolve(path.sep, ...parts);
+  const root = p("srv", "projects");
+  // A stand-in disk: the root and one project exist, and a link inside the root leads to the home folder.
+  const real = new Map<string, string>([
+    [p("srv"), p("srv")],
+    [root, root],
+    [p("srv", "projects", "app"), p("srv", "projects", "app")],
+    [p("srv", "projects", "escape"), p("home", "me")],
+    [p("srv", "projects-old"), p("srv", "projects-old")],
+    [p("home"), p("home")],
+    [p("home", "me"), p("home", "me")],
+    [p(), p()],
+  ]);
+  const fsx = { exists: (f: string) => real.has(f), read: () => "", realpath: (f: string) => real.get(f) ?? f };
+  const loaded = loadedOf({ projectsRoot: root });
+  const allowed = [root, p("srv", "projects", "app"), p("srv", "projects", "new-site"), p("srv", "projects", "app", "sub", "..", "web")];
+  for (const dir of allowed) assert.equal(projectFolderRefusal(loaded, dir, fsx), null, dir);
+  const outside = [
+    p("home", "me"),
+    p("srv", "projects-old"),
+    p("srv", "projects", ".."),
+    p("srv", "projects", "escape"),
+    p("srv", "projects", "escape", "deeper"),
+  ];
+  for (const dir of outside) {
+    const why = projectFolderRefusal(loaded, dir, fsx);
+    assert.match(why ?? "", /is outside the config's projectsRoot/, dir);
+  }
+  assert.match(projectFolderRefusal(loaded, p("srv", "projects", "escape"), fsx)!, /\(really .*me\)/, "a link out of the root names where it leads");
+  assert.equal(projectFolderRefusal(NO_POLICY, p("home", "me"), fsx), null, "no root: every folder, as without a config");
+
+  // The operator's file sets it; a project's own file naming one is refused, since the project folder is what it limits.
+  const at = (dir: string): string => path.join(dir, ".scenescout", "config.json");
+  const files = new Map<string, string>([[at(p("srv", "projects", "app")), JSON.stringify({ projectsRoot: p("srv", "projects", "app") })]]);
+  const disk = { exists: (f: string) => files.has(f), read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+  const joined = withProjectPolicy(loaded, p("srv", "projects", "app"), disk);
+  assert.ok(!joined.ok && /"projectsRoot" is read from the operator's config only/.test(joined.error));
+  assert.equal(tightenPolicy({ projectsRoot: root }, {}).projectsRoot, root);
+  assert.equal(tightenPolicy({}, { maxMode: "observe" }).projectsRoot, undefined);
+});
+
+test("config: a command's --project outside projectsRoot stops it before the project's file is read", () => {
+  // Its real path: on macOS the temp folder is reached through a link, which would refuse every folder here for that reason alone.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ss-root-")));
+  try {
+    const launch = path.join(dir, "launch");
+    const root = path.join(dir, "projects");
+    fs.mkdirSync(path.join(launch, ".scenescout"), { recursive: true });
+    fs.mkdirSync(path.join(root, "app"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "elsewhere", ".scenescout"), { recursive: true });
+    fs.writeFileSync(path.join(launch, ".scenescout", "config.json"), JSON.stringify({ projectsRoot: root }));
+    // Not valid: had it been read, the refusal would be about it.
+    fs.writeFileSync(path.join(dir, "elsewhere", ".scenescout", "config.json"), "{");
+    const out = configureCommand({}, launch, path.join(dir, "elsewhere"), [], { mode: "read-only" }, fsPolicyReader);
+    assert.ok(!out.ok && /is outside the config's projectsRoot/.test(out.error) && !/Do not retry/.test(out.error), out.ok ? "ran" : out.error);
+    const inRoot = configureCommand({}, launch, path.join(root, "app"), [], { mode: "read-only" }, fsPolicyReader);
+    assert.ok(inRoot.ok, inRoot.ok ? "" : inRoot.error);
+    // A link inside the root that leads out of it is outside it.
+    fs.symlinkSync(path.join(dir, "elsewhere"), path.join(root, "link"), "dir");
+    const linked = configureCommand({}, launch, path.join(root, "link"), [], { mode: "read-only" }, fsPolicyReader);
+    assert.ok(!linked.ok && /is outside the config's projectsRoot/.test(linked.error), linked.ok ? "ran" : linked.error);
+    // A link whose target is not there yet leads out of the root too: it is judged by where it leads, not by its own name.
+    fs.symlinkSync(path.join(dir, "not-yet"), path.join(root, "dangling"), "dir");
+    for (const at of [path.join(root, "dangling"), path.join(root, "dangling", "app")]) {
+      const dangling = configureCommand({}, launch, at, [], { mode: "read-only" }, fsPolicyReader);
+      assert.ok(!dangling.ok && /is outside the config's projectsRoot/.test(dangling.error), `${at}: ${dangling.ok ? "ran" : dangling.error}`);
+    }
+    // A relative target read from the link's real folder: root/out/back leads to elsewhere/../not-there, outside the root,
+    // though read from where the link is written it would be root/not-there.
+    fs.symlinkSync(path.join(dir, "elsewhere"), path.join(root, "out"), "dir");
+    fs.symlinkSync(path.join("..", "not-there"), path.join(dir, "elsewhere", "back"), "dir");
+    const back = configureCommand({}, launch, path.join(root, "out", "back"), [], { mode: "read-only" }, fsPolicyReader);
+    assert.ok(!back.ok && /is outside the config's projectsRoot/.test(back.error), back.ok ? "ran" : back.error);
+    // The contrast: a dangling link whose target would be inside the root is inside it.
+    fs.symlinkSync(path.join(root, "later"), path.join(root, "soon"), "dir");
+    const soon = configureCommand({}, launch, path.join(root, "soon"), [], { mode: "read-only" }, fsPolicyReader);
+    assert.ok(soon.ok, soon.ok ? "" : soon.error);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("write rules: the file and the environment each turn the strict classifier and the destructive-GET refusal on, and neither turns the other's off", () => {
+  const on = { SCENESCOUT_STRICT_WRITES: "1", SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1" };
+  // Nothing set: today's defaults.
+  const none = writeRulesSettings({}, {}, false);
+  assert.deepEqual(none, { writeClassifier: "standard", refuseDestructiveGets: false, authPosts: null, notes: [] });
+  // The file stricter than the environment: on, with the environment unset or off.
+  for (const env of [{}, { SCENESCOUT_STRICT_WRITES: "0", SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "off" }]) {
+    const r = writeRulesSettings({ writeClassifier: "strict", refuseDestructiveGets: true }, env, false);
+    assert.equal(r.writeClassifier, "strict");
+    assert.equal(r.refuseDestructiveGets, true);
+  }
+  // The environment stricter than the file: on, and the note says the file's value lost to it.
+  const envWins = writeRulesSettings({ writeClassifier: "standard", refuseDestructiveGets: false }, on, false);
+  assert.equal(envWins.writeClassifier, "strict");
+  assert.equal(envWins.refuseDestructiveGets, true);
+  assert.match(envWins.notes.join("; "), /writeClassifier "strict": SCENESCOUT_STRICT_WRITES is stricter than the config's "standard"/);
+  assert.match(envWins.notes.join("; "), /refuseDestructiveGets: SCENESCOUT_REFUSE_DESTRUCTIVE_GETS is stricter than the config's false/);
+  // The environment alone: as today.
+  assert.deepEqual(writeRulesSettings({}, on, false), { writeClassifier: "strict", refuseDestructiveGets: true, authPosts: null, notes: [] });
+  // An environment value that cannot be read is an error naming it, as the attach reports it today.
+  assert.throws(() => writeRulesSettings({ writeClassifier: "strict" }, { SCENESCOUT_STRICT_WRITES: "yes" }, false), /SCENESCOUT_STRICT_WRITES must be 1 or 0/);
+});
+
+test("write rules: the file's authPosts is the most the environment may name, and a guided check also asks the path rule", () => {
+  const file = { authPosts: ["POST /api/login", "POST https://idp.example.com/oauth/token"] };
+  // The file alone: its list.
+  assert.deepEqual(writeRulesSettings(file, {}, false).authPosts, { entries: file.authPosts, andSignInPath: false });
+  // The environment narrower than the file: the environment's, since it is within the file's.
+  const narrower = writeRulesSettings(file, { SCENESCOUT_AUTH_POSTS: "post /api/login/" }, false);
+  assert.deepEqual(narrower.authPosts, { entries: ["post /api/login/"], andSignInPath: false });
+  assert.deepEqual(narrower.notes, []);
+  // The environment naming more than the file: what it adds is left out, and said so.
+  const wider = writeRulesSettings(file, { SCENESCOUT_AUTH_POSTS: "POST /api/login, POST /api/graphql" }, false);
+  assert.deepEqual(wider.authPosts?.entries, ["POST /api/login"]);
+  assert.match(wider.notes.join("; "), /SCENESCOUT_AUTH_POSTS entries the config does not list were left out: "POST \/api\/graphql"/);
+  // [] in the file allows none, whatever the environment lists.
+  assert.deepEqual(writeRulesSettings({ authPosts: [] }, { SCENESCOUT_AUTH_POSTS: "POST /api/login" }, false).authPosts?.entries, []);
+  // No file list: the environment's, as today; neither: the path rule.
+  assert.deepEqual(writeRulesSettings({}, { SCENESCOUT_AUTH_POSTS: "POST /api/login" }, false).authPosts, {
+    entries: ["POST /api/login"],
+    andSignInPath: false,
+  });
+  assert.equal(writeRulesSettings({}, {}, true).authPosts, null, "a guided check with no list: the path rule alone, as today");
+  // A guided check keeps the list, and asks the path rule as well, rather than dropping it.
+  assert.deepEqual(writeRulesSettings(file, {}, true).authPosts, { entries: file.authPosts, andSignInPath: true });
+  assert.deepEqual(writeRulesSettings({}, { SCENESCOUT_AUTH_POSTS: "POST /api/login" }, true).authPosts, { entries: ["POST /api/login"], andSignInPath: true });
 });

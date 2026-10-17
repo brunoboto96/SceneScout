@@ -258,6 +258,8 @@ A JSON file a team commits to set what SceneScout may do, which no agent can loo
 | `trustedEmbeds` | a list of `https://host` origins, at most 10 | no limit | The only embedded-frame origins an attach may trust, and the ones it gets when it names none. `[]` allows none |
 | `dedup` | `rule`, `judge` | no limit | The most the dedup setting may be. `rule` keeps the model judge off: `dedup: "judge"` and `--dedup judge` are refused, and `SCENESCOUT_DEDUP=judge` and `ci`'s default are turned down to `rule` |
 | `evidence` | `inline`, `file`, `off` | no limit | The most a finding's picture may do. `file` keeps pictures out of the conversation; `off` takes none. An attach's `evidence` above it is refused, and a default above it is lowered |
+| `uploads` | `fixtures`, `project` | `project` | What `scout_upload` may send. `fixtures` sends only the files it generates: a `filePath`, and a run plan's upload step naming a file, are refused before anything runs, whatever `SCENESCOUT_UPLOAD_ALLOW` lists. `project` leaves it to the [upload fence](Safety-model.md#what-is-written-to-disk), as without a file |
+| `projectsRoot` | an absolute folder | no limit | The folder every project folder must sit inside, by its real path, so a link inside it that leads out is outside it: an attach's `projectPath` (or the folder it would choose when none is given), `scout_login`'s and `scout_scan`'s, `--project` for `check` and `ci`, and the folder a first look runs in. One outside it is refused, naming the folder. Read from the operator's file only: a project's own file that sets it is refused, since the project folder is what it limits |
 
 The presets:
 
@@ -269,8 +271,9 @@ The presets:
 | `trustedEmbeds` | `[]` |
 | `dedup` | `"rule"` |
 | `evidence` | `"file"` |
+| `uploads` | `"fixtures"` |
 
-`strict` is the one-line answer for a team that wants every agent to look only, with nothing named by an argument and nothing sent to a model but the agent's own conversation. A team that needs form submissions sets `"maxMode": "read-only"` beside it.
+`strict` is the one-line answer for a team that wants every agent to look only, with nothing named by an argument, no file from disk uploaded and nothing sent to a model but the agent's own conversation. A team that needs form submissions sets `"maxMode": "read-only"` beside it.
 
 ## Environment variables
 
@@ -323,15 +326,15 @@ The presets:
 | `SCENESCOUT_LOGIN_PASSWORD_SELECTOR` | `login --script` | As `--password-selector` |
 | `SCENESCOUT_LOGIN_OTP_SELECTOR` | `login --script` | As `--otp-selector` |
 | `SCENESCOUT_LOGIN_SUBMIT_SELECTOR` | `login --script` | As `--submit-selector` |
-| `GH_TOKEN` | `export --to github` | The GitHub token, read before `GITHUB_TOKEN`. It must be able to create issues in the repository, and its account to set labels there |
-| `GITHUB_TOKEN` | `export --to github` | The GitHub token, when `GH_TOKEN` is not set |
-| `GITHUB_API_URL` | `export --to github` | The GitHub API's address, for GitHub Enterprise Server (such as `https://github.example.com/api/v3`). Default `https://api.github.com`; GitHub Actions sets it. The same rules as `--jira-url` |
-| `JIRA_EMAIL` | `export --to jira` | The email address of the Atlassian account the API token belongs to |
-| `JIRA_API_TOKEN` | `export --to jira` | The Atlassian API token. The only way to give one |
-| `JIRA_BASE_URL` | `export --to jira` | As `--jira-url` |
+| `GH_TOKEN` | `export --to github`, the server's ticket tools | The GitHub token, read before `GITHUB_TOKEN`. It must be able to create issues in the repository, and its account to set labels there |
+| `GITHUB_TOKEN` | `export --to github`, the server's ticket tools | The GitHub token, when `GH_TOKEN` is not set |
+| `GITHUB_API_URL` | `export --to github`, the server's ticket tools | The GitHub API's address, for GitHub Enterprise Server (such as `https://github.example.com/api/v3`). Default `https://api.github.com`; GitHub Actions sets it. The same rules as `--jira-url` |
+| `JIRA_EMAIL` | `export --to jira`, the server's ticket tools | The email address of the Atlassian account the API token belongs to |
+| `JIRA_API_TOKEN` | `export --to jira`, the server's ticket tools | The Atlassian API token. The only way to give one |
+| `JIRA_BASE_URL` | `export --to jira`, the server's ticket tools | As `--jira-url` |
 | `JIRA_PROJECT_KEY` | `export --to jira` | As `--jira-project` |
-| `JIRA_ISSUE_TYPE` | `export --to jira` | As `--jira-issue-type` |
-| `JIRA_LINK_TYPE` | `export --to jira` | As `--jira-link-type` |
+| `JIRA_ISSUE_TYPE` | `export --to jira`, the server's ticket tools | As `--jira-issue-type` |
+| `JIRA_LINK_TYPE` | `export --to jira`, the server's ticket tools | As `--jira-link-type` |
 | `CLAUDE_CONFIG_DIR` | `install`, `doctor` | Where Claude Code keeps its configuration; the skill goes into its `skills/` folder. Default `~/.claude` |
 | `APPDATA` | `doctor` | On Windows, where Claude Desktop keeps its installed extensions (`Claude\Claude Extensions` inside it). Set by Windows |
 | `LOCALAPPDATA` | `doctor` | On Windows, where the Microsoft Store build of Claude Desktop keeps its data (`Packages\Claude_…`). Set by Windows |
@@ -531,10 +534,23 @@ Clients that list the server's prompts offer these as commands, beside `scout_pl
 | `live` | none | Return the loopback live-view URL for the current session. Where the host can open a URL, it may open that address |
 | `login` | `role` (required), `url` (optional) | Call `scout_login` for that role and wait the way that tool waits. The person signs in in the window it opens. `url` is the app's address when you have it |
 | `check-my-site` | `url` (optional) | Shown as *Check my site*. Call `scout_intake` (with the address when given), follow the guided plan it returns, show progress with `scout_status`, and end with `scout_cards` and the follow-up prompts. Never choose a care level for the person. An address with a user name, password or token in it, or with a space, line break or hidden character, is refused without being repeated |
-| `recheck` | none | Shown as *Re-check after a fix*. Attach in `observe` only, list the open findings with `scout_verify`, re-test each and record its verdict, then show the cards that changed |
+| `recheck` | none | Shown as *Re-check after a fix*. Call `scout_recheck_plan` and follow the plan it returns: it attaches in the care level the findings were found in, never a looser one, with its own `planId` (confirmed again by the person where it writes), lists them with `scout_verify`, re-tests each and records its verdict, then shows the cards that changed |
 | `team-report` | none | Shown as *Make a team report*. Call `scout_team_report` and say where `team-report.html` and its evidence folder are; nothing is sent anywhere |
-| `file-tickets` | `to` (optional) | Shown as *File problems as tickets*. `to` is `github` or `jira`. Files nothing from the chat: show the cards, then give the `scenescout export` command a developer runs (a dry run unless `--yes`), and never ask for a token |
+| `file-tickets` | `to` (optional) | Shown as *File problems as tickets*. `to` is `github` or `jira`. Show the cards and ask which to file and where, preview them with `scout_ticket_preview`, then call `scout_ticket_file`, which files only once the person says yes in the server's own form. Where the form cannot be shown, give the `scenescout export` command instead. Never ask for a token |
 | `is-it-safe` | none | Shown as *Is it safe to run on my live site?*. Reply with the guided safety explainer word for word, calling no tool |
+
+## Desktop extension settings
+
+Claude Desktop asks for these in the extension's settings, and keeps the two marked secret itself. They are only needed to file problems as tickets from the chat (`scout_ticket_preview` and `scout_ticket_file`), they are all optional, and each reaches the server as the environment variable `scenescout export` reads. A setting left empty is no setting. None of them is ever asked for in the chat, shown in a tool's result or written to the project.
+
+| Setting | Secret | Reaches the server as | What it is |
+|---|---|---|---|
+| GitHub token | yes | `GH_TOKEN` | A token that can create issues in the repository the person files into |
+| Jira site address | no | `JIRA_BASE_URL` | Such as `https://your-site.atlassian.net` |
+| Jira account email | no | `JIRA_EMAIL` | The email of the Atlassian account the API token belongs to |
+| Jira API token | yes | `JIRA_API_TOKEN` | An Atlassian API token |
+
+With the plugin in Claude Code, set the same variables in the environment Claude Code starts in.
 
 ## Claude Code mod settings
 

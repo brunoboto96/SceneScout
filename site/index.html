@@ -1354,7 +1354,7 @@
                 <button class="copy" type="button" data-copy="npx -y scenescout http://localhost:3000" aria-label="Copy the command">Copy</button>
               </div>
               <span class="try-note"
-                >It only reads pages, changes nothing, and writes a short report to <code>scenescout-report/</code> in the current folder.</span
+                >It opens pages and follows links, sends no form, and writes a short report to <code>scenescout-report/</code> in the current folder.</span
               >
             </div>
             <div class="actions">
@@ -1767,19 +1767,19 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
             <div class="zone gilded sanctuary">
               <span class="name">Sanctuary</span>
               <code>observe</code>
-              <p>Reads only.</p>
-              <span class="def">Default for a first look, for the check, and for an agent on a remote site</span>
+              <p>Page loads and signing in. Forms that post are refused.</p>
+              <span class="def">Default for a first look, and for an agent on a remote site</span>
             </div>
             <div class="zone gilded town">
               <span class="name">Town</span>
               <code>read-only</code>
-              <p>Forms can be sent; nothing existing is changed or deleted.</p>
-              <span class="def">Default for an agent on a local app</span>
+              <p>Forms can be sent, and can create a record or change one. Deletes and edits by PUT or PATCH are refused.</p>
+              <span class="def">Default for the check, and for an agent on a local app</span>
             </div>
             <div class="zone gilded frontier">
               <span class="name">Frontier</span>
               <code>safe-write</code>
-              <p>Creates records, and changes only the ones it created.</p>
+              <p>Creates records. PUT, PATCH and DELETE only on the ones it created.</p>
             </div>
             <div class="zone gilded wilds">
               <span class="name">The Wilds</span>
@@ -1788,7 +1788,8 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
             </div>
           </div>
           <p class="safe-note">
-            Only test sites you own or are allowed to test.
+            Only HTTP is checked: messages over a WebSocket are not, and a link that acts when opened, such as an unsubscribe link, is followed. Only test sites
+            you own or are allowed to test.
             <a href="https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Safety-model.md">How the safety model works</a>.
           </p>
         </div>

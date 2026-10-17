@@ -17,6 +17,11 @@
         <input type="hidden" name="title" value="another thing" />
         <button type="submit" data-testid="form-post-only-submit">Add thing by POST only</button>
       </form>
+      <!-- A form posting to an address that reads as a command (/things/9/cancel): a GET of it is one a server may act on. -->
+      <form method="post" action="/things/9/cancel">
+        <input type="hidden" name="reason" value="smoke" />
+        <button type="submit" data-testid="form-post-command-submit">Cancel thing 9</button>
+      </form>
     </main>
   </body>
 </html>
