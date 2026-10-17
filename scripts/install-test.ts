@@ -761,7 +761,8 @@ test("the plugin and the desktop extension link to what they reach", () => {
   const plugin = JSON.parse(fs.readFileSync(path.join(repoRoot, ".claude-plugin", "plugin.json"), "utf8")) as Record<string, unknown>;
   assert.equal(plugin.privacyPolicyUrl, anchor, "the plugin's privacy link lands on the What it reaches table");
   assert.ok((readManifest().long_description ?? "").includes(anchor), "the extension's description links to it");
-  const guide = fs.readFileSync(path.join(repoRoot, "docs", "guide", "Ways-to-use-it.md"), "utf8");
+  // A Windows checkout ends lines with \r\n; the heading is found on either.
+  const guide = fs.readFileSync(path.join(repoRoot, "docs", "guide", "Ways-to-use-it.md"), "utf8").replace(/\r\n/g, "\n");
   const reach = guide.slice(guide.indexOf("\n## What it reaches\n"));
   assert.ok(reach.length > 1 && guide.includes("\n## What it reaches\n"), "the heading the links name is there");
   const header = reach.split("\n").find((l) => l.startsWith("| |")) ?? "";
