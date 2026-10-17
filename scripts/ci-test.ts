@@ -2221,6 +2221,46 @@ test("every job that runs the browser suite in shards runs each shard it names",
   assert.equal(sharded, 2, "the suite and cross-browser jobs both run the browser suite in shards");
 });
 
+test("test.yml: a browser build is restored only from a cache of the same image, browser and Playwright, and saved only after it installed", () => {
+  // Playwright downloads a different WebKit and Firefox build per Linux release and per macOS version under the same
+  // directory name, so a key without the runner image would hand a build made for the old image to a job on the new
+  // one when ubuntu-latest or macos-latest moves, and skip the download that would have fixed it.
+  const workflow = parseYaml(readText(path.join(REPO, ".github", "workflows", "test.yml"))) as Record<string, any>;
+  let cached = 0;
+  for (const [name, job] of Object.entries(workflow.jobs as Record<string, WorkflowJob>)) {
+    const steps = job.steps ?? [];
+    const install = steps.findIndex((s) => /npx playwright install --with-deps /.test(s.run ?? ""));
+    if (install === -1) continue;
+    cached += 1;
+    const browser = /--with-deps (.+)$/.exec(steps[install].run!.trim())![1];
+    const keyStep = steps.findIndex((s) => s.id === "browser");
+    const restore = steps.findIndex((s) => s.id === "browser-cache");
+    const save = steps.findIndex((s) => (s.uses ?? "").startsWith("actions/cache/save@"));
+    const deps = steps.findIndex((s) => /npx playwright install-deps /.test(s.run ?? ""));
+    const ci = steps.findIndex((s) => s.run === "npm ci");
+    // The version is read from the installed package, so the key step runs after npm ci.
+    assert.ok(ci !== -1 && ci < keyStep && keyStep < restore && restore < install && install < save, `${name}: npm ci, key, restore, install, save`);
+    const keyRun = steps[keyStep].run ?? "";
+    assert.match(keyRun, /playwright=\$\(node -p "require\('playwright\/package\.json'\)\.version"\)/, name);
+    assert.match(keyRun, /image=\$\{ImageOS:-/, `${name}: the key step names the runner image`);
+    assert.match(steps[restore].uses ?? "", /^actions\/cache\/restore@/, name);
+    assert.equal(
+      steps[restore].with?.key,
+      `playwright-\${{ runner.os }}-\${{ steps.browser.outputs.image }}-\${{ runner.arch }}-${browser}-\${{ steps.browser.outputs.playwright }}`,
+      `${name}: the key names the image, the arch, the browser it installs and the Playwright version`,
+    );
+    const miss = "steps.browser-cache.outputs.cache-hit != 'true'";
+    assert.equal(steps[install].if, miss, `${name}: a hit skips the download`);
+    // No always(): a download that failed part-way is never saved.
+    assert.equal(steps[save].if, miss, `${name}: only a build this job installed is saved`);
+    assert.equal(steps[save].with?.key, "${{ steps.browser-cache.outputs.cache-primary-key }}", name);
+    assert.equal(steps[save].with?.path, steps[restore].with?.path, `${name}: saved from where it is restored to`);
+    assert.equal(steps[deps].if, "steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'", name);
+    assert.equal(steps[deps].run?.trim(), `npx playwright install-deps ${browser}`, `${name}: the system libraries of the browser it restored`);
+  }
+  assert.equal(cached, 3, "the docs, suite and cross-browser jobs each install a browser");
+});
+
 test("the same lines compare equal as LF and as CRLF, and one different line does not", () => {
   const lines = "alpha\nbeta\n";
   const crlf = asCrlf(lines);

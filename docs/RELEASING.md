@@ -17,11 +17,16 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
    approval counts as the code-owner review. Its diff is generated and limited
    to the version, the changelog, `plugin.json`, the extension manifest and the
    deleted changeset files.
-4. The workflow runs again on that merge, finds no pending changesets, and
-   publishes to npm, pushes the `vX.Y.Z` tag and creates the GitHub Release.
+4. The workflow runs again on that merge, finds no pending changesets, builds
+   the package from a clean `dist`, publishes it to npm, then pushes the
+   `vX.Y.Z` tag and creates the GitHub Release. The tag and the release are
+   made only once npm has the version, and a version missing from npm is
+   published again by the next run on `main` that finds no pending changesets.
 5. It then builds the Claude Desktop extension bundle from that tag
    (`npm run build && npm run mcpb`, which writes `.mcpb-build/scenescout-X.Y.Z.mcpb`),
-   checks its manifest against the MCPB schema, and attaches it to the release.
+   checks its manifest against the MCPB schema, and attaches it to the release
+   with a `SHA256SUMS` file. A build provenance attestation for the bundle is
+   recorded too: check a download with `gh attestation verify <file> --repo brunoboto96/SceneScout`.
    The manifest follows the MCPB `manifest.json` format, manifest version 0.3.
 
 Nothing is published while the repository variable `NPM_PUBLISH` is anything
@@ -32,15 +37,19 @@ date, so merged changesets stay visible; only the publish step is skipped.
 
 The workflows in [examples/workflows/](../examples/workflows/) name SceneScout
 at one exact release (`@vX.Y.Z`), because the job that holds a model's key
-should run a reviewed version. Dependabot does not read `examples/`, so move
-them by hand after a release, all at once:
+should run a reviewed version. Dependabot reads that folder (it is listed in
+`.github/dependabot.yml`) and opens one grouped pull request that moves the
+SceneScout release and the pinned third-party actions together. To move the
+SceneScout release by hand instead, all at once:
 
 ```bash
 sed -i.bak -E 's#(brunoboto96/SceneScout(/[A-Za-z0-9_-]+)?)@v[0-9]+\.[0-9]+\.[0-9]+#\1@vX.Y.Z#' examples/workflows/*.yml && rm examples/workflows/*.bak
 ```
 
 `qa-test` fails when the examples name more than one release, a moving ref,
-or a release newer than `package.json`.
+or a release newer than `package.json`; `install-test` fails when an example
+pins a third-party action to a different commit than this repository's own
+workflows.
 
 ## Skipping a release run
 

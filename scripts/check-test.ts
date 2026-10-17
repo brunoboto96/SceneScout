@@ -27,8 +27,10 @@ import {
   installPackage,
   installTarget,
   isVersionSpec,
+  NPM_TIMEOUT_MS,
   npmCommand,
   npmInstallArgs,
+  runNpm,
   pinnedTree,
   sameDependencies,
   outDirFor,
@@ -1660,6 +1662,21 @@ test("action: npm is started without a shell, and only a plain version, range or
   assert.throws(() => npmCommand("win32", "C:\\node\\node.exe", () => false), /npm was not found/);
   for (const ok of ["3.10.0", "^3.10", "~3.10.1", "latest", "3.10.0-next.1"]) assert.ok(isVersionSpec(ok), ok);
   for (const bad of ["", "3 && curl x", "3|x", "$(id)", "3;x", "3>x"]) assert.ok(!isVersionSpec(bad), bad);
+});
+
+test("action: an npm call that outlives its limit is stopped and the error says which call and how long", () => {
+  assert.ok(NPM_TIMEOUT_MS >= 60_000 && NPM_TIMEOUT_MS <= 30 * 60_000, "a bound a slow registry fits in, and a hung one does not outlast the job");
+  const hang = ["-e", "setTimeout(() => {}, 30000)"];
+  assert.throws(
+    () => runNpm(process.execPath, hang, { timeoutMs: 200, label: "npm ci" }),
+    (err: Error) => /npm ci did not finish within 1 second/.test(err.message) && /::error/.test(err.message) === false,
+  );
+  // The contrast: a call inside its limit returns, and a failing call keeps its own error.
+  assert.equal(runNpm(process.execPath, ["-e", "process.stdout.write('ok')"], { timeoutMs: 20_000, label: "npm view", encoding: "utf8" }), "ok");
+  assert.throws(
+    () => runNpm(process.execPath, ["-e", "process.exit(3)"], { timeoutMs: 20_000, label: "npm ci" }),
+    (err: Error) => !/did not finish/.test(err.message),
+  );
 });
 
 /** The registry's integrity hash for the stand-in release. */

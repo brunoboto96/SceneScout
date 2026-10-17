@@ -24,8 +24,8 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { check, eventually, failureCount, recordCrash, startFixtureServer, type SmokeContext } from "./smoke/harness.ts";
 import { descendants, extraHandles, type Leftover } from "./smoke/leaks.ts";
-import { declaredTitle, parseShard, pickShard, shardProblems, withoutShard } from "./smoke/shards.ts";
-import { shards } from "./smoke/suites.ts";
+import { declaredTitle, parseShard, pickShard, shardProblems, shardSeconds, TOGETHER, withoutShard } from "./smoke/shards.ts";
+import { shards, suites as allSuites, timings } from "./smoke/suites.ts";
 
 /** Processes still running under this one. `ps` is POSIX; on Windows the check is skipped and says so. */
 function leftovers(): Leftover[] {
@@ -71,9 +71,15 @@ async function main(): Promise<void> {
     .filter((f) => f.endsWith(".ts"))
     .map((f) => declaredTitle(fs.readFileSync(path.join(smokeDir, f), "utf8")))
     .filter((t): t is string => t !== undefined);
-  const problems = shardProblems(shards, files, [["read-only exploration", "cross-run memory, safe-write, uploads"]]);
+  const problems = shardProblems(shards, files, TOGETHER);
   if (problems.length > 0) throw new Error(`The shards in scripts/smoke/suites.ts are not right:\n  ${problems.join("\n  ")}`);
-  const suites = pickShard(shards, parseShard(args));
+  const shard = parseShard(args);
+  // Unsharded, the suites run in the order suites.ts lists them; a shard runs its own, in that same order.
+  const suites = shard ? pickShard(shards, shard) : allSuites;
+  if (shard) {
+    const minutes = (shardSeconds(suites, timings.suites) / 60).toFixed(1);
+    console.log(`Shard ${shard.index}/${shard.count}: ${suites.length} suites, about ${minutes} min on the CI runner they were measured on`);
+  }
   const only = withoutShard(args)[0]?.toLowerCase();
   process.env.SCENESCOUT_ACTION_TIMEOUT_MS ??= SMOKE_ACTION_TIMEOUT_MS;
   // What is open before anything runs (stdio), so what is open at the end can be compared with it.
@@ -105,12 +111,7 @@ async function main(): Promise<void> {
   check("nothing is left open that would keep node running", extra.length === 0, `open: ${extra.join(", ")}`);
   if (ran === 0) {
     // A filter that matches nothing must not read as a pass.
-    console.error(
-      `\nNo suite matched "${only}". Suites: ${shards
-        .flat()
-        .map((s) => s.title)
-        .join(" | ")}`,
-    );
+    console.error(`\nNo suite matched "${only}". Suites: ${allSuites.map((s) => s.title).join(" | ")}`);
     process.exit(1);
   }
   if (failureCount() > 0) {

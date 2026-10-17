@@ -54,7 +54,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc",
     "prepare": "npm run build",
     "setup": "node dist/cli.js install",
     "doctor": "node dist/cli.js doctor",
