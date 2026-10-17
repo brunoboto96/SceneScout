@@ -734,6 +734,8 @@ export function registerExploreTools(): void {
             url: eng.currentUrl,
             state: eng.currentState || "(unknown)",
             session: eng.sessionKey,
+            // The mode it was filed in, so a guided re-check of it never attaches above that (guided.ts recheckSpec).
+            foundInMode: eng.mode,
           });
           if (filed.judgeError) logLine(`dedup judge: ${filed.judgeError}; the rule decided`);
           // In a guided check, the area this session is working on is where the finding was found (its card and scout_cards' filter).

@@ -40,6 +40,7 @@ import {
   DESTRUCTIVE_NOT_OFFERED,
   HELD_BACK,
   PHONE_VIEWPORT,
+  RECHECK_WORDS,
   SIGN_IN_AGAIN,
   SIGN_IN_HEALTH,
   type SignInHealthState,
@@ -48,7 +49,9 @@ import {
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, judgeLifetime, readLifetime, type LifetimeVerdict } from "./expiry.js";
 import { loginCommand, profilePath } from "./profiles.js";
 import { holdsCredential } from "./credential.js";
+import { isNotABug, knownMode, type Finding } from "./memory.js";
 import { secretWordKind } from "./sensitive.js";
+import { unknownIds, verifyWorklist } from "./verify.js";
 
 export { holdsCredential };
 
@@ -122,7 +125,7 @@ export type ConfirmReason = "creates-data" | "forms-on-remote-site";
 
 /** A call the agent makes, in the order the plan lists it. */
 export interface GuidedCall {
-  tool: "scout_login" | "scout_attach" | "scout_tickets" | "scout_session";
+  tool: "scout_login" | "scout_attach" | "scout_tickets" | "scout_session" | "scout_verify";
   args: Record<string, unknown>;
 }
 
@@ -146,6 +149,11 @@ export interface GuidedPlan {
   budget: { minutes: number; pages: number };
   /** With a sign-in: whether the saved one lasts the check, said before it starts. */
   signInHealth?: SignInHealth;
+  /**
+   * Only on a re-check plan (buildRecheckPlan): the findings it re-tests, and
+   * the ones it leaves for another re-check. Its choices then name no area.
+   */
+  recheck?: { ids: string[]; foundIn: Care; leftOut: RecheckLeftOut[] };
 }
 
 /** Whether the saved sign-in lasts a check, in the person's words, and how to sign in again anyway. */
@@ -506,7 +514,8 @@ export function savedSignInHealth(
  * its own choices and id, and the person's confirmation is kept.
  */
 export function withSignInHealth(plan: GuidedPlan, health: SignInHealth | undefined): GuidedPlan {
-  const rebuilt = buildGuidedPlan(plan.choices, plan.planId, health ? { signInHealth: health } : {});
+  const opts = health ? { signInHealth: health } : {};
+  const rebuilt = plan.recheck ? buildRecheckPlan(recheckSpecOf(plan), plan.planId, opts) : buildGuidedPlan(plan.choices, plan.planId, opts);
   return { ...rebuilt, confirm: plan.confirm };
 }
 
@@ -836,12 +845,27 @@ export function guidedPlanText(plan: GuidedPlan): string {
           : "";
     steps.push(`Call ${call.tool} ${JSON.stringify(call.args)}${after}.`);
   }
-  steps.push(
-    `As you start each area, call scout_session {area} with it: ${plan.areas.map((a) => `"${a.area}"`).join(", ")}. Where the care level holds a step back, stop there and say so.`,
-  );
+  if (plan.recheck) {
+    steps.push(
+      `scout_verify lists each problem with its steps. Follow them, then record what you saw with scout_verify {id, verdict, note}: "gone", "present" (still there) or "changed". ` +
+        `A problem whose steps need more than ${CARE_LABEL[plan.choices.care]} allows cannot be checked in this re-check: leave it open, never record it as gone, and tell the person it needs a check that may do more.`,
+    );
+    const looser = plan.recheck.leftOut.filter((l) => l.why === "looser-care").map((l) => l.id);
+    if (looser.length > 0)
+      steps.push(
+        `The problems left for a re-check of their own are not part of this plan: re-test none of them here. If the person asks for them, call scout_recheck_plan ${JSON.stringify({ ids: looser })}.`,
+      );
+  } else
+    steps.push(
+      `As you start each area, call scout_session {area} with it: ${plan.areas.map((a) => `"${a.area}"`).join(", ")}. Where the care level holds a step back, stop there and say so.`,
+    );
   steps.push(
     `Stop after at most ${plan.budget.minutes} minutes and ${plan.budget.pages} pages, then write the report with scout_report ${JSON.stringify({ level: plan.level, force: true })} if the limits ended the run, else ${JSON.stringify({ level: plan.level })}.`,
   );
+  if (plan.recheck)
+    steps.push(
+      `Then call scout_cards ${JSON.stringify({ ids: plan.recheck.ids })} and tell the person in plain words which problems are gone, which are still there and which changed.`,
+    );
   lines.push("Then, in order:", ...steps.map((s) => `${(step += 1)}. ${s}`));
   return lines.join("\n");
 }
@@ -851,7 +875,177 @@ export function guidedPlanText(plan: GuidedPlan): string {
  * A session attached with a plan works only on that plan's areas; one attached
  * without a plan may name any area.
  */
-export function areaRefusal(plan: Pick<GuidedPlan, "planId" | "areas"> | undefined, area: CheckArea): string | null {
+export function areaRefusal(plan: Pick<GuidedPlan, "planId" | "areas" | "recheck"> | undefined, area: CheckArea): string | null {
   if (!plan || plan.areas.some((a) => a.area === area)) return null;
+  if (plan.recheck) return `guided plan ${plan.planId} is a re-check: it checks the problems it lists, not an area`;
   return `guided plan ${plan.planId} does not check "${area}": its areas are ${plan.areas.map((a) => `"${a.area}"`).join(", ")}`;
+}
+
+// ---- Re-check after a fix (design 2.7) ----
+//
+// A re-check re-tests findings earlier checks left open, built on verify.ts's
+// worklist. It never attaches above the care level a finding was found in
+// (Finding.foundInMode, the strictest mode it was filed in; none recorded is
+// observe), and it is a new plan with its own id: a confirmation the original
+// check had is never carried over, so a re-check that writes asks again.
+
+/** The care level a finding filed in `mode` is re-checked at most in. None recorded, or observe, is Look only; destructive, never offered, is the loosest a guided check may be. */
+export function careOfMode(mode: WriteMode | undefined): Care {
+  if (mode === "read-only") return "may-submit-forms";
+  if (mode === "safe-write" || mode === "destructive") return "may-create-test-data";
+  return "look-only";
+}
+
+/** A finding a re-check may cover, with the care level it was found in. */
+export interface RecheckCandidate {
+  id: string;
+  title: string;
+  url: string;
+  care: Care;
+}
+
+/** A finding a re-check leaves for another: found in a looser care level than the plan's, or on another site. */
+export interface RecheckLeftOut {
+  id: string;
+  title: string;
+  why: "looser-care" | "other-site";
+  care: Care;
+}
+
+/** What a re-check plan is built from; a kept plan carries enough to rebuild it (recheckSpecOf). */
+export interface RecheckSpec {
+  address: string;
+  /** The care level the re-check runs in: `foundIn`, or stricter where the SceneScout config caps it. */
+  care: Care;
+  /** The care level its findings were found in. */
+  foundIn: Care;
+  signIn: SignIn;
+  ids: string[];
+  leftOut: RecheckLeftOut[];
+}
+
+/**
+ * The open findings a re-check may cover, in verify.ts's order (worst route
+ * first, at most MAX_WORKLIST), each with the care level it was found in.
+ * With `ids`, exactly those that are open; without, every open one but those
+ * the person marked not a bug. With `address`, only findings on its site.
+ * `missing`: ids asked for that are not open.
+ */
+export function recheckCandidates(
+  findings: readonly Finding[],
+  ids?: readonly string[],
+  address?: string,
+): { candidates: RecheckCandidate[]; missing: string[] } {
+  const named = ids !== undefined && ids.length > 0;
+  // One site's findings are chosen before the worklist's cap, so another site's cannot crowd them out.
+  const site = address === undefined ? null : originOf(address);
+  const pool = (named ? findings : findings.filter((f) => !isNotABug(f))).filter((f) => site === null || originOf(f.url) === site);
+  const byId = new Map(findings.map((f) => [f.id, f]));
+  const candidates = verifyWorklist(pool, ids).map((it) => ({
+    id: it.id,
+    title: it.title,
+    url: it.url,
+    care: careOfMode(knownMode(byId.get(it.id)?.foundInMode)),
+  }));
+  return { candidates, missing: named ? unknownIds(findings, ids) : [] };
+}
+
+/**
+ * Which of the candidates one re-check covers, and in what care level.
+ *
+ * - The site: `address`'s origin when given, else the first candidate's (the
+ *   worst route's). Findings on another origin are left for a re-check of
+ *   that site.
+ * - The care level: the strictest any finding on the site was found in, so
+ *   no finding is re-tested above the level it was found in. Findings found
+ *   in a looser level are left for a re-check of their own, which asks the
+ *   person to confirm that level where it needs it.
+ * - The SceneScout config's maxMode caps it further; it only ever lowers it.
+ */
+export function recheckSpec(candidates: readonly RecheckCandidate[], opts: CareLimit & { signIn?: SignIn; address?: string } = {}): Checked<RecheckSpec> {
+  let site: string | null = null;
+  if (opts.address !== undefined) {
+    const checked = checkAddress(opts.address);
+    if (!checked.ok) return checked;
+    site = originOf(checked.value);
+  }
+  site ??= candidates.map((c) => originOf(c.url)).find((o) => o !== null && /^https?:/.test(o)) ?? null;
+  if (site === null) return { ok: false, error: RECHECK_WORDS.none };
+  const onSite = candidates.filter((c) => originOf(c.url) === site);
+  if (onSite.length === 0) return { ok: false, error: opts.address !== undefined ? RECHECK_WORDS.noneOnSite(new URL(site).host) : RECHECK_WORDS.none };
+  const strictest = CARES[Math.min(...onSite.map((c) => CARES.indexOf(c.care)))];
+  const allowed = caresWithin(opts.maxMode);
+  const care = allowed.includes(strictest) ? strictest : allowed[allowed.length - 1];
+  const ids = onSite.filter((c) => c.care === strictest).map((c) => c.id);
+  const leftOut: RecheckLeftOut[] = [
+    ...onSite.filter((c) => c.care !== strictest).map((c) => ({ id: c.id, title: c.title, why: "looser-care" as const, care: c.care })),
+    ...candidates.filter((c) => originOf(c.url) !== site).map((c) => ({ id: c.id, title: c.title, why: "other-site" as const, care: c.care })),
+  ];
+  return { ok: true, value: { address: site, care, foundIn: strictest, signIn: opts.signIn ?? "none", ids, leftOut } };
+}
+
+/** The spec a kept re-check plan was built from, to rebuild it. */
+export function recheckSpecOf(plan: GuidedPlan): RecheckSpec {
+  if (!plan.recheck) throw new Error(`guided plan ${plan.planId} is not a re-check`);
+  const { ids, foundIn, leftOut } = plan.recheck;
+  return { address: plan.choices.address, care: plan.choices.care, foundIn, signIn: plan.choices.signIn, ids, leftOut };
+}
+
+/** A re-check is a quick look: it walks only the pages its findings are on. */
+const RECHECK_THOROUGHNESS: Thoroughness = "quick";
+
+/**
+ * The guided plan for a re-check: attach on the site in the spec's care level
+ * with this plan's id, then scout_verify the findings. It is built
+ * unaccepted like any plan, so a care level that needs the person's
+ * confirmation asks for it again, whatever the original check was given.
+ */
+export function buildRecheckPlan(spec: RecheckSpec, planId: string = newPlanId(), opts: CareLimit & { signInHealth?: SignInHealth } = {}): GuidedPlan {
+  const address = checkAddress(spec.address);
+  if (!address.ok) throw new Error(`buildRecheckPlan was given an address checkAddress refuses: ${address.error}`);
+  if (!caresWithin(opts.maxMode).includes(spec.care) || !CARES.includes(spec.foundIn) || CARES.indexOf(spec.care) > CARES.indexOf(spec.foundIn))
+    throw new Error(`buildRecheckPlan was given care "${String(spec.care)}" for findings found in "${String(spec.foundIn)}"`);
+  if (!SIGN_INS.includes(spec.signIn)) throw new Error(`buildRecheckPlan was given signIn "${String(spec.signIn)}"`);
+  if (spec.ids.length === 0) throw new Error("buildRecheckPlan was given no finding to re-check");
+  const choices: GuidedChoices = { address: address.value, areas: [], signIn: spec.signIn, care: spec.care, thoroughness: RECHECK_THOROUGHNESS };
+  const mode = CARE_MODE[spec.care];
+  const objective = clip(RECHECK_WORDS.objective(spec.ids.length), MAX_OBJECTIVE);
+  const budget = { ...THOROUGHNESS_BUDGET[RECHECK_THOROUGHNESS] };
+  const reason = confirmationReason(choices);
+  const health = spec.signIn === "none" ? undefined : opts.signInHealth;
+  const signsIn = spec.signIn !== "none" && health?.state !== "lasts";
+  const looser = spec.leftOut.filter((l) => l.why === "looser-care");
+  const looserCares = CARES.filter((c) => looser.some((l) => l.care === c));
+  const elsewhere = spec.leftOut.filter((l) => l.why === "other-site").length;
+  const tellPerson = [
+    `${CARE_LABEL[spec.care]}: ${CARE_EXPLAIN[spec.care]}`,
+    RECHECK_WORDS.tellPerson(spec.ids.length, spec.care),
+    ...looserCares.map((c) => RECHECK_WORDS.looserCare(looser.filter((l) => l.care === c).length, c)),
+    ...(elsewhere > 0 ? [RECHECK_WORDS.otherSite(elsewhere)] : []),
+    ...(CARES.indexOf(spec.foundIn) > CARES.indexOf(spec.care) ? [RECHECK_WORDS.capped(spec.care)] : []),
+    ...(health ? [health.sentence] : []),
+    ...(signsIn && spec.signIn !== "none" ? [signInSentence(SIGN_IN_HINT[spec.signIn])] : []),
+    budgetSentence(budget),
+    ...(reason ? [CONFIRM_COMING[reason]] : []),
+  ];
+  const role = spec.signIn === "none" ? {} : { role: INTAKE_ROLE };
+  const calls: GuidedCall[] = [
+    ...(signsIn ? [{ tool: "scout_login" as const, args: { url: address.value, ...role } }] : []),
+    { tool: "scout_attach", args: { url: address.value, mode, ...role, objective, planId } },
+    { tool: "scout_verify", args: { ids: [...spec.ids] } },
+  ];
+  return {
+    planId,
+    choices,
+    mode,
+    level: THOROUGHNESS_LEVEL[RECHECK_THOROUGHNESS],
+    objective,
+    areas: [],
+    confirm: reason ? { reason, sentence: confirmSentence(reason, address.value), accepted: false } : null,
+    tellPerson,
+    calls,
+    budget,
+    ...(health ? { signInHealth: health } : {}),
+    recheck: { ids: [...spec.ids], foundIn: spec.foundIn, leftOut: spec.leftOut.map((l) => ({ ...l })) },
+  };
 }

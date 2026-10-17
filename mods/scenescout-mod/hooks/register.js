@@ -20,10 +20,13 @@ import {
   FEEDBACK_TOOL,
   PANEL_WORDS,
   PLAN_TOOL,
+  RECHECK_TOOL,
   RESULTS_LIMIT,
+  SAVED_TOOL,
   TEAM_REPORT_TOOL,
   afterConfirm,
   afterPlan,
+  afterSavedRun,
   choicesFromDraft,
   endsMainTurn,
   errorSentence,
@@ -31,6 +34,7 @@ import {
   guidedText,
   pictureSvg,
   readCards,
+  readSaved,
   readTeamReport,
   reduce,
   renderGuided,
@@ -156,6 +160,7 @@ async function openPanel($, servers, which) {
   const surfaces = await $.session.surfaces();
   // A first open of the guided panel starts on the tour; where nothing draws there is no tour to show.
   if (which === "guided" && surfaces.length > 0) await maybeStartTour($);
+  if (which === "guided") await loadSaved($, servers);
   if (surfaces.length === 0) {
     const status = (await $.state.get(STATUS)).value ?? { kind: "loading" };
     if (which === "pane") return { text: fallbackText(status) };
@@ -238,15 +243,24 @@ async function sendToClaude($, text) {
 
 /** Build a plan from these choices, then preview its confirmation or start Claude on it. */
 async function buildAndStart($, servers, choices) {
-  await updateWizard($, (w) => ({ ...w, busy: "plan", notice: null }));
-  const result = await callServer($, servers, PLAN_TOOL, { choices });
+  return planAndStart($, servers, "plan", () => callServer($, servers, PLAN_TOOL, { choices }), afterPlan);
+}
+
+/**
+ * Ask the server for a plan (`ask`), then preview its confirmation or start
+ * Claude on it, as `after` reads the answer: a new check, a re-check, or a
+ * saved check run again.
+ */
+async function planAndStart($, servers, busy, ask, after) {
+  await updateWizard($, (w) => ({ ...w, busy, notice: null }));
+  const result = await ask();
   let send;
   let planId = null;
   await updateWizard($, (w) => {
-    const after = afterPlan(w, result);
-    send = after.send;
-    planId = after.wizard.planId;
-    return after.wizard;
+    const next = after(w, result);
+    send = next.send;
+    planId = next.wizard.planId;
+    return next.wizard;
   });
   // The person pressed Start on a plan that needs no form: Claude's attach with it is theirs, so it is not asked about again.
   if (send && planId) await rememberConfirmed($, planId);
@@ -297,6 +311,34 @@ async function perform($, servers, type, payload) {
     }
     case "confirm":
       return confirmPlan($, servers, wizardOf((await $.state.get(WIZARD)).value).planId);
+    case "recheck": {
+      // The server builds the re-check's plan in the care level the problems were found in; Claude is handed only its id.
+      const w = wizardOf((await $.state.get(WIZARD)).value);
+      // On the last check's site: a project that kept findings for several sites re-checks the one whose results these are.
+      const signIn = w.lastChoices?.signIn;
+      const address = w.lastChoices?.address;
+      const args = { ...(typeof signIn === "string" ? { signIn } : {}), ...(typeof address === "string" && address ? { address } : {}) };
+      return planAndStart($, servers, "recheck", () => callServer($, servers, RECHECK_TOOL, args), afterPlan);
+    }
+    case "runSaved":
+      return planAndStart($, servers, "plan", () => callServer($, servers, SAVED_TOOL, { action: "run", name: String(payload.name ?? "") }), afterSavedRun);
+    case "saveCheck": {
+      const w = wizardOf((await $.state.get(WIZARD)).value);
+      if (!w.planId) return;
+      const result = await callServer($, servers, SAVED_TOOL, { action: "save", name: w.saveName, planId: w.planId });
+      const read = readSaved(result);
+      return updateWizard($, (x) =>
+        read.ok ? { ...x, saved: read.saved, saveName: "", notice: { tone: "info", text: read.said } } : { ...x, notice: { tone: "error", text: read.error } },
+      );
+    }
+    case "deleteSaved": {
+      const read = readSaved(await callServer($, servers, SAVED_TOOL, { action: "delete", name: String(payload.name ?? "") }));
+      return updateWizard($, (x) =>
+        read.ok
+          ? { ...x, saved: read.saved, deleting: null, notice: { tone: "info", text: read.said } }
+          : { ...x, deleting: null, notice: { tone: "error", text: read.error } },
+      );
+    }
     case "cards":
       return loadCards($, servers, true);
     case "openCard":
@@ -365,6 +407,20 @@ async function confirmPlan($, servers, planId) {
   });
   if (result?.structuredContent?.accepted === true) await rememberConfirmed($, planId);
   if (send) await sendToClaude($, send);
+}
+
+/**
+ * The project's saved checks, for the welcome. A server that cannot say
+ * where they are (no check open and no workspace) leaves the list as it was,
+ * and says why in the mod's log rather than on the welcome.
+ */
+async function loadSaved($, servers) {
+  const read = readSaved(await callServer($, servers, SAVED_TOOL, { action: "list" }));
+  if (!read.ok) {
+    $.ui.log(`SceneScout: the saved checks could not be listed: ${read.error}`);
+    return;
+  }
+  await updateWizard($, (w) => ({ ...w, saved: read.saved }));
 }
 
 /** The findings as cards, worst first. */

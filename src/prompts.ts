@@ -170,7 +170,8 @@ export const GUIDED_PROMPTS: readonly ListedPrompt[] = [
   {
     name: RECHECK_PROMPT,
     title: PROMPT_TITLE[RECHECK_PROMPT],
-    description: "Check the problems earlier checks left open again, in Look only, and say which are gone, which are still there and which changed.",
+    description:
+      "Check the problems earlier checks left open again, in the care level each was found in and never a looser one, and say which are gone, which are still there and which changed.",
     arguments: [],
   },
   {
@@ -257,11 +258,10 @@ function recheck(): string {
   return [
     `The person picked ${quoted(PROMPT_TITLE[RECHECK_PROMPT])}: ${quoted(ACTION_PROMPT.recheck)}`,
     "",
-    '1. Open the project with scout_attach in mode "observe" (Look only): the site\'s address and the folder SceneScout keeps its notes in, from this conversation, or ask the person for them. Never attach in another mode for a re-check. If the site needs signing in, call scout_login for the role first.',
-    "2. Call scout_verify with no arguments. It lists the problems earlier checks left open, in the order to check them, each with its steps. If there are none, say so in a sentence and stop.",
-    '3. Follow each problem\'s steps, then record what you saw with scout_verify {id, verdict, note}: "gone", "present" (still there) or "changed". A problem whose steps need something saved on the site cannot be checked in Look only: leave it open and tell the person it needs a check that may send forms, which they start with ' +
-      `${quoted(PROMPT_TITLE[CHECK_MY_SITE_PROMPT])}.`,
-    "4. Call scout_cards with the ids you checked, and tell the person in plain words which are gone, which are still there and which changed.",
+    "1. Call scout_recheck_plan with no arguments. If it says no project is open, call it again with address: the site's address from this conversation, or ask the person for it. If the site needs signing in, pass signIn as the person's check used it. If it says there is nothing to check again, say so in a sentence and stop.",
+    `2. Follow the plan it returns as you would a guided check's: tell the person what it says to tell them, then make its calls in order. It runs in the care level the problems were found in, never a looser one. If it needs the person's confirmation, call scout_guided_confirm with its planId: you can ask for that form, you cannot answer it, and a confirmation an earlier check had does not carry over. If they go back, or the form cannot be shown, nothing is checked again: tell them so, in a sentence.`,
+    '3. scout_verify lists each problem with its steps. Follow them, then record what you saw with scout_verify {id, verdict, note}: "gone", "present" (still there) or "changed". A problem whose steps need more than the plan\'s care level allows cannot be checked in it: leave it open, and tell the person it needs a check that may do more.',
+    "4. Call scout_cards with the ids you checked, and tell the person in plain words which are gone, which are still there and which changed. If the plan left problems for a re-check of their own, say so and offer it.",
     "",
     NEVER_A_CREDENTIAL,
   ].join("\n");
