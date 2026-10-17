@@ -888,6 +888,9 @@ async function dedupJudgeEnvCheck(): Promise<void> {
     const [keyless] = await attaches({}, [{}]);
     if (!/⚠ DEDUP JUDGE OFF: the judge needs ANTHROPIC_API_KEY or OPENAI_API_KEY in the server's environment\. The rule decides duplicates\./.test(keyless))
       fail(`SCENESCOUT_DEDUP=judge with no key did not say the judge is off:\n${keyless}`);
+    const [argOnly] = await attaches({ OPENAI_API_KEY: KEY, SCENESCOUT_DEDUP: "rule" }, [{ dedup: "judge" }]);
+    if (/a model judge|is sent to openai/.test(argOnly) || !/dedup: "judge" was not applied[\s\S]*SCENESCOUT_DEDUP=judge/.test(argOnly))
+      fail(`scout_attach {dedup: "judge"} switched the judge on without SCENESCOUT_DEDUP=judge:\n${argOnly}`);
     console.log("✓ SCENESCOUT_DEDUP=judge asks for the judge, an attach's dedup wins over it, and the attach says what the judge sends or why it is off");
   } finally {
     await fixture.close();

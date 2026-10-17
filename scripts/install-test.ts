@@ -69,6 +69,8 @@ import {
   writeRedirectHopsJudged,
   frameUnloadWritesMayGoUnissued,
   closeWaitsForLeavingWrites,
+  awaitsDroppedNavigationErrorPage,
+  droppedNavigationErrorPage,
 } from "../src/browsers.ts";
 
 import { INTAKE_QUESTIONS, introQuestions } from "../src/intake.ts";
@@ -1266,6 +1268,29 @@ test("the focus audit presses the key that reaches buttons and links in that bro
   assert.equal(focusAdvanceKey("webkit", "linux"), "Tab");
   assert.equal(focusAdvanceKey("chromium", "darwin"), "Tab");
   assert.equal(focusAdvanceKey("firefox", "darwin"), "Tab");
+});
+
+test("only Chromium replaces a navigation the policy dropped with its own error page", () => {
+  assert.equal(droppedNavigationErrorPage("chromium"), "chrome-error://");
+  assert.equal(droppedNavigationErrorPage("firefox"), null);
+  assert.equal(droppedNavigationErrorPage("webkit"), null);
+});
+
+test("an action waits for the error page of a navigation it had dropped, and only then", () => {
+  const page = "http://127.0.0.1:4000/form.html";
+  const base = { engine: "chromium" as const, url: page, refusedNavigationAt: 1050, actionStartedAt: 1000 };
+  // The case that left a session on the error page: the navigation failed during this action and the page has not moved yet.
+  assert.equal(awaitsDroppedNavigationErrorPage(base), true);
+  // Refused in the same millisecond the action began still counts as this action's.
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, refusedNavigationAt: 1000 }), true);
+  // Already there: nothing to wait for (the engine goes back from it).
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, url: "chrome-error://chromewebdata/" }), false);
+  // Dropped during an earlier action, or never: this action did not drop one.
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, refusedNavigationAt: 999 }), false);
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, refusedNavigationAt: null }), false);
+  // Firefox and WebKit stay on the page, so waiting would only cost the bound.
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, engine: "firefox" }), false);
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, engine: "webkit" }), false);
 });
 
 test("shared workers are taken from the page in every mode that blocks anything", () => {
@@ -2579,4 +2604,27 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
       floor !== null && (Number(floor[1]) > Number(next.split(".")[0]) || (floor[1] === next.split(".")[0] && Number(floor[2]) >= Number(next.split(".")[1])));
     assert.ok(rangeAdmits(range, next) || startsLater, `AGENTS.md no longer records the Playwright hold, so widen the range ${range} (or restore the line)`);
   }
+});
+
+test("example workflows: Dependabot reads their folder, and their third-party pins match the ones this repository's workflows use", () => {
+  const cfg = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "dependabot.yml"), "utf8")) as {
+    updates: Array<{ "package-ecosystem": string; directories?: string[] }>;
+  };
+  const dirs = cfg.updates.find((u) => u["package-ecosystem"] === "github-actions")?.directories ?? [];
+  assert.ok(dirs.includes("/examples/workflows"), "a copied example would otherwise keep a pin nothing updates");
+  const pins = (text: string) =>
+    new Map([...text.matchAll(/^\s*(?:-\s+)?uses:\s*([\w.-]+\/[\w./-]+)@([0-9a-f]{40})\s+#\s*(v\S+)/gm)].map((m) => [m[1], `${m[2]} ${m[3]}`]));
+  const own = new Map<string, string>();
+  const wfDir = path.join(repoRoot, ".github", "workflows");
+  for (const f of fs.readdirSync(wfDir)) for (const [k, v] of pins(fs.readFileSync(path.join(wfDir, f), "utf8"))) own.set(k, v);
+  const exDir = path.join(repoRoot, "examples", "workflows");
+  let checked = 0;
+  for (const f of fs.readdirSync(exDir)) {
+    for (const [action, pin] of pins(fs.readFileSync(path.join(exDir, f), "utf8"))) {
+      if (!own.has(action)) continue;
+      checked++;
+      assert.equal(pin, own.get(action), `${f}: ${action} is pinned to a release this repository's workflows have moved past`);
+    }
+  }
+  assert.ok(checked >= 2, `the scan found the shared pins: ${checked}`);
 });

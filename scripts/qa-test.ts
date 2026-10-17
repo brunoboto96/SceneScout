@@ -38,6 +38,7 @@ import {
   MAX_FOCUS,
   newerRunFor,
   parseQaCommand,
+  postComment,
   previewUrlFromTemplate,
   pushedShots,
   qaCommentMarkdown,
@@ -783,7 +784,7 @@ test("report stage: posts the results with the artifact's link; a run a newer on
       const body = await runReport({ env: { ...env, GITHUB_API_URL: api }, inputs, log: quiet });
       const post = calls.find((c) => c.method === "POST")!;
       assert.equal(post.url, "/repos/owner/app/issues/7/comments");
-      assert.equal(post.body.body, body);
+      assert.equal(withoutPostKey(post.body.body), body, "what the reader sees is the reply as built");
       assert.match(body!, /actions\/runs\/42\/artifacts\/99/);
 
       const cancelled = () => runReport({ env: { ...env, GITHUB_API_URL: api }, inputs: { ...inputs, result: "cancelled" }, log: quiet });
@@ -857,6 +858,118 @@ test("github client: a server error is retried, a refusal is not, and no call wa
   await assert.rejects(refused("POST", "/y", {}), /HTTP 403/);
   assert.equal(m, 1);
   assert.throws(() => githubClient({ token: "", apiUrl: "" }), /no GitHub token/);
+});
+
+test("github client: a write is retried only when it is idempotent or a lookup shows it did not land", async () => {
+  const mk = (statuses: Array<number | "reset">) => {
+    const calls: string[] = [];
+    let i = 0;
+    const call = githubClient({
+      token: "t",
+      apiUrl: "https://api.example",
+      wait: async () => {},
+      fetchImpl: (async (_u: string, init: RequestInit) => {
+        calls.push(String(init.method));
+        const s = statuses[Math.min(i++, statuses.length - 1)];
+        if (s === "reset") throw new Error("socket hang up");
+        return new Response("{}", { status: s });
+      }) as unknown as typeof fetch,
+    });
+    return { call, calls };
+  };
+  // A write with no declared way to check is sent once, however it failed.
+  const post = mk([502, 200]);
+  await assert.rejects(post.call("POST", "/x", { a: 1 }), /HTTP 502/);
+  assert.deepEqual(post.calls, ["POST"]);
+  const reset = mk(["reset", 200]);
+  await assert.rejects(reset.call("POST", "/x", { a: 1 }), /socket hang up/);
+  assert.deepEqual(reset.calls, ["POST"], "a dropped connection may have landed, so it is not repeated blind");
+  const patch = mk([503, 200]);
+  await assert.rejects(patch.call("PATCH", "/x", { a: 1 }), /HTTP 503/);
+  assert.deepEqual(patch.calls, ["PATCH"]);
+  // The contrast: a read, and a write declared idempotent, are retried.
+  const get = mk([502, 200]);
+  assert.deepEqual(await get.call("GET", "/x"), {});
+  assert.deepEqual(get.calls, ["GET", "GET"]);
+  const idem = mk([502, 200]);
+  assert.deepEqual(await idem.call("POST", "/x", { a: 1 }, { idempotent: true }), {});
+  assert.deepEqual(idem.calls, ["POST", "POST"]);
+  // A write with a lookup: the lookup decides.
+  const landed = mk(["reset", 200]);
+  assert.equal(await landed.call("POST", "/x", { a: 1 }, { landed: async () => true }), null, "it landed, so it is not posted again");
+  assert.deepEqual(landed.calls, ["POST"]);
+  const missed = mk([502, 200]);
+  assert.deepEqual(await missed.call("POST", "/x", { a: 1 }, { landed: async () => false }), {}, "it did not land, so it is sent again");
+  assert.deepEqual(missed.calls, ["POST", "POST"]);
+});
+
+/** A posted comment without the hidden key postComment adds; the key itself must be there, once, as the last line. */
+function withoutPostKey(posted: string): string {
+  const m = /<!-- scenescout-qa-post [0-9a-f-]{36} -->\n$/.exec(posted);
+  assert.ok(m, "the post carries its key as its last line");
+  return posted.slice(0, m.index);
+}
+
+/**
+ * A stand-in for one pull request's comments as GitHub keeps them: a comment's time is GitHub's clock
+ * (`clockMs` from the runner's) cut to the second, and `since` keeps what was made at or after it.
+ * The first POST fails as `failFirst` says, after the comment was made unless `firstLands` is false; `listedAfterWait` holds a new
+ * comment out of the listing until the client has waited once, as a reply still being written is.
+ */
+function commentsApi({ clockMs = 0, failFirst = "reset" as "reset" | 502, firstLands = true, listedAfterWait = false, earlier = [] as string[] } = {}) {
+  const second = (ms: number) => new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(".000Z", "Z");
+  let waited = false;
+  const comments = earlier.map((body, i) => ({ id: i + 1, body, created_at: second(Date.now() + clockMs), early: true }));
+  const posts: string[] = [];
+  const call = githubClient({
+    token: "t",
+    apiUrl: "https://api.example",
+    wait: async () => {
+      waited = true;
+    },
+    fetchImpl: (async (u: string, init: RequestInit) => {
+      const url = new URL(u);
+      if (init.method === "POST") {
+        const body = JSON.parse(String(init.body)).body as string;
+        posts.push(body);
+        if (posts.length > 1 || firstLands) comments.push({ id: comments.length + 1, body, created_at: second(Date.now() + clockMs), early: !listedAfterWait });
+        if (posts.length === 1) {
+          if (failFirst === "reset") throw new Error("socket hang up");
+          return new Response("{}", { status: 502 });
+        }
+        return new Response(JSON.stringify({ id: comments.length }), { status: 201 });
+      }
+      const since = Date.parse(url.searchParams.get("since") ?? "1970-01-01T00:00:00Z");
+      const listed = comments.filter((c) => Date.parse(c.created_at) >= since && (c.early || waited));
+      return new Response(JSON.stringify(listed.slice(0, Number(url.searchParams.get("per_page") ?? 30))), { status: 200 });
+    }) as unknown as typeof fetch,
+  });
+  return { call, posts, comments };
+}
+
+test("post a comment: a reply that landed is not posted twice, and an identical earlier reply never stands in for a new one", async () => {
+  const body = `${COMMENT_MARKER}\nNo QA run: only a pull request's own repository may start one.\n`;
+  // The answer was lost after GitHub made the comment: the lookup finds it, so it is not posted again.
+  for (const failFirst of ["reset", 502] as const) {
+    const lost = commentsApi({ failFirst });
+    await postComment(lost.call, "owner/app", 7, body);
+    assert.equal(lost.posts.length, 1, `${failFirst}: the comment that landed is the only one`);
+    assert.ok(lost.posts[0].startsWith(body), "what the reader sees is the body as given");
+  }
+  // The same words, posted in the same second by another command's job, and this call's POST never
+  // reached GitHub: the earlier comment is not this one, so the reply is sent again.
+  const twin = commentsApi({ earlier: [body], firstLands: false });
+  await postComment(twin.call, "owner/app", 7, body);
+  assert.equal(twin.posts.length, 2, "an earlier identical reply does not count as this one");
+  assert.equal(twin.comments.length, 2, "the earlier reply and this one");
+  // GitHub's clock a few seconds behind the runner's: the comment that landed is still found.
+  const skew = commentsApi({ clockMs: -3_000 });
+  await postComment(skew.call, "owner/app", 7, body);
+  assert.equal(skew.posts.length, 1, "a clock a few seconds apart does not hide the comment that landed");
+  // A reply GitHub lists only a moment later: the lookup runs after the pause, not before it.
+  const slow = commentsApi({ failFirst: 502, listedAfterWait: true });
+  await postComment(slow.call, "owner/app", 7, body);
+  assert.equal(slow.posts.length, 1, "the lookup waits before deciding the comment did not land");
 });
 
 // ── show and compare ────────────────────────────────────────────────────────
@@ -1071,6 +1184,42 @@ test("shots stage: refuses to run beside a key; otherwise pushes the pictures to
       assert.ok(!calls.some((c) => c.method === "PATCH" || c.method === "DELETE"));
     },
   );
+});
+
+test("shots stage: a new branch whose create failed before GitHub made it is created again, not reported as a missing ref", async () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, "shots"));
+  fs.writeFileSync(path.join(dir, "shots", "preview.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 2]));
+  fs.writeFileSync(path.join(dir, "out"), "");
+  process.env.GITHUB_OUTPUT = path.join(dir, "out");
+  const calls: string[] = [];
+  let creates = 0;
+  let branch: string | null = null;
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const fetchImpl = (async (u: string, init: RequestInit) => {
+    const route = new URL(u).pathname;
+    calls.push(`${init.method} ${route}`);
+    if (init.method === "GET" && route.endsWith("/git/ref/heads/scenescout-shots")) return branch ? json(200, { object: { sha: branch } }) : json(404, {});
+    if (route.endsWith("/git/blobs")) return json(201, { sha: "blob1" });
+    if (route.endsWith("/git/trees")) return json(201, { sha: "tree1" });
+    if (route.endsWith("/git/commits")) return json(201, { sha: "commit1" });
+    if (init.method === "POST" && route.endsWith("/git/refs")) {
+      // The first create is answered 502 by a proxy before GitHub made the branch; the second makes it.
+      if (++creates === 1) return json(502, {});
+      branch = "commit1";
+      return json(201, {});
+    }
+    return json(404, {});
+  }) as unknown as typeof fetch;
+  const out = await runShots({
+    env: { GITHUB_REPOSITORY: "owner/app", GITHUB_RUN_ID: "42", RESULTS: dir, GITHUB_API_URL: "https://api.example" },
+    inputs: { "github-token": "test-token" },
+    fetchImpl,
+    log: quiet,
+  });
+  assert.deepEqual(out, { pushed: "preview.png" });
+  assert.equal(creates, 2, "the lookup found no branch, so the create was sent again");
+  assert.equal(branch, "commit1");
 });
 
 test("shots stage: on an existing branch, it builds on the tip and never forces; a moved tip is retried", async () => {
@@ -2069,7 +2218,7 @@ test("reply stage: reads the downloaded check.json, links the run and the artifa
     const body = await runReply({ env, inputs: CHECK_INPUTS, log: quiet });
     const post = calls.find((c) => c.method === "POST")!;
     assert.equal(post.url, "/repos/owner/app/issues/7/comments");
-    assert.equal(post.body.body, body);
+    assert.equal(withoutPostKey(post.body.body), body, "what the reader sees is the reply as built");
     assert.match(body, /\*\*Failed\.\*\*/);
     assert.match(body, /actions\/runs\/900\/artifacts\/77/);
     assert.match(body, /`replay\.html`/);

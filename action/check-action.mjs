@@ -357,13 +357,41 @@ export function sameDependencies(lockRoot, installed) {
   );
 }
 
+/** The longest one npm call may take: a slow registry fits, a hung one cannot hold the job to its own limit. */
+export const NPM_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * execFileSync with a time limit. A call that runs out is killed and fails with a message that names the
+ * call and the limit, which the step prints as its error annotation; any other failure keeps its own error.
+ *
+ * @param {string} file
+ * @param {string[]} args
+ * @param {{ timeoutMs?: number, label?: string, [option: string]: unknown }} [opts] the rest go to execFileSync
+ */
+export function runNpm(file, args, { timeoutMs = NPM_TIMEOUT_MS, label = "npm", ...options } = {}) {
+  try {
+    return execFileSync(file, args, { ...options, timeout: timeoutMs, killSignal: "SIGKILL" });
+  } catch (err) {
+    if (err && typeof err === "object" && err.code === "ETIMEDOUT") {
+      const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+      const span = seconds >= 120 ? `${Math.round(seconds / 60)} minutes` : seconds === 1 ? "1 second" : `${seconds} seconds`;
+      throw new Error(
+        `${label} did not finish within ${span} and was stopped. The registry or the network may be unreachable from this runner; re-run the job, or install scenescout yourself and set the cli input.`,
+      );
+    }
+    throw err;
+  }
+}
+
 function defaultIo() {
   const npm = npmCommand(process.platform, process.execPath);
   return {
-    exec: (args) => execFileSync(npm.file, [...npm.prefixArgs, ...args], { stdio: "inherit" }),
+    exec: (args) => runNpm(npm.file, [...npm.prefixArgs, ...args], { stdio: "inherit", label: `npm ${args[0]}` }),
     // The registry's hash for that exact version, as npm install would check the tarball against.
     integrityOf: (version) =>
-      JSON.parse(execFileSync(npm.file, [...npm.prefixArgs, "view", `scenescout@${version}`, "dist.integrity", "--json"], { encoding: "utf8" }) || "null"),
+      JSON.parse(
+        runNpm(npm.file, [...npm.prefixArgs, "view", `scenescout@${version}`, "dist.integrity", "--json"], { encoding: "utf8", label: "npm view" }) || "null",
+      ),
     tmpDir: process.env.RUNNER_TEMP || os.tmpdir(),
     warn: (message) => console.log(`::warning title=SceneScout dependencies not pinned::${escapeAnnotation(message)}`),
   };

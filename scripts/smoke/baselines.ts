@@ -14,10 +14,17 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_ACTION_TIMEOUT_MS } from "../../dist/engine/limits.js";
 import { decodePng, DIFF_HIGHLIGHT } from "../../dist/engine/png.js";
 import { BROWSER, check } from "./harness.ts";
 
 export const title = "visual baselines (check --baseline)";
+
+/**
+ * For a check whose targets include one the page does not show: capturing it waits out the action limit, so these runs
+ * take the engine's own default rather than the 15 s the smoke runner sets against a loaded machine.
+ */
+const TARGET_MISSING = ["--action-timeout-ms", String(DEFAULT_ACTION_TIMEOUT_MS)];
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cli = path.join(here, "..", "..", "dist", "cli.js");
@@ -264,7 +271,7 @@ export async function run(): Promise<void> {
       path.join(elsewhere, "targets.json"),
       JSON.stringify({ targets: [{ path: "/card.html", element: "testid=not-on-the-page" }, { path: "/walled.html" }, { path: "/gone.html" }] }),
     );
-    const missing = await checkWith("compare", "missing", elsewhere);
+    const missing = await checkWith("compare", "missing", elsewhere, TARGET_MISSING);
     check(
       "a target the page does not show is not captured, filed high, and fails the gate",
       missing.status === 1 &&
@@ -279,7 +286,7 @@ export async function run(): Promise<void> {
       JSON.stringify(missing.results[2]),
     );
     // An update that meets a sign-in wall writes no baseline of the sign-in page: not for one target, and not at all when the crawl met it.
-    const walled = await checkWith("update", "walled", elsewhere);
+    const walled = await checkWith("update", "walled", elsewhere, TARGET_MISSING);
     check(
       "update: a target that sends the browser to sign-in is not captured, and no baseline of the sign-in page is written",
       walled.status === 1 &&

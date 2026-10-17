@@ -20,7 +20,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { escapeAnnotation, inputsFromEnv, setOutputs } from "./check-action.mjs";
-import { checkWorkflowId, COMMENT_MARKER, CONTROL_CHARS, githubClient, inert } from "./qa-action.mjs";
+import { checkWorkflowId, COMMENT_MARKER, CONTROL_CHARS, githubClient, inert, postComment } from "./qa-action.mjs";
 import { fileReader, readZipEntry, zipEntries } from "./zip.mjs";
 
 export { checkWorkflowId };
@@ -442,7 +442,7 @@ export async function runDispatch({
   const workflowUrl = `${server}/${repo}/actions/workflows/${wf}`;
 
   const done = async (body) => {
-    await call("POST", `/repos/${repo}/issues/${pr}/comments`, { body });
+    await postComment(call, repo, pr, body);
     const outputs = {
       download: "false",
       replied: "true",
@@ -571,7 +571,7 @@ export async function runReply({ env = process.env, inputs = inputsFromEnv(), fe
     recording,
     problem: downloadFailed ? "download-failed" : read.problem,
   });
-  await call("POST", `/repos/${repo}/issues/${pr}/comments`, { body });
+  await postComment(call, repo, pr, body);
   return body;
 }
 
@@ -590,9 +590,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process
       const inputs = inputsFromEnv();
       const pr = Number(inputs.pr);
       if (Number.isInteger(pr) && pr > 0)
-        await githubClient({ token: inputs["github-token"], apiUrl: env.GITHUB_API_URL })("POST", `/repos/${repoOf(env)}/issues/${pr}/comments`, {
-          body: failedToFollowMarkdown({ workflow: inputs["check-workflow"], message }),
-        });
+        await postComment(
+          githubClient({ token: inputs["github-token"], apiUrl: env.GITHUB_API_URL }),
+          repoOf(env),
+          pr,
+          failedToFollowMarkdown({ workflow: inputs["check-workflow"], message }),
+        );
     } catch (replyErr) {
       console.log(
         `::error title=SceneScout QA check::${escapeAnnotation(`the failure could not be posted: ${replyErr instanceof Error ? replyErr.message : String(replyErr)}`)}`,
