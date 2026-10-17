@@ -555,7 +555,7 @@ export function registerSessionTools(): void {
             writeStatus(target, "idle", "scout_attach");
           }
           // With the live view running, a frame of each step is held in its memory for the timeline (never on disk).
-          eng.frameHolder = live ? (jpeg) => live?.holdFrame(target, jpeg) ?? null : null;
+          eng.frameHolder = live ? live.frameHolderFor(target) : null;
           // Which plan this session carries out, for scout_session {area}; a new attach starts with no area.
           // A plan no session carries any more is spent, so the next check with it asks the person again.
           // Whether a session already carried the plan: then this attach is part of the same check.

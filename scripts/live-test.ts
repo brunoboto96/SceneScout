@@ -3406,6 +3406,11 @@ test("held frames: bounded in bytes too, whatever their count, and a frame large
   assert.ok(ring.get(b) && ring.get(c));
   assert.equal(ring.put("s", Buffer.alloc(11)), null, "one frame over the whole bound");
   assert.deepEqual(ring.held("s"), { frames: 2, bytes: 8 }, "and it pushed nothing out");
+  // Pushed out by size after 2 steps, not by count after 100: the step's wording must not claim it was 100 steps old.
+  const [line] = annotateFrames([{ at: "a", action: "click", url: "u", frame: a }], ring, "s", false);
+  assert.equal(line.noFrame, LIVE_WORDS.agedOut);
+  assert.doesNotMatch(LIVE_WORDS.agedOut, /older than the last \d+ steps/, "a size eviction is not a count eviction");
+  assert.match(LIVE_WORDS.agedOut, /fewer when the pictures are large/);
 });
 
 test("a step's frame in the feed: held, aged out, never kept, and recorded, each said as itself", () => {
@@ -3431,7 +3436,7 @@ test("a step's frame in the feed: held, aged out, never kept, and recorded, each
   assert.equal(again[0].noFrame, LIVE_WORDS.agedOut, "one pushed out before the close stays aged out");
   assert.equal(annotateFrames(feed, ring, "viewer", false)[1].noFrame, LIVE_WORDS.agedOut, "another session's close is not this one's");
   // Each wording is about a past step; none of them is the live failure, which is for a live page that does not answer.
-  assert.match(LIVE_WORDS.agedOut, /older than the last 100 steps/);
+  assert.match(LIVE_WORDS.agedOut, /older than the frames kept in memory, which are the last 100 steps/);
   assert.match(LIVE_WORDS.agedOut, /record: true/);
   assert.match(LIVE_WORDS.agedOut, /SCENESCOUT_RECORD=on/);
   for (const w of [LIVE_WORDS.agedOut, LIVE_WORDS.droppedOnClose, LIVE_WORDS.notKept, LIVE_WORDS.notKeptRecording, LIVE_WORDS.recordingGone]) {
@@ -3488,6 +3493,20 @@ test("a held frame is served from memory over HTTP, never asked of the disk, and
   } finally {
     await live.stop();
   }
+});
+
+test("held frames: a step still running when its session closes keeps nothing; a new attach under the name holds again", () => {
+  const live = new LiveServer(fakeProvider(["admin"]).provider, () => T0, new FrameRing(5));
+  const holder = live.frameHolderFor("admin");
+  assert.ok(holder(JPEG), "an open session holds its frames");
+  // scout_close drops the frames before the browser closes; work a watchdog let run on may still take a picture after that.
+  live.dropSession("admin");
+  assert.equal(holder(JPEG), null, "a frame taken after the close is not kept");
+  assert.equal(live.heldFor("admin").frames, 0, "nothing of a closed session stays in memory");
+  const again = live.frameHolderFor("admin");
+  assert.ok(again(JPEG), "the session attached again under the same name holds frames again");
+  assert.equal(holder(JPEG), null, "the closed attach's holder stays spent");
+  assert.equal(live.heldFor("admin").frames, 1);
 });
 
 test("open: an attach that asks for the live view opens it every time; the default and the environment, once per server", () => {

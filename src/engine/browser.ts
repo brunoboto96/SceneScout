@@ -1132,7 +1132,8 @@ export class BrowserEngine {
   private async holdFrame(): Promise<{ heldFrame?: string }> {
     if (this.recording || !this.frameHolder) return {};
     const jpeg = await this.liveShot(RECORD_SHOT_TIMEOUT_MS);
-    const key = jpeg ? this.frameHolder(jpeg) : null;
+    // Read again after the picture: a close while it was taken clears the holder.
+    const key = jpeg ? (this.frameHolder?.(jpeg) ?? null) : null;
     return key ? { heldFrame: key } : {};
   }
 

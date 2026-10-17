@@ -21,9 +21,9 @@ export const HELD_FRAMES = 100;
 export const LIVE_WORDS = {
   /** The session's live page gave no picture. */
   liveFailure: "No frame available. The session's page may be closed, or not answering.",
-  /** A past step whose frame was held in memory and has since been pushed out by newer ones. */
+  /** A past step whose frame was held in memory and has since been pushed out by newer ones, by count or by size. */
   agedOut:
-    `No frame for this step: it is older than the last ${HELD_FRAMES} steps, the only ones kept in memory. ` +
+    `No frame for this step: it is older than the frames kept in memory, which are the last ${HELD_FRAMES} steps, or fewer when the pictures are large. ` +
     "Turn on recording to keep every frame (scout_attach {record: true} or SCENESCOUT_RECORD=on).",
   /** A past step whose frame was held in memory and dropped when its session closed. */
   droppedOnClose:

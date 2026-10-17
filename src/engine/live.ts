@@ -640,6 +640,24 @@ export class LiveServer {
     return this.ring.put(session, jpeg);
   }
 
+  /** How many closes each session name has had: a holder handed out before the latest one keeps nothing. */
+  private readonly closes = new Map<string, number>();
+
+  /**
+   * What one attach of `session` holds its steps' frames through. It keeps
+   * nothing once the session has closed: a step a watchdog let run on past
+   * scout_close would otherwise put a frame back after the close dropped them.
+   */
+  frameHolderFor(session: string): (jpeg: Buffer) => string | null {
+    const attach = this.closes.get(session) ?? 0;
+    return (jpeg) => ((this.closes.get(session) ?? 0) === attach ? this.ring.put(session, jpeg) : null);
+  }
+
+  /** How many frames and bytes `session` holds now. */
+  heldFor(session: string): { frames: number; bytes: number } {
+    return this.ring.held(session);
+  }
+
   /** A feed with each step's frame checked against what is still held. */
   private viewerFeed(session: string, limit: number, recording: boolean | undefined): ActivityLine[] {
     return annotateFrames(this.provider.activity(session, limit), this.ring, session, recording === true);
@@ -857,6 +875,7 @@ export class LiveServer {
    * frame under a LIVE badge for as long as the page stayed open.
    */
   dropSession(session: string): void {
+    this.closes.set(session, (this.closes.get(session) ?? 0) + 1);
     this.ring.drop(session);
     this.endStream(session);
   }
