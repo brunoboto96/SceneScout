@@ -1303,6 +1303,16 @@ test("plain steps: each repro action as a person would do it, and the tester's o
     ['select combobox "Status" = archived @ http://app.test/x', 'Choose "archived" in the "Status" list'],
     ['upload the "Attachment" input (accepts .pdf) ← report.pdf (1200 bytes, application/pdf; generated) @ http://app.test/x', 'Attach the file "report.pdf"'],
     ['hover button "Help" @ http://app.test/x', 'Point at the "Help" button'],
+    // A plan names its target by locator; none of that shows in the words.
+    ["plan:select testid=orders-status-filter @ http://app.test/x", 'Choose an option in the "orders status filter" list'],
+    ["plan:click testid=create_order @ http://app.test/x", 'Click the "create order" control'],
+    ["plan:click text=Create order @ http://app.test/x", 'Click "Create order"'],
+    ['plan:click role=button[name="Save"] @ http://app.test/x', 'Click the "Save" button'],
+    ["plan:click role=link[name=Help] @ http://app.test/x", 'Click the "Help" link'],
+    ["plan:type label=Email @ http://app.test/x", 'Type into the "Email" field'],
+    ["plan:hover testid=help-icon @ http://app.test/x", 'Point at the "help icon" control'],
+    ["plan:scroll testid=orders-list @ http://app.test/x", 'Scroll the "orders list" control'],
+    ["plan:scroll down @ http://app.test/x", "Scroll down"],
     ["press Escape @ http://app.test/x", "Press Escape"],
     ["scroll down @ http://app.test/x", "Scroll down"],
     ["back @ http://app.test/x", "Go back to the previous page"],
@@ -1315,6 +1325,17 @@ test("plain steps: each repro action as a person would do it, and the tester's o
     ["write-policy:blocked POST /api/things @ http://app.test/x", null],
   ];
   for (const [line, want] of cases) assert.equal(plainStep(line), want, line);
+  for (const [line] of cases) assert.doesNotMatch(plainStep(line) ?? "", /testid=|text=|label=|role=/, line);
+  // A target the plan's own parser refuses is quoted as it is, never half-read
+  // into words; a role is read in any case, as the plan reads it.
+  const raw: Array<[string, string]> = [
+    ['plan:click role=button[name="Save"][exact] @ http://app.test/x', 'Click role=button[name="Save"][exact]'],
+    ['plan:click role=button[name="Save"] >> nth=1 @ http://app.test/x', 'Click role=button[name="Save"] >> nth=1'],
+    ["plan:click css=.toolbar > button @ http://app.test/x", "Click css=.toolbar > button"],
+    ["plan:click testid= @ http://app.test/x", "Click testid="],
+    ["plan:click role=BUTTON @ http://app.test/x", "Click the unnamed button"],
+  ];
+  for (const [line, want] of raw) assert.equal(plainStep(line), want, line);
 });
 
 test("plain steps: start at the last page the run went to, or at the page the trace began on", () => {
@@ -1472,7 +1493,7 @@ test("the Evidence section: there with a picture or a recorded frame, absent wit
   assert.match(withPictures, /\n## Evidence\n/);
   assert.match(
     withPictures,
-    /### 1\. Saving a thing says it worked when it did not\n\n\*\*Blocks users\*\* · on \/things\/new · finding `0a1b2c3d4e`\n\n!\[What the page showed\]\(recordings\/s1\/finding-0a1b2c3d4e\.png\)/,
+    /### 1\. Saving a thing says it worked when it did not\n\n\*\*Blocks users\*\* · on \/things\/new\n\n<!-- finding 0a1b2c3d4e -->\n\n!\[What the page showed\]\(recordings\/s1\/finding-0a1b2c3d4e\.png\)/,
   );
   assert.match(
     withPictures,
@@ -1625,6 +1646,71 @@ test("the plain part (Summary and Evidence) is the same page, word for word", ()
   );
 });
 
+test("a finding's title with a closing fold tag is text in the folded technical details, and the HTML reads it back as the title", () => {
+  const store = freshStore();
+  const trap = "Save </details> closes early";
+  store.addFinding({ severity: "high", category: "http-error", title: trap, detail: "d", url: "http://app.test/a", state: "/a#1" });
+  store.addFinding({ severity: "low", category: "visual", title: "Save closes nothing early", detail: "d", url: "http://app.test/b", state: "/b#2" });
+  // A "worth a look" entry has its own heading in the same fold.
+  const look = "Spacing </details> off the grid";
+  store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: look,
+    detail: "d",
+    url: "http://app.test/c",
+    state: "/c#3",
+    tier: "worth_a_look",
+    convention: "a 4px scale",
+  });
+  const extras = { routesVisited: 1, routesTotal: 1, designAudits: 0 };
+  const both = generateReport(store, [], extras, { write: false }).markdown;
+  const folded = both.slice(both.indexOf("## Technical details"));
+  assert.ok(!folded.split("\n").some((l) => l.startsWith("#") && l.includes("</details>")), "no raw fold tag from a title in a heading inside the fold");
+  assert.match(folded, /### .* Save &lt;\/details&gt; closes early\n/);
+  assert.match(folded, /### Spacing &lt;\/details&gt; off the grid\n/);
+  // The contrast: the other title, and the document's balance of folds.
+  assert.match(folded, /### .* Save closes nothing early\n/);
+  const opens = (both.match(/<details>/g) ?? []).length;
+  const closes = (both.match(/^\s*<\/details>$/gm) ?? []).length;
+  assert.equal(opens, closes, "every fold the document opens is closed once");
+  const html = buildReplayHtml({ project: "p", at: "2026-01-01T00:00:00.000Z", version: "", sessions: [], markdown: both, evidence: [] });
+  assert.ok(html.includes("<h4>🔴 [HIGH] Save &lt;/details&gt; closes early</h4>"), "report.html shows the title once-escaped");
+  assert.ok(!html.includes("&amp;lt;"), "and never double-escaped");
+  // Unfolded (dev), nothing is escaped: the document has no fold to close.
+  const dev = generateReport(store, [], { ...extras, report: "dev" }, { write: false }).markdown;
+  assert.ok(dev.includes(trap) && dev.includes(`### ${look}`));
+});
+
+test("the Evidence caption names no finding id, and the HTML still hangs the recorded frames under the item", () => {
+  const withPictures = formatPlainSection(plainGoldenInput("both")).join("\n");
+  const evidence = withPictures
+    .slice(withPictures.indexOf("## Evidence"))
+    .split("\n")
+    .filter((l) => !l.startsWith("!["))
+    .join("\n");
+  assert.doesNotMatch(evidence.replace(/<!-- finding [0-9a-f]+ -->/g, ""), /finding|0a1b2c3d4e/, "the visible Evidence text carries no id");
+  assert.match(evidence, /<!-- finding 0a1b2c3d4e -->/);
+  const md = [
+    "## Evidence",
+    "",
+    "### 1. A thing",
+    "",
+    "**Blocks users** · on /things",
+    "",
+    "<!-- finding abc0123456 -->",
+    "",
+    "![What the page showed](recordings/s/0001-click.jpg)",
+    "",
+  ].join("\n");
+  const frame = { id: "abc0123456", frames: [{ at: "2026-01-01T00:00:01.000Z", action: "click", detail: "Save", frame: "recordings/s/0002-click.jpg" }] };
+  const html = renderMarkdown(md, [frame], "");
+  assert.ok(!html.includes("abc0123456") && !html.includes("&lt;!--"), "the comment is not shown");
+  assert.match(html, /0002-click\.jpg/, "the frames recorded before the finding sit under the item");
+  const bare = renderMarkdown(md.replace("<!-- finding abc0123456 -->", ""), [frame], "");
+  assert.doesNotMatch(bare, /0002-click\.jpg/, "without the anchor there is nothing to hang them from");
+});
+
 test("report.html: Summary, Evidence, then Technical details and Steps folded, a picture shown, nothing from the app unescaped", () => {
   const md = [
     "# SceneScout Report",
@@ -1649,7 +1735,9 @@ test("report.html: Summary, Evidence, then Technical details and Steps folded, a
     "",
     "### 1. A <b>thing</b> fails",
     "",
-    "**Blocks users** · on /things · finding `abc0123456`",
+    "**Blocks users** · on /things",
+    "",
+    "<!-- finding abc0123456 -->",
     "",
     "![What the page showed](recordings/s/0001-click.jpg)",
     "",

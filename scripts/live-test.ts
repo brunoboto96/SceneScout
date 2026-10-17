@@ -953,6 +953,43 @@ test("the report panel shows a folded problem's title as the app wrote it, nests
   assert.deepEqual(cells, ["1", "Save a|b fails", "/x"], "an escaped pipe is text in its own cell, not a new column");
 });
 
+test("the report panel hides an Evidence item's finding comment and shows a folded heading's escaped title as the app wrote it", () => {
+  // report.md carries an Evidence item's finding id in a comment no Markdown
+  // viewer shows, and escapes a finding title in a heading inside the folded
+  // technical details. The panel sets text, so it must drop the one and decode
+  // the other. A heading outside a fold is written raw and read raw.
+  const md = [
+    "## Evidence",
+    "",
+    "### 1. Raw &lt; outside",
+    "",
+    "**Blocks users** · on /things",
+    "",
+    "<!-- finding 0a1b2c3d4e -->",
+    "",
+    "## Technical details",
+    "",
+    "<details><summary>For developers</summary>",
+    "",
+    "### 🔴 [HIGH] Save &lt;/details&gt; &amp; close",
+    "",
+    "</details>",
+  ].join("\n");
+  const root = renderLiveReport(md);
+  const all = textOf(root);
+  assert.doesNotMatch(all, /<!--|0a1b2c3d4e/, "the finding comment is not shown");
+  assert.ok(
+    root.children.some((c) => c.tag === "h4" && textOf(c) === "1. Raw &lt; outside"),
+    "a heading outside a fold is not decoded",
+  );
+  const fold = root.children.find((c) => c.tag === "details");
+  assert.ok(fold);
+  assert.ok(
+    fold.children.some((c) => /^h\d$/.test(c.tag) && textOf(c) === "🔴 [HIGH] Save </details> & close"),
+    "the folded heading reads as the title, decoded once",
+  );
+});
+
 test("the report panel shows a recorded picture through the frame route and drops any other picture line", () => {
   // The two regexes are written inside a template literal with doubled
   // backslashes; read them back from the page as the browser gets them.

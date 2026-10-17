@@ -128,13 +128,17 @@ What the page showed for each problem, numbered as in the summary.
 
 ### 1. Saving a thing says it worked when it did not
 
-**Blocks users** · on /things/new · finding `0a1b2c3d4e`
+**Blocks users** · on /things/new
+
+<!-- finding 0a1b2c3d4e -->
 
 ![What the page showed](recordings/s1/finding-0a1b2c3d4e.png)
 
 ### 2. The error hides behind the banner
 
-**Annoying** · on /login · finding `1b2c3d4e5f`
+**Annoying** · on /login
+
+<!-- finding 1b2c3d4e5f -->
 
 ![What the page showed](recordings/s1/0004-click.jpg)
 
@@ -268,13 +272,17 @@ What the page showed for each problem, numbered as in the summary.
 
 ### 1. Saving a thing says it worked when it did not
 
-**Blocks users** · on /things/new · finding `0a1b2c3d4e`
+**Blocks users** · on /things/new
+
+<!-- finding 0a1b2c3d4e -->
 
 ![What the page showed](recordings/s1/finding-0a1b2c3d4e.png)
 
 ### 2. The error hides behind the banner
 
-**Annoying** · on /login · finding `1b2c3d4e5f`
+**Annoying** · on /login
+
+<!-- finding 1b2c3d4e5f -->
 
 ![What the page showed](recordings/s1/0004-click.jpg)
 

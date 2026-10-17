@@ -22,7 +22,16 @@ import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
 import { formatLoadRetries } from "./limits.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
-import { DEFAULT_REPORT_AUDIENCE, escapeTableCell, formatPlainSection, pictureOf, TECHNICAL_HEADING, type PlainRun, type ReportAudience } from "./plain.js";
+import {
+  DEFAULT_REPORT_AUDIENCE,
+  escapeSummaryText,
+  escapeTableCell,
+  formatPlainSection,
+  pictureOf,
+  TECHNICAL_HEADING,
+  type PlainRun,
+  type ReportAudience,
+} from "./plain.js";
 import { formatTicketsPlain, formatTicketsTechnical, ticketSummaryLine, type TicketReportInput } from "./tickets.js";
 import { COLLECTOR_CAP } from "./collector.js";
 import { buildRunRecord, fromRunLine, type RunRecord } from "./from-run.js";
@@ -138,7 +147,7 @@ function projectName(dir: string): string {
  * when there are none. The first bullet names the id, as a finding's does, so
  * the live view hangs the frames recorded around it under the entry.
  */
-function formatWorthALook(items: readonly Finding[], sessionStart: string): string[] {
+function formatWorthALook(items: readonly Finding[], sessionStart: string, folded = false): string[] {
   if (items.length === 0) return [];
   const lines = [
     `## Worth a look (${items.length})`,
@@ -147,7 +156,8 @@ function formatWorthALook(items: readonly Finding[], sessionStart: string): stri
     ``,
   ];
   for (const f of items) {
-    lines.push(`### ${f.title}`, ``);
+    // Inside the fold a title is text, as a finding's is (findingRenderer).
+    lines.push(`### ${folded ? escapeSummaryText(f.title) : f.title}`, ``);
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}${f.foundAt >= sessionStart ? "" : " · seen in an earlier run"}`);
     lines.push(`- **A defect only if** your project uses ${f.convention ?? "a convention the finding does not name"}`);
     if (f.evidence) lines.push(`- **Seen:** \`${f.evidence}\``);
@@ -841,7 +851,7 @@ export function generateReport(
   roleMatrixSection(lines, memory);
   const gaps = gapLedgerSection(lines, memory, extras);
   findingSections(lines, current, historical, extras, now);
-  lines.push(...formatWorthALook(worthALook, memory.sessionStart));
+  lines.push(...formatWorthALook(worthALook, memory.sessionStart, foldsTechnical(extras)));
   resolvedSection(lines, resolved, extras, now);
   runSettingsSections(lines, extras);
   trailingSections(lines, memory, oracleLog, extras, cov);
@@ -1015,7 +1025,9 @@ function gapLedgerSection(lines: string[], memory: MemoryStore, extras: ReportEx
 /** A finding's full entry, written to `lines`: open, or `complete` for a resolved one. */
 function findingRenderer(lines: string[], folded = false): (f: Finding, complete?: boolean) => void {
   const renderFinding = (f: Finding, complete = false): void => {
-    lines.push(complete ? `### 🟢 [COMPLETE] ${f.title}` : `### ${SEVERITY_ICON[f.severity]} [${f.severity.toUpperCase()}] ${f.title}`);
+    // Inside the fold a title is text: a `</details>` in it would close the fold.
+    const title = folded ? escapeSummaryText(f.title) : f.title;
+    lines.push(complete ? `### 🟢 [COMPLETE] ${title}` : `### ${SEVERITY_ICON[f.severity]} [${f.severity.toUpperCase()}] ${title}`);
     lines.push(``);
     if (complete) lines.push(`- **Resolved** (was ${f.severity})`);
     if (!complete && f.regressedAt) lines.push(`- **⟳ REGRESSED:** previously marked resolved, re-found ${f.regressedAt} — the fix did not hold`);

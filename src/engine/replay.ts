@@ -397,7 +397,6 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
     if (!para.length) return;
     const text = para.join(" ");
     out.push(`<p>${inline(text)}</p>`);
-    if (item === "head") itemId = /· finding `([0-9a-f]+)`$/.exec(text)?.[1] ?? itemId;
     para = [];
   };
   const closeItem = (): void => {
@@ -445,7 +444,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
         out.push(`<article class="ev" data-testid="report-evidence-item"><div class="ev-head">`);
         item = "head";
       }
-      out.push(`<h${h}${anchor && !open.includes("part") ? ` id="${anchor}"` : ""}>${inline(m[2])}</h${h}>`);
+      out.push(`<h${h}${anchor && !open.includes("part") ? ` id="${anchor}"` : ""}>${inline(open.includes("part") ? decodeEntities(m[2]) : m[2])}</h${h}>`);
       i += 1;
     } else if ((m = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(line))) {
       // A finding's picture. The path is the report's own, relative to the run's
@@ -539,6 +538,11 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
         i += 1;
       }
       out.push(`<ol>${items.join("")}</ol>`);
+    } else if ((m = /^<!-- finding ([0-9a-f]+) -->$/.exec(line))) {
+      // The id an Evidence item's frames hang from; it is not text.
+      flush();
+      if (item === "head") itemId = m[1];
+      i += 1;
     } else if (line.trim() === "") {
       flush();
       i += 1;

@@ -95,12 +95,40 @@ const ROLE_WORD: Record<string, string> = {
   cell: "cell",
 };
 
-/** `role "name"` as "the "name" button"; a target that is not that shape is quoted as it is. */
-function control(target: string): string {
-  const m = /^(\w+) "(.*)"$/.exec(target.trim());
-  if (!m) return target.trim();
-  const word = ROLE_WORD[m[1]] ?? m[1];
-  return m[2] ? `the "${m[2]}" ${word}` : `the unnamed ${word}`;
+/**
+ * A control as a person would name it. A role and a name (`button "Save"`)
+ * read as the "Save" button. A plan's locator reads by what it holds: a
+ * `role=button[name="Save"]` the same way, a `label=` as a field, a `text=` as
+ * the words themselves, and a `testid=` as the test id's words with the dashes
+ * taken out, since the id is the only name an unlabelled control has. `kind`
+ * is what the step knows the control to be (a select is a list); a bare test id
+ * is otherwise "control". Anything else is quoted as it is.
+ */
+function control(target: string, kind = "control"): string {
+  const t = target.trim();
+  const m = /^(\w+) "(.*)"$/.exec(t);
+  if (m) {
+    const word = ROLE_WORD[m[1]] ?? m[1];
+    return m[2] ? `the "${m[2]}" ${word}` : `the unnamed ${word}`;
+  }
+  // A plan's locator, read as flow.ts's parseTarget reads it (that module
+  // cannot be imported here without a cycle), so anything a plan would refuse
+  // (a CSS selector, a chained locator) is quoted as it is rather than half-read.
+  const role = /^role=([a-z]+)(?:\[name=(?:"([^"]*)"|'([^']*)'|([^\]"']*))\])?$/i.exec(t);
+  if (role) {
+    const word = ROLE_WORD[role[1].toLowerCase()] ?? role[1].toLowerCase();
+    const name = role[2] ?? role[3] ?? role[4];
+    return name ? `the "${name}" ${word}` : `the unnamed ${word}`;
+  }
+  const by = /^(testid|label|text)=(.+)$/.exec(t);
+  if (!by) return t;
+  if (by[1] === "label") return `the "${by[2]}" field`;
+  if (by[1] === "text") return `"${by[2]}"`;
+  const words = by[2]
+    .replace(/^["']|["']$/g, "")
+    .replace(/[-_]+/g, " ")
+    .trim();
+  return words ? `the "${words}" ${kind}` : `the ${kind}`;
 }
 
 /** One action-log step, split into what was done, to what, and on which page. */
@@ -132,12 +160,12 @@ export function plainStep(line: string): string | null {
   }
   if (action === "type") {
     const t = /^(\w+ ".*") ← ("(?:[^"\\]|\\.)*")( \+ Enter)?/.exec(target);
-    if (!t) return `Type into ${control(target)}`;
+    if (!t) return `Type into ${control(target, "field")}`;
     return `Type ${t[2]} into ${control(t[1])}${t[3] ? " and press Enter" : ""}`;
   }
   if (action === "select") {
     const s = /^(\w+ ".*") = (.*)$/.exec(target);
-    return s ? `Choose "${s[2]}" in ${control(s[1])}` : `Choose an option in ${control(target)}`;
+    return s ? `Choose "${s[2]}" in ${control(s[1])}` : `Choose an option in ${control(target, "list")}`;
   }
   if (action === "upload") {
     const u = / ← (.+?) \(/.exec(target);
@@ -145,7 +173,7 @@ export function plainStep(line: string): string | null {
   }
   if (action === "hover") return `Point at ${control(target)}`;
   if (action === "press") return `Press ${target}`;
-  if (action === "scroll") return target ? `Scroll ${target}` : "Scroll the page";
+  if (action === "scroll") return target ? `Scroll ${control(target)}` : "Scroll the page";
   if (action === "back") return "Go back to the previous page";
   return null;
 }
@@ -497,10 +525,15 @@ export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, 
   return lines;
 }
 
+/** The comment under an Evidence title that names the finding whose frames the HTML report hangs there. */
+export const FINDING_ANCHOR_OPEN = "<!-- finding ";
+export const FINDING_ANCHOR_CLOSE = " -->";
+
 /**
- * The pictures: each problem that has one, under its number and title. The
- * line under the title ends with the finding's id, which is where the HTML
- * report puts the frames recorded before it was filed. Empty, with no heading,
+ * The pictures: each problem that has one, under its number and title. A
+ * comment under the title carries the finding's id, which is where the HTML
+ * report puts the frames recorded before it was filed; a Markdown viewer
+ * does not show it. Empty, with no heading,
  * when no problem has a picture, so a run that was not recorded and took no
  * pictures has no Evidence section at all.
  */
@@ -509,7 +542,14 @@ export function formatEvidenceSection(input: Pick<PlainInput, "current" | "lastF
   input.current.forEach((f, i) => {
     const card = plainCard(f, { lastFrame: input.lastFrames?.get(f.id) });
     if (!card.picture) return;
-    lines.push(`### ${i + 1}. ${card.title.replace(/\s*\r?\n\s*/g, " ")}`, ``, `**${card.impact}** · on ${card.page} · finding \`${card.id}\``, ``);
+    lines.push(
+      `### ${i + 1}. ${card.title.replace(/\s*\r?\n\s*/g, " ")}`,
+      ``,
+      `**${card.impact}** · on ${card.page}`,
+      ``,
+      `${FINDING_ANCHOR_OPEN}${card.id}${FINDING_ANCHOR_CLOSE}`,
+      ``,
+    );
     lines.push(`![What the page showed](${card.picture.file})`, ``);
   });
   if (lines.length === 0) return [];

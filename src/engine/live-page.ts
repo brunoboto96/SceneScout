@@ -662,7 +662,9 @@ export const LIVE_PAGE = `<!doctype html>
       } else if ((m = /^(#{1,6}) (.*)$/.exec(line))) {
         flush();
         var h = el('h' + Math.min(6, m[1].length + 1));
-        inline(h, m[2]);
+        // Inside a fold report.md writes a finding's title with &lt; &gt; &amp;, so a
+        // </details> in it cannot close the fold; the panel sets text, so it decodes them.
+        inline(h, folds.length ? decodeEntities(m[2]) : m[2]);
         container.appendChild(h);
         i += 1;
       } else if ((m = /^!\\[([^\\]]*)\\]\\((recordings\\/[A-Za-z0-9._\\/-]+)\\)$/.exec(line)) && m[2].indexOf('..') < 0) {
@@ -686,6 +688,10 @@ export const LIVE_PAGE = `<!doctype html>
         container.appendChild(details);
         folds.push(container);
         container = details;
+        i += 1;
+      } else if (/^<!-- finding [0-9a-f]+ -->$/.test(line)) {
+        // The id the HTML report hangs an Evidence item's frames from; it is not text.
+        flush();
         i += 1;
       } else if (/^<\\/details>$/.test(line)) {
         flush();
