@@ -1188,7 +1188,7 @@ const BASELINE_MARK: Record<BaselineResult["status"], string> = {
 /** One target's line in the report. */
 function baselineLine(r: BaselineResult, run: BaselineRun): string {
   const what = `${BASELINE_MARK[r.status]} ${code(r.element)} on ${code(r.path)}`;
-  const notes = [r.platformNote, r.partial, r.unsteady]
+  const notes = [r.platformNote, r.partial, r.unsteady, r.retaken]
     .filter(Boolean)
     .map((n) => ` _(${cell(n!)})_`)
     .join("");

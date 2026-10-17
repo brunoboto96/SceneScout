@@ -150,6 +150,46 @@ export async function steadyPicture(
   }
 }
 
+/**
+ * A target's picture and its verdict, with a difference confirmed: a picture
+ * that differs from a stored baseline it could be compared with (a change
+ * under compare, a rewrite under update, either with a pixel changed) is taken again from a fresh load and
+ * judged again, and the second picture's verdict is the one kept. A renderer
+ * can, now and then, draw a page's text a pixel off for the whole of one load
+ * (seen on Chromium on a slow machine, about once in a few hundred loads):
+ * that picture holds still, so steadyPicture keeps it, yet the next load
+ * draws the page as it always does. A real change repeats on every load, so
+ * it is still reported, from the second picture; a rare draw is not. `first`
+ * is the first verdict when there was a second, for the log. A second
+ * picture that cannot be taken throws, as the first would.
+ */
+export async function confirmedPicture<S, V extends { status: string; diff?: { changedPixels: number; sizeChanged: boolean } }>(
+  take: () => Promise<S>,
+  judge: (shot: S) => V,
+): Promise<{ shot: S; verdict: V; first: V | null }> {
+  const shot = await take();
+  const verdict = judge(shot);
+  // An update that rewrites a baseline from another system with no pixel changed has nothing to confirm.
+  const differs =
+    !!verdict.diff && (verdict.diff.changedPixels > 0 || verdict.diff.sizeChanged) && (verdict.status === "changed" || verdict.status === "updated");
+  if (!differs) return { shot, verdict, first: null };
+  const again = await take();
+  return { shot: again, verdict: judge(again), first: verdict };
+}
+
+/**
+ * What a result says when its first picture differed and a second load's matched (confirmedPicture): the loads
+ * disagree, so the gate passes, and the line says so, so a difference shown on a first visit only is still seen.
+ */
+export function retakenNote(firstPercent: number): string {
+  return `a first load's picture was ${firstPercent}% different and a second load's matched: a difference on one load only is not reported as a change`;
+}
+
+/** The note a target's result carries from confirmedPicture: only when the loads disagreed and the second matched. */
+export function retakenFor(first: { diff?: { percent: number } } | null, verdict: { status: string }): { retaken: string } | Record<string, never> {
+  return first?.diff && verdict.status === "matches" ? { retaken: retakenNote(first.diff.percent) } : {};
+}
+
 /** What a result says when its picture never held still (steadyPicture): a comparison of it may not repeat. */
 export function unsteadyNote(budgetMs: number): string {
   return `the picture was still changing after about ${budgetMs / 1000}s, so the last one taken is used: something on the page keeps moving, and a comparison of it may not repeat`;
@@ -410,6 +450,8 @@ export interface BaselineResult {
   partial?: string;
   /** The picture never held still within the action limit, so the last one taken is used (steadyPicture). */
   unsteady?: string;
+  /** The first picture differed and a second load's matched, so the second is the one judged (confirmedPicture). */
+  retaken?: string;
   /** The comparison, when one was made. */
   diff?: BaselineDiff;
   /** Its baseline's PNG, relative to the baselines folder. */

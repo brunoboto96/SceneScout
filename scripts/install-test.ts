@@ -71,6 +71,7 @@ import {
   closeWaitsForLeavingWrites,
   awaitsDroppedNavigationErrorPage,
   droppedNavigationErrorPage,
+  errorPageExit,
 } from "../src/browsers.ts";
 
 import { INTAKE_QUESTIONS, introQuestions } from "../src/intake.ts";
@@ -1291,6 +1292,19 @@ test("an action waits for the error page of a navigation it had dropped, and onl
   // Firefox and WebKit stay on the page, so waiting would only cost the bound.
   assert.equal(awaitsDroppedNavigationErrorPage({ ...base, engine: "firefox" }), false);
   assert.equal(awaitsDroppedNavigationErrorPage({ ...base, engine: "webkit" }), false);
+});
+
+test("the error page is left by going back unless a POST loaded the page before it", () => {
+  // Going back loads the entry with the request that loaded it, and Chromium re-sends a POST without asking.
+  assert.equal(errorPageExit("POST"), "get");
+  assert.equal(errorPageExit("post"), "get");
+  assert.equal(errorPageExit("PUT"), "get");
+  // A page a GET loaded (a form that redirected after its POST ends on a GET) is gone back to.
+  assert.equal(errorPageExit("GET"), "back");
+  assert.equal(errorPageExit("HEAD"), "back");
+  // No load seen (the session went back onto the error page, or the page came from the back-forward cache): the entry
+  // behind the error page may be one a POST loaded, so it is loaded with a GET rather than gone back to.
+  assert.equal(errorPageExit(null), "get");
 });
 
 test("shared workers are taken from the page in every mode that blocks anything", () => {

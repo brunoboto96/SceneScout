@@ -1254,6 +1254,29 @@ async function methodOverrides({ baseUrl, projectDir, stats }: SmokeContext): Pr
     const plainReplay = await engine.apiRequest({ method: "POST", path: "/api/override/replay-plain", body: "{}" });
     check("...while the same call with no override goes out", writesTo("POST /api/override/replay-plain") === 1, plainReplay.slice(0, 300));
 
+    // The same refused form clicked by a run_plan step. A plan step does not go through the click's after-action path,
+    // so in Chromium it was left on the error page: step 2 could not find its target and timed out.
+    // "continue": the page's 403 for the refused form is a console error, which would otherwise end the plan at step 1.
+    const plan = await engine.runPlan(
+      [
+        { action: "click", target: "testid=override-form-submit" },
+        { action: "click", target: "testid=override-plain" },
+      ],
+      "continue",
+    );
+    check("run_plan: a step clicking the refused form is refused and the plan goes on", /^PLAN \(2\/2 steps ran\)/.test(plan) && !/FAILED/.test(plan), plan);
+    check("...and the form never reached the server", writesTo("POST /api/override/form") === 0, JSON.stringify(stats.writes));
+    check(
+      "...and the next step runs on the page, not the browser's error page",
+      /\n2\. click testid=override-plain → OK \(http[^)]*\/method-override\.html\)/.test(plan),
+      plan,
+    );
+    check(
+      "...and the step that met the error page says it went back",
+      droppedNavigationErrorPage(BROWSER) === null ? !/error page/.test(plan) : /\n1\. [^\n]*showed an error page; returned to http/.test(plan),
+      plan,
+    );
+
     // Leaving the page sends both beacons. The plain one arriving says the beacons were sent; the override one must not.
     await engine.navigate("/method-override.html");
     await engine.navigate("/index.html");

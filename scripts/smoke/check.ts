@@ -1327,6 +1327,46 @@ async function flowWriteEdges({
     `${leave.status} ${JSON.stringify(leave.flows)} writes=${JSON.stringify(stats.writes)}`,
   );
 
+  // The same beacon, judged late. How soon the policy hears of a beacon sent on pagehide depends on the machine: heard
+  // after the flow's last look, it was dropped by the hand-back and the flow listed nothing (a chromium flake in CI).
+  // White-box: the policy's judgement of this one request is held back 400 ms, at both places it is judged (the route
+  // handler, and in Chromium the browser-level interception), so the late report happens on every run.
+  const slowLeavesBefore = writes("POST /api/leave");
+  const slowEngine = new BrowserEngine();
+  let slowReplay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
+  try {
+    const project = path.join(work, "flow-leave-beacon-late");
+    fs.mkdirSync(project, { recursive: true });
+    await slowEngine.attach({ url: baseUrl, projectDir: project, mode: "read-only" });
+    const guard = (slowEngine as unknown as { guard: Record<string, (...args: never[]) => Promise<unknown>> }).guard;
+    const holdBack = (name: string, urlOf: (args: never[]) => string): void => {
+      const judge = guard[name]!.bind(guard);
+      guard[name] = async (...args: never[]) => {
+        if (/\/api\/leave\b/.test(urlOf(args))) await settle(400);
+        return judge(...args);
+      };
+    };
+    holdBack("judge", (args) => (args[0] as unknown as { request(): { url(): string } }).request().url());
+    holdBack("judgeUnseenRequest", (args) => (args[1] as unknown as { request: { url: string } }).request.url);
+    slowReplay = await slowEngine.replayFlow(
+      [
+        { action: "navigate", target: "/check-flow-writes.html" },
+        { action: "click", target: "testid=writes-save-on-leave" },
+        { action: "expect-text", text: "Will save on leave" },
+      ],
+      "observe",
+    );
+  } finally {
+    await slowEngine.close();
+  }
+  check(
+    `${BROWSER}: ...and a beacon the policy judges only after the flow's last look is still listed, not dropped as the flow hands back; nothing reaches the server`,
+    slowReplay?.outcome.status === "passed" &&
+      (slowReplay.refusedBackground ?? []).some((sig) => /\/api\/leave\b/.test(sig)) &&
+      writes("POST /api/leave") === slowLeavesBefore,
+    `${JSON.stringify(slowReplay?.outcome)} refusedBackground=${JSON.stringify(slowReplay?.refusedBackground)} writes=${JSON.stringify(stats.writes)}`,
+  );
+
   // A write that goes out only as the flow leaves the page: after the last step's own checks on any machine, since
   // nothing but the engine leaving the page sends it. The contrast to the beacon above: same moment, sent as a fetch.
   const itemsBefore = writes("POST /api/items");

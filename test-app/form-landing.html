@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Thing added</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="form-landing-heading">Thing added</h1>
+      <!-- A form naming DELETE on a record this run did not create: safe-write refuses it, so its navigation is dropped. -->
+      <form method="post" action="/api/things/9">
+        <input type="hidden" name="_method" value="delete" />
+        <button type="submit" data-testid="form-landing-send">Send</button>
+      </form>
+      <!-- A link the server answers with 204: a load that never replaces this page, so this page is still the one a POST loaded. -->
+      <a href="/no-content" data-testid="form-landing-nothing">Nothing happens</a>
+      <p data-testid="form-landing-note">Answered to GET and POST alike.</p>
+    </main>
+  </body>
+</html>

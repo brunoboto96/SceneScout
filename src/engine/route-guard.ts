@@ -195,6 +195,8 @@ export class RouteGuard {
   private readonly routedWrites = new RoutedWrites();
   /** Requests the route handler is still judging, by the page that sent them: a page is closed only once its own are answered. */
   private readonly routesInFlight = new Map<Page, Set<Promise<unknown>>>();
+  /** Requests the browser-level interception is still judging (unseenInFlight). */
+  private readonly unseenJudging = new Set<Promise<unknown>>();
   /** Writes refused at the browser level, so the driver's own report of them (a redirect hop failing) is known as the policy's doing. */
   private readonly unseenRefusals = new UnseenRefusals();
   /**
@@ -248,6 +250,11 @@ export class RouteGuard {
   /** The route handler's judgements still pending for requests `page` sent. */
   inFlight(page: Page): Promise<unknown>[] {
     return [...(this.routesInFlight.get(page) ?? [])];
+  }
+
+  /** The browser-level interception's judgements still pending. It cannot tell which page sent a request, so all of them. */
+  unseenInFlight(): Promise<unknown>[] {
+    return [...this.unseenJudging];
   }
 
   /** A new attach: creations a previous attach was waiting on are not this one's. */
@@ -488,7 +495,12 @@ export class RouteGuard {
   async interceptUnseenWrites(browser: Browser): Promise<void> {
     this.routedWrites.clear();
     const session = await browser.newBrowserCDPSession();
-    session.on("Fetch.requestPaused", (event) => void this.judgeUnseenRequest(session, event));
+    session.on("Fetch.requestPaused", (event) => {
+      // judgeUnseenRequest answers every request and catches its own errors, so it settles and never rejects.
+      const judging = this.judgeUnseenRequest(session, event);
+      this.unseenJudging.add(judging);
+      void judging.finally(() => this.unseenJudging.delete(judging));
+    });
     await session.send("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
   }
 
