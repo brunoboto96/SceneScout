@@ -2,7 +2,7 @@ The fonts in this folder are served from the site itself, so a visit sends nothi
 Each is licensed under the SIL Open Font License, Version 1.1, whose text follows the notices.
 
 Atkinson Hyperlegible: Copyright 2020 Braille Institute of America, Inc. (https://github.com/googlefonts/atkinson-hyperlegible)
-Cinzel: Copyright 2012 The Cinzel Project Authors (https://github.com/NDISCOVER/Cinzel)
+Cinzel: Copyright 2020 The Cinzel Project Authors (https://github.com/NDISCOVER/Cinzel)
 JetBrains Mono: Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
 
 The files are the Latin subsets Google Fonts serves, unmodified.
