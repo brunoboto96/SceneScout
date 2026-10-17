@@ -969,8 +969,11 @@ async function openCheck(): Promise<void> {
       const handed = await lines(2);
       const html = path.join(fs.realpathSync(projectDir), ".scenescout", "report.html");
       const htmlRaw = path.join(projectDir, ".scenescout", "report.html");
-      if (handed.length !== 2 || handed[0] !== url || (handed[1] !== html && handed[1] !== htmlRaw))
-        fail(`the opener was not handed exactly the live view's address, then report.html:\n${handed.join("\n")}`);
+      // The opener runs detached, so the two launches may land in either order: compare as a set.
+      const isLive = (line: string): boolean => line === url;
+      const isReport = (line: string): boolean => line === html || line === htmlRaw;
+      const bothHanded = handed.length === 2 && ((isLive(handed[0]) && isReport(handed[1])) || (isReport(handed[0]) && isLive(handed[1])));
+      if (!bothHanded) fail(`the opener was not handed exactly the live view's address and report.html:\n${handed.join("\n")}`);
       assertClosedAll(textOf(await client.callTool({ name: "scout_close", arguments: { all: true } })));
     } finally {
       await client.close();
