@@ -206,9 +206,12 @@ export async function agreedFirstPicture<S, V>(
   return { shot: third, verdict: judge(third), agreed: false, takes: 3 };
 }
 
-/** What a result says when a first baseline's loads never agreed (agreedFirstPicture): nothing is written, so a later run takes it again. */
+/**
+ * Why a first baseline's loads never agreed (agreedFirstPicture), as the target's detail. The report and the issue add
+ * that the baseline was not written (a not-captured result under update), so this does not say it again.
+ */
 export function unstableFirstNote(takes: number): string {
-  return `${takes} loads drew the page differently each time, so no baseline was written: it is not stable enough to keep one of; run the check again, or fix what moves`;
+  return `no two of ${takes} loads drew the page the same, so there is no stable picture to keep; run the check again, or find what changes between loads`;
 }
 
 /**

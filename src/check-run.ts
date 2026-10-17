@@ -549,12 +549,12 @@ function shownDir(dir: string, projectDir: string): string {
   return rel.startsWith("..") || path.isAbsolute(rel) ? dir : rel.split(path.sep).join("/");
 }
 
-/** A baseline target's picture could not be taken: the target's result, with the reason, not the check's failure. */
 /** Whether two decoded pictures are the same size and every pixel is the same. */
 function samePixels(a: { width: number; height: number; data: Uint8Array }, b: { width: number; height: number; data: Uint8Array }): boolean {
   return a.width === b.width && a.height === b.height && Buffer.compare(a.data, b.data) === 0;
 }
 
+/** A baseline target's picture could not be taken: the target's result, with the reason, not the check's failure. */
 class NotCaptured extends Error {
   constructor(readonly why: string) {
     super(why);

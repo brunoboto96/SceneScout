@@ -3401,7 +3401,23 @@ test("baselines: a baseline written for the first time is written only when two 
   const unstable = await run(["a", "b", "c"]);
   assert.equal(unstable.agreed, false);
   assert.equal(unstable.takes, 3);
-  assert.match(unstableFirstNote(3), /^3 loads drew the page differently each time, so no baseline was written/);
+  // The report line and the issue each give the reason and say once that nothing was written.
+  const unstableResult: BaselineResult = {
+    path: "/plans",
+    element: "page",
+    status: "not-captured",
+    detail: unstableFirstNote(3),
+    baseline: "chromium/plans-1/page.png",
+  };
+  const updateRun = baselineRun([unstableResult], { mode: "update" });
+  const line = formatCheck({ ...result(checkFindings([route()], ORIGIN, [], [], updateRun).issues), baselines: updateRun })
+    .split("\n")
+    .find((l) => l.startsWith("- ⊘ "));
+  const evidence = baselineEvidence(unstableResult, updateRun) ?? "";
+  for (const said of [line ?? "", evidence]) {
+    assert.match(said, /no two of 3 loads drew the page the same/, said);
+    assert.equal(said.match(/not written|no baseline was written/g)?.length, 1, `says once that nothing was written: ${said}`);
+  }
   // A load that cannot be taken is the target's failure.
   await assert.rejects(run(["a"]), /no more pictures/);
 });
