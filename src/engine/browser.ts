@@ -2647,11 +2647,17 @@ export class BrowserEngine {
     });
   }
 
-  private async afterAction(action: string, target: string, click?: ClickContext): Promise<string> {
+  /**
+   * After an action has settled: in Chromium, a main-frame navigation the write policy dropped is replaced by the
+   * browser's error page only some time after it fails, which can be after the settle. Wait for that page, and when the
+   * session is on it, go back to the app. Returns the error page's address and where the session went back to, or null
+   * when the action left no error page. Every path that acts on the page calls this: a click through afterAction and a
+   * run_plan step after its settle, or the session is left where no script can reach the app.
+   */
+  private async returnFromDroppedNavigation(): Promise<{ errorUrl: string; returnedTo: string } | null> {
     const page = this.requirePage();
-    await this.settle();
-    // A navigation the policy dropped is replaced by Chromium's error page only some time after it fails, which can be
-    // after the settle. Read before then, the page looks unmoved and the session is left on the error page.
+    const errorPage = droppedNavigationErrorPage(this.engineName);
+    if (errorPage === null) return null;
     if (
       awaitsDroppedNavigationErrorPage({
         engine: this.engineName,
@@ -2660,30 +2666,45 @@ export class BrowserEngine {
         actionStartedAt: this.actionStartedAt,
       })
     ) {
-      const errorPage = droppedNavigationErrorPage(this.engineName);
-      if (errorPage === null) throw new Error("awaitsDroppedNavigationErrorPage waits only in a browser that has an error page");
       await bestEffort(page.waitForURL((u) => u.href.startsWith(errorPage), { waitUntil: "commit", timeout: DROPPED_NAVIGATION_WAIT_MS }));
+    }
+    const errorUrl = page.url();
+    if (!errorUrl.startsWith(errorPage) || this.blockedRequests.length === 0) return null;
+    await bestEffort(page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }));
+    this.snapshots.dropRefs("the browser showed an error page in place of a navigation the write policy blocked");
+    return { errorUrl, returnedTo: page.url() };
+  }
+
+  private async afterAction(action: string, target: string, click?: ClickContext): Promise<string> {
+    const page = this.requirePage();
+    await this.settle();
+    // The policy dropped a navigation and the browser showed its error page. That is the tester's own doing and must say
+    // so: reported as an off-origin bounce, it hid the block, and the caller then read the unchanged URL as "the app
+    // silently discarded the data".
+    const dropped = await this.returnFromDroppedNavigation();
+    if (dropped) {
+      this.logAction({ action, target, url: dropped.errorUrl });
+      this.logAction({ action: "write-policy:navigation-blocked", target: dropped.errorUrl.slice(0, 200), url: dropped.errorUrl });
+      return (
+        `OK: ${action} ${target}\nThe page tried to navigate with a request the write policy blocked, so the browser showed an error page; returned to ${dropped.returnedTo}.` +
+        this.drainBlocked() +
+        this.drainRefresh() +
+        this.drainDialogs() +
+        formatViolations(this.oracles.drain())
+      );
     }
     let url = page.url();
     if (url !== "about:blank" && !this.isSameOrigin(url)) {
-      // Either a click carried us off the app's origin, or the write policy
-      // aborted a NAVIGATION (a native form post) and the browser is showing
-      // its error page. The second is the tester's own doing and must say so:
-      // reported as an off-origin bounce, it hid the block, and the caller then
-      // read the unchanged URL as "the app silently discarded the data".
-      const errorPage = droppedNavigationErrorPage(this.engineName);
-      const policyAbortedNavigation = errorPage !== null && url.startsWith(errorPage) && this.blockedRequests.length > 0;
+      // A click carried us off the app's origin.
       this.logAction({ action, target, url });
-      this.logAction({ action: policyAbortedNavigation ? "write-policy:navigation-blocked" : "origin-fence:bounced", target: url.slice(0, 200), url });
+      this.logAction({ action: "origin-fence:bounced", target: url.slice(0, 200), url });
       await bestEffort(page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }));
       url = page.url();
       this.snapshots.dropRefs("the page left the app's origin");
-      const blocked = this.drainBlocked() + this.drainRefresh();
       return (
-        (policyAbortedNavigation
-          ? `OK: ${action} ${target}\nThe page tried to navigate with a request the write policy blocked, so the browser showed an error page; returned to ${url}.`
-          : `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}. Exploration is fenced to ${this.baseUrl}.`) +
-        blocked +
+        `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}. Exploration is fenced to ${this.baseUrl}.` +
+        this.drainBlocked() +
+        this.drainRefresh() +
         this.drainDialogs() +
         formatViolations(this.oracles.drain())
       );
@@ -5136,6 +5157,11 @@ export class BrowserEngine {
         }
       }
       await this.settle();
+      const dropped = await this.returnFromDroppedNavigation();
+      if (dropped) {
+        this.logAction({ action: "write-policy:navigation-blocked", target: dropped.errorUrl.slice(0, 200), url: dropped.errorUrl });
+        note += `; the page tried to navigate with a request the write policy blocked, so the browser showed an error page; returned to ${dropped.returnedTo}`;
+      }
       if (form) this.noteFormSubmit(preState, form.kind, form.probe);
       // A plan is the RECOMMENDED way to run a mechanical sequence, so its
       // steps are where most of a recorded run actually happens. Leaving
