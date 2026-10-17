@@ -5,7 +5,7 @@
  * pattern take time quadratic or worse in its length. RE2JS, a JavaScript port
  * of RE2, matches in time linear in the text whatever the pattern, so the bound
  * comes from the engine rather than from a review of each pattern. It is pure
- * JavaScript: nothing to compile, download or build per platform (ADR 27).
+ * JavaScript: nothing to compile, download or build per platform (ADR 28).
  *
  * RE2 has no lookahead and no lookbehind, and some of its classes differ from
  * JavaScript's. The patterns are written for RE2, and this module gives back
@@ -13,6 +13,9 @@
  *
  * - `\s` in RE2 is ASCII whitespace only. Write `[${SPACE}]` (or `[^${SPACE}]`
  *   for `\S`) for JavaScript's `\s`, and `[^${LINE_END}]` for its `.`.
+ * - `\b` in RE2 reads only ASCII letters, digits and `_` as a word's, as
+ *   JavaScript's does, except that JavaScript with both `i` and `u` also reads
+ *   the long s and the Kelvin sign as one (ADR 28).
  * - A lookbehind of one character class at the start, `(?<![…])`, is
  *   `notAfter`: RE2 reads the character before as part of the match, and the
  *   match handed back starts after it.

@@ -1594,19 +1594,71 @@ test("every redaction pattern reads a crafted 1 MB text in linear time (#610)", 
   for (const { name, ms } of done) assert.ok(ms < CASE_BOUND_MS, `${name}: ${ms} ms`);
 });
 
+/**
+ * Where these files build a JavaScript regular expression: a literal, `RegExp`, or a string's `match`, `matchAll` or
+ * `search`, which turn a string argument into one: read with the type checker, by the method a call resolves to, as
+ * the linear-time engine has a `matchAll` of its own and a receiver may be `string | undefined`.
+ */
+function javaScriptRegexUses(files: readonly string[]): string[] {
+  const program = ts.createProgram(files, {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    strict: true,
+    noEmit: true,
+    types: [],
+  });
+  // An import the checker cannot resolve is typed any, and a call on it would go unseen.
+  const errors = ts.getPreEmitDiagnostics(program).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n"));
+  if (errors.length > 0) throw new Error(`the type checker could not read these files: ${errors.join("; ")}`);
+  const checker = program.getTypeChecker();
+  const stringMethod = (call: ts.CallExpression): boolean => {
+    const parent = checker.getResolvedSignature(call)?.declaration?.parent;
+    return parent !== undefined && ts.isInterfaceDeclaration(parent) && parent.name.text === "String" && parent.getSourceFile().hasNoDefaultLib;
+  };
+  const found: string[] = [];
+  for (const file of files) {
+    const source = program.getSourceFile(file);
+    if (!source) throw new Error(`the type checker did not read ${file}`);
+    const visit = (node: ts.Node) => {
+      if (node.kind === ts.SyntaxKind.RegularExpressionLiteral) found.push(`${path.basename(file)}: ${node.getText()}`);
+      if (ts.isIdentifier(node) && node.text === "RegExp") found.push(`${path.basename(file)}: RegExp`);
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ["match", "matchAll", "search"].includes(node.expression.name.text) &&
+        stringMethod(node)
+      )
+        found.push(`${path.basename(file)}: ${node.getText()}`);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  return found;
+}
+
 test("redaction, the field checks and the credential check hold no JavaScript regular expression (#610)", () => {
   // They read text the app controls; a pattern written for JavaScript's backtracking engine would bring back the
   // time a crafted text can cost. The linear-time engine is linear-regex.ts.
-  for (const file of ["redact.ts", "sensitive.ts", "credential.ts", "linear-regex.ts"]) {
-    const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "engine", file), "utf8");
-    const found: string[] = [];
-    const visit = (node: ts.Node) => {
-      if (node.kind === ts.SyntaxKind.RegularExpressionLiteral) found.push(node.getText());
-      if (ts.isIdentifier(node) && node.text === "RegExp") found.push("RegExp");
-      ts.forEachChild(node, visit);
-    };
-    visit(ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true));
-    assert.deepEqual(found, [], `${file} uses JavaScript's engine`);
+  const engine = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "engine");
+  const files = ["redact.ts", "sensitive.ts", "credential.ts", "linear-regex.ts"].map((file) => path.join(engine, file));
+  assert.deepEqual(javaScriptRegexUses(files), [], "these files use JavaScript's engine");
+  // A string's match, matchAll and search turn a string argument into a JavaScript regular expression, with no
+  // literal and no RegExp in sight; split and replace with a string do not. The pair differs only in that.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-regex-guard-"));
+  try {
+    const implicit = path.join(dir, "implicit.ts");
+    const literal = path.join(dir, "literal.ts");
+    // matchAll takes a string at run time; the lib types it as RegExp only, hence the cast.
+    fs.writeFileSync(
+      implicit,
+      'export const a = (t: string, u?: string, v?: "x" | "y") => [t.match("a+"), [...t.matchAll("b+" as never)], t.search("c+"), u?.match("d+"), v?.search("e+")];\n',
+    );
+    fs.writeFileSync(literal, 'export const a = (t: string) => [t.split("a+"), t.replace("b+", ""), t.replaceAll("c+", "")];\n');
+    assert.equal(javaScriptRegexUses([implicit]).length, 5, "a string's match, matchAll and search are found, on an optional string too");
+    assert.deepEqual(javaScriptRegexUses([literal]), [], "a string's split and replace with a string are not");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

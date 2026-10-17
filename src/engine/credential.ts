@@ -112,7 +112,8 @@ function pairValue(raw: string): boolean {
 
 const QUOTES_AROUND = new LinearRegex(`^["'“‘(\\[]+|["'”’)\\],.;:?]+$`);
 const EMAIL = new LinearRegex(String.raw`^[^@${SPACE}]+@[^@${SPACE}]+\.\p{L}{2,}$`);
-const SCHEME = new LinearRegex(String.raw`^[a-z][a-z0-9+.-]*://`, { ignoreCase: true });
+/** ASCII letters, as JavaScript's `i` without `u` read them: ignoring case would fold the long s and the Kelvin sign in. */
+const SCHEME = new LinearRegex(String.raw`^[A-Za-z][A-Za-z0-9+.-]*://`);
 const ITEM_NUMBER = new LinearRegex(String.raw`^#[0-9]+$`);
 const SETTING = new LinearRegex(String.raw`^([\p{L}_-]+)=[\p{L}\p{N}_-]+$`);
 const NUMBER = new LinearRegex(String.raw`\p{N}`);

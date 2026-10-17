@@ -309,6 +309,13 @@ test("credentials: the near misses of those pass: a field's name before a colon,
     assert.equal(ok({ address, areas: ["forms"] }).address, address);
 });
 
+test("credentials: a link's scheme is ASCII letters, so a value starting with a long s or a Kelvin sign before :// is still a value (#610)", () => {
+  // The linear-time engine folds the long s (\u017f) to s and the Kelvin sign (\u212a) to k when it ignores case; the
+  // scheme's letters must not, or the value reads as a link and the check lets it through. Each pair differs in that letter.
+  for (const letter of ["\u017f", "\u212a"]) assert.equal(holdsCredential(`The password is ${letter}://hunter22`), true, letter);
+  for (const letter of ["s", "k", "S", "K"]) assert.equal(holdsCredential(`The password is ${letter}://hunter22`), false, letter);
+});
+
 test("credentials: the check reads a crafted 1 MB text in linear time (#578, #610)", async () => {
   // On JavaScript's engine four of these did not finish in a minute: one long word, and one before a scheme's
   // "://" (the pattern that removes addresses before colon pairs are read, about 5 s at 50k characters), names and

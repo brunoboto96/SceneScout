@@ -1,4 +1,4 @@
-# 27. Redaction and the credential check run on a linear-time regular-expression engine
+# 28. Redaction and the credential check run on a linear-time regular-expression engine
 
 ## Context
 
@@ -28,7 +28,7 @@ RE2 has no lookahead and no lookbehind, and its `\s`, `.` and `\b` are not
 JavaScript's. Each pattern was rewritten to give back what JavaScript gave. A
 differential check of the old and new functions, on every string literal in the
 test suites and on several hundred thousand generated strings, found no
-difference; the one difference known is case folding (below). The rewrite:
+difference but in case folding and word boundaries beside ſ and K (below). The rewrite:
 
 - `\s` is written as JavaScript's set (`SPACE`), `.` as JavaScript's (`LINE_END`).
 - A lookbehind of one character class reads that character as part of the
@@ -67,14 +67,26 @@ difference; the one difference known is case folding (below). The rewrite:
   JavaScript ran with `i` and no `u` flag now fold only their words
   (`(?i:password)`), so their character classes are the ASCII ones they were;
   in those words the long s (ſ) and the Kelvin sign (K) read as `s` and `k`,
-  so `paſsword: hunter22` is now redacted. That is the only difference found.
-  Folding all of such a pattern was tried first and found by review to leave
-  one crafted token in clear that the old pattern redacted, which is why only
-  the words fold.
+  so `paſsword: hunter22` is now redacted. That is the only difference found
+  in redaction. Folding all of such a pattern was tried first and found by
+  review to leave one crafted token in clear that the old pattern redacted,
+  which is why only the words fold; a link's scheme in the credential check
+  is ASCII letters for the same reason.
+- RE2's `\b` reads only ASCII letters, digits and `_` as a word's, where
+  JavaScript with the `i` and `u` flags also read ſ and K as one. In the
+  credential check a word written beside one of them (`Aſ` for "as", `Kuse`)
+  can read differently either way: one sentence is now refused that was not,
+  another passes that was refused. The check reads what the person typed into
+  the guided choices, not text the app controls, so this is recorded rather
+  than written around.
 - A new pattern in these files is written for RE2 and its lookarounds as above;
   the timing tests take about ten seconds in each of the two suites.
-- One runtime dependency is added. It has no install script and no
-  dependencies of its own.
+- One runtime dependency is added, MIT-licensed as this package is. It has no
+  install script and no dependencies of its own, and the lock file pins its
+  tarball by hash; it has one maintainer and its releases carry npm's registry
+  signature but no provenance attestation, so a version bump is reviewed as a
+  change to the redaction it runs. Both the npm package and the `.mcpb` bundle
+  carry it (the bundle installs the production dependencies from the lock file).
 
 ## Failure direction
 
