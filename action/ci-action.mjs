@@ -113,6 +113,7 @@ function nextUse() {
 function resolve() {
   const inputs = inputsFromEnv();
   ciArgs(inputs); // fail on a missing url before downloading anything
+  retentionDaysOf(inputs);
   const engine = engineOf(inputs);
   const cwd = process.cwd();
   let cli;

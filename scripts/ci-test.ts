@@ -1941,6 +1941,22 @@ test("action: artifact-retention-days reaches the upload, and only a whole numbe
     assert.throws(() => retentionDaysOf({ "artifact-retention-days": bad }), /artifact-retention-days/, bad);
 });
 
+test("action: a bad artifact-retention-days fails the resolve step before anything is installed", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-ci-resolve-"));
+  try {
+    // A cli that does not exist is the first thing resolve would trip on after the inputs: the retention error must come first.
+    const inputs = { ...defaultInputs(), url: "http://127.0.0.1:3000", cli: path.join(dir, "missing.js"), "artifact-retention-days": "abc" };
+    const r = spawnSync(process.execPath, [path.join(REPO, "action", "ci-action.mjs"), "resolve"], {
+      env: { PATH: process.env.PATH ?? "", INPUTS: JSON.stringify(inputs), RUNNER_TEMP: dir },
+      encoding: "utf8",
+    });
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stdout, /artifact-retention-days/, r.stdout);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("action: third-party steps are pinned by commit, and no input is pasted into a script", () => {
   const steps = action.runs.steps as Array<{ uses?: string; run?: string }>;
   for (const s of steps) if (s.uses) assert.match(s.uses, /@[0-9a-f]{40}$/, s.uses);

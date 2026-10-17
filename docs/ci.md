@@ -675,7 +675,7 @@ What can be shown is limited on purpose. Only an element a snapshot lists (a con
 
 In `<project>/.scenescout/ci/`, or `--out`:
 
-- `report.md` and `report.html`: the report, exactly as an agent's run writes it (it is also in `.scenescout/report.md`, with the run's memory);
+- `report.md` and `report.html`: the report, exactly as an agent's run writes it (it is also in `.scenescout/report.md`, with the run's memory). The pictures `report.html` shows stay in `.scenescout/record/`, which is neither copied here nor uploaded by the action, so the copy here and in the artifact shows a note in place of each picture;
 - `summary.md`: how the run ended, what it spent, and the findings this run made or saw again. On GitHub Actions it is also appended to the job summary;
 - `ci.json`: the same, for a script: `stop`, `contractMet`, `usage` (`turns`, `inputTokens`, `cachedInputTokens`, `outputTokens`, `seconds`, `estimatedCostUsd`), `dedup` (`by`, and with the judge `effort`, `calls`, `failed`, `inputTokens`, `outputTokens` and `seconds`, already counted in `usage`), `counts` and `findings`, and with `--lanes` 2 or more, `lanes`: `asked`, `planned` (the lanes the split made), `ran` (those that attached), `oneLoop` (why the run explored in one loop, when it did) and `sessions`, each lane's `session`, `modules`, `routes`, `attached`, `stop`, `detail`, `turns` and tokens;
 - `ci.sarif`: the findings as SARIF 2.1.0, at `error`, `warning` or `note` by severity, and worth-a-look findings as notes. Each result points at the same anchor file as a check's (`--sarif-file-anchor`, see [Code scanning](#code-scanning)), with its page in the message, in a logical location and in `properties.route`.
