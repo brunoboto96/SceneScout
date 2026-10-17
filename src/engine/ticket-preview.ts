@@ -18,6 +18,7 @@ import crypto from "node:crypto";
 import { githubIssue, inertPlain, TRACKER_LABEL, type ExportOptions, type Tracker } from "./export.js";
 import type { ConfirmFormOutcome } from "./guided.js";
 import type { Finding } from "./memory.js";
+import { shellQuote } from "./profiles.js";
 import { TICKET_ANSWER, TICKET_FIELD, TICKET_SAYS, ticketFormIntro, ticketFormLines } from "./guided-words.js";
 
 /** How long a preview may be filed from. */
@@ -76,9 +77,9 @@ export function ticketExportCommand(o: ExportOptions, ids: readonly string[]): s
   return `npx -y scenescout export ${where} --only ${ids.join(",")} --project ${shellWord(o.projectDir)} --include-worth-a-look`;
 }
 
-/** A folder as one shell word: bare when it is plain, else in double quotes. */
+/** A folder as one shell word for this platform's usual shell: bare when it is plain, else quoted (profiles.ts shellQuote). */
 function shellWord(s: string): string {
-  return /^[A-Za-z0-9_./:\\-]+$/.test(s) ? s : `"${s.replace(/(["\\$`])/g, "\\$1")}"`;
+  return /^[A-Za-z0-9_./-]+$/.test(s) ? s : shellQuote(s);
 }
 
 /**

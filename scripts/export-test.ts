@@ -90,6 +90,7 @@ import {
   type KeptPreview,
   type TicketPreview,
 } from "../src/engine/ticket-preview.ts";
+import { shellQuote } from "../src/engine/profiles.ts";
 import { fileTickets, previewTickets, type TicketDeps } from "../src/ticket-run.ts";
 
 const REPO = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -3267,13 +3268,20 @@ test("tickets: where the app cannot show the form, nothing is filed and the resu
     assert.ok(got.ok);
     const r = await fileTickets(got.preview.previewId, store, confirmWith({ kind: "unsupported" }).confirm, ticketDeps(env));
     assert.deepEqual([r.filed, r.outcome], [false, "unsupported"]);
-    assert.ok(r.text.includes(`npx -y scenescout export --to github --repo owner/app --only aaa0000001,ccc0000003 --project ${dir}`), r.text);
+    // The folder is quoted for this platform's shell when it needs quoting (a Windows temp folder does).
+    const folder = /^[A-Za-z0-9_./-]+$/.test(dir) ? dir : shellQuote(dir);
+    assert.ok(r.text.includes(`npx -y scenescout export --to github --repo owner/app --only aaa0000001,ccc0000003 --project ${folder}`), r.text);
     assert.match(r.text, /adding --yes files them/i);
     const command = r.text
       .split("\n")
       .find((l) => l.includes("npx -y scenescout export"))!
       .trim();
-    const parsed = parseExportArgs(command.split(" ").slice(4), dir, env);
+    // Split into words with the quoted folder kept whole, as a shell would.
+    const words = command
+      .replace(` --project ${folder}`, " --project \u0000")
+      .split(" ")
+      .map((w) => (w === "\u0000" ? dir : w));
+    const parsed = parseExportArgs(words.slice(4), dir, env);
     assert.ok(parsed.ok && parsed.options.dryRun && parsed.options.includeWorthALook, "the command is one export takes, and a dry run");
     assert.ok(!r.text.includes(GH_TOKEN));
 
