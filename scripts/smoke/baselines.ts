@@ -175,7 +175,7 @@ export async function run(): Promise<void> {
         same.results.length === 5 &&
         same.results.every((r) => r.status === "matches" && r.diff?.percent === 0 && !r.unsteady) &&
         visual(same).length === 0,
-      `${same.status} ${JSON.stringify(same.results)}`,
+      `${same.status} ${JSON.stringify(same.results)}\n${same.out.slice(-600)}`,
     );
     check("...and writes no pictures", !fs.existsSync(path.join(same.dir, "visual")));
 
@@ -231,7 +231,7 @@ export async function run(): Promise<void> {
     check(
       "...and with --baseline-threshold 100 the same restyle is within the threshold everywhere, and the gate passes",
       allowed.status === 0 && allowed.results.every((r) => r.status === "matches") && (of(allowed, "testid=plan")?.diff?.percent ?? 0) > 0,
-      `${allowed.status} ${JSON.stringify(allowed.results)}`,
+      `${allowed.status} ${JSON.stringify(allowed.results)}\n${allowed.out.slice(-600)}`,
     );
 
     const retaken = await checkWith("update", "retaken");
@@ -243,7 +243,7 @@ export async function run(): Promise<void> {
         of(retaken, "testid=notes")?.status === "matches" &&
         fs.readFileSync(stored("testid=notes", "png")).equals(notesBytes) &&
         fs.statSync(stored("testid=notes", "png")).mtimeMs === notesWritten,
-      `${retaken.status} ${JSON.stringify(retaken.results)}`,
+      `${retaken.status} ${JSON.stringify(retaken.results)}\n${retaken.out.slice(-600)}`,
     );
 
     const retakenPlan = fs.readFileSync(stored("testid=plan", "png"));
@@ -256,7 +256,7 @@ export async function run(): Promise<void> {
     check(
       "after the update, compare passes again with every target at 0%",
       after.status === 0 && after.results.every((r) => r.status === "matches" && r.diff?.percent === 0) && visual(after).length === 0,
-      `${after.status} ${JSON.stringify(after.results)}`,
+      `${after.status} ${JSON.stringify(after.results)}\n${after.out.slice(-600)}`,
     );
     check(
       "...and the pictures an earlier run left in its output folder are gone, while a file it did not write is kept",
