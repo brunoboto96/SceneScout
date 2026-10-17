@@ -402,7 +402,40 @@ async function refusedFormOnAPostedPage({ baseUrl, projectDir, stats }: SmokeCon
       );
       const after = await engine.snapshot(true);
       check("...and the session is on the page, not the browser's error page", after.includes("Thing added"), after.slice(0, 400));
+      // Going back from the page loaded again lands on the error page's history entry first; leaving that one must not go
+      // back onto the entry the form's POST made either.
+      const back = await engine.goBack();
+      check("...and going back from it does not send that POST again either", posts() === before + 1, `${back}\n${JSON.stringify(stats.writes)}`);
+      check(
+        "...and says it loaded the page with GET rather than going back past the error page",
+        droppedNavigationErrorPage(BROWSER) === null ||
+          /showed an error page; loaded http[^\s]*\/form-landing again with GET, since this session did not see how it was loaded/.test(back),
+        back,
+      );
     }
+    // A page only the form's POST can show: loading its address with a GET is refused with 405. The engine made that GET,
+    // so it says so, and the 405 is not charged to the page as an oracle violation.
+    await engine.navigate("/form-post.html");
+    const onlyPosts = (): number => stats.writes["POST /form-landing-post-only"] ?? 0;
+    const onlyRef = (await engine.snapshot(true)).match(/(e\d+) button "Add thing by POST only"/)?.[1];
+    if (!onlyRef) throw new Error("Add thing by POST only button not found");
+    await engine.click(onlyRef);
+    const onlyBefore = onlyPosts();
+    const onlySend = (await engine.snapshot(true)).match(/(e\d+) button "Send"/)?.[1];
+    if (!onlySend) throw new Error("Send button not found after the POST-only form");
+    const onlySent = await engine.click(onlySend);
+    check(
+      "a page only a POST shows: leaving the error page does not send that POST again",
+      onlyPosts() === onlyBefore,
+      `${onlySent}\n${JSON.stringify(stats.writes)}`,
+    );
+    check(
+      "...and the 405 its address answers to the engine's GET is named as the engine's, not reported as the page's violation",
+      droppedNavigationErrorPage(BROWSER) === null
+        ? !/error page/.test(onlySent)
+        : /answered HTTP 405 to that GET/.test(onlySent) && !/http_error|console_error/.test(onlySent),
+      onlySent,
+    );
   } finally {
     await engine.close().catch(() => {});
   }

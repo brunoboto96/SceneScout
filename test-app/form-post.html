@@ -12,6 +12,11 @@
         <label>Title <input name="title" value="a thing" data-testid="form-post-title" /></label>
         <button type="submit" data-testid="form-post-submit">Add thing</button>
       </form>
+      <!-- The same form, posting to an address the server answers only to POST (a GET of it is refused with 405). -->
+      <form method="post" action="/form-landing-post-only">
+        <input type="hidden" name="title" value="another thing" />
+        <button type="submit" data-testid="form-post-only-submit">Add thing by POST only</button>
+      </form>
     </main>
   </body>
 </html>

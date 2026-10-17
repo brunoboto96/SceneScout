@@ -272,11 +272,12 @@ export function droppedNavigationErrorPage(engine: BrowserEngineName): string | 
  * re-sends a POST without asking: the app receives the form a second time and,
  * in safe-write, makes the record twice. A page a write loaded is loaded again
  * from its address with a GET instead ("get"). A page a GET loaded, including
- * one a form redirected to after its POST, is gone back to ("back"), as is one
- * whose load the engine did not see (null).
+ * one a form redirected to after its POST, is gone back to ("back"). One whose
+ * load the engine did not see (null) is loaded with a GET too: the session may
+ * have gone back onto the error page, and the entry behind it may be a POST's.
  */
 export function errorPageExit(documentMethod: string | null): "back" | "get" {
-  if (documentMethod === null) return "back";
+  if (documentMethod === null) return "get";
   const method = documentMethod.toUpperCase();
   return method === "GET" || method === "HEAD" ? "back" : "get";
 }

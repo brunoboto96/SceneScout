@@ -547,6 +547,21 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       });
       return;
     }
+    // The same page answered only to its form's POST: a GET of its address is refused with 405, as a route that handles
+    // the form alone does.
+    if (urlPath === "/form-landing-post-only") {
+      req.resume();
+      req.on("end", () => {
+        if (req.method !== "POST") {
+          res.writeHead(405, { "content-type": "text/html; charset=utf-8", allow: "POST" });
+          res.end("<!DOCTYPE html><title>Method Not Allowed</title><h1>Method Not Allowed</h1>");
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(fs.readFileSync(path.join(appDir, "form-landing.html")));
+      });
+      return;
+    }
     // A search read through POST (read-posts.html). A body carrying a delete command or a GraphQL mutation is counted
     // apart, so a suite can prove none arrived while plain searches did.
     if (urlPath === "/api/search" && req.method === "POST") {
