@@ -63,6 +63,9 @@ export function shouldKeepWaiting(state: SettleState): boolean {
   return Math.min(state.sinceLastStartMs, state.elapsedMs) < QUIET_MS;
 }
 
+/** How long a navigation that finished without failing still counts as on its way, waiting for its frame to commit it. */
+export const NAVIGATION_COMMIT_GRACE_MS = 500;
+
 /**
  * Which requests are still in flight, for the wait above.
  *
@@ -83,13 +86,18 @@ export class InFlightRequests<R, F> {
   private readonly open = new Map<R, { frame: F | undefined; order: number }>();
   /** Per frame, the order of the latest navigation request it sent that has not yet committed. */
   private readonly pendingNavigation = new Map<F, number>();
+  /** Per frame, when its pending navigation request finished without failing (it may still be about to commit). */
+  private readonly finishedNavigation = new Map<F, number>();
   private order = 0;
 
   /** A request started. `frame` is undefined for one no frame sent (a worker's). */
   started(request: R, frame: F | undefined, isNavigation: boolean): void {
     const order = ++this.order;
     this.open.set(request, { frame, order });
-    if (isNavigation && frame !== undefined) this.pendingNavigation.set(frame, order);
+    if (isNavigation && frame !== undefined) {
+      this.pendingNavigation.set(frame, order);
+      this.finishedNavigation.delete(frame);
+    }
   }
 
   /**
@@ -98,10 +106,14 @@ export class InFlightRequests<R, F> {
    * being the one a later commit of its frame is measured against. A finished
    * one may still be about to commit (its body can end first), so it stays.
    */
-  ended(request: R, failed = false): void {
+  ended(request: R, failed = false, at: number = Date.now()): void {
     const held = this.open.get(request);
     this.open.delete(request);
-    if (failed && held?.frame !== undefined && this.pendingNavigation.get(held.frame) === held.order) this.pendingNavigation.delete(held.frame);
+    if (held?.frame === undefined || this.pendingNavigation.get(held.frame) !== held.order) return;
+    if (failed) {
+      this.pendingNavigation.delete(held.frame);
+      this.finishedNavigation.delete(held.frame);
+    } else this.finishedNavigation.set(held.frame, at);
   }
 
   /**
@@ -113,17 +125,39 @@ export class InFlightRequests<R, F> {
     const navigation = this.pendingNavigation.get(frame);
     if (navigation === undefined) return;
     this.pendingNavigation.delete(frame);
+    this.finishedNavigation.delete(frame);
     for (const [request, held] of this.open) if (held.frame === frame && held.order < navigation) this.open.delete(request);
   }
 
   /** Frames that are gone (detached, or their page closed): every request they sent is dropped. */
   gone(isGone: (frame: F) => boolean): void {
     for (const [request, held] of this.open) if (held.frame !== undefined && isGone(held.frame)) this.open.delete(request);
-    for (const frame of [...this.pendingNavigation.keys()]) if (isGone(frame)) this.pendingNavigation.delete(frame);
+    for (const frame of [...this.pendingNavigation.keys()])
+      if (isGone(frame)) {
+        this.pendingNavigation.delete(frame);
+        this.finishedNavigation.delete(frame);
+      }
   }
 
   get count(): number {
     return this.open.size;
+  }
+
+  /**
+   * Whether `frame` has a navigation on its way: its latest navigation request
+   * is still open, or finished without failing less than
+   * NAVIGATION_COMMIT_GRACE_MS ago and has not been committed (a document's
+   * body can end before the frame commits it). One that finished long enough
+   * ago without committing (a 204, a download) never will, and one that failed
+   * (refused, aborted) never will either: neither counts.
+   */
+  navigating(frame: F, now: number = Date.now()): boolean {
+    const order = this.pendingNavigation.get(frame);
+    if (order === undefined) return false;
+    const finishedAt = this.finishedNavigation.get(frame);
+    if (finishedAt !== undefined) return now - finishedAt < NAVIGATION_COMMIT_GRACE_MS;
+    for (const held of this.open.values()) if (held.frame === frame && held.order === order) return true;
+    return false;
   }
 }
 
@@ -167,18 +201,31 @@ export function describePace(paceMs: number): string {
 export const URL_QUIET_MS = 400;
 /** Longest to watch. A page redirecting in a loop must not hold up the run. */
 export const URL_CAP_MS = 3000;
+/**
+ * The quiet window the attach's sign-in verdict watches with, when the session
+ * carries a saved sign-in. An app whose scripts send a signed-out visitor to
+ * sign-in after a hydration pass or a token check can take longer than the
+ * run's window, and a verdict read before that passes a stale profile as
+ * signed in, for the rest of the run. Paid once per attach with credentials.
+ */
+export const ATTACH_URL_QUIET_MS = 1000;
 
 export interface UrlWatch {
   /** Since the URL last changed. */
   sinceChangeMs: number;
   /** Since the watch began. */
   elapsedMs: number;
+  /** Whether the page's own navigation has started and not yet committed or failed: its address is about to change. */
+  navigating?: boolean;
+  /** How long the URL must hold still; URL_QUIET_MS unless given. */
+  quietMs?: number;
 }
 
 /** Whether to keep watching the URL before judging where the page landed. */
 export function keepWatchingUrl(w: UrlWatch): boolean {
   if (w.elapsedMs >= URL_CAP_MS) return false;
-  return w.sinceChangeMs < URL_QUIET_MS;
+  if (w.navigating) return true;
+  return w.sinceChangeMs < (w.quietMs ?? URL_QUIET_MS);
 }
 
 /**
@@ -238,15 +285,23 @@ export async function settlePage(page: SettlingPage, src: SettleSource, now: () 
  * guard redirects on a timer and issues no request until it does, so the
  * request-based settle has nothing to wait on and the page is read while it
  * is still, briefly, the page it was asked for. `now` is the clock it measures by, as for settlePage.
+ * `navigating` says whether the page's own navigation is on its way (InFlightRequests.navigating): a guard that has
+ * fired, whose sign-in page has not answered yet, has not changed the address, so the watch waits for it (to the
+ * cap). `quietMs` replaces URL_QUIET_MS (the attach's verdict uses ATTACH_URL_QUIET_MS).
  */
-export async function stableUrlOf(current: () => SettlingPage | null, now: () => number = Date.now): Promise<string> {
+export async function stableUrlOf(
+  current: () => SettlingPage | null,
+  now: () => number = Date.now,
+  opts: { navigating?: () => boolean; quietMs?: number } = {},
+): Promise<string> {
   const page = current();
   if (!page || page.isClosed()) return page ? page.url() : "";
   const started = now();
   let url = page.url();
   let changedAt = started;
   for (;;) {
-    if (!keepWatchingUrl({ sinceChangeMs: now() - changedAt, elapsedMs: now() - started })) return url;
+    const watch = { sinceChangeMs: now() - changedAt, elapsedMs: now() - started, navigating: opts.navigating?.() ?? false };
+    if (!keepWatchingUrl(opts.quietMs !== undefined ? { ...watch, quietMs: opts.quietMs } : watch)) return url;
     await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
     if (current() !== page || page.isClosed()) return url;
     const at = page.url();

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area (late guard)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="gated-late-heading">Gated area</h1>
+    </main>
+    <script>
+      // A client-side auth guard that sends a signed-out visitor to sign-in 600 ms after the page has loaded, as an app
+      // does that first finishes a hydration pass or a token check. No request is in flight while it waits, so the
+      // engine's request-based settle has nothing to wait on. Signed in (the "smoke-auth" flag a storage state sets),
+      // the same page stays put: that is the one fact the attach's verdict must turn on.
+      addEventListener("load", function () {
+        setTimeout(function () {
+          try {
+            if (localStorage.getItem("smoke-auth") === "yes") return;
+          } catch (e) {
+            /* storage unavailable — treat as signed out */
+          }
+          location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
+        }, 600);
+      });
+    </script>
+  </body>
+</html>

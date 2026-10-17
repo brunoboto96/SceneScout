@@ -66,6 +66,48 @@ export async function run({ baseUrl, projectDir }: SmokeContext): Promise<void> 
     check("...and the route it asked for is not counted as covered", slow.includes("NOT counted as covered"), slow);
   } finally {
     await engDead.close().catch(() => {});
+  }
+  try {
+    await attachVerdictWaitsForLateSignIn(baseUrl, authProject, deadState);
+  } finally {
     fs.rmSync(authProject, { recursive: true, force: true });
   }
+}
+
+/**
+ * The attach's sign-in verdict on an app that sends a signed-out visitor to sign-in from its scripts after load. Read
+ * before that redirect, a stale profile passed as signed in. Contrastive pair: the same page attached with a storage
+ * state that signs in (the page stays put, and the attach is clean) and one that does not (AUTH FAILED).
+ */
+async function attachVerdictWaitsForLateSignIn(baseUrl: string, authProject: string, deadState: string): Promise<void> {
+  console.log("auth loss: the attach's sign-in verdict waits for a redirect the app's scripts make after load");
+  const liveState = path.join(authProject, "signed-in-fixture.json");
+  fs.writeFileSync(
+    liveState,
+    JSON.stringify({ cookies: [], origins: [{ origin: new URL(baseUrl).origin, localStorage: [{ name: "smoke-auth", value: "yes" }] }] }),
+  );
+  const attachAt = async (page: string, state: string): Promise<{ out: string; ms: number }> => {
+    const engine = new BrowserEngine();
+    try {
+      const started = Date.now();
+      const out = await engine.attach({ url: `${baseUrl}/${page}`, projectDir: authProject, mode: "read-only", storageStatePath: state });
+      return { out, ms: Date.now() - started };
+    } finally {
+      await engine.close().catch(() => {});
+    }
+  };
+  const late = await attachAt("gated-late.html", deadState);
+  check("a stale profile on a page that redirects to sign-in 600 ms after load is AUTH FAILED", late.out.includes("AUTH FAILED"), late.out);
+  check("...and names the sign-in page it landed on", /attaching landed on http[^\s]*\/login\?redirectTo=/.test(late.out), late.out);
+  const signedIn = await attachAt("gated-late.html", liveState);
+  check("the same page with a profile that signs in attaches cleanly", !signedIn.out.includes("AUTH FAILED"), signedIn.out);
+  console.log(`  (attach with a saved sign-in on a page that stays put: ${signedIn.ms} ms)`);
+  const slowLogin = await attachAt("gated-slow-login.html", deadState);
+  check(
+    "a stale profile whose sign-in page answers slowly is AUTH FAILED: the verdict waits for the navigation on its way",
+    slowLogin.out.includes("AUTH FAILED"),
+    slowLogin.out,
+  );
+  const slowSignedIn = await attachAt("gated-slow-login.html", liveState);
+  check("...and the same page signed in attaches cleanly", !slowSignedIn.out.includes("AUTH FAILED"), slowSignedIn.out);
 }
