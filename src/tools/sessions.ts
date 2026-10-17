@@ -34,7 +34,7 @@ import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "../en
 import { RECORD_MAX_FRAMES } from "../engine/replay.js";
 import { describePace, normalizePace } from "../engine/settle.js";
 import { formatScan, scanProject } from "../scan.js";
-import { fsPolicyReader, policyNote, refusalText, resolveSettings, withProjectPolicy } from "../engine/project-config.js";
+import { fsPolicyReader, policyNote, projectFolderRefusal, refusalText, resolveSettings, withProjectPolicy } from "../engine/project-config.js";
 import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, holdGuidedPlan, type CheckArea } from "../engine/guided.js";
 import { AREA_LABEL } from "../engine/guided-words.js";
 import { nowSentence } from "../engine/progress.js";
@@ -68,6 +68,7 @@ import {
   settleGuidedCall,
   guidedSessions,
   operatorPolicy,
+  sessionPolicy,
   callWork,
   CLOSE_WORK_WAIT_MS,
   flushAfterClose,
@@ -141,13 +142,16 @@ export async function projectFolderFor(url: string, given: string | undefined) {
   }
   const userDirsFile = path.join(os.homedir(), ".config", "user-dirs.dirs");
   const userDirs = process.platform === "linux" && fs.existsSync(userDirsFile) ? fs.readFileSync(userDirsFile, "utf8") : undefined;
-  return chooseProjectFolder({
+  const folder = chooseProjectFolder({
     given,
     workspace,
     url,
     home: { platform: process.platform, homedir: os.homedir(), env: process.env, userDirs },
     exists: fs.existsSync,
   });
+  // The operator's projectsRoot holds whichever folder was chosen, the default included (engine/project-config.ts).
+  const outside = "dir" in folder ? projectFolderRefusal(operatorPolicy, folder.dir, fsPolicyReader) : null;
+  return outside ? { refused: outside } : folder;
 }
 
 /**
@@ -207,6 +211,8 @@ export function registerSessionTools(): void {
     },
     serializedControl(async ({ projectPath }: { projectPath: string }) => {
       try {
+        const outside = projectFolderRefusal(operatorPolicy, projectPath, fsPolicyReader);
+        if (outside) return errorText(new Error(`scout_scan ${outside}`));
         return text(formatScan(scanProject(projectPath)), activeName);
       } catch (err) {
         return errorText(err);
@@ -536,6 +542,9 @@ export function registerSessionTools(): void {
             actionTimeoutMs,
             navTimeoutMs,
             memoryStore: store,
+            // Set as the old session closes, so the session's uploads follow this attach's config (engine/project-config.ts)
+            // from then on, also when a later step of the attach fails; a refusal before that leaves the old session's.
+            onSessionBegins: () => sessionPolicy.set(eng, config.loaded),
           });
           // Put the session on the board now, so the live view shows it before its
           // first tool call. liveLine() needs the port, so the server is awaited

@@ -367,6 +367,13 @@ export interface AttachOptions {
    * writes to memory.json because all writes go through one instance.
    */
   memoryStore?: MemoryStore;
+  /**
+   * Called once the session this attach replaces is closed, before the new one
+   * starts: from then on the session is this attach's, even when a later step
+   * fails. A refusal before that point leaves the old session, and the caller's
+   * state for it, as they were.
+   */
+  onSessionBegins?: () => void;
 }
 
 export interface UploadOptions {
@@ -1560,6 +1567,7 @@ export class BrowserEngine {
     writeClassifierSetting(process.env);
     refuseDestructiveGetsSetting(process.env);
     await this.close();
+    opts.onSessionBegins?.();
     this.limits = limits;
     this.auth = auth;
     this.role = roleLabel(auth);

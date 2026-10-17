@@ -622,6 +622,14 @@ export function logLine(line: string): void {
 /** Each session's finding-picture settings from its last attach, and how many pictures its results have carried since. */
 export const evidenceFor = new WeakMap<BrowserEngine, EvidenceSettings & { shown: number }>();
 
+/** Each session's SceneScout config from its last attach: the operator's, tightened by its project's own (engine/project-config.ts). */
+export const sessionPolicy = new WeakMap<BrowserEngine, LoadedPolicy>();
+
+/** The config a session runs under: its attach's, else the operator's. */
+export function policyFor(eng: BrowserEngine): LoadedPolicy {
+  return sessionPolicy.get(eng) ?? operatorPolicy;
+}
+
 // Signing in from the conversation: a window the person signs in in, watched
 // in the background, so a call need not last as long as the person takes and
 // a second call picks up the same window. One per project and role.
