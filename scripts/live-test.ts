@@ -3404,6 +3404,17 @@ test("the band and the status line carry the check's now sentence and its proble
   const long = statusWith({ now: `Typing ${"a".repeat(300)}` });
   assert.equal(around.statusLine(w, long)!.length, around.STATUS_MAX);
   assert.ok(around.statusLine(w, long)!.endsWith("..."));
+  // A step's words can quote the tested page, and a saved check's name is typed: no control character reaches the terminal as a code.
+  const coded = statusWith({ now: "\u001b[2J\u001b[31mOpening\u0007 /orders\nnext\u009b1m\u202e" });
+  const plain = "SceneScout · Now: [2J [31mOpening /orders next 1m · 1 problem so far";
+  assert.equal(around.bandLine(w, coded), plain);
+  assert.equal(around.statusLine(w, coded), plain);
+  assert.equal(
+    around.bandLine(wizard({ step: "confirm", fromQueue: "Admin\u001b]0;owned\u0007 area" }), STATUS_DONE),
+    around.BAND_WORDS.confirmNext("Admin ]0;owned area"),
+  );
+  const needsCoded = statusWith({ phase: "needs-you", needsYou: { kind: "stuck", sentence: "Stuck on\r\u001b[1A /x", actions: [] } });
+  assert.equal(around.bandLine(w, needsCoded), "SceneScout needs you: Stuck on [1A /x");
 });
 
 test("the band draws on the two surfaces that have it, keeps what is beneath, and its button opens the panel", () => {
@@ -3428,6 +3439,13 @@ test("the mod polls with the panel closed only while there is a check to keep in
   assert.equal(around.keepsPolling(false, idle, STATUS_RUNNING, at), true, "a check going");
   assert.equal(around.keepsPolling(false, idle, STATUS_DONE, at), false, "a check that has ended");
   assert.equal(around.keepsPolling(false, wizard({ queue: [QUEUED_LOOKS] }), STATUS_DONE, at), true, "a check waiting to start");
+  // A queued check waiting on the person's yes: nothing changes until they open the panel, which polls again.
+  const asking = wizard({ step: "confirm", planId: "gp-queued0001", fromQueue: QUEUED_WRITES.name, queue: [QUEUED_LOOKS] });
+  assert.equal(around.keepsPolling(false, asking, STATUS_DONE, at), false, "waiting on the person's yes");
+  assert.equal(around.keepsPolling(false, { ...asking, fromQueue: null }, STATUS_DONE, at), false, "their own preview holds the queue the same way");
+  assert.equal(around.keepsPolling(false, { ...asking, step: "running" }, STATUS_DONE, at), true, "the same queue with no preview waiting");
+  assert.equal(around.keepsPolling(false, asking, STATUS_RUNNING, at), true, "a check still going is kept in view");
+  assert.equal(around.keepsPolling(true, asking, STATUS_DONE, at), true);
   // A plan handed to Claude that the server does not show yet: polled until it is seen to end, or for a while at most.
   const handed = wizard({ step: "running", planId: "gp-handed0001" });
   assert.equal(around.keepsPolling(false, handed, STATUS_IDLE, at), true);

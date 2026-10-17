@@ -261,7 +261,7 @@ function engineBeneath(on: any, statusLines: Array<string | undefined>) {
 }
 
 /** A server whose guided check runs until `run.done`, whose one saved check writes, and which records every call. */
-function runServer(on: any, calls: Array<{ tool: string; args: Record<string, unknown> }>, run: { done: boolean }) {
+function runServer(on: any, calls: Array<{ tool: string; args: Record<string, unknown> }>, run: { done: boolean; now?: string }) {
   on("mcp.call", async (_$: unknown, e: { tool: string; args: Record<string, unknown> }) => {
     calls.push({ tool: e.tool, args: e.args });
     if (e.tool === "scout_status_poll")
@@ -269,7 +269,7 @@ function runServer(on: any, calls: Array<{ tool: string; args: Record<string, un
         value: status(
           run.done
             ? { ...RUNNING, phase: "done", now: "Finished", next: [{ kind: "direct", tool: "scout_cards", label: "See the problems", args: {} }] }
-            : RUNNING,
+            : { ...RUNNING, ...(run.now === undefined ? {} : { now: run.now }) },
         ),
       };
     if (e.tool === "scout_saved_checks")
@@ -317,6 +317,21 @@ test("the band above the prompt carries what the check is doing now and its prob
     expect(await survey.findAll({ key: "guided-band-open" })).toEqual([]);
     await survey.unmount();
   }
+});
+
+test("the band and the status line draw a site's words as plain text, with no terminal codes", async ($, on) => {
+  const lines: Array<string | undefined> = [];
+  // A step's words can quote the tested page: an escape sequence, a bell and a line break in them are never drawn as codes.
+  runServer(on, [], { done: false, now: "\u001b[2J\u001b[31mOpening\u0007 /orders\nnext\u009b1m" });
+  answerCommands(on);
+  engineBeneath(on, lines);
+  mock.clock(on, { now: 1_000 });
+  await $.command.run({ command: "scenescout-guided", args: "" } as never);
+  expect(lines.at(-1)).toBe("SceneScout · Now: [2J [31mOpening /orders next 1m · 2 problems so far");
+  const band = await $.ui.mount({ ...BAND, surface: "terminal", props: bandProps() });
+  expect(await band.find({ type: "Text", text: /^SceneScout · Now: \[2J \[31mOpening \/orders next 1m · 2 problems so far$/ })).toBeDefined();
+  expect(await band.find({ key: "guided-band-open" })).toBeDefined();
+  await band.unmount();
 });
 
 test("a card takes Not a bug or Confirmed, each sent to scout_feedback, and offers the other once one is given", async ($, on) => {

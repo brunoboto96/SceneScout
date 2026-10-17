@@ -46,6 +46,18 @@ function num(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
 
+/**
+ * C0 and C1 control characters, DEL, and the bidirectional overrides: what a
+ * terminal would read as a code rather than draw. A step's words can quote
+ * the tested page, so the band and the status line never carry them.
+ */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g;
+
+/** A line as plain text: each run of control characters a space, and the spaces it leaves collapsed. */
+export function plainLine(/** @type {string} */ line) {
+  return line.replace(CONTROL, " ").replace(/ {2,}/g, " ").trim();
+}
+
 /** Whether a guided check has ended: done, or stopped. */
 export function isFinished(/** @type {any} */ g) {
   return isRecord(g) && (g.phase === "done" || g.phase === "stopped");
@@ -68,6 +80,12 @@ export function problemCount(/** @type {any} */ p) {
  * @returns {string | null}
  */
 export function bandLine(w, status) {
+  const line = bandWords(w, status);
+  return line === null ? null : plainLine(line);
+}
+
+/** The band's line before it is made plain. @param {import("./guided.js").Wizard} w @param {{ kind: string, data?: any }} status */
+function bandWords(w, status) {
   if (w.step === "confirm" && w.fromQueue) return BAND_WORDS.confirmNext(w.fromQueue);
   const g = guidedOf(status, null);
   if (g && !isFinished(g)) {
@@ -97,8 +115,10 @@ export function statusLine(w, status) {
 /**
  * Whether the mod polls the server: while the panel is open, and with it
  * closed while there is a check to keep in view: one going, one waiting in
- * the queue, or one the panel handed Claude that the server does not show
- * yet, for HANDED_WAIT_MS after it was sent (Claude may never start it).
+ * the queue (but not while a preview waits on the person's yes, which holds
+ * the queue and only the open panel can give), or one the panel handed
+ * Claude that the server does not show yet, for HANDED_WAIT_MS after it was
+ * sent (Claude may never start it).
  *
  * @param {boolean} isOpen
  * @param {import("./guided.js").Wizard} w
@@ -106,9 +126,12 @@ export function statusLine(w, status) {
  * @param {{ now: number, sentAt: number }} at
  */
 export function keepsPolling(isOpen, w, status, at) {
-  if (isOpen || w.queue.length > 0) return true;
+  if (isOpen) return true;
   const g = guidedOf(status, null);
   if (g && !isFinished(g)) return true;
+  // A preview waiting on the person's yes (a queued check's or their own) holds the queue, and changes only when they open the panel, which polls.
+  if (w.step === "confirm") return false;
+  if (w.queue.length > 0) return true;
   const handed = w.step === "running" && w.planId !== null && !(g && str(g.planId) === w.planId);
   return handed && at.now - at.sentAt < HANDED_WAIT_MS;
 }
