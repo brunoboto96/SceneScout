@@ -39,6 +39,12 @@ export interface SettleState {
   elapsedMs: number;
   /** A floor this session asked for, so a person can follow along. 0 means as fast as the page allows. */
   paceMs: number;
+  /**
+   * The wait is before a read (a snapshot), not after an action. A read sends
+   * nothing, so the quiet window is not run again from it: the wait before it
+   * already saw the page quiet, and only a request started since counts.
+   */
+  read?: boolean;
 }
 
 /**
@@ -60,7 +66,60 @@ export function shouldKeepWaiting(state: SettleState): boolean {
   // through a hop — a click that posts to a service worker, which then fetches —
   // is read while the page is between the two, and the request lands during the
   // NEXT action, which is then blamed for it.
+  if (state.read) return state.sinceLastStartMs < QUIET_MS;
   return Math.min(state.sinceLastStartMs, state.elapsedMs) < QUIET_MS;
+}
+
+/** The waits between reads of a page's controls before a snapshot, growing (recheckWait). */
+export const RECHECK_WAITS_MS: readonly number[] = [50, 100, 200, 400];
+/** Longest the re-reads go on while the page is quiet. */
+export const RECHECK_CAP_MS = 1000;
+/** Longest while the page still has requests out or just started one: its content may be on the way. */
+export const RECHECK_BUSY_CAP_MS = 4000;
+
+export interface RecheckState {
+  /** How many controls each read so far found, the first read first. */
+  counts: readonly number[];
+  /** For each read, whether the page was busy when it was taken (absent: none was). */
+  busyAt?: readonly boolean[];
+  /** Since the first read. */
+  elapsedMs: number;
+  /** Requests started and not yet finished, less than RECHECK_OPEN_MS ago (InFlightRequests.openWithin). */
+  inFlight: number;
+  /** Since the most recent request started. */
+  sinceLastStartMs: number;
+}
+
+/** A request open longer than this is not content on its way (an EventSource, a long poll): it does not keep the re-reads going. */
+export const RECHECK_OPEN_MS = SETTLE_CAP_MS;
+
+/** Whether the page is busy for the re-reads: a young request out, or one started within QUIET_MS. */
+export function recheckBusy(inFlight: number, sinceLastStartMs: number): boolean {
+  return inFlight > 0 || sinceLastStartMs < QUIET_MS;
+}
+
+/**
+ * How long to wait before reading the page's controls again, or null when the
+ * last read can be used. A single-page app can show an empty shell, or a shell
+ * with its navigation drawn, while the route's own content loads; reading
+ * until two reads agree is what keeps a snapshot from listing the loading
+ * state.
+ *
+ * Two equal reads, both taken while the page was quiet and with the page still
+ * quiet (no young request out, none started within QUIET_MS), end it, an empty
+ * page included: an empty page with nothing on its way is what it is. While
+ * the page is busy, equal reads do not count, up to RECHECK_BUSY_CAP_MS. There is always one re-read. A page that renders
+ * late from a timer, with no request, after the reads have agreed is not waited
+ * for.
+ */
+export function recheckWait(s: RecheckState): number | null {
+  const n = s.counts.length;
+  const busy = recheckBusy(s.inFlight, s.sinceLastStartMs);
+  const quietPair = !(s.busyAt?.[n - 1] ?? false) && !(s.busyAt?.[n - 2] ?? false);
+  if (n >= 2 && s.counts[n - 1] === s.counts[n - 2] && quietPair && !busy) return null;
+  const cap = busy ? RECHECK_BUSY_CAP_MS : RECHECK_CAP_MS;
+  if (s.elapsedMs >= cap) return null;
+  return Math.min(RECHECK_WAITS_MS[Math.min(n - 1, RECHECK_WAITS_MS.length - 1)], cap - s.elapsedMs);
 }
 
 /** How long a navigation that finished without failing still counts as on its way, waiting for its frame to commit it. */
@@ -83,7 +142,7 @@ export const NAVIGATION_COMMIT_GRACE_MS = 500;
  * types so it is tested without a browser.
  */
 export class InFlightRequests<R, F> {
-  private readonly open = new Map<R, { frame: F | undefined; order: number }>();
+  private readonly open = new Map<R, { frame: F | undefined; order: number; at: number }>();
   /** Per frame, the order of the latest navigation request it sent that has not yet committed. */
   private readonly pendingNavigation = new Map<F, number>();
   /** Per frame, when its pending navigation request finished without failing (it may still be about to commit). */
@@ -91,9 +150,9 @@ export class InFlightRequests<R, F> {
   private order = 0;
 
   /** A request started. `frame` is undefined for one no frame sent (a worker's). */
-  started(request: R, frame: F | undefined, isNavigation: boolean): void {
+  started(request: R, frame: F | undefined, isNavigation: boolean, at: number = Date.now()): void {
     const order = ++this.order;
-    this.open.set(request, { frame, order });
+    this.open.set(request, { frame, order, at });
     if (isNavigation && frame !== undefined) {
       this.pendingNavigation.set(frame, order);
       this.finishedNavigation.delete(frame);
@@ -141,6 +200,17 @@ export class InFlightRequests<R, F> {
 
   get count(): number {
     return this.open.size;
+  }
+
+  /**
+   * The requests still open that started less than `ms` ago. A stream that
+   * never ends (an EventSource, a long poll) stays open for the page's life;
+   * past this age it is the page's way of working, not content on its way.
+   */
+  openWithin(ms: number, now: number = Date.now()): number {
+    let n = 0;
+    for (const held of this.open.values()) if (now - held.at < ms) n += 1;
+    return n;
   }
 
   /**
@@ -255,9 +325,10 @@ export interface SettleSource {
  * Wait after an action until the page has settled (shouldKeepWaiting), or the session has moved to another page.
  * `now` is the clock the wait measures by; a test passes one its stand-in page advances, so no assertion rests on
  * how long a real timer took (a 20 ms tick takes about 31 ms on Windows' default timer resolution). It must be the
- * clock `src.lastRequestStart()` is read on, or the time since the last request means nothing.
+ * clock `src.lastRequestStart()` is read on, or the time since the last request means nothing. `read` is for a wait
+ * before a read rather than after an action (SettleState.read).
  */
-export async function settlePage(page: SettlingPage, src: SettleSource, now: () => number = Date.now): Promise<void> {
+export async function settlePage(page: SettlingPage, src: SettleSource, now: () => number = Date.now, read = false): Promise<void> {
   await bestEffort(page.waitForLoadState("domcontentloaded"));
   // Wait on what is actually in flight rather than a flat sleep. The rule is
   // shouldKeepWaiting above; the reasoning for not using networkidle is at the
@@ -269,6 +340,7 @@ export async function settlePage(page: SettlingPage, src: SettleSource, now: () 
       sinceLastStartMs: now() - src.lastRequestStart(),
       elapsedMs: now() - started,
       paceMs: src.paceMs(),
+      read,
     };
     if (!shouldKeepWaiting(state)) return;
     await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));

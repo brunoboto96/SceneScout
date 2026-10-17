@@ -101,7 +101,20 @@ flowchart TD
 The quiet window runs from **the action as well as the last request**. A click
 that posts to a service worker, which then fetches, makes no request of its
 own — reading the page between the two blamed the next action for the worker's
-request.
+request. A snapshot is a read, not an action: it sends nothing, so before
+it the window runs from the last request only, and a snapshot right after an
+action that has already settled does not wait 120 ms again.
+
+A snapshot then reads the page's controls more than once, because a
+single-page app can show an empty shell, or its navigation alone, while the
+route's content loads. It reads again after 50, 100, 200 and 400 ms until two
+reads, both taken while the page is quiet (no request out, none started in
+the last 120 ms), find the same number of controls, at most 1 s; while
+requests are still out, equal reads do not count, up to 4 s. A request open
+longer than 2 s (a stream or a long poll the page keeps for its whole life)
+does not keep the page busy. An empty page with nothing on its way
+counts as read after two reads. A page that draws late from a timer, with no
+request, after two reads have agreed, is read before it draws.
 
 Separately, where a **bounce verdict** is about to be made — attach judging a
 storage state, navigate judging coverage — the URL is watched until it holds
