@@ -104,7 +104,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--provider` | the one whose key is set | `anthropic` or `openai`. Required when both keys are set |
 | `--model` | `claude-sonnet-5` or `gpt-6-luna` | The model id |
 | `--effort` | `low` | `none` (OpenAI only), `low`, `medium`, `high`, `xhigh` or `max` |
-| `--base-url` | the provider's own API | Another endpoint implementing the same API. Must be https, or plain http to `127.0.0.1` or `localhost` |
+| `--base-url` | the provider's own API | Another endpoint implementing the same API. Must be https, or plain http to `127.0.0.1` or `localhost`, with no credentials, query or fragment |
 | `--max-turns` | `80` | The most model calls |
 | `--max-tokens` | `3000000` | The most tokens, input and output, over the run |
 | `--max-minutes` | `20` | The most minutes of exploration; the report is written after |
@@ -311,7 +311,7 @@ The presets:
 | `SCENESCOUT_STORAGE_STATE_ALLOW` | the server | Storage-state files `scout_attach` `storageStatePath` may read from outside the project, as exact absolute paths separated as in `PATH`. Unset: only files inside the project are read. `ci` adds the file `--storage-state` names for its own server. A relative entry or one starting with `~` stops the server as it starts |
 | `SCENESCOUT_DEDUP` | the server | `judge` asks a model, with a key below, whether a filing the dedup rule keeps apart from everything recorded is one of the open findings on its page; `rule` (default) does not. A `scout_attach` `dedup: "rule"` wins over it; `dedup: "judge"` from a tool call does not switch the judge on unless this variable already says `judge` |
 | `SCENESCOUT_DEDUP_PROVIDER` | the server | `anthropic` or `openai`: which key the dedup judge uses when both are set |
-| `SCENESCOUT_DEDUP_BASE_URL` | the server | The API root the dedup judge sends its key and questions to, for a private endpoint that speaks the chosen provider's API (the same rules as `ci --base-url`: https, or plain http only to `127.0.0.1` or `localhost`, no credentials in the URL, and a redirect is never followed). Unset or blank: the provider's own API. A value that breaks a rule stops the judge's setup with a message naming the variable |
+| `SCENESCOUT_DEDUP_BASE_URL` | the server | The API root the dedup judge sends its key and questions to, for a private endpoint that speaks the chosen provider's API (the same rules as `ci --base-url`: https, or plain http only to `127.0.0.1` or `localhost`, no credentials, query or fragment in the URL, and a redirect is never followed). Unset or blank: the provider's own API. A value that breaks a rule stops the judge's setup with a message naming the variable |
 | `SCENESCOUT_FROM_RUN` | the server, `ci` | An earlier run's `ci.json` or project directory, for every `ci` run and `scout_lane_brief` that does not name its own: the run starts from that run's record. Unset (default): a fresh run. `--from-run` and the brief's `fromRun` win over it |
 | `SCENESCOUT_FROM_RUN_MODE` | the server, `ci` | `continue` (default) or `replay`: how a run that starts from an earlier one uses its record. `--from-run-mode` and the brief's `fromRunMode` win over it |
 | `SCENESCOUT_FROM_RUN_TURNS_PER_PAGE` | the server, `ci` | A whole number from 1 to 200 (default 7): turns a continued `ci` run budgets per page, which caps how many pages it takes on. `--from-run-turns-per-page` wins over it |

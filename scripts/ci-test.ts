@@ -312,6 +312,19 @@ test("base URL: https anywhere, plain http only to this machine, never with cred
   assert.ok(!checkBaseUrl("http://10.0.0.5/v1").ok);
   assert.ok(!checkBaseUrl("https://u:p@llm.example.com/v1").ok);
   assert.ok(!checkBaseUrl("ftp://llm.example.com").ok);
+  assert.ok(checkBaseUrl("http://[::1]:8080/v1").ok, "IPv6 loopback is this machine");
+  assert.ok(!checkBaseUrl("http://localhost.attacker.example/v1").ok, "a host that only starts with localhost is not this machine");
+  assert.deepEqual(checkBaseUrl("HTTPS://LLM.Example.com/v1"), { ok: true, url: "https://llm.example.com/v1" });
+  // The API path is appended to the URL: after a query or a fragment it would land inside them, and the request would go to another path.
+  for (const bad of [
+    "https://llm.example.com/v1?api-version=1",
+    "https://llm.example.com/v1#part",
+    "https://llm.example.com/v1?",
+    "https://llm.example.com/v1#",
+  ]) {
+    const r = checkBaseUrl(bad);
+    assert.ok(!r.ok && /--base-url must carry no query or fragment/.test(r.error), bad);
+  }
 });
 
 // ── which provider ──────────────────────────────────────────────────────────
@@ -3649,6 +3662,12 @@ test("dedup: SCENESCOUT_DEDUP_BASE_URL points the judge at a private endpoint un
       bad,
     );
   }
+  assert.throws(
+    () => judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: "https://llm.example/v1#x" }),
+    /^Error: SCENESCOUT_DEDUP_BASE_URL must carry no query or fragment/,
+  );
+  // The rule (a project's dedup ceiling, or the default) never reads the variable, so a bad value cannot stop an attach that keeps the judge off.
+  assert.equal(planDedup("rule", { ...key, SCENESCOUT_DEDUP_BASE_URL: "http://10.0.0.5/v1" }, undefined).mode, "rule");
   // Without a key there is nothing to send, so the missing key is the answer, as before.
   const none = judgeKeyConfig({ SCENESCOUT_DEDUP_BASE_URL: "https://llm.internal.example/v1" });
   assert.ok(!none.ok);

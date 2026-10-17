@@ -183,6 +183,8 @@ export function checkBaseUrl(raw: string, name = "--base-url"): { ok: true; url:
     return { ok: false, error: `${name} is not a URL` };
   }
   if (u.username || u.password) return { ok: false, error: `${name} must carry no credentials: the key is read from the environment` };
+  // The API's path is appended to this URL: after a query or a fragment it would land inside them and the call would go elsewhere.
+  if (/[?#]/.test(u.href)) return { ok: false, error: `${name} must carry no query or fragment: the API's path is added to its end` };
   if (u.protocol === "https:") return { ok: true, url: u.toString().replace(/\/+$/, "") };
   if (u.protocol === "http:" && LOOPBACK_HOSTS.has(u.hostname)) return { ok: true, url: u.toString().replace(/\/+$/, "") };
   return { ok: false, error: `${name} must be https (plain http only to 127.0.0.1 or localhost): the API key is sent to it` };
