@@ -1302,8 +1302,9 @@ test("the error page is left by going back unless a POST loaded the page before 
   // A page a GET loaded (a form that redirected after its POST ends on a GET) is gone back to.
   assert.equal(errorPageExit("GET"), "back");
   assert.equal(errorPageExit("HEAD"), "back");
-  // No load seen: going back sends nothing the engine knows to be a write.
-  assert.equal(errorPageExit(null), "back");
+  // No load seen (the session went back onto the error page, or the page came from the back-forward cache): the entry
+  // behind the error page may be one a POST loaded, so it is loaded with a GET rather than gone back to.
+  assert.equal(errorPageExit(null), "get");
 });
 
 test("shared workers are taken from the page in every mode that blocks anything", () => {
