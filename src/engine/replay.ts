@@ -23,7 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { ActivityLine } from "./live.js";
 import { cspMeta, savedPageCsp } from "./csp.js";
-import { isSafeRelativePath } from "./plain.js";
+import { EVIDENCE_HEADING, IMPACT, isSafeRelativePath, SUMMARY_HEADING, TECHNICAL_HEADING, type CardImpact } from "./plain.js";
 import { scriptLiteral } from "./script-literal.js";
 
 /** One session's trail, as the document shows it. */
@@ -283,44 +283,130 @@ function renderPicture(p: NonNullable<FindingEvidence["picture"]>, id: string, f
   );
 }
 
-function renderEvidence(e: FindingEvidence, framePrefix = "", savedAt = ""): string {
-  const picture = e.picture ? renderPicture(e.picture, e.id, framePrefix, savedAt) : "";
-  if (e.frames.length === 0) return picture;
+/** The recorded frames before a finding was filed, as a strip of small pictures, each opening full size. */
+function renderFrames(e: FindingEvidence, framePrefix = "", savedAt = ""): string {
+  if (e.frames.length === 0) return "";
   const shots = e.frames
     .map(
       (f) =>
-        `<figure><img loading="lazy" ${GONE} src="${escapeHtml(framePrefix + f.frame)}" alt="The page when this step ran">` +
-        `<p class="gone-note">This frame is not beside this file. Frames live in the run's <code>recordings/</code> folder, which travels with it.</p>` +
+        `<figure><a class="frame" href="${escapeHtml(framePrefix + f.frame)}" target="_blank" rel="noreferrer" data-testid="report-frame-open">` +
+        `<img loading="lazy" ${GONE} src="${escapeHtml(framePrefix + f.frame)}" alt="The page when this step ran">` +
+        `<p class="gone-note">This frame is not beside this file. Frames live in the run's <code>recordings/</code> folder, which travels with it.</p></a>` +
         `<figcaption>${escapeHtml(clock(f.at))} <b>${escapeHtml(f.action)}</b> ${escapeHtml(f.detail)}` +
         (savedAt ? `<span class="onDisk">${escapeHtml(savedAt + "/" + f.frame)}</span>` : "") +
         `</figcaption></figure>`,
     )
     .join("");
-  return `${picture}<details class="evidence"><summary>Evidence — the ${e.frames.length} step${e.frames.length === 1 ? "" : "s"} on screen before this was filed</summary><div class="shots">${shots}</div></details>`;
+  return (
+    `<div class="filmstrip" data-testid="report-evidence-frames"><p class="strip-label">The ${e.frames.length} step${e.frames.length === 1 ? "" : "s"} on screen before this was filed</p>` +
+    `<div class="shots">${shots}</div></div>`
+  );
 }
 
-/** The report's sections the header links to, by heading. */
-const SECTION_ANCHORS: Record<string, string> = { "In plain words": "plain", "Technical detail": "technical" };
+/** A finding's own picture and its frames, together: where the technical report names its id and no Evidence section showed them. */
+function renderEvidence(e: FindingEvidence, framePrefix = "", savedAt = ""): string {
+  const picture = e.picture ? renderPicture(e.picture, e.id, framePrefix, savedAt) : "";
+  return `${picture}${renderFrames(e, framePrefix, savedAt)}`;
+}
+
+/**
+ * The report's sections the header links to, by heading. Built on first use:
+ * plain.ts reaches this module through its own imports, so its constants are
+ * not there yet while this one loads.
+ */
+function sectionAnchor(heading: string): string | undefined {
+  const anchors: Record<string, string> = { [SUMMARY_HEADING]: "summary", [EVIDENCE_HEADING]: "evidence", [TECHNICAL_HEADING]: "technical" };
+  return Object.hasOwn(anchors, heading) ? anchors[heading] : undefined;
+}
+
+/** A section folded by default: its heading and one line say what is in it. */
+const FOLDED_TESTID: Record<string, string> = { technical: "report-technical-toggle" };
+
+/** The impact words, as the chip each is drawn in. Typed by CardImpact, so a new impact word cannot be left without one. */
+function impactClasses(): Record<CardImpact, string> {
+  return { [IMPACT.high]: "high", [IMPACT.medium]: "medium", [IMPACT.low]: "low", "Worth a look": "look" };
+}
+
+function impactClass(word: string): string | undefined {
+  const classes = impactClasses();
+  return Object.hasOwn(classes, word) ? classes[word as CardImpact] : undefined;
+}
+
+function impactChip(word: string): string {
+  return `<span class="impact ${impactClass(word)}">${word}</span>`;
+}
+
+/**
+ * A Markdown table row's cells. `\|` is a pipe in the text and `\\` a
+ * backslash (escapeTableCell writes both), so a title holding a pipe stays in
+ * its own cell rather than forging another column.
+ */
+export function tableCells(row: string): string[] {
+  const inner = row.trim().replace(/^\|/, "").replace(/\|$/, "");
+  const cells: string[] = [];
+  let cell = "";
+  for (let k = 0; k < inner.length; k++) {
+    const c = inner[k];
+    if (c === "\\" && (inner[k + 1] === "|" || inner[k + 1] === "\\")) {
+      cell += inner[k + 1];
+      k += 1;
+    } else if (c === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else cell += c;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+/** Text that Markdown kept as HTML entities inside a raw element (a `<summary>`), back to the characters, to be escaped once more. */
+function decodeEntities(text: string): string {
+  return text.replace(/&(lt|gt|quot|#39|amp);/g, (_, e: string) => ({ lt: "<", gt: ">", quot: '"', "#39": "'", amp: "&" })[e] as string);
+}
 
 /**
  * The report's markdown as elements. A deliberately small subset — headings,
- * tables, lists, code fences, the report's own <details> repro blocks — built
- * by escaping every piece of text, because finding titles and element names
- * come from the app under test.
+ * tables, lists, code fences, the report's own <details> blocks — built by
+ * escaping every piece of text, because finding titles and element names come
+ * from the app under test.
+ *
+ * The technical details' `## ` heading, followed by its `<details>` line, is a
+ * part folded by default, with the heading in its summary. Under Evidence, each problem is one item,
+ * its title beside its picture, with the frames recorded before it was filed
+ * under the picture. Elsewhere a finding's frames go under the list that names
+ * its `**Id:**`, once: a finding the Evidence section showed is not repeated.
  */
 export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] = [], framePrefix = "", savedAt = ""): string {
   const out: string[] = [];
   const lines = md.split("\n");
   let i = 0;
   let para: string[] = [];
+  /** What each open <details> is, so its close closes the right thing. */
+  const open: Array<"part" | "plain"> = [];
+  let section = "";
+  /** Inside an Evidence item: "head" (title and words) or "media" (its picture and frames). */
+  let item: "" | "head" | "media" = "";
+  let itemId = "";
+  const shown = new Set<string>();
   const inline = (text: string): string =>
     escapeHtml(text)
       .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/<strong>([^<]+)<\/strong>/g, (whole, w: string) => (impactClass(w) ? impactChip(w) : whole));
   const flush = (): void => {
-    if (para.length) out.push(`<p>${inline(para.join(" "))}</p>`);
+    if (!para.length) return;
+    const text = para.join(" ");
+    out.push(`<p>${inline(text)}</p>`);
+    if (item === "head") itemId = /· finding `([0-9a-f]+)`$/.exec(text)?.[1] ?? itemId;
     para = [];
   };
+  const closeItem = (): void => {
+    if (item === "head" || item === "media") out.push(`</div></article>`);
+    item = "";
+    itemId = "";
+  };
+  /** Heading levels inside a folded part go one deeper, under the part's own heading. */
+  const depth = (): number => (open.includes("part") ? 1 : 0);
   while (i < lines.length) {
     const line = lines[i];
     let m: RegExpExecArray | null;
@@ -336,15 +422,39 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
       out.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
     } else if ((m = /^(#{1,6}) (.*)$/.exec(line))) {
       flush();
-      const level = Math.min(6, m[1].length + 1);
-      // The two parts of the report are what the header links to.
-      const anchor = m[1] === "##" ? SECTION_ANCHORS[m[2]] : undefined;
-      out.push(`<h${level}${anchor ? ` id="${anchor}"` : ""}>${inline(m[2])}</h${level}>`);
+      const level = m[1].length;
+      if (level <= 3) closeItem();
+      let next = i + 1;
+      while (next < lines.length && lines[next].trim() === "") next += 1;
+      const folds = level === 2 && m[2] === TECHNICAL_HEADING && /^<details><summary>.*<\/summary>$/.test(lines[next] ?? "");
+      if (level === 2 && !open.includes("part")) section = m[2];
+      const anchor = level === 2 ? sectionAnchor(m[2]) : undefined;
+      if (folds) {
+        const hint = /^<details><summary>(.*)<\/summary>$/.exec(lines[next])![1];
+        const id = anchor ?? "";
+        out.push(
+          `<details class="part"${id ? ` id="${id}"` : ""} data-testid="report-${id || "part"}-section"><summary data-testid="${FOLDED_TESTID[id] ?? "report-part-toggle"}">` +
+            `<h2>${inline(m[2])}</h2><span class="hint">${inline(decodeEntities(hint))}</span></summary>`,
+        );
+        open.push("part");
+        i = next + 1;
+        continue;
+      }
+      const h = Math.min(6, level + depth());
+      if (section === EVIDENCE_HEADING && level === 3 && !open.includes("part")) {
+        out.push(`<article class="ev" data-testid="report-evidence-item"><div class="ev-head">`);
+        item = "head";
+      }
+      out.push(`<h${h}${anchor && !open.includes("part") ? ` id="${anchor}"` : ""}>${inline(m[2])}</h${h}>`);
       i += 1;
     } else if ((m = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(line))) {
       // A finding's picture. The path is the report's own, relative to the run's
       // folder, and anything else (a scheme, an absolute path, `..`) is dropped.
       flush();
+      if (item === "head") {
+        out.push(`</div><div class="ev-media">`);
+        item = "media";
+      }
       if (isSafeRelativePath(m[2])) {
         const src = (m[2].startsWith("recordings/") ? framePrefix : "") + m[2];
         out.push(
@@ -354,46 +464,73 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
             `</figure>`,
         );
       }
+      if (item === "media" && itemId && !shown.has(itemId)) {
+        const found = evidence.find((e) => e.id === itemId);
+        if (found) out.push(renderFrames(found, framePrefix, savedAt));
+        shown.add(itemId);
+      }
       i += 1;
     } else if ((m = /^<details><summary>(.*)<\/summary>$/.exec(line))) {
       flush();
-      const testid = m[1] === "Technical detail" ? "report-technical-toggle" : "report-details-toggle";
-      out.push(`<details><summary data-testid="${testid}">${inline(m[1])}</summary>`);
+      const text = decodeEntities(m[1]);
+      const problem = section === SUMMARY_HEADING && /^\d+\. /.test(text);
+      const testid = problem ? "report-problem-toggle" : "report-details-toggle";
+      out.push(`<details${problem ? ` class="problem"` : ""}><summary data-testid="${testid}">${inline(text)}</summary><div class="fold">`);
+      open.push("plain");
       i += 1;
     } else if (/^<\/details>$/.test(line)) {
       flush();
-      out.push(`</details>`);
+      // A close with nothing open is dropped rather than written unmatched.
+      if (open.length === 0) {
+        i += 1;
+        continue;
+      }
+      const was = open.pop();
+      if (was === "part") closeItem();
+      out.push(was === "part" ? `</details>` : `</div></details>`);
       i += 1;
     } else if (/^\|/.test(line)) {
       flush();
       const rows: string[] = [];
-      let first = true;
+      let head: string[] = [];
       while (i < lines.length && /^\|/.test(lines[i])) {
         const row = lines[i];
         i += 1;
         if (/^\|(\s*:?-+:?\s*\|)+\s*$/.test(row)) continue;
-        const cells = row
-          .replace(/^\||\|\s*$/g, "")
-          .split("|")
-          .map((c) => `<${first ? "th" : "td"}>${inline(c.trim())}</${first ? "th" : "td"}>`);
-        rows.push(`<tr>${cells.join("")}</tr>`);
-        first = false;
+        const cells = tableCells(row);
+        if (head.length === 0) {
+          head = cells;
+          rows.push(`<thead><tr>${cells.map((c) => `<th scope="col">${inline(c)}</th>`).join("")}</tr></thead><tbody>`);
+          continue;
+        }
+        rows.push(
+          `<tr>${cells
+            .map((c, k) => `<td data-label="${escapeHtml(head[k] ?? "")}">${impactClass(c) && head[k] === "Impact" ? impactChip(c) : inline(c)}</td>`)
+            .join("")}</tr>`,
+        );
       }
-      out.push(`<table>${rows.join("")}</table>`);
+      const problems = head.includes("Impact") && head.includes("What was expected");
+      out.push(
+        `<div class="table-wrap"><table${problems ? ` class="problems" data-testid="report-problems-table"` : ""}>${rows.join("")}</tbody></table></div>`,
+      );
     } else if (/^\s*[-*] /.test(line)) {
       flush();
       const items: string[] = [];
       // A finding's id sits in this list; its evidence goes straight under it,
-      // which is where a reader is when they ask "show me".
+      // which is where a reader is when they ask "show me" — unless the
+      // Evidence section already showed it.
       let found: FindingEvidence | undefined;
       while (i < lines.length && (m = /^\s*[-*] (.*)$/.exec(lines[i]))) {
         const id = /\*\*Id:\*\* `([0-9a-f]+)`/.exec(m[1])?.[1];
-        if (id) found = evidence.find((e) => e.id === id);
+        if (id && !shown.has(id)) found = evidence.find((e) => e.id === id);
         items.push(`<li>${inline(m[1])}</li>`);
         i += 1;
       }
       out.push(`<ul>${items.join("")}</ul>`);
-      if (found) out.push(renderEvidence(found, framePrefix, savedAt));
+      if (found) {
+        out.push(renderEvidence(found, framePrefix, savedAt));
+        shown.add(found.id);
+      }
     } else if (/^\d+\. /.test(line)) {
       flush();
       const items: string[] = [];
@@ -411,83 +548,150 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
     }
   }
   flush();
+  closeItem();
+  // A fold the document left open is closed here, so the page after it is not swallowed.
+  while (open.length > 0) out.push(open.pop() === "part" ? `</details>` : `</div></details>`);
   return out.join("\n");
 }
 
 const STYLE = `
-:root { color-scheme: light dark; --bg:#f6f7f9; --panel:#fff; --line:#d9dde3; --text:#15181d; --muted:#5d6673; --accent:#2563eb; --bad:#b91c1c; --warn:#7c4a03; --warn-bg:#fef3c7; }
-@media (prefers-color-scheme: dark) { :root { --bg:#0e1116; --panel:#161a21; --line:#2a303a; --text:#e6e9ee; --muted:#98a2b3; --accent:#7aa2ff; --bad:#fca5a5; --warn:#fbbf24; --warn-bg:#3a2a08; } }
+:root { color-scheme: light dark;
+  --bg:#f4f5f7; --panel:#fff; --sunk:#eceef1; --line:#dde1e6; --text:#16191d; --muted:#565f6b; --accent:#1f5fd6;
+  --bad:#b42318; --warn:#7c4a03; --warn-bg:#fef3c7;
+  --high:#b42318; --high-bg:#fde8e6; --medium:#8a5300; --medium-bg:#fdf0d5; --low:#1f5fd6; --low-bg:#e3edfd; --look:#565f6b; --look-bg:#eceef1;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+@media (prefers-color-scheme: dark) { :root {
+  --bg:#0f1215; --panel:#171b20; --sunk:#1d2228; --line:#2a3038; --text:#e7eaee; --muted:#9ea8b4; --accent:#8fb0ff;
+  --bad:#ff9b8f; --warn:#fbbf24; --warn-bg:#3a2a08;
+  --high:#ffa499; --high-bg:#3b1714; --medium:#f5c060; --medium-bg:#352507; --low:#a3bfff; --low-bg:#172540; --look:#b3bcc7; --look-bg:#252a31; } }
 * { box-sizing: border-box; }
-body { margin:0; background:var(--bg); color:var(--text); font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
-header { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; gap:8px 16px; align-items:baseline; padding:14px 20px; background:var(--panel); border-bottom:1px solid var(--line); }
-header h1 { margin:0; font-size:17px; }
-header .meta { color:var(--muted); font-size:13px; }
-nav { margin-left:auto; display:flex; gap:12px; font-size:14px; }
-nav a { color:var(--accent); }
-main { max-width:1000px; margin:0 auto; padding:24px 20px 64px; }
-h2 { font-size:21px; margin:32px 0 12px; padding-top:20px; border-top:1px solid var(--line); }
-h3 { font-size:17px; margin:24px 0 8px; }
-h4 { font-size:15px; margin:20px 0 6px; }
-table { border-collapse:collapse; margin:10px 0 16px; font-size:13px; }
-th, td { border:1px solid var(--line); padding:5px 9px; text-align:left; vertical-align:top; }
-th { background:var(--panel); }
-code { font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:0 4px; }
-pre { padding:12px; background:var(--panel); border:1px solid var(--line); border-radius:6px; overflow-x:auto; }
-pre code { border:0; padding:0; background:none; }
+html { -webkit-text-size-adjust:100%; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; overflow-wrap:anywhere; }
+::selection { background:var(--low-bg); color:var(--text); }
+a { color:var(--accent); text-underline-offset:2px; }
+[id] { scroll-margin-top:84px; }
+a:focus-visible, summary:focus-visible, button:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:4px; }
+header.top { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; gap:6px 24px; align-items:center; padding:12px max(16px, calc((100vw - 968px) / 2)); background:var(--panel); border-bottom:1px solid var(--line); }
+header.top h1 { margin:0; font-size:17px; line-height:1.3; }
+header.top .meta { margin:0; color:var(--muted); font-size:13px; }
+nav { margin-left:auto; display:flex; flex-wrap:wrap; gap:4px 18px; font-size:14px; }
+nav a { text-decoration:none; font-weight:500; }
+nav a:hover { text-decoration:underline; }
+main { max-width:1000px; margin:0 auto; padding:8px 16px 80px; }
+main > p, .fold > p, .ev-head > p, details.part > p { max-width:72ch; }
+h2 { font-size:26px; line-height:1.25; letter-spacing:-0.01em; margin:48px 0 14px; }
+main > h2:first-child { margin-top:28px; }
+#summary + p { font-size:18px; line-height:1.55; }
+h3 { font-size:18px; line-height:1.35; margin:32px 0 8px; }
+h4 { font-size:15px; margin:22px 0 6px; }
+p { margin:0 0 12px; }
+ul, ol { padding-left:24px; margin:0 0 14px; }
+li { margin:2px 0; }
+.impact { display:inline-block; padding:1px 8px; border-radius:999px; font-weight:600; font-size:13px; line-height:1.6; white-space:nowrap; color:var(--look); background:var(--look-bg); }
+.impact.high { color:var(--high); background:var(--high-bg); } .impact.medium { color:var(--medium); background:var(--medium-bg); } .impact.low { color:var(--low); background:var(--low-bg); }
+.table-wrap { overflow-x:auto; margin:12px 0 20px; }
+table { border-collapse:collapse; font-size:14px; font-variant-numeric:tabular-nums; background:var(--panel); }
+th, td { border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top; overflow-wrap:normal; }
+th { background:var(--sunk); font-weight:600; }
+table.problems { width:100%; }
+table.problems td:first-child { color:var(--muted); text-align:right; width:2.5em; }
+table.problems td:nth-child(3) { font-weight:600; }
+code { font:13px/1.45 var(--mono); background:var(--sunk); border-radius:4px; padding:1px 5px; overflow-wrap:anywhere; }
+pre { padding:12px 14px; background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow-x:auto; font-size:13px; }
+pre code { background:none; padding:0; overflow-wrap:normal; }
+summary { cursor:pointer; }
+details.problem { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin:8px 0; }
+details.problem > summary { padding:12px 16px; font-weight:600; }
+details.problem[open] > summary { border-bottom:1px solid var(--line); }
+details.problem .fold { padding:14px 16px 4px; }
+details.part { margin:48px 0 0; border-top:1px solid var(--line); }
+details.part > summary { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 14px; padding:24px 0 16px; list-style:none; }
+details.part > summary::-webkit-details-marker { display:none; }
+details.part > summary::before { content:""; align-self:center; width:9px; height:9px; border-right:2px solid var(--muted); border-bottom:2px solid var(--muted); transform:rotate(-45deg); transition:transform .15s ease-out; }
+details.part[open] > summary::before { transform:rotate(45deg); }
+details.part > summary h2 { margin:0; }
+details.part > summary .hint { flex:1 1 320px; color:var(--muted); font-size:14px; }
+details.part > summary:hover h2 { text-decoration:underline; text-underline-offset:4px; text-decoration-thickness:1px; }
+details.part > h3 { font-size:21px; margin-top:36px; }
+details:not(.part):not(.problem):not(.session) { margin:4px 0 18px; padding:6px 12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+details:not(.part):not(.problem):not(.session) > summary { color:var(--muted); font-size:14px; }
+article.ev { display:grid; grid-template-columns:minmax(0,1fr); gap:4px 28px; padding:22px 0; border-top:1px solid var(--line); }
+article.ev h3 { margin:0 0 8px; }
+@media (min-width:760px) { article.ev { grid-template-columns:minmax(0,5fr) minmax(0,7fr); } }
+figure { margin:0; }
+figure.picture { margin:6px 0 14px; max-width:min(100%,720px); }
+figure.picture img { width:auto; max-width:100%; height:auto; max-height:440px; border:1px solid var(--line); border-radius:8px; display:block; background:var(--panel); }
+.ev-media figure.picture { margin-top:0; }
+figure.picture figcaption { margin-top:6px; color:var(--muted); font-size:13px; }
+.filmstrip { margin:4px 0 8px; }
+.strip-label { margin:0 0 6px; color:var(--muted); font-size:13px; }
+.filmstrip .shots { display:flex; gap:10px; overflow-x:auto; padding-bottom:6px; }
+.filmstrip figure { flex:0 0 180px; }
+.filmstrip img { width:180px; height:112px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
+.filmstrip figcaption { margin-top:4px; color:var(--muted); font:11px/1.45 var(--mono); }
 details.session { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin:12px 0; padding:10px 14px; }
-details.session > summary { cursor:pointer; font-size:15px; display:flex; gap:10px; align-items:baseline; }
+details.session > summary { font-size:15px; display:flex; flex-wrap:wrap; gap:4px 10px; align-items:baseline; }
 details.session .role { color:var(--muted); font-size:13px; }
 details.session .count { margin-left:auto; color:var(--muted); font-size:12px; }
-.objective { margin:8px 0 14px; color:var(--muted); }
+.objective { margin:8px 0 14px; color:var(--muted); max-width:72ch; }
 .block { border-left:2px solid transparent; border-radius:4px; padding:6px 10px; margin:8px 0; }
-.block.g0 { background:rgba(96,165,250,.22); border-color:rgba(96,165,250,.85); }
-.block.g1 { background:rgba(52,211,153,.22); border-color:rgba(52,211,153,.85); }
-.block.g2 { background:rgba(251,191,36,.24); border-color:rgba(251,191,36,.9); }
-.block.g3 { background:rgba(244,114,182,.22); border-color:rgba(244,114,182,.85); }
-@media (prefers-color-scheme: light) {
-  .block.g0 { background:rgba(37,99,235,.13); } .block.g1 { background:rgba(5,150,105,.13); }
-  .block.g2 { background:rgba(217,119,6,.15); } .block.g3 { background:rgba(219,39,119,.12); }
-}
+.block.g0 { background:rgba(96,165,250,.16); border-color:rgba(96,165,250,.85); }
+.block.g1 { background:rgba(52,211,153,.16); border-color:rgba(52,211,153,.85); }
+.block.g2 { background:rgba(251,191,36,.18); border-color:rgba(251,191,36,.9); }
+.block.g3 { background:rgba(244,114,182,.16); border-color:rgba(244,114,182,.85); }
 .task { margin:2px 0 8px; font-weight:600; }
 .task.none { font-weight:400; color:var(--muted); font-style:italic; }
 ol.steps { list-style:none; margin:0; padding:0; }
 .step { margin:0 0 2px; }
-.step .row { display:flex; gap:8px; font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+.step .row { display:flex; gap:8px; font:12px/1.6 var(--mono); }
 .step .t { color:var(--muted); flex:0 0 auto; }
 .step .a { font-weight:600; flex:0 0 auto; }
 .step .a.bad { color:var(--bad); }
-.step .d { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.step .d { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
 .step .frame { display:block; margin:4px 0 10px; }
 .step .frame img { max-width:min(100%,720px); max-height:360px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; }
-figure.picture { margin:6px 0 14px; max-width:min(100%,720px); }
-figure.picture img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
-figure.picture figcaption { margin-top:4px; color:var(--muted); font-size:12px; }
-figure.picture figcaption .onDisk { display:block; font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
-details.evidence { margin:6px 0 18px; padding:8px 12px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
-details.evidence > summary { cursor:pointer; color:var(--muted); font-size:13px; }
-details.evidence .shots { display:flex; flex-wrap:wrap; gap:14px; margin-top:12px; }
-details.evidence figure { margin:0; max-width:min(100%,460px); }
-details.evidence img { width:100%; max-height:300px; object-fit:cover; object-position:top; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
-#gone-bar { position:sticky; top:0; z-index:3; margin:0; padding:14px 22px; background:var(--warn-bg); color:var(--warn);
-  border-bottom:1px solid var(--line); }
+#gone-bar { position:sticky; top:0; z-index:3; margin:0; padding:14px 22px; background:var(--warn-bg); color:var(--warn); border-bottom:1px solid var(--line); }
 #gone-bar p { margin:0 0 6px; max-width:68ch; }
 #gone-bar .path { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
-#gone-bar code { font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; user-select:all; }
+#gone-bar code { font:12px/1.6 var(--mono); background:none; user-select:all; }
 #gone-bar button { font:inherit; padding:4px 10px; border:1px solid currentColor; border-radius:6px; background:transparent; color:inherit; cursor:pointer; }
-#gone-bar .why { margin:0; font-size:12px; opacity:.8; }
-.onDisk { display:block; margin-top:4px; color:var(--muted); font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
-header .served { flex:1 1 100%; margin:6px 0 0; color:var(--muted); font-size:12px; }
-header .served code { font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
+#gone-bar .why { margin:0; font-size:12px; opacity:.85; }
+.onDisk { display:block; margin-top:4px; color:var(--muted); font:11px/1.5 var(--mono); overflow-wrap:anywhere; }
+header.top .served { flex:1 1 100%; margin:2px 0 0; color:var(--muted); font-size:12px; }
+header.top .served code { font:11px/1.5 var(--mono); }
 .gone-note { display:none; margin:0; padding:14px; border:1px dashed var(--line); border-radius:6px; color:var(--muted); font-size:12px; }
 figure.gone .gone-note, a.gone .gone-note { display:block; }
-figure.gone img, a.gone img { display:none; }
+/* A picture that did not load gives way to its note; the element stays, 1px and transparent, so nothing that points at it loses it. */
+figure.gone img, a.gone img { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
 a.frame.gone { display:block; max-width:min(100%,720px); }
-figure.picture { margin:8px 0 14px; max-width:min(100%,720px); }
-figure.picture img { width:auto; max-width:100%; max-height:420px; border:1px solid var(--line); border-radius:6px; display:block; background:var(--panel); }
-details > summary { cursor:pointer; }
-details:not(.session):not(.evidence) { margin:4px 0 18px; padding:6px 12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
-details:not(.session):not(.evidence) > summary { color:var(--muted); font-size:13px; }
-details.evidence figcaption { margin-top:4px; color:var(--muted); font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere; }
+@media (max-width:640px) {
+  header.top { position:static; padding:12px 16px; }
+  nav { margin-left:0; }
+  h2 { font-size:22px; margin-top:36px; }
+  #summary + p { font-size:17px; }
+  table.problems, table.problems tbody, table.problems tr, table.problems td { display:block; width:auto; }
+  table.problems thead { display:none; }
+  table.problems tr { border:1px solid var(--line); border-radius:8px; margin:0 0 10px; padding:10px 12px; background:var(--panel); }
+  table.problems td { border:0; padding:2px 0; text-align:left; }
+  table.problems td:first-child { width:auto; text-align:left; }
+  table.problems td::before { content:attr(data-label); display:block; color:var(--muted); font-size:12px; font-weight:400; }
+  table.problems td:first-child::before, table.problems td:nth-child(2)::before, table.problems td:nth-child(3)::before { display:none; }
+  table.problems td:first-child { float:left; margin-right:8px; }
+  .step .frame img { max-width:100%; }
+}
+@media (prefers-reduced-motion: reduce) { details.part > summary::before { transition:none; } }
+@media print {
+  :root { --bg:#fff; --panel:#fff; --sunk:#f1f2f4; --line:#c9ced6; --text:#000; --muted:#444; }
+  header.top { position:static; padding:0 0 8px; }
+  nav, #gone-bar, header.top .served { display:none; }
+  main { max-width:none; padding:0; }
+  a { color:inherit; text-decoration:none; }
+  article.ev, figure, tr, details.problem { break-inside:avoid; }
+  h2, h3, .ev-head { break-after:avoid; }
+  .impact { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  .filmstrip .shots { flex-wrap:wrap; overflow:visible; }
+  details.part > summary::before { display:none; }
+}
 `;
 
 /**
@@ -545,14 +749,20 @@ function exitWatch(savedFile: string): string {
 function navLinks(markdown: string): string {
   const has = (heading: string): boolean => markdown.split("\n").includes(`## ${heading}`);
   return [
-    has("In plain words")
-      ? `<a href="#plain" data-testid="report-plain-link">In plain words</a>`
+    has(SUMMARY_HEADING)
+      ? `<a href="#summary" data-testid="report-summary-link">${SUMMARY_HEADING}</a>`
       : `<a href="#report" data-testid="report-top-link">Report</a>`,
-    has("Technical detail") ? `<a href="#technical" data-testid="report-technical-link">Technical detail</a>` : "",
+    has(EVIDENCE_HEADING) ? `<a href="#evidence" data-testid="report-evidence-link">${EVIDENCE_HEADING}</a>` : "",
+    has(TECHNICAL_HEADING) ? `<a href="#technical" data-testid="report-technical-link">${TECHNICAL_HEADING}</a>` : "",
     `<a href="#steps" data-testid="report-steps-link">Steps</a>`,
   ]
     .filter(Boolean)
     .join("");
+}
+
+/** The report's own title and date: the page's header says both, so the body starts at the first section. */
+function withoutTitle(markdown: string): string {
+  return markdown.replace(/^# SceneScout Report\n+(Generated: [^\n]*\n+)?/, "");
 }
 
 /** The whole document: one file, no external assets, opens from the file system. */
@@ -561,8 +771,9 @@ export function buildReplayHtml(input: ReplayInput): string {
   const prefix = input.framePrefix ?? "";
   const savedAt = input.savedAt ?? "";
   const sessions = input.sessions.map((s, i) => renderSession(s, i, prefix, savedAt)).join("\n");
-  const report = renderMarkdown(input.markdown, input.evidence ?? [], prefix, savedAt);
+  const report = renderMarkdown(withoutTitle(input.markdown), input.evidence ?? [], prefix, savedAt);
   const watch = savedAt ? exitWatch(`${savedAt}/report.html`) : "";
+  const stepCount = input.sessions.reduce((n, s) => n + s.steps.length, 0);
   // The copy on disk runs nothing but the picture handler; the served copy also runs its watch on the engine, and the fetch that watch makes.
   const policy = savedPageCsp({
     scripts: watch ? [watch] : [],
@@ -575,15 +786,15 @@ export function buildReplayHtml(input: ReplayInput): string {
 <meta charset="utf-8">
 ${cspMeta(policy)}
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SceneScout run — ${escapeHtml(input.project)}</title>
+<title>SceneScout run report — ${escapeHtml(input.project)}</title>
 <style>${STYLE}</style>
 </head>
 <body>
-<header>
-  <h1>SceneScout run</h1>
-  <span class="meta">${escapeHtml(input.project)} · written ${escapeHtml(stamp(input.at))}${input.version ? ` · v${escapeHtml(input.version)}` : ""}</span>
+<header class="top">
+  <div><h1>SceneScout run report</h1>
+  <p class="meta">${escapeHtml(input.project)} · written ${escapeHtml(stamp(input.at))}${input.version ? ` · v${escapeHtml(input.version)}` : ""}</p></div>
+  <nav aria-label="Report sections">${navLinks(input.markdown)}</nav>
   ${savedAt ? `<p class="served">This page is served by the engine and goes when it does. The copy that stays is <code>${escapeHtml(savedAt)}/report.html</code>, beside the frames it shows.</p>` : ""}
-  <nav>${navLinks(input.markdown)}</nav>
 </header>
 ${
   savedAt
@@ -594,16 +805,16 @@ ${
 </div>`
     : ""
 }
-<main>
-<h2 id="report">Report</h2>
+<main id="report">
 ${report}
-<h2 id="steps">What each session did</h2>
-<p class="objective">Every action, in the blocks its tasks made. ${
+<details class="part" id="steps" data-testid="report-steps-section"><summary data-testid="report-steps-toggle"><h2>Steps</h2><span class="hint">Every action each session took, in the blocks its tasks made: ${input.sessions.length} session${input.sessions.length === 1 ? "" : "s"}, ${stepCount} step${stepCount === 1 ? "" : "s"}.</span></summary>
+<p class="objective">${
     framed
       ? "Each step shows the page as it was; click a frame to open it full size."
       : "This run was not recorded, so there are no frames — attach with record:true to keep them."
   }</p>
 ${sessions || "<p>No session recorded any action.</p>"}
+</details>
 </main>
 ${watch ? `<script>${watch}</script>` : ""}
 </body>
