@@ -144,7 +144,7 @@ import { allowsWrite, WRITE_MODES } from "../src/engine/policy.ts";
 import { isReadMethod } from "../src/engine/unload.ts";
 import { readyBrowser } from "../src/engine/launch.ts";
 import type { Finding } from "../src/engine/memory.ts";
-import { IMPACT, PLAIN_WORDING, plainCard, plainFinding, plainSteps } from "../src/engine/plain.ts";
+import { IMPACT, PLAIN_WORDING, formatEvidenceSection, plainCard, plainFinding, plainSteps } from "../src/engine/plain.ts";
 
 const REMOTE = "https://staging.example.com";
 const LOCAL = "http://localhost:3000";
@@ -913,7 +913,14 @@ test("card: the report's plain entry says exactly what the card says", () => {
   ])
     assert.ok(entry.includes(part), `the report carries "${part}"`);
   card.steps.forEach((s, i) => assert.ok(entry.includes(`${i + 1}. ${s}`), s));
-  assert.ok(entry.includes(`](${card.picture!.file})`));
+  // The picture lives in the Evidence section (ADR 31); the entry points to it by the problem's number.
+  assert.ok(entry.includes("under Evidence, as problem 1"), entry);
+  assert.ok(
+    formatEvidenceSection({ current: [f] })
+      .join("\n")
+      .includes(`](${card.picture!.file})`),
+    "the Evidence section carries the card's picture",
+  );
 });
 
 test("guided: a care level above the config's maxMode is never offered, and choosing one is refused saying the config set it", () => {
