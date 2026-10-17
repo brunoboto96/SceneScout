@@ -222,9 +222,30 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: desktop-extension
-      - name: Attach the bundle to the release
-        run: gh release upload "$TAG" *.mcpb --clobber
+      - name: Write the bundle's checksum
+        run: sha256sum *.mcpb > SHA256SUMS
+      - name: Attach the bundle and its checksum to the release
+        run: gh release upload "$TAG" *.mcpb SHA256SUMS --clobber
         env:
           TAG: ${{ needs.release.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+
+  # Signs a build provenance attestation for the bundle, so a downloaded .mcpb
+  # can be checked with `gh attestation verify`. Its own job: it holds the
+  # token-minting permission and runs no repository code.
+  attest-desktop-extension:
+    needs: [release, desktop-extension]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-extension
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: "*.mcpb"

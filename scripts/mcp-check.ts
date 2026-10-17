@@ -11,6 +11,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema, ListRootsRequestSchema, type ElicitRequest, type ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { INTAKE_FORM_MESSAGE, introQuestions } from "../dist/intake.js";
 import { shellQuote, writeProfile } from "../dist/engine/profiles.js";
 import { siteFolderName } from "../dist/engine/project-folder.js";
@@ -61,6 +62,7 @@ const EXPECTED_TOOLS = [
   "scout_status_poll",
   "scout_cards",
   "scout_feedback",
+  "scout_team_report",
 ];
 
 type ToolText = { content: Array<{ type: string; text?: string }> };
@@ -1310,6 +1312,7 @@ async function guidedCardsCheck(): Promise<void> {
       for (const [name, readOnly] of [
         ["scout_cards", true],
         ["scout_feedback", false],
+        ["scout_team_report", false],
       ] as const) {
         const t = tools.find((x) => x.name === name);
         if (t?.annotations?.readOnlyHint !== readOnly || t.annotations.destructiveHint !== false || !t.outputSchema)
@@ -1317,6 +1320,17 @@ async function guidedCardsCheck(): Promise<void> {
       }
       const before = await call("scout_cards", {});
       if (!before.isError || !/attach first/.test(textOf(before))) fail(`scout_cards before any attach did not say to attach first: ${textOf(before)}`);
+      // scout_team_report takes no arguments, and says what it returns.
+      const teamTool = tools.find((x) => x.name === "scout_team_report");
+      const teamOut = Object.keys((teamTool?.outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {}).sort();
+      if (
+        Object.keys((teamTool?.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {}).length !== 0 ||
+        teamOut.join(",") !== "evidenceDir,file,folder,manifest,missingPictures,path,pictures,problems"
+      )
+        fail(`scout_team_report's schemas are not no input and the TeamReport output: ${JSON.stringify({ input: teamTool?.inputSchema, out: teamOut })}`);
+      const teamBefore = await call("scout_team_report", {});
+      if (!teamBefore.isError || !/attach first/.test(textOf(teamBefore)))
+        fail(`scout_team_report before any attach did not say to attach first: ${textOf(teamBefore)}`);
 
       const built = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms", "broken-pages"] } });
       const plan = built.structuredContent as { planId: string; mode: string };
@@ -1380,6 +1394,20 @@ async function guidedCardsCheck(): Promise<void> {
       if (got.cards[0].picture && !cards.content.some((c) => c.type === "image" && c.mimeType === "image/png"))
         fail("scout_cards with pictures inline returned no image for a card that has a picture");
 
+      // The team report of the same check: the card with its picture, written inside .scenescout/, and a manifest that is the files on disk.
+      const team = await call("scout_team_report", {});
+      const made = team.structuredContent as
+        { file: string; problems: number; pictures: number; manifest: Array<{ file: string; sha256: string }> } | undefined;
+      if (team.isError || !made || made.file !== ".scenescout/team-report.html" || made.problems !== 1 || made.pictures !== 1)
+        fail(`scout_team_report did not write the check's card and picture: ${JSON.stringify(team).slice(0, 600)}`);
+      for (const m of made.manifest) {
+        const onDisk = createHash("sha256")
+          .update(fs.readFileSync(path.join(projectDir, ...m.file.split("/"))))
+          .digest("hex");
+        if (!m.file.startsWith(".scenescout/") || onDisk !== m.sha256) fail(`scout_team_report's manifest entry ${m.file} is not the file on disk`);
+      }
+      if (!fs.readFileSync(path.join(projectDir, ".scenescout", "team-report.html"), "utf8").includes("The send button gives no sign it worked"))
+        fail("the team report page does not show the check's problem");
       const labelled = await call("scout_feedback", { id, verdict: "not-a-bug", reason: "The page reloads on purpose" });
       if (labelled.isError || (labelled.structuredContent as { verdict?: string }).verdict !== "not-a-bug")
         fail(`scout_feedback did not label the finding: ${textOf(labelled)}`);
@@ -1406,7 +1434,7 @@ async function guidedCardsCheck(): Promise<void> {
     fs.rmSync(projectDir, { recursive: true, force: true });
   }
   console.log(
-    "✓ a guided check's progress reaches the pane's poll and the status text, scout_cards shows its card with the area and picture, and a not-a-bug label keeps the finding, leaves it out of the cards and the count, and is exported as a candidate",
+    "✓ a guided check's progress reaches the pane's poll and the status text, scout_cards shows its card with the area and picture, scout_team_report writes it with its picture and a manifest that matches the files, and a not-a-bug label keeps the finding, leaves it out of the cards and the count, and is exported as a candidate",
   );
 }
 

@@ -156,11 +156,78 @@ export const PROMPT_TITLE = {
 
 /** Said where the guided version of a step is not built yet, and what the person gets instead. */
 export const NOT_YET = {
-  "team-report":
-    "A team report made for sharing, with a cover page, each problem as a card, what was not checked and lines to sign off, is coming in a later version. For now you get the report in plain words.",
   "file-tickets":
     "Filing problems as tickets from the chat is coming in a later version. For now a developer can file them from a terminal, after first seeing a list of what would be filed.",
 } as const;
+
+/**
+ * Every fixed word of the team report (design 2.5): its cover, its sections,
+ * the sign-off lines and the evidence. The numbers and the site's own words
+ * are filled in by team-report.ts, which escapes them.
+ */
+export const TEAM_REPORT_WORDS = {
+  title: "Team report",
+  site: "Site",
+  date: "Date",
+  checked: "What was checked",
+  care: "Care level",
+  thoroughness: "How thorough",
+  notGiven: "Not given",
+  everything: "Everything it could reach",
+  summary: "Summary",
+  problems: "Problems found",
+  noProblems: "This check found no problems.",
+  whatWasDone: "What was done",
+  expected: "What was expected",
+  happened: "What happened",
+  on: "on",
+  alsoOn: "also seen on",
+  pictureMissing: "The picture of this problem was not found when the report was made.",
+  technical: "Technical detail",
+  notABug: "Marked not a bug",
+  notABugNote: "Someone marked these not a bug. They are kept, and listed here apart from the problems.",
+  notChecked: "What was not checked",
+  notCheckedNote: "These are the parts the check knew about and did not test. A problem there would not be in this report.",
+  nothingLeft: "Nothing the check knew about was left untested.",
+  signoff: "Sign-off",
+  signoffNote: "Sign once the problems above have been read and a decision made about each.",
+  signRoles: ["Checked by", "Reviewed by", "Approved by"],
+  role: "Role",
+  name: "Name",
+  signature: "Signature",
+  signedDate: "Date",
+  evidence: "Evidence",
+  evidenceNote:
+    "The pictures, and this report as Markdown, are in the folder beside this page. The SHA-256 of each file lets anyone confirm it is the one this report was made with. manifest.json in that folder lists them all, this page included.",
+  file: "File",
+  bytes: "Bytes",
+  sha256: "SHA-256",
+  notFound: "not found",
+  noEvidence: "No pictures were taken.",
+} as const;
+
+/** The care level a report names for the write mode a check ran in. Deleting existing data is never a guided choice, so it reads as a developer's. */
+export const MODE_CARE_LABEL: Record<"observe" | "read-only" | "safe-write" | "destructive", string> = {
+  observe: CARE_LABEL["look-only"],
+  "read-only": CARE_LABEL["may-submit-forms"],
+  "safe-write": CARE_LABEL["may-create-test-data"],
+  destructive: "May delete data (a developer's choice)",
+};
+
+/** The pages a check reached, for the report's cover. */
+export function pagesChecked(visited: number, total: number): string {
+  return `${visited} of the ${total} page${total === 1 ? "" : "s"} it knew about`;
+}
+
+/** The line at the foot of a team report. */
+export function teamReportFooter(version: string): string {
+  return `Made by SceneScout${version ? ` ${version}` : ""}. It stays on this computer until you share it.`;
+}
+
+/** The count of what a check left untested, before the list. */
+export function notCheckedCount(n: number): string {
+  return `The check left ${n} thing${n === 1 ? "" : "s"} untested.`;
+}
 
 /** Said where whoever set SceneScout up allows no care level above one. */
 export function careCapSentence(care: Care): string {
@@ -316,6 +383,7 @@ export const ACTION_LABEL = {
   stop: "Stop",
   recheck: "Check them again",
   plainReport: "Write the report in plain words",
+  teamReport: "Make a team report",
   confirm: "Confirm the care level",
   notABug: "Not a bug",
   explain: "Explain more",

@@ -203,20 +203,29 @@ test("a redirect chain commits once, keeping the final hop", () => {
 
 // ---- the waits themselves, on a stand-in page (settlePage, stableUrlOf) ----
 
-/** A stand-in for the page a wait reads: its URL, whether it is closed, and how often the wait looked again. */
+/**
+ * A stand-in for the page a wait reads: its URL, whether it is closed, and how often the wait looked again. Its clock
+ * is its own: each tick the wait asks for advances it by exactly that tick and takes no real time, so these checks say
+ * the same on any machine. A real 20 ms timer takes about 31 ms on Windows' default timer resolution, and a check that
+ * counted ticks as time failed there.
+ */
 function standInPage(url = "http://app.test/a") {
   const page = {
     href: url,
     closed: false,
     loadWaits: 0,
     ticks: 0,
+    /** The stand-in clock's time, in ms. */
+    clock: 1_000_000,
+    now: () => page.clock,
     onTick: () => {},
     async waitForLoadState(_state: "domcontentloaded") {
       page.loadWaits += 1;
     },
     async waitForTimeout(ms: number) {
       page.ticks += 1;
-      await new Promise((resolve) => setTimeout(resolve, ms));
+      page.clock += ms;
+      await new Promise((resolve) => setImmediate(resolve));
       page.onTick();
     },
     url: () => page.href,
@@ -225,12 +234,12 @@ function standInPage(url = "http://app.test/a") {
   return page;
 }
 
-test("settlePage waits for the document, then returns at once on a quiet page", async () => {
+test("settlePage waits for the document, then returns once the quiet window after the action has passed", async () => {
   const page = standInPage();
-  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 0, current: () => page });
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 0, current: () => page }, page.now);
   assert.equal(page.loadWaits, 1);
-  // The quiet window runs from the action as well (QUIET_MS), so a few ticks, not many.
-  assert.ok(page.ticks <= QUIET_MS / SETTLE_TICK_MS + 2, `${page.ticks} ticks`);
+  // The quiet window runs from the action as well (QUIET_MS): exactly long enough for it, not a tick more.
+  assert.equal(page.ticks, Math.ceil(QUIET_MS / SETTLE_TICK_MS));
 });
 
 test("settlePage waits while a request is in flight, and stops when it lands", async () => {
@@ -239,25 +248,43 @@ test("settlePage waits while a request is in flight, and stops when it lands", a
   page.onTick = () => {
     if (page.ticks === 10) inFlight = 0;
   };
-  await settlePage(page, { inFlight: () => inFlight, lastRequestStart: () => 0, paceMs: () => 0, current: () => page });
-  assert.ok(page.ticks >= 10, `${page.ticks} ticks`);
+  const started = page.clock;
+  await settlePage(page, { inFlight: () => inFlight, lastRequestStart: () => started, paceMs: () => 0, current: () => page }, page.now);
+  assert.equal(page.ticks, 10, "it returns on the first look after the request lands, the quiet window having passed while it was out");
+});
+
+test("settlePage holds the quiet window from a request that starts late, on the clock the request was stamped by", async () => {
+  const page = standInPage();
+  // A short request starts and lands between two looks, inside the action's own quiet window, so the window runs
+  // on from the request rather than ending where the action's would.
+  let lastStart = 0;
+  page.onTick = () => {
+    if (page.ticks === 3) lastStart = page.clock;
+  };
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => lastStart, paceMs: () => 0, current: () => page }, page.now);
+  assert.equal(page.ticks, 3 + Math.ceil(QUIET_MS / SETTLE_TICK_MS), `${page.ticks} ticks`);
+});
+
+test("settlePage gives up at the cap on a page that never goes quiet", async () => {
+  const page = standInPage();
+  const started = page.clock;
+  await settlePage(page, { inFlight: () => 1, lastRequestStart: () => page.clock, paceMs: () => 0, current: () => page }, page.now);
+  assert.equal(page.clock - started, SETTLE_CAP_MS);
 });
 
 test("settlePage stops waiting once the session has moved to another page", async () => {
   const page = standInPage();
   const other = standInPage();
   // Something is always in flight, so only the page changing ends the wait before the cap.
-  const started = Date.now();
-  await settlePage(page, { inFlight: () => 1, lastRequestStart: () => Date.now(), paceMs: () => 0, current: () => other });
+  await settlePage(page, { inFlight: () => 1, lastRequestStart: () => page.clock, paceMs: () => 0, current: () => other }, page.now);
   assert.equal(page.ticks, 1);
-  assert.ok(Date.now() - started < SETTLE_CAP_MS / 2);
 });
 
-test("settlePage holds a page for the pace the session asked for", async () => {
+test("settlePage holds a page for the pace the session asked for, and no longer", async () => {
   const page = standInPage();
-  const started = Date.now();
-  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 300, current: () => page });
-  assert.ok(Date.now() - started >= 300);
+  const started = page.clock;
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 300, current: () => page }, page.now);
+  assert.equal(page.clock - started, 300);
 });
 
 test("settlePage reads the page even when its document wait fails", async () => {
@@ -265,26 +292,41 @@ test("settlePage reads the page even when its document wait fails", async () => 
   page.waitForLoadState = async () => {
     throw new Error("Target page, context or browser has been closed");
   };
-  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 0, current: () => page });
-  assert.ok(page.ticks >= 1);
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 0, current: () => page }, page.now);
+  // The same wait as on a page whose document wait succeeds.
+  assert.equal(page.ticks, Math.ceil(QUIET_MS / SETTLE_TICK_MS));
 });
 
 test("stableUrlOf answers empty with no page, and a closed page's URL at once", async () => {
   assert.equal(await stableUrlOf(() => null), "");
   const page = standInPage("http://app.test/closed");
   page.closed = true;
-  assert.equal(await stableUrlOf(() => page), "http://app.test/closed");
+  assert.equal(await stableUrlOf(() => page, page.now), "http://app.test/closed");
   assert.equal(page.ticks, 0);
 });
 
 test("stableUrlOf follows a late redirect and returns where it settled", async () => {
   const page = standInPage("http://app.test/private");
+  let changedAt = 0;
   page.onTick = () => {
-    if (page.ticks === 5) page.href = "http://app.test/login";
+    if (page.ticks === 5) {
+      page.href = "http://app.test/login";
+      changedAt = page.clock;
+    }
   };
-  assert.equal(await stableUrlOf(() => page), "http://app.test/login");
-  // It kept watching for the quiet window after the change.
-  assert.ok(page.ticks * SETTLE_TICK_MS >= URL_QUIET_MS, `${page.ticks} ticks`);
+  assert.equal(await stableUrlOf(() => page, page.now), "http://app.test/login");
+  // It kept watching for the whole quiet window after the change, and returned as soon as it had passed.
+  assert.equal(page.clock - changedAt, URL_QUIET_MS);
+});
+
+test("stableUrlOf stops at its cap on a URL that never holds still", async () => {
+  const page = standInPage("http://app.test/0");
+  const started = page.clock;
+  page.onTick = () => {
+    page.href = `http://app.test/${page.ticks}`;
+  };
+  await stableUrlOf(() => page, page.now);
+  assert.equal(page.clock - started, URL_CAP_MS);
 });
 
 test("stableUrlOf returns the URL so far once the session leaves the page", async () => {
@@ -294,6 +336,6 @@ test("stableUrlOf returns the URL so far once the session leaves the page", asyn
     page.href = "http://app.test/b";
     current = null;
   };
-  assert.equal(await stableUrlOf(() => current), "http://app.test/a");
+  assert.equal(await stableUrlOf(() => current, page.now), "http://app.test/a");
   assert.equal(page.ticks, 1);
 });

@@ -9,7 +9,7 @@ import { feedForSession } from "../../dist/engine/live.js";
 import { computeGaps, generateReport } from "../../dist/engine/report.js";
 import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
 import type { StyleRecord } from "../../dist/engine/design.js";
-import { focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
+import { droppedNavigationErrorPage, focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
 import { DEFAULT_ACTION_TIMEOUT_MS } from "../../dist/engine/limits.js";
 import { BROWSER, check, eventually, settle, WAIT_MS, type SmokeContext } from "./harness.ts";
 
@@ -1239,6 +1239,14 @@ async function methodOverrides({ baseUrl, projectDir, stats }: SmokeContext): Pr
     const form = await engine.click(formRef);
     check("a native form carrying _method=delete is refused", form.includes("WRITE-POLICY blocked") && /POST as DELETE/.test(form), form);
     check("...and never reached the server", writesTo("POST /api/override/form") === 0, JSON.stringify(stats.writes));
+    // Chromium shows its error page in place of the dropped navigation, some time after the navigation fails; the click
+    // waits for it and goes back. Read too early, the session was left on the error page, where the plain scout_request
+    // below failed with "Failed to fetch". Firefox and WebKit stay on the page.
+    check(
+      "...and the session is back on the page, not the browser's error page",
+      droppedNavigationErrorPage(BROWSER) === null ? !/error page/.test(form) : /showed an error page; returned to http/.test(form),
+      form,
+    );
 
     const replayed = await engine.apiRequest({ method: "POST", path: "/api/override/replay", body: "{}", headers: { "X-HTTP-Method-Override": "DELETE" } });
     check("scout_request with an override header is refused", /REFUSED by the write policy/.test(replayed), replayed.slice(0, 300));

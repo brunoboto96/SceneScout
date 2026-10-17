@@ -22,7 +22,20 @@ import { orphanPids } from "../src/engine/reaper.ts";
 import { bestEffort, settleWithin } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles } from "./smoke/leaks.ts";
-import { declaredTitle, parseShard, pickShard, shardProblems, withoutShard } from "./smoke/shards.ts";
+import fs from "node:fs";
+import {
+  balanceShards,
+  DEFAULT_SUITE_SECONDS,
+  declaredTitle,
+  parseShard,
+  pickShard,
+  shardProblems,
+  shardSeconds,
+  TOGETHER,
+  suiteSecondsFromLog,
+  withoutShard,
+} from "./smoke/shards.ts";
+import { readTimings } from "./smoke/timings.ts";
 
 /** Stands in for work that takes a while, or yields to the timer queue. No assertion depends on how long one takes. */
 const tick = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -330,6 +343,91 @@ test("a split that leaves a suite out, lists one twice, or parts the suites that
   assert.deepEqual(shardProblems([sh("read", "write"), sh("other", "gone")], files, together), ['"gone" is in a shard but no suite file declares it']);
   assert.deepEqual(shardProblems([sh("read"), sh("write", "other")], files, together), ['"read" and "write" share state, so they must be in one shard']);
   assert.deepEqual(shardProblems([sh("write", "read"), sh("other")], files, together), ['"read" must run before "write", which reads what it recorded']);
+});
+
+test("the smoke shards are balanced on measured time, longest first, into the least-loaded shard", () => {
+  const sh = (...titles: string[]) => titles.map((title) => ({ title }));
+  const titles = (shards: { title: string }[][]) => shards.map((s) => s.map((x) => x.title));
+  const seconds = { long: 400, a: 200, b: 150, c: 120, d: 60, e: 40 };
+  // Longest first: long alone, a and b apart, c onto b's shard (150 < 200), then d and e onto a's (200 < 270, 260 < 270).
+  // Each shard keeps the listed order.
+  assert.deepEqual(titles(balanceShards(sh("a", "b", "c", "d", "e", "long"), 3, seconds)), [["long"], ["a", "d", "e"], ["b", "c"]]);
+  // Time a job spends on other work counts as already there, so the shard that runs the unit suites gets less.
+  assert.deepEqual(titles(balanceShards(sh("a", "b", "c", "d", "e", "long"), 3, seconds, { extra: [0, 300, 0] })), [["e", "long"], ["c"], ["a", "b", "d"]]);
+  // Equal times go by title (w, x, y, z) and an equal load to the lower shard, so the split is the same in every job and
+  // for any order the suites are read in; each shard still runs in the listed order.
+  const even = { x: 10, y: 10, z: 10, w: 10 };
+  assert.deepEqual(titles(balanceShards(sh("x", "y", "z", "w"), 2, even)), [
+    ["y", "w"],
+    ["x", "z"],
+  ]);
+  assert.deepEqual(titles(balanceShards(sh("w", "z", "y", "x"), 2, even)), [
+    ["w", "y"],
+    ["z", "x"],
+  ]);
+  // A suite never measured weighs the default, not nothing: it is placed before a suite one second shorter, after one
+  // second longer.
+  assert.deepEqual(titles(balanceShards(sh("new", "a"), 2, { a: DEFAULT_SUITE_SECONDS - 1 })), [["new"], ["a"]]);
+  assert.deepEqual(titles(balanceShards(sh("new", "a"), 2, { a: DEFAULT_SUITE_SECONDS + 1 })), [["a"], ["new"]]);
+  // The default can be set: at 29 the new suite takes the second shard, q joins it, and r goes back to the first on the tie.
+  assert.deepEqual(titles(balanceShards(sh("p", "q", "r", "new"), 2, { p: 30, q: 1, r: 1 }, { defaultSeconds: 29 })), [
+    ["p", "r"],
+    ["q", "new"],
+  ]);
+  // Suites that share state are one unit: they land together, in their listed order, weighed as their sum.
+  const together: [string, string][] = [["read", "write"]];
+  const times = { read: 100, write: 100, big: 150, other: 60 };
+  const shared = balanceShards(sh("read", "big", "write", "other"), 3, times, { together });
+  assert.deepEqual(titles(shared), [["read", "write"], ["big"], ["other"]]);
+  assert.deepEqual(shardProblems(shared, ["read", "big", "write", "other"], together), []);
+  // Apart, the same times would split the pair.
+  assert.deepEqual(titles(balanceShards(sh("read", "big", "write", "other"), 3, times)), [["big"], ["read", "other"], ["write"]]);
+  // Every suite lands in exactly one shard, and an empty shard is allowed rather than invented work.
+  assert.deepEqual(titles(balanceShards(sh("only"), 3, { only: 5 })), [["only"], [], []]);
+  assert.deepEqual(shardSeconds(sh("a", "unmeasured"), { a: 7 }), 7 + DEFAULT_SUITE_SECONDS);
+  assert.throws(() => balanceShards(sh("a"), 0, {}), /at least one shard/);
+});
+
+test("the committed timings keep the CI shards within about a minute of each other", () => {
+  // The titles the suite files declare, against the times CI measured. Their order is the directory's, not suites.ts's,
+  // which gives the same split because ties go by title (above).
+  const dir = path.join(import.meta.dirname, "smoke");
+  const files = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".ts"))
+    .map((f) => declaredTitle(fs.readFileSync(path.join(dir, f), "utf8")))
+    .filter((t): t is string => t !== undefined)
+    .map((title) => ({ title }));
+  const timings = readTimings();
+  assert.equal(timings.jobExtra.length, 3, "one extra time per shard the workflow runs");
+  const shards = balanceShards(files, 3, timings.suites, { together: TOGETHER, extra: timings.jobExtra });
+  const jobs = shards.map((s, k) => shardSeconds(s, timings.suites) + timings.jobExtra[k]);
+  assert.ok(Math.max(...jobs) - Math.min(...jobs) <= 60, `the shards' jobs take ${jobs.join(", ")} seconds`);
+  // Every real suite runs once, the pair that shares state stays together and in order, and a suite added with no
+  // measured time (first or last by title) is placed once without moving another suite out of the run.
+  const titles = files.map((f) => f.title);
+  assert.deepEqual(shardProblems(shards, titles, TOGETHER), []);
+  for (const added of ["a new suite", "zz new suite"]) {
+    const grown = balanceShards([...files, { title: added }], 3, timings.suites, { together: TOGETHER, extra: timings.jobExtra });
+    assert.deepEqual(shardProblems(grown, [...titles, added], TOGETHER), [], added);
+  }
+});
+
+test("each suite's time is read from a CI log's timestamps, and a suite the log never finished is left out", () => {
+  const job = "ubuntu-latest · node 24 · shard 2/3\tUNKNOWN STEP\t";
+  const log = [
+    `${job}\ufeff2026-10-16T18:15:14.9461349Z ##[group]Run npm run smoke:run -- --shard 2/3`,
+    `${job}2026-10-16T18:15:15.8230375Z ━━ injection oracle ━━`,
+    `${job}2026-10-16T18:15:20.0000000Z   ✓ injection oracle: a check`,
+    "a line with no timestamp",
+    `${job}2026-10-16T18:15:28.0233139Z ━━ postmessage oracle ━━`,
+    `${job}2026-10-16T18:16:29.7059299Z SMOKE PASSED`,
+  ].join("\r\n");
+  assert.deepEqual(suiteSecondsFromLog(log), { "injection oracle": 12, "postmessage oracle": 62 });
+  // Cancelled mid-suite: the last suite has no end, so it gets no time rather than a short one.
+  assert.deepEqual(suiteSecondsFromLog(log.split("\r\n").slice(0, 5).join("\n")), { "injection oracle": 12 });
+  assert.deepEqual(suiteSecondsFromLog(`2026-10-16T18:00:00Z ━━ a ━━\n2026-10-16T18:01:00Z SMOKE FAILED: 1 check(s) failed`), { a: 60 });
+  assert.deepEqual(suiteSecondsFromLog("━━ a ━━\nSMOKE PASSED"), {}, "a log with no timestamps gives no times");
 });
 
 test("a suite file's title is read from its source, and a helper module has none", () => {
