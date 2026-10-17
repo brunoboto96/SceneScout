@@ -21,7 +21,8 @@ import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
 import { bestEffort, settleWithin } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
-import { busiestOwners, descendants, extraHandles, parseTasklist, parseTcpTable, socketLine, socketsLeft, tcpStateCounts } from "./smoke/leaks.ts";
+import { descendants, extraHandles, socketsLeft } from "./smoke/leaks.ts";
+import { busiestOwners, parseTasklist, parseTcpTable, readMachineSockets, socketLine, tcpStateCounts, type CommandRunner } from "../src/engine/tcp-table.ts";
 import fs from "node:fs";
 import {
   balanceShards,
@@ -397,6 +398,43 @@ test("the socket line names the total and the states, busiest first, and the pro
       [4410, "node.exe"],
     ],
   );
+});
+
+test("a Windows table whose state name has a space still parses: the process is the last field", () => {
+  const rows = parseTcpTable("  TCP    127.0.0.1:5    127.0.0.1:6    WARTEN ZEIT     0\r\n  TCP    127.0.0.1:7    0.0.0.0:0    LISTENING     88");
+  assert.deepEqual(rows, [
+    { state: "WARTEN ZEIT", local: "127.0.0.1:5", remote: "127.0.0.1:6", pid: 0 },
+    { state: "LISTEN", local: "127.0.0.1:7", remote: "0.0.0.0:0", pid: 88 },
+  ]);
+});
+
+test("reading the machine's sockets: the command per platform, and a failure that keeps what was read", async () => {
+  const asked: string[] = [];
+  const table = "  TCP    127.0.0.1:5    127.0.0.1:6    ESTABLISHED   77";
+  const runner =
+    (fail: string | null): CommandRunner =>
+    async (cmd, args) => {
+      asked.push([cmd, ...args].join(" "));
+      if (cmd === fail) throw new Error(`${cmd} failed\nmore`);
+      return cmd === "tasklist"
+        ? '"chrome.exe","77","Console","1","1 K"'
+        : cmd === "netstat" && args[0] === "-ano"
+          ? table
+          : "tcp4 0 0 127.0.0.1.1 127.0.0.1.2 TIME_WAIT";
+    };
+  assert.equal(await readMachineSockets("win32", runner(null)), "1 TCP sockets on this machine: ESTABLISHED 1; most held by chrome.exe (77): 1");
+  assert.deepEqual(asked.splice(0), ["netstat -ano", "tasklist /FO CSV /NH"]);
+  // A process list that cannot be read leaves the table that was read, not an error in its place.
+  assert.equal(
+    await readMachineSockets("win32", runner("tasklist")),
+    "1 TCP sockets on this machine: ESTABLISHED 1 (could not name their processes: tasklist failed)",
+  );
+  assert.equal(await readMachineSockets("win32", runner("netstat")), "(could not read the TCP table: netstat failed)");
+  asked.length = 0;
+  assert.equal(await readMachineSockets("darwin", runner(null)), "1 TCP sockets on this machine: TIME_WAIT 1");
+  assert.deepEqual(asked.splice(0), ["netstat -an -p tcp"]);
+  await readMachineSockets("linux", runner(null));
+  assert.deepEqual(asked, ["ss -tan"]);
 });
 
 test("a smoke shard runs its own suites, and every suite belongs to exactly one shard", () => {

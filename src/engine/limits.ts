@@ -207,3 +207,53 @@ export function explainTimeout(err: unknown, kind: LimitKind, ms: number): unkno
   out.name = err.name;
   return out;
 }
+
+/**
+ * The page-load failures that are tried again, once. net::ERR_NO_BUFFER_SPACE
+ * is the machine refusing the browser a socket (on Windows, WSAENOBUFS), a
+ * transient condition of the machine and not an answer from the app: the
+ * hosted Windows runners raised it with as few as 150 sockets open. Every
+ * other failure is reported as it is.
+ */
+export const RETRIED_LOAD_ERRORS = ["ERR_NO_BUFFER_SPACE"] as const;
+export type RetriedLoadError = (typeof RETRIED_LOAD_ERRORS)[number];
+
+/** How many times one page load is tried again after a retried error. */
+export const LOAD_RETRIES = 1;
+
+/** The pause before the retry, so a machine short of socket buffers has a moment to free one. */
+export const LOAD_RETRY_PAUSE_MS = 500;
+
+/** The error to retry a failed page load for, given how many times it was already retried; null when it is not retried. */
+export function loadRetryCause(message: string, retriesSoFar: number): RetriedLoadError | null {
+  if (retriesSoFar >= LOAD_RETRIES) return null;
+  return RETRIED_LOAD_ERRORS.find((code) => new RegExp(`\\bnet::${code}(?![A-Z_])`).test(message)) ?? null;
+}
+
+/** The line an action's result carries for a load that was retried, so a flaky machine stays visible. */
+export function loadRetryNote(url: string, cause: RetriedLoadError): string {
+  return `Note: loading ${url} was retried after ${cause} (the machine refused the browser a socket; it was loaded once more).`;
+}
+
+/** One load the engine retried, for the report. */
+export interface LoadRetry {
+  at: string;
+  url: string;
+  session: string;
+  cause: RetriedLoadError;
+  /** The machine's TCP table when the load failed (tcp-table.ts). */
+  sockets: string;
+}
+
+/** The report's section listing the loads this run retried; empty when there were none. */
+export function formatLoadRetries(retries: readonly LoadRetry[]): string[] {
+  if (retries.length === 0) return [];
+  return [
+    `## Page loads retried`,
+    ``,
+    `A page load the machine refused a socket for is loaded once more. Each was retried once; a load that failed again is reported where it failed.`,
+    ``,
+    ...retries.map((r) => `- \`${r.url}\` (session ${r.session}): retried after ${r.cause}, at ${r.at}. Sockets then: ${r.sockets}`),
+    ``,
+  ];
+}

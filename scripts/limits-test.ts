@@ -3,7 +3,7 @@
  * and a page load may take, where each is set (option > environment >
  * default), the bounds each is held to, what a timeout says (including a
  * scroll of a named target that could not run), and the waits a page gets
- * when a call names none.
+ * when a call names none, and which failed page loads are tried again.
  *
  *   npx tsx --test scripts/limits-test.ts
  */
@@ -16,9 +16,13 @@ import {
   DEFAULT_TIME_LIMITS,
   explainTimeout,
   explicitLimits,
+  formatLoadRetries,
   isTimeoutMessage,
   LIMIT_BOUNDS,
   limitHint,
+  LOAD_RETRIES,
+  loadRetryCause,
+  loadRetryNote,
   NAV_TIMEOUT_ENV,
   pageTimeouts,
   parseLimit,
@@ -198,4 +202,44 @@ test("a bookkeeping read of a target never outlasts the action, whatever the act
 test("a screenshot keeps Playwright's own 30 s rather than the action limit the page now defaults to", () => {
   assert.equal(SCREENSHOT_TIMEOUT_MS, 30_000);
   assert.ok(SCREENSHOT_TIMEOUT_MS > pageTimeouts(DEFAULT_TIME_LIMITS).timeout);
+});
+
+test("a page load is retried only after net::ERR_NO_BUFFER_SPACE, and only once", () => {
+  const refused = "page.goto: net::ERR_NO_BUFFER_SPACE at http://127.0.0.1:52494/slow-page\nCall log:\n  - navigating";
+  assert.equal(LOAD_RETRIES, 1);
+  assert.equal(loadRetryCause(refused, 0), "ERR_NO_BUFFER_SPACE");
+  // Once retried, a second refusal is the load's failure.
+  assert.equal(loadRetryCause(refused, 1), null);
+  // Every other failure is the app's or the machine's answer, and is reported as it is.
+  for (const other of [
+    "page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:1/",
+    "page.goto: net::ERR_ADDRESS_UNREACHABLE at http://127.0.0.1:1/",
+    "page.goto: net::ERR_INSUFFICIENT_RESOURCES at http://127.0.0.1:1/",
+    "page.goto: Timeout 20000ms exceeded.",
+    "page.goto: NS_ERROR_CONNECTION_REFUSED",
+    "page.goto: net::ERR_NO_BUFFER_SPACE_SOMETHING at http://127.0.0.1:1/",
+  ]) {
+    assert.equal(loadRetryCause(other, 0), null, other);
+  }
+});
+
+test("a retried load is said in the action's result and in the report", () => {
+  const note = loadRetryNote("http://127.0.0.1:8080/things", "ERR_NO_BUFFER_SPACE");
+  assert.match(note, /retried after ERR_NO_BUFFER_SPACE/);
+  assert.ok(note.includes("http://127.0.0.1:8080/things"));
+  assert.deepEqual(formatLoadRetries([]), [], "no retry, no section");
+  const lines = formatLoadRetries([
+    {
+      at: "2026-10-17T10:00:00.000Z",
+      url: "http://127.0.0.1:8080/things",
+      session: "lane-1",
+      cause: "ERR_NO_BUFFER_SPACE",
+      sockets: "150 TCP sockets on this machine: TIME_WAIT 92",
+    },
+  ]);
+  assert.equal(lines[0], "## Page loads retried");
+  const entry = lines.find((l) => l.startsWith("- "));
+  assert.ok(entry, lines.join("\n"));
+  assert.match(entry!, /`http:\/\/127\.0\.0\.1:8080\/things` \(session lane-1\): retried after ERR_NO_BUFFER_SPACE/);
+  assert.ok(entry!.includes("150 TCP sockets on this machine: TIME_WAIT 92"));
 });
