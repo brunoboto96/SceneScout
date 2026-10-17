@@ -144,7 +144,7 @@ You can read the report while the agents are still working, and scrub back throu
 
 - 🧠 **Your agent is the brain, so no extra API key.** The engine contains no model. It gives the agent you already pay for deterministic tools and the testing method to use them.
 - 📐 **It reads structure, not pixels.** The agent sees every element with its role, state and layout box, so overlap and broken images are measured, not guessed from a screenshot.
-- 🛡️ **Safety is enforced on the network, not requested in a prompt.** Nothing existing is changed unless you allow it, and a blocked write never reaches your server.
+- 🛡️ **Safety is enforced on the network, not requested in a prompt.** Every request the page sends is judged against the session's write mode, and a request the mode refuses never reaches your server.
 - ✅ **"Done" is a contract.** The report lists everything not tested, and at the `extensive` level refuses to finish while any known page is unvisited.
 - 🧠 **It remembers.** Each run starts from what the last one learned, and re-tests the bugs earlier runs left open.
 - 📊 **It is measured, not asserted.** Every change to how it explores is scored against an app with planted bugs and a held-out app it is never tuned on ([the log](docs/benchmark.md)):
@@ -239,12 +239,14 @@ The preview commands test a deployed preview, so the pull request's code never r
 
 | Mode | What may leave the page |
 |---|---|
-| 🔵 `observe` | Reads only. The default for a first look, for `scenescout check`, and for an agent's run on a remote site with no source |
-| 🟢 `read-only` | Reads and ordinary form posts; nothing existing is changed or deleted. The default for an agent's run on a local app |
-| 🟡 `safe-write` | Creates records, and edits or deletes only the ones it created |
-| 🔴 `destructive` | Everything. Only when you say the data is disposable; the agent never picks it |
+| 🔵 `observe` | `GET`, `HEAD` and `OPTIONS` requests, signing in, signing out and refreshing a token, and any `POST` you name as a read that does not look destructive. Any other form that posts is refused. The default for a first look, for `scenescout check`, and for an agent's run on a remote site with no source |
+| 🟢 `read-only` | Also ordinary form posts, which can create a record or change one that was there. `PUT`, `PATCH`, `DELETE`, requests that look destructive and clicks on controls labelled delete, archive and the like are refused. The default for an agent's run on a local app |
+| 🟡 `safe-write` | Also `PUT`, `PATCH` and `DELETE`, but only on records this run created |
+| 🔴 `destructive` | Everything. Only when you say the data is disposable: the agent is told never to choose it, and the config file below can rule it out |
 
-A team can commit `.scenescout/config.json` to cap what any agent may choose, for example `{"preset": "strict"}` to keep every run to reads only ([the config file](docs/guide/Configuration-reference.md#the-config-file)).
+A team can commit `.scenescout/config.json` to cap what any agent may choose, for example `{"preset": "strict"}` to keep every run in `observe` ([the config file](docs/guide/Configuration-reference.md#the-config-file)).
+
+What the policy cannot stop: a link is opened like any page, so a link that changes something just by being opened (an unsubscribe link) is followed, unless you [turn on refusing those](docs/guide/Safety-model.md#stricter-judgement-of-destructive-writes) in `observe` and `read-only`; only HTTP is judged, so messages over a WebSocket are not; and in Firefox and WebKit the later hops of a redirect that keeps a write's method go out unjudged. Which refusals are guarantees and which are pattern matching is in the [Safety model](docs/guide/Safety-model.md#what-is-a-guarantee-and-what-is-best-effort).
 
 The policy sits on the network, so a blocked request never reaches your server. The page gets a refusal instead, which is how SceneScout catches a page that claims success anyway. A saved journey that creates something, like the order above, runs only when the check is told `--flow-writes allow`, against a test environment. Findings, memory and reports stay in a `.scenescout/` folder that keeps itself out of git.
 

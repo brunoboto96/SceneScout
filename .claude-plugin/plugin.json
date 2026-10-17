@@ -9,6 +9,8 @@
   "homepage": "https://github.com/brunoboto96/SceneScout#readme",
   "repository": "https://github.com/brunoboto96/SceneScout",
   "license": "MIT",
+  "supportUrl": "https://github.com/brunoboto96/SceneScout/issues",
+  "privacyPolicyUrl": "https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md#what-it-reaches",
   "keywords": ["testing", "qa", "exploratory-testing", "playwright", "mcp", "ui"],
   "mcpServers": {
     "scenescout": {

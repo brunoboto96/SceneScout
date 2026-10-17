@@ -62,8 +62,8 @@ Invoke the skill with no flags (`/scenescout`, or the `explore` prompt with no a
 | The address | The URL the session attaches to |
 | A way of signing in | A browser window opens, you sign in as you normally would, and the session attaches with the saved login (role `user`). No sign-in: the session attaches signed out |
 | Tickets or a description | The session's objective, and the area it keeps to. Tickets are also read for their acceptance criteria, and the report answers each one. "Everything" explores the whole site |
-| Real data: yes, or not sure | `observe`: nothing but `GET` requests leave the page, so nothing is created or changed |
-| Real data: no | `read-only`: ordinary forms are submitted, deletes and other destructive requests are blocked |
+| Real data: yes, or not sure | `observe`: only `GET`, `HEAD` and `OPTIONS` requests leave the page, signing in apart, so no form that posts reaches the server. A link that acts when opened (an unsubscribe link) is still followed |
+| Real data: no | `read-only`: ordinary forms are submitted and can create or change a record; `PUT`, `PATCH`, `DELETE` and requests that look destructive are blocked |
 
 Where your client can show a form (MCP elicitation in form mode, as Claude Code and VS Code offer), the agent calls `scout_intake` and you get the guided start as one form instead:
 
@@ -104,7 +104,7 @@ An address with a user name, password or token in it, or with a space, line brea
 SceneScout needs only a URL, but it does better from inside the app's repository:
 
 - **Next to the code** (recommended). `scout_scan` reads routes from the source: file-based routing (Next.js, SvelteKit, Nuxt) and router configuration written in code (React Router, Vue Router, Angular). Coverage is then measured against the app's real routes, not only what happened to be linked, and the agent can read the component behind a finding and name the file and the fix.
-- **Against a remote URL**, from any folder (an empty `qa/` folder is fine; memory and the report are kept there). Routes come from same-origin links only. With no source to confirm the target is a development app, the method attaches in `observe` mode, where nothing but `GET` requests leave the page, unless you say form submissions are acceptable there.
+- **Against a remote URL**, from any folder (an empty `qa/` folder is fine; memory and the report are kept there). Routes come from same-origin links only. With no source to confirm the target is a development app, the method attaches in `observe` mode, where no form that posts reaches the server (signing in aside), unless you say form submissions are acceptable there.
 
 ### Things worth asking for
 
@@ -181,21 +181,27 @@ An optional extra for Claude Code, installed as a second plugin from the same ma
 - **Lane agents' model.** Set `lane_model` (`/plugin configure scenescout-mod@scenescout-marketplace`, or the `/config` row) to an alias such as `sonnet` or a full model id, and a subagent whose prompt names `scout_attach` or `scout_lane_report` starts on that model, over the one the planner chose. A fork keeps its parent's model. Left empty, which is the default, the mod does not handle subagents at all.
 - **Finding the server.** The panel calls the server named `scenescout` (how `scenescout install` registers it) or `plugin:scenescout:scenescout` (how the plugin starts it). If yours is named otherwise, set `mcp_server` to the name `/mcp` lists.
 
-### What it reaches
+## What it reaches
 
-The mod's row of the disclosure [issue #544](https://github.com/brunoboto96/SceneScout/issues/544) asks for; the plugin's and the desktop extension's rows are that issue's.
+What each way of installing SceneScout touches on your machine and on the network. The Claude Code plugin and the desktop extension run the same MCP server, so they differ only in how it starts. The mod runs no server of its own.
 
-| | The Claude Code mod |
-|---|---|
-| Network | None of its own. It calls the SceneScout MCP server through Claude Code's own connection: the status poll, building and confirming a plan, the cards and a card's label |
-| Processes | None |
-| Files | Reads and writes none. Its picture links point at files the server saved in the project's `.scenescout/` folder |
-| What it keeps | The panel's state for the session, in Claude Code's memory. Across sessions, one value in its own store (a file Claude Code keeps for the mod): whether you have seen or skipped the tour |
-| Model calls | None of its own. **Start**, **Stop**, **Explain more**, **Check again**, **Run again**, **Sign in again** and the report buttons send a message to Claude in your session, marked as sent by the mod |
-| Data sent anywhere | Nothing leaves the machine through the mod |
-| Asks you | Before Claude's own `scout_attach` in a mode that writes; your no refuses the call |
+| | The plugin (Claude Code) | The desktop extension | The mod |
+|---|---|---|---|
+| How it starts | Claude Code runs `npx -y scenescout@<version> serve`, the version the plugin was released with | Claude Desktop runs the server from the extension's own files with its built-in Node | Claude Code loads its hooks module |
+| Network: the app | The site under test, and whatever its pages load, from a real browser. Every request a page sends is judged by the session's write mode ([Safety model](Safety-model.md)); `scout_request` reaches the site's own origin only | Same as the plugin | None of its own |
+| Network: downloads | The npm registry, when `npx` fetches the package the first time (npm caches it). Playwright's download servers, once, for the browser build an attach needs (the headless Chromium build is about 200 MB) unless `SCENESCOUT_BROWSER_DOWNLOAD` is `off`; in CI only when it is `on` | Playwright's download servers, as for the plugin. Nothing from npm | None |
+| Network: a model | None by default. The duplicate judge sends two findings' text to a model provider only when the server's environment has `SCENESCOUT_DEDUP=judge` and a provider key; an agent cannot switch it on | Same as the plugin | None of its own. Its buttons send a message to Claude in your session, marked as sent by the mod |
+| Network: anything else | No telemetry and no update check | Same | Nothing |
+| A port | The live view, on `127.0.0.1` at a port the system picks, with a token on every path, opened at the first attach. `SCENESCOUT_LIVE=off` keeps it closed | Same | None |
+| Processes | The server; a browser per session (a visible window for `scout_login`); Playwright's installer for a download; the platform's opener for the live view and the report; and at start, `ps` to find browsers an earlier crashed server left, of which it ends only those it launched itself | Same, without `npx` | None |
+| Your default browser | Opens the live view as a session attaches and the report when it is written, on a desktop session; not in CI, over SSH or with no display. `SCENESCOUT_OPEN=none` stops it | Same | Opens a finding's picture or the live view when you press its link |
+| Files written | `.scenescout/` in the project folder: memory, findings, notes, reports, saved logins (owner-only) and the live view's token. The browser builds in Playwright's cache folder. The browser's own temporary profile while it runs | Same | None. Claude Code keeps one value for it: whether you have seen the tour |
+| Files read | In the project folder: its source when `scout_scan` runs, a file `scout_upload` names, a ticket file (or one in a folder `SCENESCOUT_TICKET_DIRS` names), a storage state, and `.scenescout/config.json`. Also the config file in the folder the server started in, or the one `SCENESCOUT_CONFIG` names | Same | None |
+| The project folder | The `projectPath` the agent names, else the folder your client offers as its workspace, else `Documents/SceneScout/<site>` (`SCENESCOUT_PROJECTS_DIR` moves or turns that off). It is the fence for uploads and ticket files, and the agent chooses it: [the project folder is the trust boundary](Safety-model.md#the-project-folder-is-the-trust-boundary) | Same | Not applicable |
 
-**Trust.** A mod is JavaScript that runs inside Claude Code with your permissions, unsandboxed: it could read your files and environment and see your session. This one does only what the table says; `claude plugin validate` on its directory lists every event it handles and every call it makes, and `claude plugin test` on it mounts the panel on every surface. Install it only if you are comfortable running it, and leave it out where your organisation's policy says no.
+The mod in more detail: it calls the SceneScout MCP server through Claude Code's own connection (the status poll, building and confirming a plan, the cards and a card's label), keeps the panel's state in Claude Code's memory for the session, and asks you before Claude's own `scout_attach` in a mode that writes; your no refuses the call.
+
+**Trust in the mod.** A mod is JavaScript that runs inside Claude Code with your permissions, unsandboxed: it could read your files and environment and see your session. This one does only what the table says; `claude plugin validate` on its directory lists every event it handles and every call it makes, and `claude plugin test` on it mounts the panel on every surface. Install it only if you are comfortable running it, and leave it out where your organisation's policy says no.
 
 ## `scenescout check`: a gate in CI
 
