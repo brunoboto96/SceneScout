@@ -119,7 +119,7 @@ export interface IntakeSettings {
 
 /**
  * The settings the four answers choose. Real data, or an answer that is not
- * sure, is observe: nothing but GET requests leaves the page. Only a plain no
+ * sure, is observe: only GET, HEAD and OPTIONS requests leave the page (plus signing in and out, token refresh and POSTs named as reads). Only a plain no
  * allows read-only, and plain answers never reach safe-write or destructive,
  * which need the person to ask for them by name.
  */

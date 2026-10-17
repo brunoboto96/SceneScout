@@ -1703,6 +1703,11 @@ async function main(): Promise<void> {
   }
   console.log(`✓ server exposes ${names.length} tools`);
 
+  // observe lets out HEAD and OPTIONS as well as GET; a description that says only GET misleads the agent choosing a mode.
+  const attachDescription = tools.find((t) => t.name === "scout_attach")?.description ?? "";
+  if (!/observe' lets out only GET, HEAD and OPTIONS/.test(attachDescription) || /not a GET|only a GET|only GET requests/.test(attachDescription))
+    fail(`scout_attach's description does not state what observe lets out (GET, HEAD and OPTIONS):\n${attachDescription.slice(0, 600)}`);
+
   // The run-status pane, an MCP App (SEP-1865). The SDK this server is built on
   // has no notion of visibility, so the host is what keeps an app-only tool from
   // the model; what the server owes it is the _meta that says so.

@@ -1479,7 +1479,7 @@ async function labelsAndLeaving({ baseUrl, projectDir, stats }: SmokeContext): P
     check(
       "a repeat is counted on one line, without the paragraph",
       /WRITE-POLICY blocked \(observe\): 1 repeat block of 1 known endpoint \(POST \S*\/api\/monitor\/tunnel ×1\)/.test(secondLoad) &&
-        !secondLoad.includes("observe mode blocks every request"),
+        !secondLoad.includes("observe mode lets out only GET, HEAD and OPTIONS"),
       secondLoad,
     );
     check("the beacon never reached the server", writesTo("POST /api/monitor/tunnel") === 0, JSON.stringify(stats.writes));

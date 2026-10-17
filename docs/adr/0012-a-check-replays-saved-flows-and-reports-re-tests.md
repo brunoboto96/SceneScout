@@ -67,8 +67,8 @@ verdict in the report (so on the CI job summary) and in `check.json`, so a
 reviewer sees what a green check was allowed to do.
 
 - **`--flow-writes never|allow`, default `never`.** `never`: flows replay under
-  observe's rule whatever `--mode` says (every request that is not a GET is
-  refused, a sign-in excepted), so an unconfigured check sends no HTTP write,
+  observe's rule whatever `--mode` says (every request that is not a GET,
+  HEAD or OPTIONS is refused, a sign-in excepted), so an unconfigured check sends no HTTP write,
   in a flow or anywhere else it chooses. The rule covers HTTP: messages sent
   over a WebSocket are not inspected, so a flow's result lists the sockets its
   page opened. `allow`: flows replay under the check's own
