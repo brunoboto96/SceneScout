@@ -538,8 +538,9 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       stats.writes[key] = (stats.writes[key] ?? 0) + 1;
     }
     // The page a native form's POST lands on (form-post.html), answered to a GET as well, as a page that renders its own
-    // address does. Counted above, so a suite can tell how many times the form's POST reached the server.
-    if (urlPath === "/form-landing") {
+    // address does. Counted above, so a suite can tell how many times the form's POST reached the server. /things/9/cancel
+    // is the same page at an address that reads as a command: its GETs are counted in stats.loads.
+    if (urlPath === "/form-landing" || urlPath === "/things/9/cancel") {
       req.resume();
       req.on("end", () => {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });

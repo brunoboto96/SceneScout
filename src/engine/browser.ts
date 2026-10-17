@@ -448,8 +448,12 @@ interface MainDocumentWatch {
 interface AppPageReload {
   /** The method going back would have sent again, or null when this session did not see the page's load. */
   method: string | null;
-  /** The status that GET was answered with, or null when it had no answer. */
+  /** The status that GET was answered with, or null when it had no answer or was not sent. */
   status: number | null;
+  /** The address of the page before: the one loaded again with GET, or the one left unloaded when it reads as a destructive command. */
+  address: string;
+  /** Whether the address read as a destructive command (browsers.ts errorPageExit "blank"), so no GET was sent. */
+  destructive: boolean;
 }
 
 /** What a click's result needs to judge a page error the click raised (rankRouteCancellations). */
@@ -2736,17 +2740,24 @@ export class BrowserEngine {
    * that loaded it, and a browser re-sends a POST without asking (browsers.ts errorPageExit), so a page a write loaded,
    * or one whose load this session did not see, is loaded again from its address with a GET. That GET is the engine's
    * own request, like a scout_request call: an error it is answered with is said in the action's result and not charged
-   * to the page. Returns how the page was loaded again, or null when the session went back.
+   * to the page. An address that reads as a destructive command is not loaded at all: a GET of it is a request a server
+   * may act on, and no write rule judges it, so the session leaves for about:blank. Returns how the page was loaded
+   * again, or null when the session went back.
    */
   private async returnToAppPage(page: Page): Promise<AppPageReload | null> {
     const method = this.documentMethods.get(page) ?? null;
     const appUrl = this.lastAppUrls.get(page);
-    if (errorPageExit(method) === "get" && appUrl !== undefined) {
+    const exit = errorPageExit(method, appUrl);
+    if (exit === "blank" && appUrl !== undefined) {
+      await bestEffort(page.goto("about:blank", { timeout: this.limits.backNavMs }));
+      return { method, status: null, address: appUrl, destructive: true };
+    }
+    if (exit === "get" && appUrl !== undefined) {
       this.pendingReplay = { method: "GET", key: requestKey(appUrl) };
       this.oracles.replayStarted(appUrl);
       try {
         const res = await bestEffort(page.goto(appUrl, { waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }), null);
-        return { method, status: res ? res.status() : null };
+        return { method, status: res ? res.status() : null, address: appUrl, destructive: false };
       } finally {
         this.pendingReplay = null;
         this.oracles.replayEnded(appUrl);
@@ -2770,8 +2781,18 @@ export class BrowserEngine {
     return `${why}${answered}`;
   }
 
+  /** Why the session left for about:blank instead of loading the page again (AppPageReload.destructive), for an action's result. */
+  private static blankWords(reload: AppPageReload): string {
+    const why = reload.method !== null ? `going back would have sent again the ${reload.method} that loaded it, and ` : "";
+    return (
+      `without loading ${reload.address} again: ${why}its address reads as a destructive command, which a GET may act on, ` +
+      `so the engine sent no request to it. Navigate to a page of the app to go on`
+    );
+  }
+
   /** How the session left the error page, for an action's result. */
   private static leftErrorPage(dropped: { returnedTo: string; reload: AppPageReload | null }): string {
+    if (dropped.reload?.destructive) return `left it for about:blank ${BrowserEngine.blankWords(dropped.reload)}`;
     return dropped.reload !== null
       ? `loaded ${dropped.returnedTo} again with GET, ${BrowserEngine.reloadWords(dropped.reload)}`
       : `returned to ${dropped.returnedTo}`;
@@ -2805,7 +2826,9 @@ export class BrowserEngine {
       url = page.url();
       this.snapshots.dropRefs("the page left the app's origin");
       return (
-        `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}${reload ? ` (loaded again with GET, ${BrowserEngine.reloadWords(reload)})` : ""}. Exploration is fenced to ${this.baseUrl}.` +
+        (reload?.destructive
+          ? `OK: ${action} ${target}\nNavigated off-origin and was taken to about:blank ${BrowserEngine.blankWords(reload)}. Exploration is fenced to ${this.baseUrl}.`
+          : `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}${reload ? ` (loaded again with GET, ${BrowserEngine.reloadWords(reload)})` : ""}. Exploration is fenced to ${this.baseUrl}.`) +
         this.drainMutations() +
         this.drainBlocked() +
         this.drainRefresh() +

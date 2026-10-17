@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { isCiEnv } from "./engine/capture.js";
+import { destructiveGet } from "./engine/strict-writes.js";
 
 /** A browser the engine can launch. */
 export const BROWSER_ENGINES = ["chromium", "firefox", "webkit"] as const;
@@ -275,11 +276,16 @@ export function droppedNavigationErrorPage(engine: BrowserEngineName): string | 
  * one a form redirected to after its POST, is gone back to ("back"). One whose
  * load the engine did not see (null) is loaded with a GET too: the session may
  * have gone back onto the error page, and the entry behind it may be a POST's.
+ * A page whose address reads as a destructive command is not loaded with a
+ * GET at all ("blank"): the engine leaves for about:blank.
  */
-export function errorPageExit(documentMethod: string | null): "back" | "get" {
-  if (documentMethod === null) return "get";
-  const method = documentMethod.toUpperCase();
-  return method === "GET" || method === "HEAD" ? "back" : "get";
+export function errorPageExit(documentMethod: string | null, address?: string): "back" | "get" | "blank" {
+  const method = documentMethod?.toUpperCase() ?? null;
+  if (method === "GET" || method === "HEAD") return "back";
+  // The GET is the engine's own request and no write rule judges a GET in safe-write, so an address that reads as a
+  // command (/things/9/delete, ?action=cancel) is not loaded: the session leaves for about:blank ("blank") instead.
+  // Judged with the rule SCENESCOUT_REFUSE_DESTRUCTIVE_GETS applies, whether or not that opt-in is on.
+  return address !== undefined && destructiveGet(address) ? "blank" : "get";
 }
 
 /** How long an action waits for the error page of a navigation the policy dropped to replace the page. */
