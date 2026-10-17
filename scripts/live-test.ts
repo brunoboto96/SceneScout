@@ -10,8 +10,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  annotateFrames,
   classify,
   feedForSession,
+  FrameRing,
+  HELD_FRAME_BYTES,
   formatDuration,
   formatStatus,
   localClock,
@@ -36,7 +39,7 @@ import {
   statusFileName,
   writeLiveToken,
 } from "../src/engine/live.ts";
-import { LIVE_PAGE } from "../src/engine/live-page.ts";
+import { HELD_FRAMES, LIVE_PAGE, LIVE_WORDS } from "../src/engine/live-page.ts";
 import {
   countFindings,
   MCP_APP_MIME,
@@ -102,6 +105,7 @@ import {
   openerCommand,
   openInBrowser,
   openOrSay,
+  opensLiveView,
   type OpenChoice,
   type OpenContext,
   type Spawner,
@@ -701,7 +705,9 @@ test("the close-up groups the feed by task and shows a hovered group's task in t
   assert.match(renderer, /mouseleave/);
   assert.match(LIVE_PAGE, /id="focus-task-head"/);
   assert.match(script, /Doing, for these actions/);
-  assert.match(script, /Nothing was stated for these\./);
+  // A group with no task is the steps before any was set: the brief says that, not that nothing was stated.
+  assert.match(script, /setBrief\('focus-task', hoverTask, WORDS\.noTask\)/);
+  assert.equal(LIVE_WORDS.noTask, "No task was set for these steps.");
   const css = LIVE_PAGE.slice(0, LIVE_PAGE.indexOf("</style>"));
   assert.match(css, /\.feed \.g3 \{ background: rgba\(/, "four tints, so consecutive tasks never share one");
 });
@@ -1334,7 +1340,7 @@ test("one pastel tint per task, and a close-up with no frame says so", () => {
   assert.match(css, /@media \(prefers-color-scheme: light\)[\s\S]*?\.feed \.g0 \{ background: rgba/, "the tints are lifted for a light card too");
   // The card already said when it had no frame; the close-up showed a broken image.
   assert.match(LIVE_PAGE, /#focus \.stage\.empty \.none \{ display: flex; \}/);
-  assert.match(LIVE_PAGE, /No frame available\. The session's page may be closed/);
+  assert.match(LIVE_PAGE, /data-testid="live-focus-none"/);
 });
 
 // ---- the recorded run: its own address, and the frames under each finding ----
@@ -3362,4 +3368,132 @@ test("where nothing draws, /scenescout-guided says where the check is and what t
   // A check of another plan is not passed off as the panel's.
   assert.equal(guided.guidedOf(STATUS_RUNNING, "gp-9999999999"), null);
   assert.equal(guided.guidedOf(STATUS_RUNNING, null)?.planId, GUIDED_PLAN_ID);
+});
+
+// ---- frames held in memory for the timeline (#616) ------------------------
+
+test("held frames: the last 100 of a session are kept, the oldest goes first, and each session has its own", () => {
+  assert.equal(HELD_FRAMES, 100);
+  const ring = new FrameRing();
+  const keys: string[] = [];
+  for (let i = 0; i < HELD_FRAMES + 1; i += 1) keys.push(ring.put("admin", JPEG)!);
+  assert.deepEqual(ring.held("admin"), { frames: HELD_FRAMES, bytes: HELD_FRAMES * JPEG.length });
+  assert.equal(ring.get(keys[0]), null, "the 101st frame pushes out the first");
+  assert.deepEqual(ring.get(keys[1]), JPEG);
+  assert.deepEqual(ring.get(keys[HELD_FRAMES]), JPEG);
+  // Another session's frames are its own: a busy lane does not push out a quiet one's.
+  const other = ring.put("viewer", JPEG)!;
+  ring.put("admin", JPEG);
+  assert.deepEqual(ring.get(other), JPEG);
+  assert.ok(keys.every((k) => FrameRing.isHeld(k)) && !FrameRing.isHeld("recordings/admin/0001-click.jpg"));
+  // Closing a session drops its frames and nobody else's.
+  ring.drop("admin");
+  assert.deepEqual(ring.held("admin"), { frames: 0, bytes: 0 });
+  assert.equal(ring.get(keys[HELD_FRAMES]), null);
+  assert.deepEqual(ring.get(other), JPEG);
+});
+
+test("held frames: bounded in bytes too, whatever their count, and a frame larger than the bound is not kept", () => {
+  assert.ok(HELD_FRAME_BYTES >= 4 * 1024 * 1024 && HELD_FRAME_BYTES <= 32 * 1024 * 1024, "a bound a run can afford per session");
+  const ring = new FrameRing(100, 10);
+  const a = ring.put("s", Buffer.alloc(4))!;
+  const b = ring.put("s", Buffer.alloc(4))!;
+  const c = ring.put("s", Buffer.alloc(4))!;
+  assert.deepEqual(ring.held("s"), { frames: 2, bytes: 8 });
+  assert.equal(ring.get(a), null);
+  assert.ok(ring.get(b) && ring.get(c));
+  assert.equal(ring.put("s", Buffer.alloc(11)), null, "one frame over the whole bound");
+  assert.deepEqual(ring.held("s"), { frames: 2, bytes: 8 }, "and it pushed nothing out");
+});
+
+test("a step's frame in the feed: held, aged out, never kept, and recorded, each said as itself", () => {
+  const ring = new FrameRing(1);
+  const old = ring.put("admin", JPEG)!;
+  const kept = ring.put("admin", JPEG)!;
+  const feed: ActivityLine[] = [
+    { at: "a", action: "click", url: "u", frame: old },
+    { at: "b", action: "click", url: "u", frame: kept },
+    { at: "c", action: "task:set", url: "u" },
+    { at: "d", action: "click", url: "u", frame: "recordings/admin/0004-click.jpg" },
+  ];
+  const off = annotateFrames(feed, ring, "admin", false);
+  assert.deepEqual(off[0], { at: "a", action: "click", url: "u", noFrame: LIVE_WORDS.agedOut }, "an aged-out frame loses its address and says so");
+  assert.deepEqual(off[1], feed[1], "a frame still held is left as it is");
+  assert.equal(off[2].noFrame, LIVE_WORDS.notKept);
+  assert.deepEqual(off[3], feed[3], "a recorded frame is the disk's to answer for");
+  assert.equal(annotateFrames(feed, ring, "admin", true)[2].noFrame, LIVE_WORDS.notKeptRecording);
+  // Closed and attached again under the same name: the steps it held when it closed were dropped, not aged out.
+  ring.drop("admin");
+  const again = annotateFrames(feed, ring, "admin", false);
+  assert.equal(again[1].noFrame, LIVE_WORDS.droppedOnClose);
+  assert.equal(again[0].noFrame, LIVE_WORDS.agedOut, "one pushed out before the close stays aged out");
+  assert.equal(annotateFrames(feed, ring, "viewer", false)[1].noFrame, LIVE_WORDS.agedOut, "another session's close is not this one's");
+  // Each wording is about a past step; none of them is the live failure, which is for a live page that does not answer.
+  assert.match(LIVE_WORDS.agedOut, /older than the last 100 steps/);
+  assert.match(LIVE_WORDS.agedOut, /record: true/);
+  assert.match(LIVE_WORDS.agedOut, /SCENESCOUT_RECORD=on/);
+  for (const w of [LIVE_WORDS.agedOut, LIVE_WORDS.droppedOnClose, LIVE_WORDS.notKept, LIVE_WORDS.notKeptRecording, LIVE_WORDS.recordingGone]) {
+    assert.doesNotMatch(w, /may be closed|not answering/, w);
+  }
+  assert.match(LIVE_WORDS.liveFailure, /may be closed, or not answering/);
+});
+
+test("the feed takes a held frame only for the live view: a page written to disk never names one", () => {
+  const log: LoggedAction[] = [
+    { at: "a", action: "click", url: "u", session: "s", heldFrame: "memory/1.jpg" },
+    { at: "b", action: "click", url: "u", session: "s", frame: "recordings/s/0001-click.jpg", heldFrame: "memory/2.jpg" },
+  ];
+  assert.deepEqual(
+    feedForSession(log, "s", 10).map((l) => l.frame),
+    [undefined, "recordings/s/0001-click.jpg"],
+  );
+  assert.deepEqual(
+    feedForSession(log, "s", 10, (x) => x, true).map((l) => l.frame),
+    ["memory/1.jpg", "recordings/s/0001-click.jpg"],
+  );
+});
+
+test("a held frame is served from memory over HTTP, never asked of the disk, and gone once pushed out or closed", async () => {
+  const { provider } = fakeProvider(["admin"]);
+  let diskAsks = 0;
+  provider.frame = async () => {
+    diskAsks += 1;
+    return null;
+  };
+  const feed: ActivityLine[] = [];
+  provider.activity = () => feed;
+  provider.snapshot = () => ({ pid: 1, version: "9.9.9", at: new Date(T0).toISOString(), sessions: [entry("admin", { recording: false })] });
+  const live = new LiveServer(provider, () => T0, new FrameRing(2));
+  try {
+    const { port, token } = await live.start();
+    const first = live.holdFrame("admin", JPEG)!;
+    feed.push({ at: "a", action: "click", url: "u", frame: first });
+    const served = await request(port, `/${token}/record/${first}`);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers["content-type"], "image/jpeg");
+    assert.deepEqual(served.body, JPEG);
+    live.holdFrame("admin", JPEG);
+    const second = live.holdFrame("admin", JPEG)!;
+    assert.equal((await request(port, `/${token}/record/${first}`)).status, 404, "pushed out by newer steps");
+    const activity = JSON.parse((await request(port, `/${token}/api/activity?session=admin`)).body.toString()) as { feed: ActivityLine[] };
+    assert.equal(activity.feed[0].noFrame, LIVE_WORDS.agedOut);
+    assert.equal(activity.feed[0].frame, undefined);
+    const status = JSON.parse((await request(port, `/${token}/api/status`)).body.toString()) as StatusResponse;
+    assert.equal(status.sessions[0].feed[0].noFrame, LIVE_WORDS.agedOut, "the board's feed is checked the same way");
+    live.dropSession("admin");
+    assert.equal((await request(port, `/${token}/record/${second}`)).status, 404, "dropped when the session closes");
+    assert.equal(diskAsks, 0, "a held frame's address is never looked for on disk");
+  } finally {
+    await live.stop();
+  }
+});
+
+test("open: an attach that asks for the live view opens it every time; the default and the environment, once per server", () => {
+  const live = { live: true, report: false, why: "x" };
+  const none = { live: false, report: false, why: "x" };
+  assert.equal(opensLiveView(live, true, true), true, "asked again by an attach after the first window was closed");
+  assert.equal(opensLiveView(live, true, false), true);
+  assert.equal(opensLiveView(live, false, false), true, "the first attach of a server opens it");
+  assert.equal(opensLiveView(live, false, true), false, "a lane attaching later does not open another window");
+  assert.equal(opensLiveView(none, true, false), false);
 });

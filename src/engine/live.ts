@@ -17,7 +17,9 @@
  *    result and, for `scenescout watch`, through a file only the owner can read;
  *  - it answers GET and nothing else: a viewer can look, never act;
  *  - a frame is held in memory and sent to the viewer. None is written to disk,
- *    because the page may be showing somebody's real data.
+ *    because the page may be showing somebody's real data. The last frames of
+ *    each session's steps are held the same way (FrameRing), bounded, and
+ *    dropped when the session closes; only a run that records writes frames.
  *
  * Nothing here imports Playwright. The engine is reached through LiveProvider,
  * so the whole module is tested over real HTTP with a fake provider.
@@ -27,7 +29,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { LIVE_PAGE } from "./live-page.js";
+import { HELD_FRAMES, LIVE_PAGE, LIVE_WORDS } from "./live-page.js";
 import { writeOwnerOnly } from "./owner-file.js";
 import { isPng } from "./png.js";
 import { bestEffort } from "./best-effort.js";
@@ -76,10 +78,12 @@ export interface SessionStatus {
   task?: string;
   /** Present exactly when `task` is. */
   taskSince?: string;
+  /** Whether the session writes a frame of every step to disk (scout_attach record). */
+  recording?: boolean;
 }
 
 /** What the engine says about a session, spread onto its board entry. Text in it is the agent's own and is redacted by the caller. */
-export type SessionDescription = Pick<SessionStatus, "mode" | "browser" | "headed" | "objective" | "task" | "taskSince">;
+export type SessionDescription = Pick<SessionStatus, "mode" | "browser" | "headed" | "objective" | "task" | "taskSince" | "recording">;
 
 /** One line of a session's activity feed: what it did, and how that turned out. */
 export interface ActivityLine {
@@ -90,12 +94,14 @@ export interface ActivityLine {
   result?: string;
   /** The task these actions were part of, so the feed can group them under it. */
   task?: string;
-  /** The frame kept for this step, on a recorded run. */
+  /** The frame kept for this step: a recorded one's path, or a frame held in memory (FrameRing). */
   frame?: string;
+  /** Why the step has no frame to show, set by the server when `frame` is absent (annotateFrames). */
+  noFrame?: string;
 }
 
 /** What the feed reads from an action-log entry. */
-export type LoggedAction = Pick<ActionLogEntry, "at" | "action" | "target" | "url" | "result" | "session" | "frame">;
+export type LoggedAction = Pick<ActionLogEntry, "at" | "action" | "target" | "url" | "result" | "session" | "frame" | "heldFrame">;
 
 /**
  * One session's most recent actions, oldest first, each tagged with the
@@ -104,7 +110,14 @@ export type LoggedAction = Pick<ActionLogEntry, "at" | "action" | "target" | "ur
  * `journey:end` lines, so the walk goes back past the window until it finds
  * the marker that says whether the window's first lines were inside one.
  */
-export function feedForSession(log: readonly LoggedAction[], session: string, limit: number, redact: (s: string) => string = (s) => s): ActivityLine[] {
+export function feedForSession(
+  log: readonly LoggedAction[],
+  session: string,
+  limit: number,
+  redact: (s: string) => string = (s) => s,
+  /** Whether a frame held in memory may stand in for a recorded one: for the live view, never for a page written to disk. */
+  heldFrames = false,
+): ActivityLine[] {
   const mine: LoggedAction[] = [];
   let i = log.length - 1;
   for (; i >= 0 && mine.length < limit; i -= 1) {
@@ -138,7 +151,9 @@ export function feedForSession(log: readonly LoggedAction[], session: string, li
     const line: ActivityLine = { at: e.at, action: e.action, url: redact(e.url) };
     if (e.target !== undefined) line.target = e.target;
     if (e.result !== undefined) line.result = e.result;
-    if (e.frame !== undefined) line.frame = e.frame;
+    // A recorded frame is the step's evidence; a held one only stands in for it where the run does not record.
+    const frame = e.frame ?? (heldFrames ? e.heldFrame : undefined);
+    if (frame !== undefined) line.frame = frame;
     if (task !== undefined) line.task = task;
     lines.push(line);
     if (e.action === JOURNEY_END) goal = undefined;
@@ -497,6 +512,114 @@ export const SHOT_MAX_AGE_MS = 1500;
 /** A viewer this far behind is skipped for a frame rather than buffered without bound. */
 const MAX_VIEWER_BACKLOG_BYTES = 4_000_000;
 
+/** Where a held frame's address starts, in the feed and under the server's record/ route. */
+export const HELD_FRAME_PREFIX = "memory/";
+
+/** The most bytes of held frames one session may take; past it, the oldest go first, whatever their count. */
+export const HELD_FRAME_BYTES = 12 * 1024 * 1024;
+
+/**
+ * The last frames of each session's steps, in memory only, so the live view's
+ * timeline can show a past step on a run that does not record. Bounded by count
+ * and by bytes per session: the oldest frame goes first. A frame larger than
+ * the whole byte bound is not kept. Nothing here touches the disk.
+ */
+export class FrameRing {
+  private next = 0;
+  private readonly sessions = new Map<string, { keys: string[]; bytes: number }>();
+  private readonly frames = new Map<string, Buffer>();
+  /** For each session closed while it held frames, the range of addresses it held then: those steps' frames were dropped, not aged out. */
+  private readonly closed = new Map<string, Array<[number, number]>>();
+
+  constructor(
+    readonly maxFrames: number = HELD_FRAMES,
+    readonly maxBytes: number = HELD_FRAME_BYTES,
+  ) {}
+
+  /** Keep a frame of `session`'s latest step. Returns its address, or null when it is too large to keep. */
+  put(session: string, jpeg: Buffer): string | null {
+    if (jpeg.length > this.maxBytes) return null;
+    let held = this.sessions.get(session);
+    if (!held) this.sessions.set(session, (held = { keys: [], bytes: 0 }));
+    this.next += 1;
+    const key = FrameRing.keyOf(this.next);
+    held.keys.push(key);
+    held.bytes += jpeg.length;
+    this.frames.set(key, jpeg);
+    while (held.keys.length > this.maxFrames || held.bytes > this.maxBytes) {
+      const oldest = held.keys.shift()!;
+      held.bytes -= this.frames.get(oldest)?.length ?? 0;
+      this.frames.delete(oldest);
+    }
+    return key;
+  }
+
+  /** A held frame by its address, or null once it has been pushed out or its session closed. */
+  get(key: string): Buffer | null {
+    return this.frames.get(key) ?? null;
+  }
+
+  /** Whether a frame address is one this ring hands out (held now or not). */
+  static isHeld(key: string): boolean {
+    return key.startsWith(HELD_FRAME_PREFIX);
+  }
+
+  private static keyOf(n: number): string {
+    return `${HELD_FRAME_PREFIX}${n}.jpg`;
+  }
+
+  private static numberOf(key: string): number {
+    return Number(/^memory\/(\d+)\.jpg$/.exec(key)?.[1] ?? NaN);
+  }
+
+  /** Whether `key` was one of `session`'s frames still held when the session closed. */
+  droppedOnClose(session: string, key: string): boolean {
+    const n = FrameRing.numberOf(key);
+    return (this.closed.get(session) ?? []).some(([from, to]) => n >= from && n <= to);
+  }
+
+  /** How many frames and bytes `session` holds. */
+  held(session: string): { frames: number; bytes: number } {
+    const held = this.sessions.get(session);
+    return { frames: held?.keys.length ?? 0, bytes: held?.bytes ?? 0 };
+  }
+
+  /** Forget everything `session` held: it has closed. */
+  drop(session: string): void {
+    const held = this.sessions.get(session);
+    if (!held) return;
+    for (const key of held.keys) this.frames.delete(key);
+    this.sessions.delete(session);
+    if (held.keys.length > 0) {
+      const ranges = this.closed.get(session) ?? [];
+      ranges.push([FrameRing.numberOf(held.keys[0]), FrameRing.numberOf(held.keys[held.keys.length - 1])]);
+      this.closed.set(session, ranges);
+    }
+  }
+}
+
+/**
+ * A feed as the viewer gets it: a held frame that has been pushed out, or dropped
+ * when its session closed, loses its address and says which, and a step with no frame says why it has none, by
+ * whether the session records. A recorded frame's path is left as it is.
+ */
+export function annotateFrames(feed: readonly ActivityLine[], ring: FrameRing, session: string, recording: boolean): ActivityLine[] {
+  return feed.map((line) => {
+    if (line.frame !== undefined && !FrameRing.isHeld(line.frame)) return line;
+    if (line.frame !== undefined && ring.get(line.frame)) return line;
+    const { frame, ...rest } = line;
+    const why =
+      frame === undefined
+        ? recording
+          ? LIVE_WORDS.notKeptRecording
+          : LIVE_WORDS.notKept
+        : ring.droppedOnClose(session, frame)
+          ? LIVE_WORDS.droppedOnClose
+          : LIVE_WORDS.agedOut;
+    return { ...rest, noFrame: why };
+  });
+}
+
 export class LiveServer {
   private server: http.Server | null = null;
   private port = 0;
@@ -508,7 +631,19 @@ export class LiveServer {
   constructor(
     private readonly provider: LiveProvider,
     private readonly now: () => number = Date.now,
+    /** The frames held for the timeline; a test passes a smaller one. */
+    private readonly ring: FrameRing = new FrameRing(),
   ) {}
+
+  /** Hold a frame of `session`'s latest step for the timeline. Returns its address for the action log, or null. */
+  holdFrame(session: string, jpeg: Buffer): string | null {
+    return this.ring.put(session, jpeg);
+  }
+
+  /** A feed with each step's frame checked against what is still held. */
+  private viewerFeed(session: string, limit: number, recording: boolean | undefined): ActivityLine[] {
+    return annotateFrames(this.provider.activity(session, limit), this.ring, session, recording === true);
+  }
 
   async start(): Promise<{ port: number; token: string }> {
     if (this.server) return { port: this.port, token: this.token };
@@ -606,7 +741,7 @@ export class LiveServer {
       const nowMs = this.now();
       const body: StatusResponse = {
         ...snap,
-        sessions: snap.sessions.map((s) => ({ ...s, state: classify(s, nowMs), feed: this.provider.activity(s.session, FEED_LINES) })),
+        sessions: snap.sessions.map((s) => ({ ...s, state: classify(s, nowMs), feed: this.viewerFeed(s.session, FEED_LINES, s.recording) })),
       };
       return this.send(res, 200, JSON.stringify(body), "application/json; charset=utf-8");
     }
@@ -614,7 +749,8 @@ export class LiveServer {
       const session = this.param(req, "session");
       if (session === null) return this.send(res, 404, "not found");
       if (!this.hasSession(session)) return this.send(res, 404, "no such session");
-      return this.send(res, 200, JSON.stringify({ session, feed: this.provider.activity(session, FEED_LINES_MAX) }), "application/json; charset=utf-8");
+      const recording = this.provider.snapshot().sessions.find((s) => s.session === session)?.recording;
+      return this.send(res, 200, JSON.stringify({ session, feed: this.viewerFeed(session, FEED_LINES_MAX, recording) }), "application/json; charset=utf-8");
     }
     if (route === "api" && name === "report") {
       const report = this.provider.report();
@@ -638,7 +774,8 @@ export class LiveServer {
       } catch {
         return this.send(res, 404, "not found");
       }
-      const jpeg = await this.provider.frame(asked);
+      // A held frame is served from memory and never looked for on disk.
+      const jpeg = FrameRing.isHeld(asked) ? this.ring.get(asked) : await this.provider.frame(asked);
       if (!jpeg) return this.send(res, 404, "no such frame");
       // Frames are JPEG; a finding's picture is PNG (capture.ts), and is labelled as one.
       const type = isPng(jpeg) ? "image/png" : "image/jpeg";
@@ -715,11 +852,17 @@ export class LiveServer {
   }
 
   /**
-   * The session is gone (closed by the agent, or its page died): every viewer
-   * is told, and the screencast is stopped. A stream nobody ends would show
-   * the last frame under a LIVE badge for as long as the page stayed open.
+   * The session was closed: its held frames are dropped, every viewer is told,
+   * and the screencast is stopped. A stream nobody ends would show the last
+   * frame under a LIVE badge for as long as the page stayed open.
    */
   dropSession(session: string): void {
+    this.ring.drop(session);
+    this.endStream(session);
+  }
+
+  /** The session's page is gone: its viewers are told and its screencast stopped. Its held frames stay until it closes. */
+  private endStream(session: string): void {
     const stream = this.streams.get(session);
     this.shots.delete(session);
     if (!stream) return;
@@ -748,7 +891,7 @@ export class LiveServer {
               entry.lastFrame = jpeg;
               for (const v of entry.viewers.values()) v.frame(jpeg);
             },
-            () => this.dropSession(session),
+            () => this.endStream(session),
           ),
           null,
         ).then((stop) => {

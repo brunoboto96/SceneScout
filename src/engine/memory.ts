@@ -509,6 +509,8 @@ export interface ActionLogEntry {
   session?: string;
   /** The frame kept for this step, relative to the memory directory. Present only on a recorded run. */
   frame?: string;
+  /** On a run that does not record, the address of this step's frame held in memory for the live view (live.ts FrameRing). */
+  heldFrame?: string;
   /** On a recorded run, set when this step has no frame because the session already kept as many as it may. */
   framePastCap?: true;
 }

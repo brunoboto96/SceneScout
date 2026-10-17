@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { feedForSession, FEED_LINES, LiveServer, StatusBoard, type LiveProvider } from "../../dist/engine/live.js";
 import { buildReplayHtml, resolveFrame } from "../../dist/engine/replay.js";
+import { LIVE_WORDS } from "../../dist/engine/live-page.js";
 import { chromium, firefox, webkit, type Page } from "playwright";
 import { BROWSER, check, eventually, settle, until, WAIT_MS, type SmokeContext } from "./harness.ts";
 
@@ -206,6 +207,7 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
 
     await viewerKeepsUp(shot);
     await savedReportOpensFromDisk();
+    await heldFramesOnAnUnrecordedRun(baseUrl);
   } finally {
     await live.stop();
     await engine.close();
@@ -566,7 +568,15 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
       (await ticks.nth(drawn - 1).getAttribute("aria-pressed")) === "true",
       String(await ticks.nth(drawn - 1).getAttribute("aria-pressed")),
     );
+    // A past step on a run that keeps no frame for it says so, not that the page may be closed.
+    const stageSays = (): Promise<string> => page.getByTestId("live-focus-none").evaluate((n) => n.textContent ?? "");
+    check(
+      "a past step with no frame says no frame was kept for it, not the live failure",
+      (await stageSays()) === LIVE_WORDS.notKept && ((await page.getByTestId("live-scrub-where").textContent()) ?? "").endsWith(LIVE_WORDS.notKept),
+      `${await stageSays()} | ${await page.getByTestId("live-scrub-where").textContent()}`,
+    );
     await page.getByTestId("live-scrub-live").click();
+    check("...and back on the live page, an empty stage is the live failure again", (await stageSays()) === LIVE_WORDS.liveFailure, await stageSays());
     await eventually(async () => (await page.locator('#timeline button[aria-pressed="true"]').count()) === 0);
     check("going back to live leaves no step marked", (await page.locator('#timeline button[aria-pressed="true"]').count()) === 0);
 
@@ -731,5 +741,61 @@ async function viewerKeepsUp(jpeg: Buffer | null): Promise<void> {
   } finally {
     await browser.close();
     await live.stop();
+  }
+}
+
+/**
+ * A run that does not record still gives the timeline a frame of each recent
+ * step, held in the live view's memory: served over HTTP, never written under
+ * .scenescout/recordings, and gone once the session closes.
+ */
+async function heldFramesOnAnUnrecordedRun(baseUrl: string): Promise<void> {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-live-held-"));
+  const engine = new BrowserEngine();
+  engine.sessionKey = "held";
+  const board = new StatusBoard();
+  const provider: LiveProvider = {
+    snapshot: () => ({ pid: process.pid, version: "smoke", at: new Date().toISOString(), sessions: board.list() }),
+    activity: (session, limit) => feedForSession(engine.memory?.actionLog ?? [], session, limit, (x) => x, true),
+    report: () => null,
+    replay: () => null,
+    frame: async () => null,
+    screenshot: () => Promise.resolve(null),
+    startStream: () => Promise.resolve(null),
+  };
+  const live = new LiveServer(provider);
+  try {
+    const { port, token } = await live.start();
+    await engine.attach({ url: baseUrl, projectDir, mode: "read-only" });
+    board.update("held", { role: "anonymous", phase: "idle", tool: "scout_attach", url: baseUrl, ...engine.liveDescription });
+    engine.frameHolder = (jpeg) => live.holdFrame("held", jpeg);
+    await engine.navigate("/page2.html");
+    await engine.snapshot();
+    await engine.crawl(["/covered.html"]);
+    const steps = (engine.memory?.actionLog ?? []).filter((e) => ["navigate", "snapshot", "crawl"].includes(e.action));
+    check(
+      "a run that does not record holds a frame of each step in memory",
+      steps.length >= 3 && steps.every((e) => (e.heldFrame ?? "").startsWith("memory/") && e.frame === undefined),
+      JSON.stringify(steps.map((e) => [e.action, e.frame, e.heldFrame])),
+    );
+    check(
+      "...and writes nothing under .scenescout/recordings",
+      !fs.existsSync(path.join(projectDir, ".scenescout", "recordings")),
+      fs.existsSync(path.join(projectDir, ".scenescout", "recordings")) ? fs.readdirSync(path.join(projectDir, ".scenescout", "recordings")).join(", ") : "",
+    );
+    const activity = JSON.parse((await get(port, `/${token}/api/activity?session=held`)).body.toString()) as { feed: Array<{ frame?: string }> };
+    const framed = activity.feed.filter((l) => l.frame);
+    const asked = await get(port, `/${token}/record/${framed[0]?.frame ?? "memory/0.jpg"}`);
+    check(
+      "...which the timeline's feed names and the server hands back as a picture",
+      framed.length >= 3 && asked.status === 200 && isJpeg(asked.body),
+      `${framed.length} framed step(s); status ${asked.status}, ${asked.body.length} bytes`,
+    );
+    live.dropSession("held");
+    check("...until the session closes, when they are dropped", (await get(port, `/${token}/record/${framed[0]?.frame ?? "memory/0.jpg"}`)).status === 404);
+  } finally {
+    await live.stop();
+    await engine.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
   }
 }
