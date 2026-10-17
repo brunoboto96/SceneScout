@@ -11,10 +11,19 @@
  * at the same tracker, so a read never goes to an address the settings did
  * not name.
  */
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { ExportRecord, Tracker } from "./export.js";
+import { MEMORY_DIRNAME } from "./memory.js";
+import { tryAcquireLock } from "./refresh.js";
 
 /** The least time between two reads of the tracker for one project. A call sooner answers what the last read found. */
 export const TICKET_STATUS_EVERY_MS = 5 * 60_000;
+/** The last read's answer, kept in the project's `.scenescout/` folder so every server process for it shares one limit. */
+export const TICKET_STATUS_FILE = "ticket-status.json";
+/** Held while one process reads the trackers for a project, so two never read at once. */
+export const TICKET_STATUS_LOCK_FILE = "ticket-status.lock";
 /** The most tickets one answer lists, the newest filed first. */
 export const TICKET_STATUS_MAX = 50;
 /** The most trackers one read asks. */
@@ -108,23 +117,103 @@ export function placeTickets(
   return out.sort((a, b) => b.at - a.at || a.id.localeCompare(b.id)).map(({ at: _at, ...t }) => t);
 }
 
+/** What a read kept: when, for which record of filed tickets, and its answer. */
+interface Kept {
+  atMs: number;
+  /** The SHA-256 of the record's text the read was made for ("" with no record): a filing changes it, and a read is due at once. */
+  record: string;
+  status: TicketStatus;
+}
+
+/** The identity of a record's text, as a kept read names it. */
+export function recordDigest(text: string | null): string {
+  return text === null ? "" : crypto.createHash("sha256").update(text).digest("hex");
+}
+
 /**
- * The last read of each project, so the tracker is asked at most once every
- * TICKET_STATUS_EVERY_MS per project, whoever calls (the mod's watch, or
- * Claude). In this process only.
+ * The last read of each project, so its trackers are asked at most once every
+ * TICKET_STATUS_EVERY_MS whoever calls (the mod's watch in any Claude Code
+ * window, or Claude) and whichever server process answers: the answer is kept
+ * in the project's `.scenescout/` folder, and a read is made holding a lock
+ * there. A project with no such folder has filed nothing, so nothing is read
+ * and its answer is kept in this process only.
  */
 export class TicketStatusReads {
-  private readonly last = new Map<string, { atMs: number; status: TicketStatus }>();
+  private readonly last = new Map<string, Kept>();
 
-  /** The last answer for this project when the next read is not due, as not fresh; else null, and the caller reads the tracker. */
-  cached(project: string, nowMs: number): TicketStatus | null {
-    const held = this.last.get(project);
-    if (!held || nowMs - held.atMs >= TICKET_STATUS_EVERY_MS || nowMs < held.atMs) return null;
+  private static dir(project: string): string {
+    return path.join(project, MEMORY_DIRNAME);
+  }
+
+  /** The kept read: the project's file where it can be read, else this process's own. */
+  private kept(project: string): Kept | null {
+    try {
+      const raw = JSON.parse(fs.readFileSync(path.join(TicketStatusReads.dir(project), TICKET_STATUS_FILE), "utf8")) as Partial<Kept>;
+      const st = raw.status as Partial<TicketStatus> | undefined;
+      if (
+        typeof raw.atMs === "number" &&
+        typeof raw.record === "string" &&
+        st &&
+        typeof st.readAt === "string" &&
+        typeof st.nextReadAt === "string" &&
+        Array.isArray(st.tickets) &&
+        Array.isArray(st.problems)
+      )
+        return { atMs: raw.atMs, record: raw.record, status: { ...(st as TicketStatus), tickets: st.tickets.slice(0, TICKET_STATUS_MAX) } };
+    } catch {
+      // None kept on disk yet, or one this version cannot read: this process's own, if any, and else a read is due.
+    }
+    return this.last.get(project) ?? null;
+  }
+
+  /** The last answer for this project and record when the next read is not due, as not fresh; else null, and the caller reads the tracker. */
+  cached(project: string, nowMs: number, record = ""): TicketStatus | null {
+    const held = this.kept(project);
+    if (!held || held.record !== record || nowMs - held.atMs >= TICKET_STATUS_EVERY_MS || nowMs < held.atMs) return null;
     return { ...held.status, fresh: false };
   }
 
-  /** Keep a read's answer, stamped with when it was read and when the next may be. */
-  remember(project: string, nowMs: number, tickets: WatchedTicket[], problems: string[]): TicketStatus {
+  /**
+   * The answer for this project: the kept one while it is current, else what
+   * `read` finds, read holding the project's lock. While another process holds
+   * it, the kept answer for this record is given again (not fresh) rather
+   * than reading too, and with none, an answer that says so.
+   */
+  async read(project: string, nowMs: number, record: string, read: () => Promise<{ tickets: WatchedTicket[]; problems: string[] }>): Promise<TicketStatus> {
+    const held = this.cached(project, nowMs, record);
+    if (held) return held;
+    const dir = TicketStatusReads.dir(project);
+    if (!fs.existsSync(dir)) {
+      const r = await read();
+      return this.remember(project, nowMs, r.tickets, r.problems, record);
+    }
+    const lock = tryAcquireLock(path.join(dir, TICKET_STATUS_LOCK_FILE), { staleMs: TICKET_STATUS_EVERY_MS });
+    if (!lock) {
+      // Only an answer for this same record: one kept from before a filing would say the new tickets are not there.
+      const kept = this.kept(project);
+      return kept && kept.record === record
+        ? { ...kept.status, fresh: false }
+        : {
+            readAt: new Date(nowMs).toISOString(),
+            fresh: false,
+            nextReadAt: new Date(nowMs + 60_000).toISOString(),
+            tickets: [],
+            problems: ["another SceneScout process is reading the trackers for this project now; ask again in a minute"],
+          };
+    }
+    try {
+      // Read under the lock only if no other process read while this one waited for it.
+      const again = this.cached(project, nowMs, record);
+      if (again) return again;
+      const r = await read();
+      return this.remember(project, nowMs, r.tickets, r.problems, record);
+    } finally {
+      lock.release();
+    }
+  }
+
+  /** Keep a read's answer, stamped with when it was read and when the next may be, in the project's folder where it has one. */
+  remember(project: string, nowMs: number, tickets: WatchedTicket[], problems: string[], record = ""): TicketStatus {
     const status: TicketStatus = {
       readAt: new Date(nowMs).toISOString(),
       fresh: true,
@@ -132,7 +221,20 @@ export class TicketStatusReads {
       tickets: tickets.slice(0, TICKET_STATUS_MAX),
       problems,
     };
-    this.last.set(project, { atMs: nowMs, status });
+    const kept: Kept = { atMs: nowMs, record, status };
+    this.last.set(project, kept);
+    const dir = TicketStatusReads.dir(project);
+    if (fs.existsSync(dir)) {
+      // By rename, so another process never reads half a file. A write that fails leaves this process's own copy, which still limits it.
+      const file = path.join(dir, TICKET_STATUS_FILE);
+      const temp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+      try {
+        fs.writeFileSync(temp, JSON.stringify(kept), { mode: 0o600 });
+        fs.renameSync(temp, file);
+      } catch {
+        fs.rmSync(temp, { force: true });
+      }
+    }
     return status;
   }
 }

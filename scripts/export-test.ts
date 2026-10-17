@@ -91,11 +91,14 @@ import {
   type TicketPreview,
 } from "../src/engine/ticket-preview.ts";
 import { shellQuote } from "../src/engine/profiles.ts";
+import { tryAcquireLock } from "../src/engine/refresh.ts";
 import { fileTickets, previewTickets, ticketStatus, type TicketDeps } from "../src/ticket-run.ts";
 import {
   placeTickets,
   recordPlaces,
   TICKET_STATUS_EVERY_MS,
+  TICKET_STATUS_FILE,
+  TICKET_STATUS_LOCK_FILE,
   TICKET_STATUS_MAX,
   TICKET_STATUS_PLACES,
   TicketStatusReads,
@@ -3439,6 +3442,7 @@ test("ticket status: GitHub and Jira: the filed tickets read back open or closed
     assert.ok(gh.seen.length + jira.seen.length > seenNow, "read again once due");
 
     // The server's settings now point at another Jira site, and the GitHub token is gone: neither is read, and each is said.
+    now += TICKET_STATUS_EVERY_MS;
     const elsewhere = await ticketStatus(
       dir,
       new TicketStatusReads(),
@@ -3452,5 +3456,59 @@ test("ticket status: GitHub and Jira: the filed tickets read back open or closed
   } finally {
     await gh.close();
     await jira.close();
+  }
+});
+
+test("ticket status: the five-minute limit holds across processes, a filing makes a read due, and a read another process holds is not repeated", async () => {
+  const gh = await standInGitHub();
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = projectWith(THREE);
+    let now = Date.parse("2026-10-17T10:00:00.000Z");
+    const deps = ticketDeps(env, () => now);
+    // Nothing filed: answered, and the answer kept.
+    assert.deepEqual((await ticketStatus(dir, new TicketStatusReads(), deps)).tickets, []);
+    const store = new TicketPreviews();
+    const preview = await previewTickets({ ids: ["aaa0000001"], to: "github", target: "owner/app" }, dir, store, deps);
+    assert.ok(preview.ok);
+    assert.ok((await fileTickets(preview.preview.previewId, store, confirmWith(FILE_IT).confirm, deps)).filed);
+    // A filing changed the record, so the next call reads at once rather than answering "none" for five minutes.
+    now += 1_000;
+    const first = await ticketStatus(dir, new TicketStatusReads(), deps);
+    assert.deepEqual([first.fresh, first.tickets.map((t) => t.ref)], [true, ["#1"]]);
+    // Another server process (its own TicketStatusReads) inside five minutes: the kept answer, and GitHub is not asked.
+    const seen = gh.seen.length;
+    now += TICKET_STATUS_EVERY_MS - 2_000;
+    const other = await ticketStatus(dir, new TicketStatusReads(), deps);
+    assert.deepEqual([other.fresh, other.tickets.map((t) => t.ref), gh.seen.length], [false, ["#1"], seen]);
+    // While another process holds the read, a due call answers what was kept rather than reading too.
+    now += 2_000;
+    const lock = tryAcquireLock(path.join(dir, ".scenescout", TICKET_STATUS_LOCK_FILE));
+    assert.ok(lock);
+    try {
+      const held = await ticketStatus(dir, new TicketStatusReads(), deps);
+      assert.deepEqual([held.fresh, held.tickets.map((t) => t.ref), gh.seen.length], [false, ["#1"], seen]);
+    } finally {
+      lock.release();
+    }
+    // A filing while another process holds the read: the kept answer is for the record before it, so it is not given as this one's.
+    const record = path.join(dir, ".scenescout", "exported.json");
+    const recordText = fs.readFileSync(record, "utf8");
+    fs.writeFileSync(record, recordText.replace(/\n$/, "\n\n"));
+    const lock2 = tryAcquireLock(path.join(dir, ".scenescout", TICKET_STATUS_LOCK_FILE));
+    assert.ok(lock2);
+    try {
+      const busy = await ticketStatus(dir, new TicketStatusReads(), deps);
+      assert.deepEqual([busy.fresh, busy.tickets, gh.seen.length], [false, [], seen]);
+      assert.match(busy.problems.join("\n"), /another SceneScout process is reading/);
+    } finally {
+      lock2.release();
+    }
+    const due = await ticketStatus(dir, new TicketStatusReads(), deps);
+    assert.equal(due.fresh, true);
+    assert.ok(gh.seen.length > seen, "read once due and free");
+    assert.ok(!fs.readFileSync(path.join(dir, ".scenescout", TICKET_STATUS_FILE), "utf8").includes(GH_TOKEN));
+  } finally {
+    await gh.close();
   }
 });

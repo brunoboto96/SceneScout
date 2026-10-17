@@ -47,7 +47,7 @@ import {
   type TicketPreview,
   type TicketPreviews,
 } from "./engine/ticket-preview.js";
-import { placeTickets, recordPlaces, type TicketStatus, type TicketStatusReads, type WatchedTicket } from "./engine/ticket-status.js";
+import { placeTickets, recordDigest, recordPlaces, type TicketStatus, type TicketStatusReads, type WatchedTicket } from "./engine/ticket-status.js";
 import { readFiledIssues, runExport, type ExportDeps } from "./export-run.js";
 
 /** What a preview or a filing needs besides its input: the environment, the clock, and the export's own dependencies (a stand-in tracker in tests). */
@@ -273,46 +273,51 @@ export async function fileTickets(
  */
 export async function ticketStatus(projectDir: string, reads: TicketStatusReads, deps: TicketDeps): Promise<TicketStatus> {
   const now = (deps.now ?? Date.now)();
-  const held = reads.cached(projectDir, now);
-  if (held) return held;
   const env = trackerEnv(deps.env);
   const clean = (s: string): string => redactKeys(s, credentialSecrets(env));
   const recordPath = path.join(projectDir, MEMORY_DIRNAME, EXPORT_RECORD_FILE);
   let text: string | null = null;
+  let unreadable: string | null = null;
   try {
     text = fs.readFileSync(recordPath, "utf8");
-  } catch {
-    // No record: nothing has been filed from this project.
+  } catch (err) {
+    // None: nothing has been filed from this project. Any other failure is said, never taken as none.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") unreadable = err instanceof Error ? err.message : String(err);
   }
-  const record = parseExportRecord(text);
-  if (!record.ok) return reads.remember(projectDir, now, [], [clean(`the record of filed tickets could not be read: ${record.error}`)]);
-  const findings = new Map(
-    readFindings(readMemory(projectDir)).map((f): [string, { title: string; severity: string; status?: string }] => [
-      f.id,
-      { title: ticketTitle(f), severity: f.severity, status: f.status },
-    ]),
-  );
-  const tickets: WatchedTicket[] = [];
-  const problems: string[] = [];
-  for (const place of recordPlaces(record.value)) {
-    const t = checkTicketTarget(place.to, place.target);
-    const label = `${TRACKER_LABEL[place.to]} ${place.target}`;
-    if (!t.ok) continue;
-    const where = t.to === "github" ? ["--to", "github", "--repo", t.target] : ["--to", "jira", "--jira-project", t.target];
-    const parsed = parseExportArgs([...where, "--project", projectDir, "--dry-run"], projectDir, env);
-    if (!parsed.ok || recordKey(parsed.options) !== place.key) {
-      problems.push(`${label}: not read, as the server's settings point at another ${place.to === "github" ? "GitHub API address" : "Jira site"}`);
-      continue;
-    }
-    const recorded = Object.fromEntries(
-      Object.entries(record.value[place.key]).flatMap(([id, e]) => ("uncertain" in e ? [] : [[id, { ref: e.ref, number: e.number }] as const])),
+  return reads.read(projectDir, now, recordDigest(text), async () => {
+    if (unreadable !== null) return { tickets: [], problems: [clean(`the record of filed tickets could not be read: ${unreadable}`)] };
+    const record = parseExportRecord(text);
+    if (!record.ok) return { tickets: [], problems: [clean(`the record of filed tickets could not be read: ${record.error}`)] };
+    const places = recordPlaces(record.value);
+    if (!places.length) return { tickets: [], problems: [] };
+    const findings = new Map(
+      readFindings(readMemory(projectDir)).map((f): [string, { title: string; severity: string; status?: string }] => [
+        f.id,
+        { title: ticketTitle(f), severity: f.severity, status: f.status },
+      ]),
     );
-    try {
-      const issues = await readFiledIssues(parsed.options, { ...deps, env }, recorded);
-      tickets.push(...placeTickets(trackerWhere(parsed.options), record.value[place.key], issues, findings));
-    } catch (err) {
-      problems.push(clean(`${label}: could not be read (${err instanceof Error ? err.message : String(err)})`));
+    const tickets: WatchedTicket[] = [];
+    const problems: string[] = [];
+    for (const place of places) {
+      const t = checkTicketTarget(place.to, place.target);
+      const label = `${TRACKER_LABEL[place.to]} ${place.target}`;
+      if (!t.ok) continue;
+      const where = t.to === "github" ? ["--to", "github", "--repo", t.target] : ["--to", "jira", "--jira-project", t.target];
+      const parsed = parseExportArgs([...where, "--project", projectDir, "--dry-run"], projectDir, env);
+      if (!parsed.ok || recordKey(parsed.options) !== place.key) {
+        problems.push(`${label}: not read, as the server's settings point at another ${place.to === "github" ? "GitHub API address" : "Jira site"}`);
+        continue;
+      }
+      const recorded = Object.fromEntries(
+        Object.entries(record.value[place.key]).flatMap(([id, e]) => ("uncertain" in e ? [] : [[id, { ref: e.ref, number: e.number }] as const])),
+      );
+      try {
+        const issues = await readFiledIssues(parsed.options, { ...deps, env }, recorded);
+        tickets.push(...placeTickets(trackerWhere(parsed.options), record.value[place.key], issues, findings));
+      } catch (err) {
+        problems.push(clean(`${label}: could not be read (${err instanceof Error ? err.message : String(err)})`));
+      }
     }
-  }
-  return reads.remember(projectDir, now, tickets, problems);
+    return { tickets, problems };
+  });
 }

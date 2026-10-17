@@ -252,7 +252,8 @@ export const COST_WORDS = {
       own >= COST_OWN_MIN ? `, from your last ${own} checks like it.` : `: a starting figure until you have run ${COST_OWN_MIN} checks like it.`
     }`,
   noFigures: "This Claude Code does not report usage, so no estimate or limit is offered.",
-  toastWarn: (/** @type {string} */ used, /** @type {string} */ cap) => `SceneScout: this check has used ${used} of the ${cap} you set. It stops there.`,
+  toastWarn: (/** @type {string} */ used, /** @type {string} */ cap) =>
+    `SceneScout: this check has used ${used} of the ${cap} you set. Claude will be asked to stop there.`,
   toastStop: (/** @type {string} */ cap) => `SceneScout: this check reached the ${cap} you set, so Claude was asked to stop and write what it has.`,
 };
 
@@ -387,20 +388,38 @@ export function costUsed(w) {
 }
 
 /**
+ * A reading in the unit a watched check started in: its window's share, or
+ * the session's dollars. A check that started in dollars before the account's
+ * first window reading stays in dollars, so its limit still holds once windows
+ * appear. Null where the reading has no figure in that unit.
+ *
+ * @param {unknown} usage
+ * @param {"percent" | "usd"} unit
+ * @param {string} kind
+ * @returns {number | null}
+ */
+function readingIn(usage, unit, kind) {
+  if (!isRecord(usage)) return null;
+  if (unit === "usd") return isRecord(usage.cost) && Number.isFinite(usage.cost.usd) ? num(usage.cost.usd) : null;
+  const w = Array.isArray(usage.rateLimits) ? usage.rateLimits.find((x) => isRecord(x) && x.kind === kind && Number.isFinite(x.percentUsed)) : undefined;
+  return w ? num(w.percentUsed) : null;
+}
+
+/**
  * A new reading for a watched check: what it has used (a window that reset
  * keeps what was used before it), and whether this reading crosses the warning
  * at COST_WARN_AT of the cap or the cap itself, each said once. A reading in
- * another unit than the check started in changes nothing.
+ * with no figure in the unit the check started in changes nothing.
  *
  * @param {CostWatch} w
  * @param {unknown} usage
  * @returns {{ watch: CostWatch, says: "warn" | "stop" | null }}
  */
 export function costStep(w, usage) {
-  const r = usageReading(usage);
-  if (!r || r.unit !== w.unit || (r.unit === "percent" ? r.kind : "") !== w.kind) return { watch: w, says: null };
-  const reset = r.value < w.last;
-  const next = reset ? { ...w, carried: w.carried + Math.max(0, w.last - w.start), start: 0, last: r.value } : { ...w, last: r.value };
+  const value = readingIn(usage, w.unit, w.kind);
+  if (value === null) return { watch: w, says: null };
+  const reset = value < w.last;
+  const next = reset ? { ...w, carried: w.carried + Math.max(0, w.last - w.start), start: 0, last: value } : { ...w, last: value };
   if (next.cap === null) return { watch: next, says: null };
   const used = costUsed(next);
   if (used >= next.cap && !next.stopped) return { watch: { ...next, warned: true, stopped: true }, says: "stop" };
@@ -427,6 +446,43 @@ export const TICKET_WORDS = {
 };
 
 /** @typedef {{ id: string, title: string, where: string, ref: string, url: string, open: boolean, finding: "open" | "resolved" | "unknown" }} Ticket */
+
+/**
+ * Whether the watch asks the server for the filed tickets on this tick: once
+ * when asked (Claude Code opened, a ticket was filed, a check ended), and then
+ * only while one of them is open. With none filed, or no tracker the server
+ * can read, the first reading has no open ticket and the watch stops there.
+ *
+ * @param {Ticket[] | null} tickets the last reading
+ * @param {boolean} asked
+ */
+export function ticketsDue(tickets, asked) {
+  return asked || (tickets ?? []).some((t) => t.open);
+}
+
+/**
+ * A new reading's tickets, with the ones of any place it could not read kept
+ * from the reading before: a tracker that timed out is not every ticket there
+ * closed. A reading with no problems is taken as it is.
+ *
+ * @param {Ticket[] | null} before
+ * @param {Ticket[]} after
+ * @param {readonly string[]} problems
+ * @returns {Ticket[]}
+ */
+export function mergeTickets(before, after, problems) {
+  if (!problems.length || !before) return after;
+  const read = new Set(after.map((t) => t.where));
+  return [...after, ...before.filter((t) => !read.has(t.where))];
+}
+
+/** Claude filing tickets through SceneScout, by whatever name its server was registered under. */
+const TICKET_FILE_CALL = /^mcp__.+__scout_ticket_file$/;
+
+/** Whether a tool call is Claude filing tickets through SceneScout. @param {{ tool?: unknown }} call */
+export function filesTickets(call) {
+  return typeof call.tool === "string" && TICKET_FILE_CALL.test(call.tool);
+}
 
 /** The tickets scout_ticket_status answered, or null when it did not. @param {any} result @returns {Ticket[] | null} */
 export function readTicketStatus(result) {

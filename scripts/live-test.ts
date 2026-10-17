@@ -4088,7 +4088,7 @@ test("cost: the cap warns once at 80% and asks Claude to stop once at the cap, a
   assert.equal(around.costStep(reset.watch, usageWith(15)).says, "warn", "5 before and 15 after: 20 of 25");
 });
 
-test("cost: with no subscription windows the cap is in dollars, and a reading in another unit changes nothing", () => {
+test("cost: with no subscription windows the cap is in dollars, and a check is measured in the unit it started in", () => {
   let w = around.startCostWatch("gp-3", usageWith(null, 2), 5, "normal")!;
   assert.deepEqual([w.unit, w.cap], ["usd", 5]);
   assert.equal(around.costStep(w, usageWith(null, 5.99)).says, null);
@@ -4096,7 +4096,11 @@ test("cost: with no subscription windows the cap is in dollars, and a reading in
   assert.equal(warn.says, "warn");
   w = warn.watch;
   assert.equal(around.costStep(w, usageWith(null, 7)).says, "stop");
-  assert.equal(around.costStep(w, usageWith(50)).says, null, "a window appearing part-way is another unit");
+  // Windows appear part-way (a subscription's first answer of the session): the check stays measured in the dollars it started in, so its limit still holds.
+  const later = around.costStep(w, usageWith(50, 7));
+  assert.deepEqual([later.says, around.costUsed(later.watch)], ["stop", 5], "a window appearing part-way leaves the limit in force");
+  assert.equal(around.costStep(w, usageWith(50, null)).says, null, "a reading with no dollars says nothing of a check measured in them");
+  assert.match(around.COST_WORDS.toastWarn("$4", "$5"), /Claude will be asked to stop/, "the limit asks Claude to stop; it does not stop the check itself");
   // A share of another window than the one the check started on is never compared with it.
   const five = around.startCostWatch("gp-6", usageWith(10), 25, "normal")!;
   const weekly = around.costStep(five, { rateLimits: [{ kind: "seven_day", percentUsed: 1 }] });
@@ -4283,6 +4287,71 @@ test("register.js: a check is measured from its start, warned at 80% and stopped
   m.server.tickets = null;
   await ticketTimer.fn();
   assert.equal((m.state.get("tickets")?.value as unknown[]).length, 2);
+  // Every ticket closed: one more reading, then the watch stops asking the server until something could change.
+  const statusCalls = () => m.calls.filter((c) => c.tool === "scout_ticket_status").length;
+  const allClosed = ticketsResult(false);
+  (allClosed.structuredContent.tickets[1] as { open: boolean }).open = false;
+  m.server.tickets = allClosed;
+  await ticketTimer.fn();
+  const afterClosed = statusCalls();
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed, "no open ticket: no polling");
+  // Another call is no reason to read; Claude filing a ticket is: the watch reads once more, and keeps reading while one is open.
+  await m.raise("tool.call", { tool: "mcp__scenescout__scout_ticket_preview", ids: ["aaa0000001"] });
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed);
+  await m.raise("tool.call", { tool: "mcp__scenescout__scout_ticket_file", previewId: "p" });
+  m.server.tickets = ticketsResult(true);
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed + 2);
+  // Every ticket closed again and the watch stopped; a check that ends (a re-check may have found a problem gone) reads once more.
+  m.server.tickets = allClosed;
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed + 3);
+  m.server.status = statusWith({ planId: "gp-recheck0002", phase: "done" });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed + 4, "one reading after the check ended");
+  // A tracker that could not be read keeps the tickets it had and the watch going; an answer that is not fresh is asked again.
+  m.server.tickets = ticketsResult(true);
+  await m.raise("tool.call", { tool: "mcp__scenescout__scout_ticket_file", previewId: "p" });
+  await ticketTimer.fn();
+  const failed = {
+    ...ticketsResult(true),
+    structuredContent: { ...ticketsResult(true).structuredContent, tickets: [], problems: ["GitHub owner/app: could not be read (timeout)"] },
+  };
+  m.server.tickets = failed;
+  await ticketTimer.fn();
+  assert.deepEqual(
+    (m.state.get("tickets")?.value as Array<{ ref: string; open: boolean }>).map((t) => [t.ref, t.open]),
+    [
+      ["#1", true],
+      ["#2", true],
+    ],
+    "a failed read is not every ticket gone",
+  );
+  const beforeStale = statusCalls();
+  m.server.tickets = allClosed;
+  await m.raise("tool.call", { tool: "mcp__scenescout__scout_ticket_file", previewId: "p" });
+  m.server.tickets = { ...allClosed, structuredContent: { ...allClosed.structuredContent, fresh: false } };
+  await ticketTimer.fn();
+  m.server.tickets = allClosed;
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), beforeStale + 2, "a kept answer leaves the filing's reading owed; the fresh one settles it");
+  assert.deepEqual(
+    around.mergeTickets([{ id: "a", title: "", where: "Jira QA", ref: "QA-1", url: "", open: true, finding: "open" }], [], ["Jira QA: could not be read"]),
+    [{ id: "a", title: "", where: "Jira QA", ref: "QA-1", url: "", open: true, finding: "open" }],
+  );
+  assert.equal(around.ticketsDue(null, false), false);
+  assert.equal(around.ticketsDue([], true), true, "asked: read once");
+  assert.equal(around.ticketsDue([{ id: "a", title: "", where: "", ref: "#1", url: "", open: true, finding: "open" }], false), true);
+  assert.equal(around.filesTickets({ tool: "mcp__scenescout__scout_ticket_file" }), true);
+  assert.equal(around.filesTickets({ tool: "mcp__other__scout_ticket_preview" }), false);
 
   // A build without $.session.usage: no estimate and no limit.
   const old = modHarness(true);

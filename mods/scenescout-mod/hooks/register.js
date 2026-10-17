@@ -64,8 +64,10 @@ import {
   costOffer,
   costStep,
   costUsed,
+  filesTickets,
   isFinished,
   keepsPolling,
+  mergeTickets,
   nextQueued,
   plainLine,
   readTicketStatus,
@@ -73,6 +75,7 @@ import {
   startCostWatch,
   statusLine,
   ticketToasts,
+  ticketsDue,
 } from "./run.js";
 
 // What a drawing reads lives in $.state (types/index.d.ts), so a reload of the mod keeps the panel where it was.
@@ -95,6 +98,10 @@ let lastGood = null;
 let timer = null;
 /** The watched tickets' timer, every TICKET_POLL_MS, replaced like the poll's on a reload. */
 let ticketTimer = null;
+/** Whether something since the last reading could have changed the filed tickets: a load of the mod, a filing, a check that ended. */
+let ticketsAsked = true;
+/** The last guided check seen ended, so its end re-arms the ticket watch once. */
+let endedPlan = null;
 /** The limit the person set for a plan still waiting on their yes, by plan id. In this load only: a reload starts that check with no limit. */
 const capFor = new Map();
 /** Whether a model turn is running: a message then goes into it rather than waiting for a turn of its own. */
@@ -125,10 +132,17 @@ export function register(on, options) {
     // session.start runs again after a reload of this mod; keep one timer.
     timer?.cancel();
     ticketTimer?.cancel();
-    // Filed tickets are watched while Claude Code is open; the server reads each tracker at most every five minutes anyway.
-    ticketTimer = $.clock.every(TICKET_POLL_MS, () =>
-      watchTickets($, servers).catch((err) => $.ui.log(`SceneScout: the filed tickets could not be read: ${err instanceof Error ? err.message : String(err)}`)),
-    );
+    // Filed tickets are watched while Claude Code is open and one of them is open; the server reads each tracker at most every five minutes anyway.
+    ticketsAsked = true;
+    ticketTimer = $.clock.every(TICKET_POLL_MS, async () => {
+      if (!ticketsDue((await $.state.get(TICKETS)).value ?? null, ticketsAsked)) return;
+      // What was owed is settled only by a fresh reading: one that failed, or a kept one, is asked again at the next tick.
+      const settled = await watchTickets($, servers).catch((err) => {
+        $.ui.log(`SceneScout: the filed tickets could not be read: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      });
+      if (settled) ticketsAsked = false;
+    });
     // A plan being built when the mod reloaded is not being built by this load: its busy mark would hold the queue for good.
     await updateWizard($, (w) => (w.busy === "plan" || w.busy === "recheck" ? { ...w, busy: null } : w));
     timer = $.clock.every(POLL_MS, async () => {
@@ -212,16 +226,22 @@ export function register(on, options) {
     if (!guardFor(e, [])) return next(e);
     const guard = guardFor(e, (await $.state.get(CONFIRMED)).value ?? []);
     if (!guard) return next(e);
+    // Claude filing tickets, once the call has run: the watch reads them at its next tick.
+    const go = async () => {
+      const result = await next(e);
+      if (filesTickets(e)) ticketsAsked = true;
+      return result;
+    };
     let answer = "";
     try {
       answer = await $.ui.ask(guard.question, [guard.allow, guard.refuse]);
     } catch (err) {
       // An older Claude Code build has no dialog to ask with: the server's form still decides.
-      if (err instanceof TypeError && /\bask\b.*not a function|not a function.*\bask\b/.test(err.message)) return next(e);
+      if (err instanceof TypeError && /\bask\b.*not a function|not a function.*\bask\b/.test(err.message)) return go();
       // Dismissed, or nobody to ask (claude -p): that is a no.
       return { deny: guard.deny };
     }
-    return answer === guard.allow ? next(e) : { deny: guard.deny };
+    return answer === guard.allow ? go() : { deny: guard.deny };
   }).catch(($, e, next) =>
     next.called
       ? next(e)
@@ -627,6 +647,12 @@ async function afterPoll($, servers) {
   const status = (await $.state.get(STATUS)).value ?? { kind: "loading" };
   setStatusLine($, statusLine(w, status, (await $.state.get(TICKETS)).value ?? null));
   await endCost($, status);
+  // A check that ended may have found a ticket's problem gone: the watch reads once more.
+  const g = status.kind === "data" ? status.data?.guided : null;
+  if (g && isFinished(g) && g.planId !== endedPlan) {
+    endedPlan = g.planId;
+    ticketsAsked = true;
+  }
   const now = await $.clock.now();
   sentAt ??= now;
   // A plan being built, by a press or a queued check, holds the queue.
@@ -778,14 +804,22 @@ async function endCost($, status) {
 
 // ---- Watched tickets (design 2.6) ----
 
-/** Read the filed tickets' state through the server, and toast what changed since the last reading. */
+/**
+ * Read the filed tickets' state through the server, and toast what changed
+ * since the last reading; a place the server could not read keeps its tickets.
+ * True when the reading was fresh.
+ */
 async function watchTickets($, servers) {
   const w = wizardOf((await $.state.get(WIZARD)).value);
   const address = typeof w.lastChoices?.address === "string" ? w.lastChoices.address : undefined;
   const result = await callServer($, servers, TICKET_STATUS_TOOL, address ? { address } : {});
-  const tickets = readTicketStatus(result);
-  if (!tickets) return;
+  const read = readTicketStatus(result);
+  if (!read) return false;
+  const s = result.structuredContent;
+  const problems = Array.isArray(s.problems) ? s.problems.map(String) : [];
   const before = (await $.state.get(TICKETS)).value ?? null;
+  const tickets = mergeTickets(before, read, problems);
   await $.state.set(TICKETS, tickets);
   for (const line of ticketToasts(before, tickets)) toast($, line);
+  return s.fresh === true;
 }
