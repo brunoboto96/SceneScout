@@ -49,7 +49,17 @@ import {
   type CheckResult,
   type RouteHealth,
 } from "./engine/check.js";
-import { flowRoles, loadFlows, maskEnvValues, resolveFlowEnv, resolveFlowsDir, type Flow, type FlowRun, type SkippedFlowFile } from "./engine/flow.js";
+import {
+  flowRoles,
+  loadFlows,
+  maskEnvValues,
+  resolveFlowEnv,
+  resolveFlowsDir,
+  videoSecretWarning,
+  type Flow,
+  type FlowRun,
+  type SkippedFlowFile,
+} from "./engine/flow.js";
 import { resolveAttachAuth } from "./engine/profiles.js";
 import { MemoryStore, MEMORY_DIRNAME, writeSelfIgnore, type Finding } from "./engine/memory.js";
 import { decodePng, encodePng, type RgbaImage } from "./engine/png.js";
@@ -192,6 +202,8 @@ export async function runCheck(
   const removeScratch = (): void => fs.rmSync(scratch, { recursive: true, force: true });
   process.once("exit", removeScratch);
   const { runFlows, envValues } = resolveRunFlows(options, inputs);
+  const videoWarning = videoSecretWarning(options.video === true, runFlows);
+  if (videoWarning) log(`warning: ${videoWarning}`);
   const run = checkRunOf(options, log, scratch);
   // From the start of the run, browser launch included: the budget is wall-clock time a person waits.
   const deadline = options.timeBudgetMs !== undefined ? Date.now() + options.timeBudgetMs : undefined;
