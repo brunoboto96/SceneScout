@@ -572,7 +572,7 @@ export class BlockNotices {
         ? `The page's own requests were answered with a 403 in the server's place, so the page's handling of a refusal is real: an error message is correct, and a success message is a false_success violation. `
         : "") +
       (rule === "observe"
-        ? `observe mode blocks every request that is not a GET, so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target. If a refused POST only reads (a search or query sent as POST), the user can name it in readPosts instead; never add one yourself.`
+        ? `observe mode lets out only GET, HEAD and OPTIONS (plus signing in, signing out, token refresh and POSTs named in readPosts), so no form submission reaches the server. Re-attach with mode="read-only" ONLY if the user confirms that ordinary form submissions are acceptable on this target. If a refused POST only reads (a search or query sent as POST), the user can name it in readPosts instead; never add one yourself.`
         : rule === "read-only"
           ? `Re-attach with mode="safe-write" to test create/edit flows, or "destructive" (user-approved disposable env only).`
           : `In safe-write, updates/deletes are only allowed on resources this session created (${createdCount} so far).`)
