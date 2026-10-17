@@ -355,3 +355,13 @@ test("every name a script imports from src/ is exported there", () => {
   }
   assert.deepEqual(missing, [], "import the name from the module that declares and exports it");
 });
+
+test("AGENTS.md keeps one item per line", () => {
+  const MAX = 1500;
+  const long = fs
+    .readFileSync(path.join(root, "AGENTS.md"), "utf8")
+    .split("\n")
+    .map((text, i) => ({ line: i + 1, length: text.length }))
+    .filter((l) => l.length > MAX);
+  assert.deepEqual(long, [], `AGENTS.md lines must stay under ${MAX} characters: add a line for a new suite or rule instead of extending an existing one`);
+});
