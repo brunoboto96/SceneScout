@@ -42,7 +42,7 @@ import { CONFIRM_SAYS, SAVED_WORDS } from "../engine/guided-words.js";
 import { MEMORY_DIRNAME } from "../engine/memory-dir.js";
 import type { Finding } from "../engine/memory.js";
 import {
-  deleteSavedCheck,
+  deleteSavedCheckReply,
   listSavedChecks,
   MAX_SAVED_NAME,
   readSavedCheck,
@@ -537,11 +537,10 @@ export function registerGuideTools(): void {
         }
         const dir = await projectDirFor(address);
         if (action === "delete") {
-          const gone = deleteSavedCheck(dir, name);
+          const gone = deleteSavedCheckReply(dir, name);
           if (!gone.ok) throw new Error(gone.error);
-          if (!gone.deleted) throw new Error(`there is no saved check called "${gone.name}"`);
           const list = savedList(dir);
-          return { content: [{ type: "text" as const, text: SAVED_WORDS.deleted(gone.name) }], structuredContent: { ...list } };
+          return { content: [{ type: "text" as const, text: gone.text }], structuredContent: { ...list } };
         }
         const read = readSavedCheck(dir, name);
         if (!read.ok) throw new Error(read.error);

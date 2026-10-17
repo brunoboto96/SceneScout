@@ -454,6 +454,17 @@ export function savedKeys(saved) {
  * @returns {Wizard}
  */
 export function reduce(w, action) {
+  const next = step(w, action);
+  // A delete question belongs to the welcome's list: leaving the welcome drops it, so it is not waiting when the person comes back.
+  return w.step === "welcome" && next.step !== "welcome" && next.deleting ? { ...next, deleting: null } : next;
+}
+
+/**
+ * @param {Wizard} w
+ * @param {{ type: string, [k: string]: any }} action
+ * @returns {Wizard}
+ */
+function step(w, action) {
   switch (action.type) {
     case "go":
       if (!STEPS.includes(action.step)) return w;

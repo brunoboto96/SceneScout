@@ -545,6 +545,7 @@ export const SAVED_WORDS = {
   saved: (name: string) => `Saved "${name}". Run it again from the guided panel's welcome, or say: run my saved SceneScout check "${name}".`,
   replaced: (name: string) => `Saved "${name}" over the saved check of that name.`,
   deleted: (name: string) => `Deleted the saved check "${name}". Nothing else was changed.`,
+  alreadyGone: (name: string) => `There is no saved check called "${name}": it was already deleted. Nothing was changed.`,
   none: "No saved checks yet. Save one when a check is finished.",
   run: (name: string) =>
     `Running the saved check "${name}" again, with the care level it was saved with. Where that care level needs it, you are asked to confirm it again.`,
