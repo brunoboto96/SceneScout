@@ -32,7 +32,15 @@ export type ScenescoutModWizard = {
   saveName: string;
   /** The saved check whose Delete was pressed and is waiting on the person's yes. */
   deleting: string | null;
+  /** Saved checks waiting to start, one at a time, each with the care level it had when it was queued. */
+  queue: ScenescoutModQueued[];
+  /** Whether the list of saved checks to queue is open. */
+  queuing: boolean;
+  /** The queued check whose confirmation the panel is previewing, or null. */
+  fromQueue: string | null;
 };
+
+export type ScenescoutModQueued = { name: string; address: string; care: ScenescoutModDraft["care"] };
 
 export type ScenescoutModStatus = {
   kind: "loading" | "data" | "text" | "error";

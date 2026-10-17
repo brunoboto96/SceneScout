@@ -537,7 +537,7 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   const register = fs.readFileSync(path.join(dir, "hooks", "register.js"), "utf8");
   // A hooks module may import only its own files by relative path, and the bare `claude-code`.
   const imports = [...register.matchAll(/^import[^"']*["']([^"']+)["']/gm)].map((m) => m[1]);
-  assert.deepEqual(imports, ["./pane.js", "./guided.js"], "register.js imports only its own rules, by relative path");
+  assert.deepEqual(imports, ["./pane.js", "./guided.js", "./run.js"], "register.js imports only its own rules, by relative path");
   // The mod presents itself in plain words, with somewhere to ask for help and to read what it reaches.
   const shown = read(path.join(entry.source, ".claude-plugin", "plugin.json")) as Record<string, unknown>;
   assert.equal(typeof shown.displayName, "string");
@@ -555,7 +555,7 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
     assert.ok(register.includes(`{ plugin: "scenescout-mod", key: "${key}" }`), `register.js keeps ${key} in $.state`);
   }
   // The rules modules use no mods API, so live-test can run them in Node.
-  for (const file of ["pane.js", "guided.js"]) {
+  for (const file of ["pane.js", "guided.js", "run.js"]) {
     const code = fs
       .readFileSync(path.join(dir, "hooks", file), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
@@ -587,6 +587,8 @@ test("the mod registers its hooks as the settings say: the panel and its guard a
     ["turn.start", null],
     ["turn.complete", null],
     ["ui.render", { component: "Pane" }],
+    // The band above the prompt while a guided check runs; a build without the band never raises it.
+    ["ui.render", { component: "AbovePrompt" }],
     // The question before Claude's own SceneScout call that would send things to a site.
     ["tool.call", null],
   ];
