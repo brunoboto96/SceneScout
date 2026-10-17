@@ -4,31 +4,83 @@
  * enforcement lives here, at the tool layer, never in the model's prompt.
  */
 import { isIdSegment } from "./fingerprint.js";
+import { fromJs, registerJsPattern } from "./js-regex.js";
+import { isSpace, LinearRegex, SPACE } from "./linear-regex.js";
 import { scriptLiteral } from "./script-literal.js";
 import { strictIsDestructive, type WriteClassifier } from "./strict-writes.js";
 
-const DESTRUCTIVE_PATTERNS: RegExp[] = [
-  /\bdelete\b/i,
+/** A label's word as the destructive patterns read it: `\bword\b`, case folded as JavaScript's `i` flag does without `u`. */
+const word = (source: string, needs?: readonly string[]): LinearRegex => fromJs(String.raw`\b${source}\b`, "i", needs ? { needs } : {});
+
+/**
+ * JavaScript read some of these with a lookahead or a lookbehind. RE2 has neither, so a lookahead
+ * is an optional last group that is there exactly when the lookahead's text is (it is the pattern's
+ * end, so it holds where it can), and the candidate is refused by `accept` when it is; a lookbehind
+ * is a check of the text before the candidate (`filterBefore`).
+ */
+const EXEMPT_RESET = String.raw`\s+(?:filters?|zoom|search|view|sort|order|form|password|layout|columns?|selection|preferences?|defaults?)`;
+const EXEMPT_DISCARD = String.raw`[\s_-]+(?:(?:your|my|all|the|any)[\s_-]+)?(?:unsaved[\s_-]+|pending[\s_-]+|local[\s_-]+|draft[\s_-]+)?(?:changes|edits)\b`;
+// "Remove" at the end of a label whose object is a filter or a chip: at most 60 characters on one line, then the word, then nothing but marks.
+const EXEMPT_REMOVE_AFTER = String.raw`[^\n]{0,60}?\b(?:filters?|chips?)\W*$`;
+
+const isWordChar = (c: string): boolean => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_";
+
+/** Whether `word` (lower case, ASCII) ends at `end` in `text`, in either case, with a non-word character or the start before it. */
+function wordEndsAt(text: string, end: number, word: string): boolean {
+  const start = end - word.length;
+  if (start < 0) return false;
+  for (let k = 0; k < word.length; k++) {
+    const c = text[start + k];
+    if (c !== word[k] && c !== word[k].toUpperCase()) return false;
+  }
+  const before = text[start - 1];
+  return before === undefined || !isWordChar(before);
+}
+
+/** Whether a filter or a chip (and one to three spaces or hyphens) stands right before `index`: the lookbehind of the "remove" pattern. */
+function filterBefore(text: string, index: number): boolean {
+  for (let gap = 1; gap <= 3; gap++) {
+    const at = index - gap;
+    if (at < 0) break;
+    const c = text[at];
+    if (c !== "-" && !isSpace(c)) break;
+    if (["filters", "filter", "chips", "chip"].some((w) => wordEndsAt(text, at, w))) return true;
+  }
+  return false;
+}
+
+const DESTRUCTIVE_PATTERNS: LinearRegex[] = [
+  word("delete", ["delete"]),
   // "Remove" a filter chip drops a condition from the view: "Remove Status:
   // Open filter" re-queries the list, the same sense the reset rule exempts.
   // A label whose object, at its end, is a filter or a chip, or a test id with
   // the chip before the verb ("filter-remove"), is exempt; "Remove member",
   // and "Remove member. Use the filter to find others.", still count.
-  /(?<!\b(?:filters?|chips?)[\s-]{1,3})\bremove\b(?![^\n]{0,60}?\b(?:filters?|chips?)\W*$)/i,
-  /\brevoke\b/i,
-  /\bdestroy\b/i,
-  /\bpurge\b/i,
-  /\bterminate\b/i,
-  /\bdeactivate\b/i,
-  /\barchive\b/i,
-  /\bwipe\b/i,
+  fromJs(
+    String.raw`\bremove\b(${EXEMPT_REMOVE_AFTER})?`,
+    "i",
+    { needs: ["remove"], accept: ({ index, groups }, text) => groups[1] === undefined && !filterBefore(text, index) },
+    String.raw`(?<!\b(?:filters?|chips?)[\s-]{1,3})\bremove\b(?!${EXEMPT_REMOVE_AFTER})`,
+  ),
+  word("revoke", ["revoke"]),
+  word("destroy", ["destroy"]),
+  word("purge", ["purge"]),
+  word("terminate", ["terminate"]),
+  word("deactivate", ["deactivate"]),
+  word("archive", ["archive"]),
+  word("wipe", ["wipe"]),
   // "Reset" is destructive only in some of its senses. Matching it bare refused
   // "Reset filters", "Reset zoom", "Reset search" and "Reset password" — none
   // of which destroy anything — so read-only runs skipped ordinary controls and
   // lost coverage on the very pages they were sent to explore. Exempt the
   // view/form senses; everything else ("Reset workspace", "Factory reset",
   // "Reset all data") still counts.
-  /\breset\b(?!\s+(filters?|zoom|search|view|sort|order|form|password|layout|columns?|selection|preferences?|defaults?))/i,
+  fromJs(
+    String.raw`\breset\b(${EXEMPT_RESET})?`,
+    "i",
+    { needs: ["reset"], accept: ({ groups }) => groups[1] === undefined },
+    String.raw`\breset\b(?!${EXEMPT_RESET})`,
+  ),
   // "Discard" names two different things. "Discard changes", "Discard your
   // edits" and "Discard unsaved changes" drop what the tester typed and has not
   // sent: no record exists to lose, and refusing it left a session stuck on a
@@ -37,25 +89,34 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
   // draft", "Discard record" and a bare "Discard" still count.
   // If the confirm does send a write, the wire policy judges that request as it
   // judges any other, and `discard` is a destructive verb in a path there.
-  /\bdiscard\b(?![\s_-]+(?:(?:your|my|all|the|any)[\s_-]+)?(?:unsaved[\s_-]+|pending[\s_-]+|local[\s_-]+|draft[\s_-]+)?(?:changes|edits)\b)/i,
-  /\bcancel subscription\b/i,
+  fromJs(
+    String.raw`\bdiscard\b(${EXEMPT_DISCARD})?`,
+    "i",
+    { needs: ["discard"], accept: ({ groups }) => groups[1] === undefined },
+    String.raw`\bdiscard\b(?!${EXEMPT_DISCARD})`,
+  ),
+  fromJs(String.raw`\bcancel subscription\b`, "i", { needs: ["cancel subscription"] }),
   // The verb: a control that signs the user off, starting the label ("Sign
   // off", "(Sign off)", a test id "sign-off-button") or joined to another verb
   // ("Save and sign off", "Save & sign off"). Anywhere else it is the noun
   // approval apps label things with ("Needs sign-off", "Manager sign-off",
   // "Final sign-off recorded"), which destroys nothing. Told by position, not
   // by a list of the words that may come before it: any modifier can.
-  /(?:^[^\p{L}\p{N}]*|\b(?:and|then)\s+|&\s*)sign(?: |-)?off\b/iu,
+  registerJsPattern(
+    String.raw`(?:^[^\p{L}\p{N}]*|\b(?:and|then)\s+|&\s*)sign(?: |-)?off\b`,
+    "iu",
+    new LinearRegex(String.raw`(?:^[^\p{L}\p{N}]*|\b(?i:and|then)[${SPACE}]+|&[${SPACE}]*)(?i:sign)(?: |-)?(?i:off)\b`, { needs: ["sign"] }),
+  ),
   // The tool is generic — destructive labels come in many languages.
-  /\b(eliminar|borrar|suprimir)\b/i, // es
-  /\b(excluir|apagar|remover)\b/i, // pt
-  /\bsupprimer\b/i, // fr
-  /\b(löschen|loeschen|entfernen)\b/i, // de
-  /\belimina(?:re)?\b/i, // it
-  /\bverwijder(?:en)?\b/i, // nl
+  word("(?:eliminar|borrar|suprimir)", ["eliminar", "borrar", "suprimir"]), // es
+  word("(?:excluir|apagar|remover)", ["excluir", "apagar", "remover"]), // pt
+  word("supprimer", ["supprimer"]), // fr
+  word("(?:löschen|loeschen|entfernen)", ["löschen", "loeschen", "entfernen"]), // de
+  word("elimina(?:re)?", ["elimina"]), // it
+  word("verwijder(?:en)?", ["verwijder"]), // nl
   // \b is ASCII-only in JS regexes — non-Latin scripts match as substrings.
-  /(удалить|удаление)/i, // ru
-  /(削除|删除|삭제)/, // ja/zh/ko
+  fromJs(String.raw`(удалить|удаление)`, "i"), // ru
+  fromJs(String.raw`(削除|删除|삭제)`, "", { needs: ["削除", "删除", "삭제"] }), // ja/zh/ko
 ];
 
 /**
@@ -76,7 +137,10 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
  */
 
 /** A destructive verb occupying a URL PATH segment. Bare keywords are meaningful here — a path is not prose. */
-const DESTRUCTIVE_URL_RE = /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|discard|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)/i;
+const DESTRUCTIVE_URL_RE = fromJs(
+  String.raw`(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|discard|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)`,
+  "i",
+);
 
 /**
  * Structured destructive intent inside a body — never a bare keyword.
@@ -94,8 +158,10 @@ const DESTRUCTIVE_URL_RE = /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke
  * and `verb` are not in the key list at all — they read as prose far more often
  * than as command fields.
  */
-const DESTRUCTIVE_BODY_RE =
-  /\bmutation\b[\s\S]{0,200}?\b(?:delete|remove|archive|destroy|purge|revoke)[A-Za-z_]|(?:^|[{,[\s]*["']|[?&])\s*(?:action|operation|op|method|_method|command|cmd)["']?\s*[:=]\s*["']?(?:delete|remove|purge|destroy|archive|revoke|deactivate|wipe|discard)\b/i;
+const DESTRUCTIVE_BODY_RE = fromJs(
+  String.raw`\bmutation\b[\s\S]{0,200}?\b(?:delete|remove|archive|destroy|purge|revoke)[A-Za-z_]|(?:^|[{,[\s]*["']|[?&])\s*(?:action|operation|op|method|_method|command|cmd)["']?\s*[:=]\s*["']?(?:delete|remove|purge|destroy|archive|revoke|deactivate|wipe|discard)\b`,
+  "i",
+);
 
 export function isDestructiveWire(url: string, body?: string | null): boolean {
   return DESTRUCTIVE_URL_RE.test(url) || (!!body && DESTRUCTIVE_BODY_RE.test(body.slice(0, 2000)));
@@ -140,12 +206,42 @@ function methodWeight(method: string): number {
   return method === "POST" ? 1 : 2;
 }
 
+const OVERRIDE_SEPARATOR = fromJs(String.raw`[\s,;]+`);
+const METHOD_NAME = fromJs(String.raw`^[A-Z][A-Z-]*$`);
+const KEY_LEAD = fromJs(String.raw`^[ [\]]+`);
+const KEY_CLOSE = fromJs(String.raw`\]+$`);
+const DISPOSITION_LINE = fromJs(String.raw`^content-disposition[ \t]*:`, "i");
+const CHARSET_PREFIX = fromJs(String.raw`^[^']*'[^']*'`);
+const LINE_BREAK = fromJs(String.raw`\r?\n`);
+const HEADER_WORD = fromJs(String.raw`(^|-)([a-z])`);
+const WHITE_SPACE = fromJs(String.raw`\s+`);
+const HEADING_TAG = fromJs(String.raw`^h[1-6]$`, "i");
+const QUERY_OR_FRAGMENT = fromJs(String.raw`[?#].*$`);
+const LEADING_DOTS = fromJs(String.raw`^\.+`);
+const PASSWORD_WORD = fromJs(String.raw`^password$`, "i");
+const NOT_A_SIGN_IN_ACTION = fromJs(String.raw`^(users?|accounts?|members?|password|signup|sign-up|register|verify|invite|invitations?)$`, "i");
+const SESSION_WORD = fromJs(String.raw`^sessions?$`, "i");
+const CONNECT_WORD = fromJs(String.raw`^connect$`, "i");
+const WORD_SEPARATOR = fromJs(String.raw`[-_.]+`);
+const HTTP_SCHEME = fromJs(String.raw`^https?:`, "i");
+const HTTP_URL = fromJs(String.raw`^https?:\/\/`, "i");
+const FILE_EXTENSION = fromJs(String.raw`\.[a-z0-9]+$`, "i");
+const TRAILING_DOT = fromJs(String.raw`\.(:\d+)?$`);
+const BLANK_FRAME = fromJs(String.raw`^about:(blank|srcdoc)`, "i");
+const MARKUP = fromJs(String.raw`<\s*[a-z!/?]`, "i");
+const JAVASCRIPT_URL = fromJs(String.raw`javascript:`, "i");
+const CONTROL_CHARACTER = fromJs(String.raw`[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]`);
+const POST_ENTRY = fromJs(String.raw`^\s*POST\s+(\S+)\s*$`, "i");
+const QUERY_OR_FRAGMENT_CHAR = fromJs(String.raw`[?#]`);
+const QUERY_OR_FRAGMENT_OR_SPACE = fromJs(String.raw`[?#\s]`);
+const FORM_QUERY_FIELD = fromJs(String.raw`(?:^|&)query=`);
+const ENTRY_SEPARATOR = fromJs(String.raw`[,\n]`);
+
 /** The method names an override value holds: one token, or a list a lenient server might read the first of. */
 function overrideNames(value: string): string[] {
-  return value
-    .split(/[\s,;]+/)
+  return OVERRIDE_SEPARATOR.splitText(value)
     .map((v) => v.trim().toUpperCase())
-    .filter((v) => /^[A-Z][A-Z-]*$/.test(v));
+    .filter((v) => METHOD_NAME.test(v));
 }
 
 /**
@@ -155,11 +251,8 @@ function overrideNames(value: string): string[] {
  * a top-level name (`[_method]`). Any of them makes it the override.
  */
 function isMethodKey(key: string): boolean {
-  const name = key
-    .split("\0")[0]
-    .replace(/^[ [\]]+/, "")
-    .replace(/\]+$/, "");
-  return name.replace(/[ .]/g, "_").toLowerCase() === "_method";
+  const name = KEY_CLOSE.replace(KEY_LEAD.replace(key.split("\0")[0], ""), "");
+  return name.replaceAll(" ", "_").replaceAll(".", "_").toLowerCase() === "_method";
 }
 
 /** `_method` among a query's or a form body's fields, keys decoded. */
@@ -190,7 +283,7 @@ function bodyMethodOverrides(body: string): string[] {
  * server may take the first or the last.
  */
 function dispositionNames(line: string): string[] {
-  if (!/^content-disposition[ \t]*:/i.test(line)) return [];
+  if (!DISPOSITION_LINE.test(line)) return [];
   const params: string[] = [];
   let current = "";
   let quote = "";
@@ -213,7 +306,7 @@ function dispositionNames(line: string): string[] {
     if (key !== "name" && key !== "name*") continue;
     let value = param.slice(eq + 1).trim();
     // RFC 2231: charset'language'value, percent-encoded.
-    if (key === "name*") value = safeDecode(value.replace(/^[^']*'[^']*'/, ""));
+    if (key === "name*") value = safeDecode(CHARSET_PREFIX.replace(value, ""));
     const q = value[0];
     names.push(q === '"' || q === "'" ? value.slice(1, value.length > 1 && value.endsWith(q) ? -1 : undefined) : value);
   }
@@ -236,7 +329,7 @@ function safeDecode(value: string): string {
  */
 function multipartMethodOverrides(body: string): string[] {
   const out: string[] = [];
-  const lines = body.split(/\r?\n/);
+  const lines = LINE_BREAK.splitText(body);
   for (let i = 0; i < lines.length; i++) {
     if (!dispositionNames(lines[i]).some(isMethodKey)) continue;
     // A bounded few header lines after it, then the blank line that ends them.
@@ -266,7 +359,7 @@ export function writeMethod(input: { method: string; url: string; headers?: Reco
   for (const [name, value] of Object.entries(input.headers ?? {})) {
     const lower = name.toLowerCase();
     if (!(METHOD_OVERRIDE_HEADERS as readonly string[]).includes(lower)) continue;
-    const display = lower.replace(/(^|-)([a-z])/g, (_, dash: string, c: string) => dash + c.toUpperCase()).replace("Http", "HTTP");
+    const display = HEADER_WORD.replace(lower, ({ groups }) => (groups[1] ?? "") + (groups[2] ?? "").toUpperCase()).replace("Http", "HTTP");
     for (const m of overrideNames(value)) named.push({ method: m, via: `${display}: ${m}` });
   }
   const query = input.url.indexOf("?");
@@ -286,7 +379,7 @@ export function writeMethodLabel(sent: string, judged: WriteMethod): string {
 }
 
 /** Auth/session flows must work even under strict write policies (login, token refresh, logout). */
-export const AUTH_FLOW_RE = /\/(auth|login|logout|signin|sign-in|signup|sign-up|session|token|verify|oauth|sso|password)\b/i;
+export const AUTH_FLOW_RE = fromJs(String.raw`\/(auth|login|logout|signin|sign-in|signup|sign-up|session|token|verify|oauth|sso|password)\b`, "i");
 
 /**
  * A control's label is a verb phrase: "Delete", "Remove user", "Archive the
@@ -313,9 +406,9 @@ export const AUTH_FLOW_RE = /\/(auth|login|logout|signin|sign-in|signup|sign-up|
 export const LABEL_HEAD_WORDS = 6;
 
 /** The head: up to LABEL_HEAD_WORDS whitespace-separated words from the start. */
-const HEAD_RE = new RegExp(`^\\s*(?:\\S+\\s+){0,${LABEL_HEAD_WORDS - 1}}\\S+`);
+const HEAD_RE = fromJs(String.raw`^\s*(?:\S+\s+){0,${LABEL_HEAD_WORDS - 1}}\S+`);
 /** A sentence ends in the label: a full stop, question or exclamation mark followed by space or the end. */
-const SENTENCE_RE = /[.!?](?:\s|$)/;
+const SENTENCE_RE = fromJs(String.raw`[.!?](?:\s|$)`);
 
 /**
  * Where a match must start to count: the end of the head for prose, the end
@@ -324,8 +417,8 @@ const SENTENCE_RE = /[.!?](?:\s|$)/;
 function matchLimit(label: string): number {
   if (!SENTENCE_RE.test(label)) return label.length;
   const head = HEAD_RE.exec(label);
-  if (!head || head[0].length === label.trimEnd().length) return label.length;
-  return head[0].length;
+  if (!head || head.text.length === label.trimEnd().length) return label.length;
+  return head.text.length;
 }
 
 export function isDestructive(...labels: Array<string | null | undefined>): boolean {
@@ -363,7 +456,7 @@ export const COMMAND_TEXT_WORDS = 4;
 
 /** A short verb phrase, or null: at most COMMAND_TEXT_WORDS words and no sentence. */
 function commandText(text: string): string | null {
-  const words = text.trim().split(/\s+/).filter(Boolean);
+  const words = WHITE_SPACE.splitText(text.trim()).filter(Boolean);
   return words.length > 0 && words.length <= COMMAND_TEXT_WORDS && !SENTENCE_RE.test(text) ? text : null;
 }
 
@@ -416,7 +509,7 @@ export function destructiveLabelOf(c: JudgedControl): string | null {
   const centre = c.centre ?? [];
   if (c.tag === "select" || c.role === "combobox" || c.role === "listbox") return first(c.testid, ...centre);
   if (LABELLED_CONTROL_ROLES.has(c.role) || c.tag === "button" || c.tag === "a") return first(c.name, c.testid);
-  if (c.role === "heading" || /^h[1-6]$/i.test(c.tag)) return first(c.testid, ...centre);
+  if (c.role === "heading" || HEADING_TAG.test(c.tag)) return first(c.testid, ...centre);
   const own = c.ownText == null ? c.name : c.interactive === false ? null : commandText(c.ownText);
   return first(own, c.testid, ...centre);
 }
@@ -462,7 +555,7 @@ export const BLOCK_NOTICE_LIST = 5;
 
 /** What a blocked write is remembered by: its method and URL, without query or fragment. */
 export function blockSignature(sig: string): string {
-  return sig.replace(/[?#].*$/, "");
+  return QUERY_OR_FRAGMENT.replace(sig, "");
 }
 
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
@@ -603,7 +696,7 @@ export function dialogResponse(type: string, readOnly: boolean, leave?: boolean)
 
 /** The line an action's result carries for a native dialog the page opened during it. */
 export function dialogNote(d: { type: string; message: string; response: DialogResponse; leave?: boolean }): string {
-  const message = d.message.trim().replace(/\s+/g, " ").slice(0, 120);
+  const message = WHITE_SPACE.replace(d.message.trim(), " ").slice(0, 120);
   if (d.type === "beforeunload") {
     return d.response === "dismiss"
       ? `\n⚠ LEAVE CONFIRMATION: the page asked to confirm leaving (it holds input that was never sent), and the engine answered "stay"` +
@@ -692,10 +785,10 @@ export class WriteRule {
  * `/api/tokens` (mint an API token) are not logins. These words count
  * wherever they sit near the end; the ambiguous ones below only on an auth path.
  */
-const OBSERVE_AUTH_SEGMENT_RE = /^(login|log-in|signin|sign-in|logout|log-out|signout|sign-out|oauth|oauth2|sso|authenticate|authn)$/i;
+const OBSERVE_AUTH_SEGMENT_RE = fromJs(String.raw`^(login|log-in|signin|sign-in|logout|log-out|signout|sign-out|oauth|oauth2|sso|authenticate|authn)$`, "i");
 
 /** A sign-in step's own name, before which `password` is the step that sends it (`/u/login/password`), not a change of password. */
-const OBSERVE_SIGN_IN_SEGMENT_RE = /^(login|log-in|signin|sign-in)$/i;
+const OBSERVE_SIGN_IN_SEGMENT_RE = fromJs(String.raw`^(login|log-in|signin|sign-in)$`, "i");
 
 /** The environment variable naming the only POSTs that count as signing in (`authExemption: allowlist`). */
 export const AUTH_POSTS_ENV = "SCENESCOUT_AUTH_POSTS";
@@ -729,17 +822,19 @@ export function authPostsSetting(env: string | undefined): { entries: ReadPost[]
  * (`/api/reports/refresh`, `/api/users/7/token`, `/api/carts/9/session`,
  * `/api/payments/callback`). Sign-in only in context: see authWordInContext.
  */
-const OBSERVE_AMBIGUOUS_AUTH_RE = /^(refresh|token|sessions?|callback|authorize)$/i;
+const OBSERVE_AMBIGUOUS_AUTH_RE = fromJs(String.raw`^(refresh|token|sessions?|callback|authorize)$`, "i");
 
 /** A segment as compared: a leading dot dropped (`/.auth/refresh`) and `_` read as `-` (`/users/sign_in`), so it reads as the word it holds. */
-const bareSegment = (seg: string): string => seg.replace(/^\.+/, "").replace(/_/g, "-");
+const bareSegment = (seg: string): string => LEADING_DOTS.replace(seg, "").replaceAll("_", "-");
 
 /** An API or version prefix: `/api`, `/rest`, `/v1`, `/v2.0`. */
-const API_PREFIX_SEGMENT_RE = /^(api|rest|v\d+(?:\.\d+)*)$/i;
+const API_PREFIX_SEGMENT_RE = fromJs(String.raw`^(api|rest|v\d+(?:\.\d+)*)$`, "i");
 
 /** Words that name the auth namespace, as one word of a segment (`/auth`, `/oauth2`, `/openid-connect`, `/rt-auth`, `/token/refresh`). */
-const AUTH_NAMESPACE_WORD_RE =
-  /^(auth|oauth|oauth2|sso|idp|identity|openid|oidc|saml|saml2|jwt|token|tokens|session|sessions|login|signin|authentication|authn)$/i;
+const AUTH_NAMESPACE_WORD_RE = fromJs(
+  String.raw`^(auth|oauth|oauth2|sso|idp|identity|openid|oidc|saml|saml2|jwt|token|tokens|session|sessions|login|signin|authentication|authn)$`,
+  "i",
+);
 
 /**
  * Whether a segment names the auth namespace: one of its words (split on `-`,
@@ -747,7 +842,7 @@ const AUTH_NAMESPACE_WORD_RE =
  * Inside a longer segment `connect` names an integration (`/stripe-connect`).
  */
 function authNamespaceSegment(seg: string): boolean {
-  return /^connect$/i.test(seg) || seg.split(/[-_.]+/).some((w) => AUTH_NAMESPACE_WORD_RE.test(w));
+  return CONNECT_WORD.test(seg) || WORD_SEPARATOR.splitText(seg).some((w) => AUTH_NAMESPACE_WORD_RE.test(w));
 }
 
 /**
@@ -756,14 +851,14 @@ function authNamespaceSegment(seg: string): boolean {
  * `/api/connect/stripe/callback` links an integration and
  * `/api/sessions/7/callback` acts on a record.
  */
-const PROVIDER_NAMESPACE_WORD_RE = /^(auth|oauth|oauth2|omniauth|sso|idp|identity|openid|oidc|saml|saml2|login|signin|authentication)$/i;
+const PROVIDER_NAMESPACE_WORD_RE = fromJs(String.raw`^(auth|oauth|oauth2|omniauth|sso|idp|identity|openid|oidc|saml|saml2|login|signin|authentication)$`, "i");
 
 function providerNamespaceSegment(seg: string): boolean {
-  return seg.split(/[-_.]+/).some((w) => PROVIDER_NAMESPACE_WORD_RE.test(w));
+  return WORD_SEPARATOR.splitText(seg).some((w) => PROVIDER_NAMESPACE_WORD_RE.test(w));
 }
 
 /** Segments that scope an identity provider to a tenant or realm, whose id follows (`/realms/12345/protocol/openid-connect/token`). */
-const IDP_SCOPE_SEGMENT_RE = /^(realms|tenants|tfp)$/i;
+const IDP_SCOPE_SEGMENT_RE = fromJs(String.raw`^(realms|tenants|tfp)$`, "i");
 
 /**
  * Whether segment `k` names an identity provider's tenant: a domain or an id
@@ -845,19 +940,19 @@ export function isAuthExempt(mode: WriteMode, method: string, pathname: string, 
   const last = bareSegment(segments[segments.length - 1]);
   // The password step of signing in (`/u/login/password`), not changing or resetting one (`/account/password`).
   if (
-    /^password$/i.test(last) &&
+    PASSWORD_WORD.test(last) &&
     segments.length >= 2 &&
     OBSERVE_SIGN_IN_SEGMENT_RE.test(bareSegment(segments[segments.length - 2])) &&
     !recordBefore(segments, segments.length - 2)
   )
     return true;
-  if (/^(users?|accounts?|members?|password|signup|sign-up|register|verify|invite|invitations?)$/i.test(last)) return false;
+  if (NOT_A_SIGN_IN_ACTION.test(last)) return false;
   // The matching segment must be at, or next to, the end: /auth/token/refresh, /oauth/token, /login.
   for (let i = Math.max(0, segments.length - 2); i < segments.length; i++) {
     const seg = bareSegment(segments[i]);
     if (OBSERVE_AUTH_SEGMENT_RE.test(seg)) return true;
     // `session(s)` only as the last segment, where a POST means "sign in", not "act on session 123".
-    const sessionWord = /^sessions?$/i.test(seg);
+    const sessionWord = SESSION_WORD.test(seg);
     if (OBSERVE_AMBIGUOUS_AUTH_RE.test(seg) && (!sessionWord || i === segments.length - 1) && authWordInContext(segments, i)) return true;
   }
   return false;
@@ -985,7 +1080,7 @@ export class EmbedMoveTracker {
       this.pending = null;
       return;
     }
-    const refererIsHttp = !!referer && /^https?:/i.test(referer);
+    const refererIsHttp = !!referer && HTTP_SCHEME.test(referer);
     if (refererIsHttp && foreignFrameOrigin(this.appUrl, [referer!]) === null) this.pending = null;
     else if (refererIsHttp) this.pending = target;
     else this.pending = embedded.has(target) ? target : null;
@@ -1047,7 +1142,7 @@ export function sandboxedRedirectPage(target: string): string {
 }
 
 /** The last path segment of a page that is a sign-in page, and nothing else: not a verification step, where a payment provider's frame sits. */
-const SIGN_IN_SEGMENT_RE = /^(login|log-in|signin|sign-in|signup|sign-up|sso|oauth)$/i;
+const SIGN_IN_SEGMENT_RE = fromJs(String.raw`^(login|log-in|signin|sign-in|signup|sign-up|sso|oauth)$`, "i");
 
 /**
  * Whether a foreign frame's writes out may go on this page after all: a
@@ -1069,7 +1164,7 @@ export function allowsForeignWriteOnSignIn(mode: WriteMode, topPageUrl: string, 
   }
   const segments = page.pathname.split("/").filter(Boolean);
   // "sign_in" is "sign-in": underscores are how some frameworks spell it.
-  const last = (segments[segments.length - 1] ?? "").replace(/\.[a-z0-9]+$/i, "").replace(/_/g, "-");
+  const last = FILE_EXTENSION.replace(segments[segments.length - 1] ?? "", "").replaceAll("_", "-");
   return SIGN_IN_SEGMENT_RE.test(last);
 }
 
@@ -1109,7 +1204,7 @@ export function trustedEmbedOrigins(list: readonly string[] | undefined): { orig
       continue;
     }
     // "pay.example.com." is "pay.example.com": one origin, one slot.
-    const origin = u.origin.replace(/\.(?=(:\d+)?$)/, "");
+    const origin = TRAILING_DOT.replaceFirst(u.origin, ({ groups }) => groups[1] ?? "");
     if (origins.includes(origin)) continue;
     if (origins.length < MAX_TRUSTED_EMBEDS) origins.push(origin);
     else overflow.push(raw);
@@ -1156,7 +1251,7 @@ export function trustsForeignWrite(
     // A blank or srcdoc frame is its parent's, and the parent is judged next.
     // Any other frame with no web address (blob:, data:) could be an untrusted
     // site that moved itself there to wrap a trusted one: no trust through it.
-    if (/^about:(blank|srcdoc)/i.test(url)) continue;
+    if (BLANK_FRAME.test(url)) continue;
     const o = originOf(url);
     if (!o) return false;
     if (o !== app) involved.add(o);
@@ -1176,9 +1271,9 @@ export const MAX_EMBED_TEXT = 200;
  * be probing a third party's system without its leave.
  */
 export function hostileForEmbed(text: string): string | null {
-  if (/<\s*[a-z!/?]/i.test(text) || /javascript:/i.test(text)) return "it is markup";
+  if (MARKUP.test(text) || JAVASCRIPT_URL.test(text)) return "it is markup";
   if (text.length > MAX_EMBED_TEXT) return `it is longer than ${MAX_EMBED_TEXT} characters`;
-  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) return "it holds control characters";
+  if (CONTROL_CHARACTER.test(text)) return "it holds control characters";
   return null;
 }
 
@@ -1233,8 +1328,7 @@ export interface ReadPost {
  */
 export function readPostsSetting(option: readonly string[] | undefined, env: string | undefined): string[] {
   if (option !== undefined) return [...option];
-  return (env ?? "")
-    .split(/[,\n]/)
+  return ENTRY_SEPARATOR.splitText(env ?? "")
     .map((e) => e.trim())
     .filter(Boolean);
 }
@@ -1252,14 +1346,14 @@ export function readPostEntries(list: readonly string[]): { entries: ReadPost[];
   const rejected: string[] = [];
   const overflow: string[] = [];
   for (const raw of list) {
-    const m = /^\s*POST\s+(\S+)\s*$/i.exec(raw);
+    const m = POST_ENTRY.exec(raw);
     if (!m) {
       rejected.push(raw);
       continue;
     }
     let origin: string | null = null;
-    let pathname = m[1];
-    if (/^https?:\/\//i.test(pathname)) {
+    let pathname = m.groups[1] ?? "";
+    if (HTTP_URL.test(pathname)) {
       let u: URL;
       try {
         u = new URL(pathname);
@@ -1267,7 +1361,7 @@ export function readPostEntries(list: readonly string[]): { entries: ReadPost[];
         rejected.push(raw);
         continue;
       }
-      if (u.search || u.hash || u.username || u.password || /[?#]/.test(pathname)) {
+      if (u.search || u.hash || u.username || u.password || QUERY_OR_FRAGMENT_CHAR.test(pathname)) {
         rejected.push(raw);
         continue;
       }
@@ -1277,7 +1371,7 @@ export function readPostEntries(list: readonly string[]): { entries: ReadPost[];
       pathname = slash === -1 ? "/" : pathname.slice(slash);
     }
     const segments = pathname.split("/").filter(Boolean);
-    if (!pathname.startsWith("/") || /[?#\s]/.test(pathname) || segments.some((seg) => seg.includes("*") && seg !== "*")) {
+    if (!pathname.startsWith("/") || QUERY_OR_FRAGMENT_OR_SPACE.test(pathname) || segments.some((seg) => seg.includes("*") && seg !== "*")) {
       rejected.push(raw);
       continue;
     }
@@ -1340,7 +1434,7 @@ export function refusedPostPage(appUrl: string, referer: string | undefined, pag
 export const MAX_READ_POST_BODY = 100_000;
 
 /** A GraphQL operation that writes: `mutation` or `subscription`, then an optional name, then its variables, directives or selection. */
-const GRAPHQL_WRITE_OP_RE = /(?:^|[^A-Za-z0-9_$])(?:mutation|subscription)\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*)?[({@]/;
+const GRAPHQL_WRITE_OP_RE = fromJs(String.raw`(?:^|[^A-Za-z0-9_$])(?:mutation|subscription)\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*)?[({@]`);
 
 /**
  * Whether a body carries a GraphQL operation that is not a query, or one that
@@ -1357,7 +1451,7 @@ export function graphqlWriteOperation(body: string): boolean {
     parsed = JSON.parse(body);
   } catch {
     // A form-encoded body: its `query` field, decoded.
-    const query = /(?:^|&)query=/.test(body) ? new URLSearchParams(body).get("query") : null;
+    const query = FORM_QUERY_FIELD.test(body) ? new URLSearchParams(body).get("query") : null;
     return query !== null && GRAPHQL_WRITE_OP_RE.test(query);
   }
   const items = Array.isArray(parsed) ? parsed : [parsed];

@@ -12,7 +12,20 @@
  */
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { templateIds } from "../src/engine/calibration.ts";
+import { elementKey, isNonPageRoute, laneRoutePaths, stripRouteQuery } from "../src/engine/fingerprint.ts";
 import { holdsCredential } from "../src/engine/guided.ts";
+import {
+  blockSignature,
+  graphqlWriteOperation,
+  hostileForEmbed,
+  isDestructive,
+  isDestructiveWire,
+  readPostEntries,
+  readPostsSetting,
+  writeMethod,
+} from "../src/engine/policy.ts";
+import { findCriterion, parseTickets } from "../src/engine/tickets.ts";
 import { redactSecrets } from "../src/engine/redact.ts";
 import { maskFillCalls, redactPersonal, secretWordKind } from "../src/engine/sensitive.ts";
 
@@ -49,6 +62,48 @@ const CASES: Record<string, Array<[string, () => unknown]>> = {
     ["a name of digits, then a letter (field name words)", () => secretWordKind(megabyte("1", "", "a"))],
     ["a fill call to the end of a long line (fill calls)", () => maskFillCalls(megabyte("x", "fill("))],
   ],
+  // The readers of text the app or a ticket supplies: ticket headings and criteria, routes, the write policy's labels,
+  // URLs and bodies, and the calibration's request paths. Each text is shaped to make one pattern's JavaScript form backtrack.
+  patterns: [
+    ["a ticket heading of spaces (heading pattern)", () => parseTickets(megabyte(" ", "# ", "x"))],
+    ["a ticket heading of colons and spaces (heading words)", () => parseTickets(megabyte(" :", "# PROJ-1 ", "y"))],
+    ["a ticket heading of hash marks and spaces (heading pattern)", () => parseTickets(megabyte(" #", "## x ", "y"))],
+    ["criteria lines of spaces (criterion patterns)", () => parseTickets(megabyte(" ", "AC1: ", "x\n- [ ] "))],
+    ["a given step of spaces (step pattern)", () => parseTickets(megabyte(" ", "Scenario: s\nGiven ", "\n"))],
+    ["a criterion name of spaces (criterion name)", () => findCriterion({ criteria: [] }, megabyte(" ", "ac", "x"))],
+    ["a route of slashes, then a letter (trailing slashes)", () => laneRoutePaths(`/a${"/".repeat(999_990)}x`)],
+    ["a word of quotes, then a letter (word edges)", () => laneRoutePaths(megabyte(".:!", "", "x"))],
+    ["a route of words and hyphens (credential pair in a route)", () => stripRouteQuery(megabyte("a-"))],
+    ["a route of hash marks (fragment)", () => stripRouteQuery(megabyte("#/"))],
+    ["a route of query marks (query)", () => stripRouteQuery(megabyte("?a"))],
+    ["a path of dots and letters (file extension)", () => isNonPageRoute(megabyte("a.", "/", "x"))],
+    ["an element name of spaces (white space)", () => elementKey({ role: "button", name: megabyte(" x"), testid: null })],
+    ["a path of numbers and commas (id lists)", () => templateIds(megabyte("1, /", "a/"))],
+    ["a path of numbers and a stray letter (id lists)", () => templateIds(megabyte("1,", "a/", "x"))],
+    ["a path of templates (template chain)", () => templateIds(megabyte("/{a}", "a"))],
+    ["a long word before a slash (path head)", () => templateIds(megabyte("a", "", "/1"))],
+    ["a label of 'reset' over and over (reset)", () => isDestructive(megabyte("reset "))],
+    ["a label of 'remove' over and over (remove)", () => isDestructive(megabyte("Remove filter "))],
+    ["a label of 'remove', then spaces (remove's end)", () => isDestructive(megabyte(" ", "remove filter", "x"))],
+    ["a label of 'discard' over and over (discard)", () => isDestructive(megabyte("discard "))],
+    ["a label of 'sign' over and over (sign off)", () => isDestructive(megabyte("sign-"))],
+    ["a label of marks, then 'sign off' (sign off's start)", () => isDestructive(megabyte("!", "", " sign off"))],
+    ["a url of verbs (destructive verb in a path)", () => isDestructiveWire(megabyte("/delete"), "")],
+    ["a body of mutation and spaces (mutation window)", () => isDestructiveWire("/x", megabyte("mutation "))],
+    ["a graphql body of mutation and spaces (write operation)", () => graphqlWriteOperation(megabyte("mutation "))],
+    [
+      "an override header of commas (override names)",
+      () => writeMethod({ method: "POST", url: "http://h/x", headers: { "X-HTTP-Method-Override": megabyte(", ") } }),
+    ],
+    [
+      "a body of disposition lines (multipart parts)",
+      () => writeMethod({ method: "POST", url: "http://h/x", body: megabyte("Content-Disposition: form-data; name=x\r\n\r\n") }),
+    ],
+    ["a blocked url of query marks (signature)", () => blockSignature(megabyte("?#"))],
+    ["a typed value of angle brackets (markup)", () => hostileForEmbed(megabyte("< "))],
+    ["a setting of entries (read posts)", () => readPostsSetting(undefined, megabyte("POST /a,"))],
+    ["a read post entry of spaces (post entry)", () => readPostEntries([megabyte(" ", "POST /a", "x y")])],
+  ],
   credential: [
     ["one long word (#578: the address remover)", () => holdsCredential(megabyte("a"))],
     ["a long word, then a scheme's colon and slashes (the address remover)", () => holdsCredential(megabyte("a", "", "://"))],
@@ -68,7 +123,9 @@ export const CASE_BOUND_MS = 30_000;
  * case is still running at the bound, the child is stopped and that case is
  * `stoppedIn`.
  */
-export function runLinearTimeCases(suite: "redaction" | "credential"): Promise<{ done: Array<{ name: string; ms: number }>; stoppedIn: string | null }> {
+export function runLinearTimeCases(
+  suite: "redaction" | "credential" | "patterns",
+): Promise<{ done: Array<{ name: string; ms: number }>; stoppedIn: string | null }> {
   // Node itself with tsx's loader, never the npx/tsx shim: Windows refuses to spawn a .cmd without a shell.
   const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), fileURLToPath(import.meta.url), suite], {
     stdio: ["ignore", "pipe", "pipe"],

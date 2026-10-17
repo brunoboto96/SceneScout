@@ -215,6 +215,19 @@ export class LinearRegex {
     return out + text.slice(last);
   }
 
+  /** The first match replaced by what `replacer` returns for it, as a String.prototype.replace with a pattern that has no `g` flag. */
+  replaceFirst(text: string, replacer: string | ((match: LinearMatch) => string)): string {
+    const match = this.exec(text);
+    if (!match) return text;
+    return text.slice(0, match.index) + (typeof replacer === "string" ? replacer : replacer(match)) + text.slice(match.end);
+  }
+
+  /** The text split at every match, as String.prototype.split with a pattern that has no group and never matches empty. */
+  splitText(text: string): string[] {
+    if (this.last > this.skip) throw new Error(`splitText by a pattern that has groups: ${this.source}`);
+    return this.split(text).map((part) => part ?? "");
+  }
+
   /** The text split at every match, each match's groups in between, as String.prototype.split with a pattern that never matches empty. */
   split(text: string): Array<string | undefined> {
     const out: Array<string | undefined> = [];
