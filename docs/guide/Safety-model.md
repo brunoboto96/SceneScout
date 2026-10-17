@@ -12,7 +12,7 @@ Only test apps you own or are authorised to test.
 
 | Mode | How to ask for it | What leaves the page |
 |---|---|---|
-| `observe` | `scout_attach {mode: "observe"}`; `--mode observe` for `check`, `ci` and a first look (the first look's default) | `GET` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token ([what counts](#what-counts-as-signing-in-in-observe)), and any `POST` you name as a read. Signing up, changing or resetting a password and creating users are refused like any other write |
+| `observe` | `scout_attach {mode: "observe"}`; `--mode observe` for `check`, `ci` and a first look (the first look's default) | `GET`, `HEAD` and `OPTIONS` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token ([what counts](#what-counts-as-signing-in-in-observe)), and any `POST` you name as a read. Signing up, changing or resetting a password and creating users are refused like any other write |
 | `read-only` (default) | `scout_attach {mode: "read-only"}`; `--mode read-only` (the default for `check` and `ci`) | Ordinary form submissions (a plain `POST`) go through. `PUT`, `PATCH`, `DELETE`, destructive-looking `POST`s and clicks on destructive-labelled controls (delete, revoke, archive and the like) are refused |
 | `safe-write` | `scout_attach {mode: "safe-write"}`; `--mode safe-write` for `ci` | Anything that creates. Changes and deletes only on records this run created, never on data that was there before |
 | `destructive` | `scout_attach {mode: "destructive"}`; `--mode destructive --allow-destructive` for `ci` | Everything |
@@ -110,7 +110,7 @@ What each mode does with each kind of request, on the network:
 | `GET`, `HEAD`, `OPTIONS` with no method override (page loads, links, images, a script's reads) | Out | Out | Out | Out |
 | `PUT`, `PATCH`, `DELETE`, or any request whose method override names one | Refused | Refused | Out only on a record this run created | Out |
 | A plain `POST` (a form, a script's save) | Refused, except signing in, signing out, refreshing a token and the `POST`s you named as reads | Out | Out | Out |
-| A `POST` that looks destructive | Refused | Refused, unless it addresses a record created in this server process | Out only on a record this run created | Out |
+| A `POST` that looks destructive | Refused | Refused, unless it addresses a record a `safe-write` session created in this server process | Out only on a record this run created | Out |
 | A write an embedded frame of another origin sends outside the app | Refused | Refused, except from the app's sign-in page (a captcha, say) | Refused, except from the app's sign-in page or an origin you named as a trusted embed | Out |
 | A write sent as a page is left (a beacon, a `keepalive` fetch) | Judged by the rows above | Judged by the rows above | Judged by the rows above | Out |
 | A page load whose address is a destructive command (`/unsubscribe?…`) | Out, unless destructive page loads are refused | Out, unless destructive page loads are refused | Out | Out |
@@ -122,13 +122,13 @@ Which of those rules is a guarantee, and which is best effort:
 |---|---|---|---|
 | The method rule, method overrides included | Guarantee | Network: the context's route handler | `policy.ts` (`allowsWrite`, `writeMethod`), `route-guard.ts` |
 | Writes sent as a page is left | Guarantee | Network: in Chromium the browser-level interception, elsewhere the route handler | `unload.ts`, `browsers.ts` (`unloadWriteInterception`) |
-| Writes from embedded frames of another origin, and the hostile input refused there | Guarantee, except the sign-in page's exception, which is judged by the page's path | Network for the writes; the engine for typed input | `policy.ts` (`foreignWrite`, `hostileForEmbed`, `withForeignFrameSandbox`) |
+| Writes from embedded frames of another origin, and the hostile input refused there | Guarantee for a write the browser attributes to a frame of another origin. A popup such a frame opens, or a page it moves the session to, is recognised from the `Origin` and `Referer` headers and the page that sent it, which is best effort, and so is the sign-in page's exception, judged by the page's path | Network for the writes; the engine for typed input | `policy.ts` (`foreignWrite`, `hostileForEmbed`, `withForeignFrameSandbox`) |
 | `scout_request` reaches the app's own origin only, under the same policy | Guarantee | The engine, then the network | `request.ts`, `route-guard.ts` |
 | No shared workers below `destructive`, no service workers in Firefox and WebKit | Guarantee | The browser context | `browsers.ts` (`sharedWorkersAllowed`, `serviceWorkerPolicy`) |
 | The guided gate: once a plan exists (or from the start, with `requireGuidedPlan`), no attach above `observe` without a plan's id, on the plan's site, in no mode above the plan's, and confirmed by the person where its care level needs that | Guarantee within the server process | The MCP server | `guided.ts` (`GuidedPlans`, `guidedAttachVerdict`) |
 | The config file's ceiling | Guarantee within the server process; the file itself is on disk ([what it does not do](#the-config-file-sets-the-limits-an-agent-cannot-loosen)) | The server or command, as it starts | `project-config.ts` |
 | The tools an unattended `scenescout ci` run's model is given | Guarantee | The run | `ci.ts` (`CI_TOOLS`) |
-| Whether a `POST` is destructive | Best effort: words in the path and the start of the body; the query and the whole body too under `SCENESCOUT_STRICT_WRITES` | Network | `policy.ts` (`isDestructiveRequest`), `strict-writes.ts` |
+| Whether a `POST` is destructive | Best effort: words in the path, and a command key or a GraphQL mutation's name in the first 2,000 characters of the body; the query and the whole body too under `SCENESCOUT_STRICT_WRITES` | Network | `policy.ts` (`isDestructiveRequest`), `strict-writes.ts` |
 | Whether a GraphQL request is a write | Best effort. A `POST` you named as a read is refused when its body holds a `mutation` or `subscription`, or a persisted query whose text cannot be read. Outside that, a GraphQL `POST` is judged like any `POST`: by a destructive word after `mutation`, in the operation's or a field's name | Network | `policy.ts` (`graphqlWriteOperation`, `readPostAllowed`, `isDestructiveRequest`) |
 | A click on a destructive-labelled control, in `observe` and `read-only` | Best effort: the control's own name | The engine, before the click; the request it would send is still judged on the network | `policy.ts` (`isDestructive`, `destructiveLabelOf`) |
 | `observe`'s sign-in exemption | Best effort: the path, unless `SCENESCOUT_AUTH_POSTS` lists the sign-in requests | Network | `policy.ts` (`isAuthExempt`) |
