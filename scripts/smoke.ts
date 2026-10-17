@@ -23,7 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { check, eventually, failureCount, recordCrash, startFixtureServer, type SmokeContext } from "./smoke/harness.ts";
-import { descendants, extraHandles, type Leftover } from "./smoke/leaks.ts";
+import { busiestOwners, descendants, extraHandles, parseTasklist, parseTcpTable, socketLine, socketsLeft, type Leftover } from "./smoke/leaks.ts";
 import { declaredTitle, parseShard, pickShard, shardProblems, shardSeconds, TOGETHER, withoutShard } from "./smoke/shards.ts";
 import { shards, suites as allSuites, timings } from "./smoke/suites.ts";
 
@@ -52,6 +52,58 @@ async function checkNothingLeft(suite: string): Promise<void> {
       console.error(`    could not end ${p.pid}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+}
+
+/**
+ * The machine's TCP table, as one line for the log: on Windows also the
+ * processes holding the most sockets. A page that fails to load with
+ * net::ERR_NO_BUFFER_SPACE on Windows (#590) was refused a socket by the
+ * system (WSAENOBUFS: no socket buffers or ports left); this line, printed
+ * after every suite and at such a crash, says how many sockets were open, in
+ * which state, and whose.
+ */
+function machineSockets(): string {
+  try {
+    const run = (cmd: string, cmdArgs: string[]) => execFileSync(cmd, cmdArgs, { encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024 * 1024 });
+    if (process.platform === "win32") {
+      const rows = parseTcpTable(run("netstat", ["-ano"]));
+      const owners = busiestOwners(rows, parseTasklist(run("tasklist", ["/FO", "CSV", "/NH"])), 3);
+      return `${socketLine(rows)}${owners.length ? `; most held by ${owners.join(", ")}` : ""}`;
+    }
+    return socketLine(parseTcpTable(process.platform === "darwin" ? run("netstat", ["-an", "-p", "tcp"]) : run("ss", ["-tan"])));
+  } catch (err) {
+    return `(could not read the TCP table: ${err instanceof Error ? err.message.split("\n")[0] : String(err)})`;
+  }
+}
+
+/** Windows' range of ports for outgoing connections: each connection takes one, held through TIME_WAIT by the side that closes first. */
+function windowsPortRange(): string {
+  try {
+    const out = execFileSync("netsh", ["int", "ipv4", "show", "dynamicport", "tcp"], { encoding: "utf8", timeout: 10_000 });
+    const start = /Start Port\s*:\s*(\d+)/.exec(out)?.[1];
+    const count = /Number of Ports\s*:\s*(\d+)/.exec(out)?.[1];
+    return start && count ? `ports for outgoing connections: ${count} from ${start}` : out.trim().replace(/\s+/g, " ");
+  } catch (err) {
+    return `(could not read the port range: ${err instanceof Error ? err.message.split("\n")[0] : String(err)})`;
+  }
+}
+
+/**
+ * Fail a suite that leaves a TCP socket of this process open: a stand-in
+ * server it never closed, or a connection to one still open, unref'd or not.
+ * The wait matches the process check's, because on Windows that check does
+ * not run and a browser Playwright is still closing holds its connections to
+ * the fixture server until it goes. Returns the baseline the next suite is held
+ * to: what is open now after a failure, so one leak fails one suite. Then log
+ * the machine's TCP table, so a run that hits ERR_NO_BUFFER_SPACE shows what
+ * was open.
+ */
+async function checkSockets(suite: string, baseline: string[]): Promise<string[]> {
+  let left: string[] = [];
+  await eventually(() => (left = socketsLeft(baseline, process.getActiveResourcesInfo())).length === 0, 40_000);
+  check(`${suite}: leaves no socket of its own open`, left.length === 0, `open: ${left.join(", ")}`);
+  console.log(`  (sockets after this suite: ${machineSockets()})`);
+  return left.length === 0 ? baseline : process.getActiveResourcesInfo();
 }
 
 /**
@@ -86,6 +138,10 @@ async function main(): Promise<void> {
   const baseline = process.getActiveResourcesInfo();
   if (process.platform === "win32") console.log("(leftover-process check skipped: no ps on Windows; open handles are still checked)");
   const server = await startFixtureServer();
+  // The shared fixture server's listening sockets are open for the whole run; each suite is held to what is open now.
+  let socketBaseline = process.getActiveResourcesInfo();
+  if (process.platform === "win32") console.log(`(${windowsPortRange()})`);
+  console.log(`(sockets before the first suite: ${machineSockets()})`);
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-smoke-"));
   const ctx: SmokeContext = { baseUrl: server.baseUrl, foreignBaseUrl: server.foreignBaseUrl, projectDir, stats: server.stats };
   let ran = 0;
@@ -97,9 +153,13 @@ async function main(): Promise<void> {
       try {
         await suite.run(ctx);
       } catch (err) {
+        // The table as soon as the suite has given up, before the checks below wait on anything.
+        if (/ERR_NO_BUFFER_SPACE/.test(err instanceof Error ? err.message : String(err)))
+          console.log(`  (sockets when the page failed to load: ${machineSockets()})`);
         recordCrash(suite.title, err);
       }
       await checkNothingLeft(suite.title);
+      socketBaseline = await checkSockets(suite.title, socketBaseline);
     }
   } finally {
     await server.close();
