@@ -5536,6 +5536,9 @@ export class BrowserEngine {
       collect();
       await bestEffort((this.page ?? page).goto("about:blank"));
       await bestEffort(this.settle());
+      // What the page sent as it was left (a beacon on pagehide) can still be being judged: wait for the verdict, so a
+      // refusal the policy reports late is counted here rather than after the flow has handed back.
+      await this.leavingWritesJudged(this.page ?? page);
       late.push(...ownRefusals());
       const last = steps[steps.length - 1];
       if (late.length > 0 && last) {
@@ -5554,7 +5557,12 @@ export class BrowserEngine {
       // does runs on under the crawl's rule. Only then is the crawl's rule restored, and WriteRule keeps the flow's for
       // a moment longer, for a write a page sent as it was left that the engine hears of late.
       await settleWithin(Promise.allSettled(context.pages().map((p) => BrowserEngine.leave(p))), 5000);
-      this.blockedRequests = [];
+      // The driven page's own leaving writes are judged before the flow's refusals are closed. A refusal reported only
+      // now (a step failed before the flow left the page, or the verdict came late) is listed with the flow's
+      // background requests rather than dropped: the flow's outcome is already decided, and nothing past this is charged.
+      if (this.page) await this.leavingWritesJudged(this.page);
+      const { charged, background } = splitRefusals(this.blockedRequests.splice(0), appOrigin);
+      for (const sig of [...charged, ...background]) if (!refusedBackground.includes(sig) && refusedBackground.length < 20) refusedBackground.push(sig);
       this.oracles.drain(false);
       this.setMode(crawlMode);
       // Pages the session no longer drives are closed only now, at about:blank and under the held rule, and each only
@@ -6252,6 +6260,21 @@ export class BrowserEngine {
   private static async leave(page: Page): Promise<void> {
     if (page.isClosed() || page.url() === "about:blank") return;
     await bestEffort(page.goto("about:blank", { timeout: 3000 }));
+  }
+
+  /**
+   * Wait, after a page has been left, for the write policy's verdict on what the page sent on its way out, on every
+   * engine: a round trip to the page first, so what it sent before it went has reached the policy, then the judgements
+   * still pending, the route handler's for this page and the browser-level interception's. Bounded: a page that
+   * cannot answer has nothing more to send, and a judgement never takes the bound. The browser-level interception hears
+   * of a request on its own CDP session, which the round trip is not ordered with: a pause event still undelivered when
+   * the round trip returns is not waited for (measured: Chromium pauses a pagehide beacon before the navigation away
+   * returns, so this covers a slow verdict rather than a slow event).
+   */
+  private async leavingWritesJudged(page: Page): Promise<void> {
+    if (page.isClosed()) return;
+    await settleWithin(bestEffort(page.evaluate(() => 0)), 2000);
+    await settleWithin(Promise.allSettled([...this.guard.inFlight(page), ...this.guard.unseenInFlight()]), 2000);
   }
 
   /**
