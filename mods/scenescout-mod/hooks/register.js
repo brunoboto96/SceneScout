@@ -35,6 +35,7 @@ import {
   errorSentence,
   guardFor,
   guidedText,
+  openResults,
   pictureSvg,
   readCards,
   readSaved,
@@ -42,12 +43,13 @@ import {
   reduce,
   renderGuided,
   resultText,
+  resultsPlan,
   sendRoute,
   startsTour,
   TOUR_SEEN_KEY,
   wizardOf,
 } from "./guided.js";
-import { BAND_WORDS, afterQueuedRun, bandLine, keepsPolling, nextQueued, renderBand, statusLine } from "./run.js";
+import { BAND_WORDS, afterQueuedRun, bandLine, keepsPolling, nextQueued, plainLine, renderBand, statusLine } from "./run.js";
 
 // What a drawing reads lives in $.state (types/index.d.ts), so a reload of the mod keeps the panel where it was.
 const WIZARD = { plugin: "scenescout-mod", key: "wizard" };
@@ -75,8 +77,13 @@ let sentAt = 0;
 let shownStatus;
 /** Whether this Claude Code refused the status line: then it is not asked again. */
 let noStatusLine = false;
-/** Whether a queued check is being started, so a second poll meanwhile starts nothing. */
-let isStarting = false;
+/**
+ * Whether a plan is being built (Start, Run again, Check them again, a saved
+ * check run again, or a queued check starting), so a second press or a poll
+ * meanwhile builds nothing. It lives in the module, not in $.state, so a
+ * reload of the mod starts without it rather than refusing every press.
+ */
+let isBuilding = false;
 
 export function register(on, options) {
   const lane = laneModelSetting(options?.lane_model);
@@ -85,6 +92,8 @@ export function register(on, options) {
   on("session.start", async ($, e, next) => {
     // session.start runs again after a reload of this mod; keep one timer.
     timer?.cancel();
+    // A plan being built when the mod reloaded is not being built by this load: its busy mark would hold the queue for good.
+    await updateWizard($, (w) => (w.busy === "plan" || w.busy === "recheck" ? { ...w, busy: null } : w));
     timer = $.clock.every(POLL_MS, async () => {
       if (isOpen) return poll($, servers);
       const now = await $.clock.now();
@@ -135,7 +144,7 @@ export function register(on, options) {
     const shown = picture && picture.id === wizard.cardId ? picture : null;
     return renderGuided(els, wizard, { surface: e.surface, status, picture: shown, runPane }, (type, payload = {}) => {
       // Fired, never awaited: a press must not hold anything up while the server or a form answers.
-      void perform($, servers, type, payload).catch((err) => $.ui.toast(`SceneScout: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300)));
+      void perform($, servers, type, payload).catch((err) => toast($, `SceneScout: ${err instanceof Error ? err.message : String(err)}`));
     });
   });
 
@@ -149,7 +158,7 @@ export function register(on, options) {
     // Another mod's band, or the engine's, stays beneath this line.
     const below = await next(e);
     return renderBand(els, line, below, () => {
-      void openPanel($, servers, "guided").catch((err) => $.ui.toast(`SceneScout: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300)));
+      void openPanel($, servers, "guided").catch((err) => toast($, `SceneScout: ${err instanceof Error ? err.message : String(err)}`));
     });
   });
 
@@ -256,7 +265,7 @@ async function sendToClaude($, text) {
     try {
       const appended = await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } });
       if (!appended?.deny) {
-        $.ui.toast("SceneScout: sent to Claude, which reads it at its next step.");
+        toast($, "SceneScout: sent to Claude, which reads it at its next step.");
         return;
       }
     } catch {
@@ -266,18 +275,37 @@ async function sendToClaude($, text) {
   try {
     void $.prompt.submit({ text }).then(
       (r) => {
-        if (r?.drop) $.ui.toast(`SceneScout: the message was not sent: ${r.drop}`.slice(0, 300));
+        if (r?.drop) toast($, `SceneScout: the message was not sent: ${r.drop}`);
       },
-      (err) => $.ui.toast(`SceneScout: the message was not sent: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300)),
+      (err) => toast($, `SceneScout: the message was not sent: ${err instanceof Error ? err.message : String(err)}`),
     );
   } catch {
-    $.ui.toast(`SceneScout: this Claude Code cannot send for you. Say this to Claude: ${text}`.slice(0, 600));
+    toast($, `SceneScout: this Claude Code cannot send for you. Say this to Claude: ${text}`, 600);
   }
 }
 
 /** Build a plan from these choices, then preview its confirmation or start Claude on it. */
 async function buildAndStart($, servers, choices) {
   return planAndStart($, servers, "plan", () => callServer($, servers, PLAN_TOOL, { choices }), afterPlan);
+}
+
+/** A toast as plain text, at most `max` characters: a server's error sentence or a check's name in it can quote the tested page. */
+function toast($, text, max = 300) {
+  $.ui.toast(plainLine(text).slice(0, max));
+}
+
+/** Run `fn`, which builds a plan, unless one is being built already; a press meanwhile is told so. */
+async function guarded($, fn) {
+  if (isBuilding) {
+    toast($, BAND_WORDS.busy);
+    return;
+  }
+  isBuilding = true;
+  try {
+    await fn();
+  } finally {
+    isBuilding = false;
+  }
 }
 
 /**
@@ -322,44 +350,62 @@ async function perform($, servers, type, payload) {
       }
       return;
     }
-    case "build": {
-      const w = wizardOf((await $.state.get(WIZARD)).value);
-      const checked = choicesFromDraft(w.draft);
-      if (!checked.ok) {
-        const text = checked.error;
-        return updateWizard($, (x) => ({ ...x, notice: { tone: "error", text } }));
-      }
-      return buildAndStart($, servers, checked.choices);
-    }
-    case "lookOnly": {
-      const w = wizardOf((await $.state.get(WIZARD)).value);
-      const choices = w.plan?.choices;
-      if (!choices) return updateWizard($, (x) => reduce(x, { type: "go", step: "configuring" }));
-      await updateWizard($, (x) => ({ ...x, draft: { ...x.draft, care: "look-only" } }));
-      return buildAndStart($, servers, { ...choices, care: "look-only" });
-    }
-    case "runAgain": {
-      const w = wizardOf((await $.state.get(WIZARD)).value);
-      if (!w.lastChoices) return updateWizard($, (x) => reduce(x, { type: "newCheck" }));
-      return buildAndStart($, servers, w.lastChoices);
-    }
+    case "build":
+      return guarded($, async () => {
+        const w = wizardOf((await $.state.get(WIZARD)).value);
+        const checked = choicesFromDraft(w.draft);
+        if (!checked.ok) {
+          const text = checked.error;
+          return updateWizard($, (x) => ({ ...x, notice: { tone: "error", text } }));
+        }
+        return buildAndStart($, servers, checked.choices);
+      });
+    case "lookOnly":
+      return guarded($, async () => {
+        const w = wizardOf((await $.state.get(WIZARD)).value);
+        const choices = w.plan?.choices;
+        if (!choices) return updateWizard($, (x) => reduce(x, { type: "go", step: "configuring" }));
+        await updateWizard($, (x) => ({ ...x, draft: { ...x.draft, care: "look-only" } }));
+        return buildAndStart($, servers, { ...choices, care: "look-only" });
+      });
+    case "runAgain":
+      return guarded($, async () => {
+        // Run again on the results repeats the results' own check, whatever started since.
+        const w = wizardOf((await $.state.get(WIZARD)).value);
+        const choices = payload.from === "results" ? resultsPlan(w).lastChoices : w.lastChoices;
+        if (!choices) return updateWizard($, (x) => reduce(x, { type: "newCheck" }));
+        return buildAndStart($, servers, choices);
+      });
     case "confirm":
       return confirmPlan($, servers, wizardOf((await $.state.get(WIZARD)).value).planId);
-    case "recheck": {
-      // The server builds the re-check's plan in the care level the problems were found in; Claude is handed only its id.
-      const w = wizardOf((await $.state.get(WIZARD)).value);
-      // On the last check's site: a project that kept findings for several sites re-checks the one whose results these are.
-      const signIn = w.lastChoices?.signIn;
-      const address = w.lastChoices?.address;
-      const args = { ...(typeof signIn === "string" ? { signIn } : {}), ...(typeof address === "string" && address ? { address } : {}) };
-      return planAndStart($, servers, "recheck", () => callServer($, servers, RECHECK_TOOL, args), afterPlan);
-    }
+    case "recheck":
+      return guarded($, async () => {
+        // The server builds the re-check's plan in the care level the problems were found in; Claude is handed only its id.
+        const w = wizardOf((await $.state.get(WIZARD)).value);
+        // On the results' own site: a project that kept findings for several sites re-checks the one whose results these are.
+        const last = resultsPlan(w).lastChoices;
+        const signIn = last?.signIn;
+        const address = last?.address;
+        const args = { ...(typeof signIn === "string" ? { signIn } : {}), ...(typeof address === "string" && address ? { address } : {}) };
+        return planAndStart($, servers, "recheck", () => callServer($, servers, RECHECK_TOOL, args), afterPlan);
+      });
     case "runSaved":
-      return planAndStart($, servers, "plan", () => callServer($, servers, SAVED_TOOL, { action: "run", name: String(payload.name ?? "") }), afterSavedRun);
+      return guarded($, () =>
+        planAndStart($, servers, "plan", () => callServer($, servers, SAVED_TOOL, { action: "run", name: String(payload.name ?? "") }), afterSavedRun),
+      );
+    case "queueBack": {
+      // Back on a queued check's preview: kept first in line, the queue paused, and said where the person sees it.
+      const name = wizardOf((await $.state.get(WIZARD)).value).fromQueue;
+      await updateWizard($, (w) => reduce(w, { type: "queueBack" }));
+      if (name) toast($, BAND_WORDS.toastKept(name));
+      return;
+    }
     case "saveCheck": {
+      // Saved from the results: the plan they were opened for, not one a queued check started since.
       const w = wizardOf((await $.state.get(WIZARD)).value);
-      if (!w.planId) return;
-      const result = await callServer($, servers, SAVED_TOOL, { action: "save", name: w.saveName, planId: w.planId });
+      const planId = resultsPlan(w).planId;
+      if (!planId) return;
+      const result = await callServer($, servers, SAVED_TOOL, { action: "save", name: w.saveName, planId });
       const read = readSaved(result);
       return updateWizard($, (x) =>
         read.ok ? { ...x, saved: read.saved, saveName: "", notice: { tone: "info", text: read.said } } : { ...x, notice: { tone: "error", text: read.error } },
@@ -421,7 +467,7 @@ async function perform($, servers, type, payload) {
       } catch {
         // An older build without prompt.fill: the toast below says what to type.
       }
-      if (!filled?.isFilled) $.ui.toast(`SceneScout: say "${PANEL_WORDS.mobileFill.trim()} ..." to Claude.`);
+      if (!filled?.isFilled) toast($, `SceneScout: say "${PANEL_WORDS.mobileFill.trim()} ..." to Claude.`);
       return updateWizard($, (w) => ({ ...w, step: "configuring", notice: null }));
     }
     default:
@@ -460,7 +506,7 @@ async function loadSaved($, servers) {
 
 /** The findings as cards, worst first. */
 async function loadCards($, servers, show) {
-  await updateWizard($, (w) => ({ ...w, busy: "cards", ...(show ? { step: "results", notice: null } : {}) }));
+  await updateWizard($, (w) => ({ ...(show ? openResults(w) : w), busy: "cards" }));
   const result = await callServer($, servers, CARDS_TOOL, { limit: RESULTS_LIMIT, pictures: "files" });
   const read = readCards(result);
   if (!read.ok) {
@@ -525,14 +571,15 @@ async function afterPoll($, servers) {
   setStatusLine($, statusLine(w, status));
   const now = await $.clock.now();
   sentAt ??= now;
-  if (isStarting) return;
+  // A plan being built, by a press or a queued check, holds the queue.
+  if (isBuilding) return;
   const entry = nextQueued(w, status, { isWorking, now, sentAt });
   if (!entry) return;
-  isStarting = true;
+  isBuilding = true;
   try {
     await startQueued($, servers, entry);
   } finally {
-    isStarting = false;
+    isBuilding = false;
   }
 }
 
@@ -554,8 +601,10 @@ function setStatusLine($, text) {
 /**
  * Start the queued check at the head of the queue: take it off the queue
  * (only if it is still the head, so two polls never start it twice), have the
- * server build its own plan, and preview its confirmation where its care level
- * needs one, opening the panel for the person's yes, or start Claude on it.
+ * server build its own plan, and start Claude on it or leave its confirmation
+ * waiting on the person where its care level needs one. The panel stays on
+ * whatever the person is reading; a toast says what happened, and the panel
+ * offers Follow it.
  */
 async function startQueued($, servers, entry) {
   let claimed = false;
@@ -572,14 +621,8 @@ async function startQueued($, servers, entry) {
     (w, result) => afterQueuedRun(w, result, entry),
   );
   const w = wizardOf((await $.state.get(WIZARD)).value);
-  if (w.step !== "confirm" || w.fromQueue !== entry.name) {
-    // Started, or not: one that did not start is said where the person sees it with the panel closed too.
-    if (w.notice?.tone === "error") $.ui.toast(BAND_WORDS.toastNotStarted(entry.name, w.notice.text).slice(0, 300));
-    return;
-  }
-  $.ui.toast(BAND_WORDS.toastConfirm(entry.name));
-  if ((await $.session.surfaces()).length > 0) {
-    isOpen = true;
-    await $.ui.open({ id: PANE_ID, title: "SceneScout", closeOnEscape: true });
-  }
+  if (w.fromQueue === entry.name) toast($, BAND_WORDS.toastConfirm(entry.name));
+  else if (w.started === entry.name) toast($, BAND_WORDS.toastStarted(entry.name));
+  // One that did not start is said where the person sees it with the panel closed too.
+  else if (w.notice?.tone === "error") toast($, BAND_WORDS.toastNotStarted(entry.name, w.notice.text));
 }
