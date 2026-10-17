@@ -2340,7 +2340,7 @@ test("the panel's words are the engine's, word for word", () => {
   assert.deepEqual(Object.keys(guided.ERROR_HEADING), [...ERROR_KINDS]);
   assert.equal(guided.STARTING_SENTENCE, PHASE_NOW.starting);
   assert.deepEqual(guided.ACTION_LABEL, ACTION_LABEL);
-  for (const k of ["stop", "recheck", "plainReport"] as const) assert.equal(guided.ACTION_PROMPT[k], ACTION_PROMPT[k]);
+  for (const k of ["stop", "recheck", "plainReport", "fileTickets"] as const) assert.equal(guided.ACTION_PROMPT[k], ACTION_PROMPT[k]);
   assert.equal(guided.ACTION_PROMPT.explain("a1b2c3d4e5"), ACTION_PROMPT.explain("a1b2c3d4e5"));
   assert.equal(guided.ACTION_PROMPT.again("a1b2c3d4e5"), ACTION_PROMPT.again("a1b2c3d4e5"));
   assert.deepEqual(guided.cardActions("a1b2c3d4e5"), engineCardActions("a1b2c3d4e5"));
@@ -2634,6 +2634,12 @@ test("each button asks for what it says: the server, Claude, or another step", (
   assert.deepEqual(results.press("guided-results-recheck"), { type: "send", payload: { text: ACTION_PROMPT.recheck } });
   assert.deepEqual(results.press("guided-results-again"), { type: "runAgain", payload: undefined });
   assert.ok(!elementsOf(results.tree).some((e) => e.props.key === "guided-results-new"), "mobile cannot type a new address");
+  // Filing tickets is a turn for Claude, which previews them; the server's own form, listing them, is where the person says yes.
+  assert.deepEqual(results.press("guided-results-file-tickets"), { type: "send", payload: { text: ACTION_PROMPT.fileTickets } });
+  assert.match(ACTION_PROMPT.fileTickets, /scout_ticket_preview.*scout_ticket_file/);
+  assert.equal(elementsOf(results.tree).find((e) => e.props.key === "guided-results-file-tickets")?.props.label, ACTION_LABEL.fileTickets);
+  const none = drawGuided("desktop", wizard({ step: "results", cards: [], cardsTotal: 0 }), STATUS_IDLE);
+  assert.ok(!elementsOf(none.tree).some((e) => e.props.key === "guided-results-file-tickets"), "nothing to file, no button");
   assert.deepEqual(drawGuided("terminal", wizard(), STATUS_DOWN).press("guided-error-retry"), { type: "retry", payload: undefined });
 });
 

@@ -1,5 +1,16 @@
 # scenescout
 
+## 3.27.0
+
+### Minor Changes
+
+- 72f3782: The config file takes two more keys. `uploads: "fixtures"` lets `scout_upload` send only the files it generates: a `filePath`, and a run plan's upload step naming a file, are refused, whatever `SCENESCOUT_UPLOAD_ALLOW` lists. `projectsRoot` names the folder every project folder must sit inside by its real path: an attach, `scout_login` or `scout_scan` naming a folder outside it is refused, and so is `check` or `ci` given such a `--project`, or a first look run in such a folder; only the operator's file may set it. The `strict` preset now sets `uploads: "fixtures"`, so a team using it uploads generated files only; `"uploads": "project"` beside the preset restores file uploads.
+
+### Patch Changes
+
+- 0c57659: Leaving Chromium's error page after a refused form, or a page on another site, no longer loads the page before it again with a GET when a POST (or a load the engine did not see) reached that page and its address reads as a destructive command (`/things/9/cancel`, `?action=delete`). That GET is the engine's own request and no write rule judges a GET in safe-write, so a server could act on it; the engine now sends nothing, leaves for `about:blank`, and says so in the action's result. The address is judged with the rule `SCENESCOUT_REFUSE_DESTRUCTIVE_GETS` uses, whether or not that setting is on.
+- d2ff32d: The README, the website, the guide, the skill and the desktop extension's description now say what each write mode lets out as the policy enforces it: `observe` also lets out `HEAD`, `OPTIONS` and the `POST`s named as reads, a plain `POST` in `read-only` can change a record that was there, a link that acts when opened is followed unless destructive page loads are refused, and messages over a WebSocket are not inspected. A new "What it reaches" table in the guide lists the network destinations, port, processes and files of the plugin, the desktop extension and the mod, and the plugin's and extension's manifests link to it.
+
 ## 3.26.0
 
 ### Minor Changes

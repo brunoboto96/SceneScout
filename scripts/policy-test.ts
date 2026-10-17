@@ -1649,12 +1649,13 @@ test("a blocked endpoint is explained once per session; repeats are counted on o
   const first = notices.notice("observe", [beacon, { ...beacon, sig: "POST https://app.test/monitoring/tunnel?key=2" }]);
   assert.match(first, /WRITE-POLICY blocked \(observe\): POST https:\/\/app\.test\/monitoring\/tunnel\?key=1 ×2 \(late/);
   assert.match(first, /NOT an app bug/);
-  assert.match(first, /observe mode blocks every request/);
+  assert.match(first, /observe mode lets out only GET, HEAD and OPTIONS/);
+  assert.doesNotMatch(first, /only a GET\b|not a GET\b/, "the hint does not say only GET leaves");
   assert.match(first, /answered with a 403/);
 
   const second = notices.notice("observe", [beacon, beacon, beacon]);
   assert.match(second, /WRITE-POLICY blocked \(observe\): 3 repeat blocks of 1 known endpoint \(POST https:\/\/app\.test\/monitoring\/tunnel ×3, background\)/);
-  assert.doesNotMatch(second, /NOT an app bug|observe mode blocks|answered with a 403/, "the paragraph is not repeated");
+  assert.doesNotMatch(second, /NOT an app bug|observe mode lets out|answered with a 403/, "the paragraph is not repeated");
   assert.equal(second.trim().split("\n").length, 1, "one line");
 
   const third = notices.notice("observe", [beacon, { sig: "POST https://app.test/api/things", late: false, answered: true }]);
@@ -1662,7 +1663,7 @@ test("a blocked endpoint is explained once per session; repeats are counted on o
   assert.doesNotMatch(third, /api\/things \(late/, "the action's own block is not marked late");
   assert.match(third, /also 1 repeat block of 1 known endpoint/);
   assert.match(third, /explained in full earlier/);
-  assert.doesNotMatch(third, /observe mode blocks/, "the full paragraph is once per rule");
+  assert.doesNotMatch(third, /observe mode lets out/, "the full paragraph is once per rule");
 
   // Nothing blocked, nothing said; a new rule is explained again; a reset starts over.
   assert.equal(notices.notice("observe", []), "");

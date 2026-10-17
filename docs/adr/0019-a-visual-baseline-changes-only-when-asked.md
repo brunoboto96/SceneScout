@@ -59,6 +59,16 @@ repeatable, and what an unmet one does to the gate.
   When the loads disagree the target passes, and its line in the report says
   how far the first picture was off, so a difference only one load shows (a
   first visit's banner, a cold cache) is visible rather than only logged.
+- **A first baseline is confirmed from a second load.** A baseline written with
+  nothing to compare it with (no baseline yet, or one that could not be used,
+  under `update`) would be the reference for every later compare, so an off
+  draw written as one fails every later check until someone retakes it. It is
+  taken twice from two loads and written only when the two pictures agree
+  pixel for pixel. When they differ a third load is taken and the picture that
+  agrees with either is kept. When all three differ nothing is written and the
+  target is reported as not captured, which is an issue like any other target
+  that could not be pictured: a page that draws differently on every load has
+  no baseline to keep.
 - **An unmet baseline is high, like a broken flow.** A change past
   `--baseline-threshold` (default 0.1%), any change of size, a baseline that
   cannot be used, and a target that could not be pictured are each one

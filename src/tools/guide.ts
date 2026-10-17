@@ -62,14 +62,14 @@ export const GUIDED_PLAN_TOOL = "scout_guided_plan";
 export const GUIDED_CONFIRM_TOOL = "scout_guided_confirm";
 
 /** What the SDK hands a handler that a form needs: the call's signal and id, so the form ends with the call. */
-type FormExtra = { signal: AbortSignal; requestId: string | number };
+export type FormExtra = { signal: AbortSignal; requestId: string | number };
 
 /**
  * Show the person a form through the client and report how it ended. Only a
  * client that declared form-mode elicitation is sent one; a failed form is
  * reported, never retried, and never read as an answer.
  */
-async function askWithForm(message: string, requestedSchema: object, extra: FormExtra, tool: string): Promise<ConfirmFormOutcome> {
+export async function askWithForm(message: string, requestedSchema: object, extra: FormExtra, tool: string): Promise<ConfirmFormOutcome> {
   if (!formElicitationSupported(server.server.getClientCapabilities())) return { kind: "unsupported" };
   try {
     const result = await server.server.elicitInput(

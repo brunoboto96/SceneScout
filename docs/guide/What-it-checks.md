@@ -37,6 +37,7 @@ Every tool that acts on the page returns, with its result, whatever went wrong w
 | Watch | `scout_status` | Each session's objective, task and findings so far; in a client that renders MCP Apps, a pane that refreshes itself. In a guided check, the check's progress in plain words and its newest cards |
 | Read the findings | `scout_cards` `scout_feedback` | Show findings as plain cards, worst first, with their pictures; record the person's own "not a bug" or "confirmed" on one, which keeps the finding, and list those labels for a maintainer |
 | Share | `scout_team_report` | Write the team report: a page with a cover, the check's problems as cards with pictures, what was not checked and blank sign-off lines, and an evidence folder with the pictures, the report as Markdown and a manifest of every file's SHA-256 |
+| File tickets | `scout_ticket_preview` `scout_ticket_file` | Preview the problems the person chose as GitHub or Jira tickets, reading the tracker for what is already filed and sending nothing; then file exactly that preview, only once the person says yes in the server's own form, within 10 minutes and while those problems are unchanged. The issues are the ones `scenescout export` files, with its marker, so neither files a problem twice |
 | Close | `scout_close` | Close one session or all of them |
 
 A few do more than their name suggests:
