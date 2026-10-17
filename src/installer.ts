@@ -264,7 +264,13 @@ export function npxServeArgs(version: string): string[] {
 
 /** Whether a registered argument line is this package's npx launcher: unpinned (older installs) or pinned to any release. */
 export function isNpxServeArgs(args: string): boolean {
-  return /^-y scenescout(@\d+\.\d+\.\d+)? serve$/.test(args);
+  return /^-y scenescout(@\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)? serve$/.test(args);
+}
+
+/** The release an npx launcher line pins, or null when it is unpinned or not this package's launcher. A pre-release such as `3.26.0-beta.1` counts. */
+export function pinnedVersion(args: string): string | null {
+  const match = /^-y scenescout@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?) serve$/.exec(args);
+  return match ? match[1] : null;
 }
 
 /**
@@ -610,6 +616,19 @@ export function diagnose(opts: {
           detail: absolute ? `via ${command} ${serverPath}` : `registered with a bare \`${command}\` command, which Claude Code may not find on its PATH`,
           fix: repair.setup,
         });
+        const pinned = pinnedVersion(serverPath);
+        if (pinned !== null) {
+          // A pin npm does not have makes every launch fail (a release whose publish did not finish). Only a definite "no such version" fails; no npm, or no network, says nothing.
+          const view = opts.run("npm", ["view", `${CLI_NAME}@${pinned}`, "version"]);
+          if (!view.missing && view.status !== 0 && /E404|No match found|notarget/i.test(view.stderr + view.stdout)) {
+            checks.push({
+              name: "registered version is published",
+              ok: false,
+              detail: `the registration pins ${CLI_NAME}@${pinned}, which npm does not have`,
+              fix: `${repair.setup}   (or wait for the release's publish to finish)`,
+            });
+          }
+        }
       } else if (!samePath(serverPath, server)) {
         // The usual aftermath of moving or deleting a checkout.
         checks.push({ name: "MCP server registered", ok: false, detail: `registered, but pointing at ${serverPath} — not this install`, fix: repair.setup });

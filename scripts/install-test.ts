@@ -37,6 +37,7 @@ import {
   manualRegisterCommand,
   npxServeArgs,
   isNpxServeArgs,
+  pinnedVersion,
   parseRegistration,
   planCommand,
   registerMcp,
@@ -1125,6 +1126,12 @@ test("an install run through npx registers the npx launcher, never a path inside
   assert.equal(isNpxServeArgs("-y scenescout@3.25.0 serve"), true);
   assert.equal(isNpxServeArgs("-y other-pkg serve"), false);
   assert.equal(isNpxServeArgs("-y scenescout@evil serve"), false);
+  // A pre-release pin is this launcher too, so a registration made from one is replaced, not reported as something else.
+  assert.equal(isNpxServeArgs("-y scenescout@3.26.0-beta.1 serve"), true);
+  assert.equal(isNpxServeArgs("-y scenescout@3.26.0-beta.1; rm serve"), false);
+  assert.equal(pinnedVersion("-y scenescout@3.26.0-beta.1 serve"), "3.26.0-beta.1");
+  assert.equal(pinnedVersion("-y scenescout@3.26.0 serve"), "3.26.0");
+  assert.equal(pinnedVersion("-y scenescout serve"), null);
   assert.ok(path.isAbsolute(launch[0]) && /npx(\.cmd)?$/.test(launch[0]), "an absolute npx beside the running node, so it starts under nvm too");
   assert.ok(!launch.join(" ").includes("_npx"), "nothing in the registration points into the cache");
   // A node that ships without npm: a bare npx on PATH beats an absolute path to nothing.
@@ -1151,6 +1158,29 @@ test("diagnose accepts an npx registration and vets its launcher", () => {
   const bare = diagnose({ ...base, run: scripted([ok("scenescout:\n  Command: npx\n  Args: -y scenescout serve\n")]).run }).filter((c) => !c.ok);
   assert.equal(bare.length, 1);
   assert.match(bare[0].detail, /bare `npx`/);
+});
+
+test("diagnose fails a registration that pins a version npm does not have, and only on a definite answer", () => {
+  const packageRoot = fakePackage();
+  const claudeDir = tmp("sc-claude-");
+  installSkill({ packageRoot, claudeDir });
+  const chromiumPath = path.join(packageRoot, "chromium");
+  fs.writeFileSync(chromiumPath, "");
+  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
+  const listing = ok("scenescout:\n  Command: /opt/node/bin/npx\n  Args: -y scenescout@9.9.9 serve\n");
+  const names = (checks: ReturnType<typeof diagnose>) => checks.filter((c) => !c.ok).map((c) => c.name);
+
+  // Contrastive pair: the same pin, once unknown to npm and once published.
+  const unpublished = scripted([listing, fail("npm error code E404\nnpm error 404 No match found for version 9.9.9")]);
+  const missingPin = diagnose({ ...base, run: unpublished.run });
+  assert.deepEqual(names(missingPin), ["registered version is published"]);
+  assert.deepEqual(unpublished.calls[1], ["npm", "view", "scenescout@9.9.9", "version"]);
+  assert.match(missingPin.find((c) => !c.ok)!.detail, /scenescout@9\.9\.9.*npm does not have/);
+
+  assert.deepEqual(names(diagnose({ ...base, run: scripted([listing, ok("9.9.9\n")]).run })), []);
+  // No npm, or an npm that failed for another reason (offline), is not evidence of a missing release.
+  assert.deepEqual(names(diagnose({ ...base, run: scripted([listing, absent]).run })), []);
+  assert.deepEqual(names(diagnose({ ...base, run: scripted([listing, fail("npm error network request failed ENOTFOUND")]).run })), []);
 });
 
 test("the engine-only doctor does not fail a plugin install for lacking a skill link or a registration", () => {
