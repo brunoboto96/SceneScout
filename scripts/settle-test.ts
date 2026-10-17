@@ -22,6 +22,8 @@ import {
   QUIET_MS,
   RECHECK_BUSY_CAP_MS,
   RECHECK_CAP_MS,
+  RECHECK_DRAWN_AGE_MS,
+  RECHECK_EMPTY_AGE_MS,
   RECHECK_OPEN_MS,
   RECHECK_WAITS_MS,
   recheckWait,
@@ -443,7 +445,7 @@ test("stableUrlOf returns the URL so far once the session leaves the page", asyn
 // ── re-reading the page's controls before a snapshot (snapshot-collect.ts) ──
 
 const recheck = (over: Partial<Parameters<typeof recheckWait>[0]> = {}) =>
-  recheckWait({ counts: [5], elapsedMs: 0, inFlight: 0, sinceLastStartMs: QUIET_MS * 10, ...over });
+  recheckWait({ counts: [5], elapsedMs: 0, inFlight: 0, sinceLastStartMs: QUIET_MS * 10, ageMs: 60_000, ...over });
 
 test("the re-check waits grow from a short first one, and two equal reads of a quiet page end it", () => {
   assert.deepEqual([...RECHECK_WAITS_MS], [50, 100, 200, 400]);
@@ -495,4 +497,25 @@ test("a request the page keeps open for its life (a stream, a long poll) stops c
   assert.equal(t.openWithin(RECHECK_OPEN_MS, RECHECK_OPEN_MS + 50), 0, "only the stream is left, and it is the page's way of working");
   // So a page with only an old stream out reads as quiet, and equal reads end the wait.
   assert.equal(recheck({ counts: [12, 12], elapsedMs: 50, inFlight: t.openWithin(RECHECK_OPEN_MS, RECHECK_OPEN_MS + 50) }), null);
+});
+
+test("a page that has just loaded or just been acted on is not taken as read before it has had time to draw", () => {
+  // A single-page app draws its route's content from a timer, with no request to wait on. Two equal quiet reads of the
+  // shell 50 ms apart prove nothing about a page that loaded 170 ms ago; the same reads of a page up for a while do.
+  assert.equal(typeof recheck({ counts: [2, 2], elapsedMs: 50, ageMs: 170 }), "number", "the shell, just loaded: read again");
+  assert.equal(recheck({ counts: [2, 2], elapsedMs: 50, ageMs: RECHECK_DRAWN_AGE_MS }), null, "the same reads, the page up long enough");
+  assert.equal(recheck({ counts: [2, 2], elapsedMs: 50, ageMs: RECHECK_DRAWN_AGE_MS - 30 }), 30, "the next read is when the page is old enough, not later");
+  // Young, a quiet page may be read past the quiet cap until it is old enough, never past the busy cap.
+  assert.equal(typeof recheck({ counts: [2, 2], elapsedMs: RECHECK_CAP_MS, ageMs: RECHECK_DRAWN_AGE_MS - 1 }), "number");
+  assert.equal(recheck({ counts: [2, 2], elapsedMs: RECHECK_BUSY_CAP_MS, ageMs: 0 }), null);
+});
+
+test("an empty page is not taken as a dead end until it has been up as long as the old rule gave it", () => {
+  // An empty shell that draws everything from a timer: two empty reads soon after the load are not a dead end.
+  assert.equal(typeof recheck({ counts: [0, 0], elapsedMs: 50, ageMs: 200 }), "number");
+  assert.equal(typeof recheck({ counts: [0, 0], elapsedMs: 50, ageMs: RECHECK_DRAWN_AGE_MS }), "number", "a drawn page's age is not enough for an empty one");
+  assert.equal(recheck({ counts: [0, 0], elapsedMs: 50, ageMs: RECHECK_EMPTY_AGE_MS }), null, "empty and up that long: it is what it is");
+  // ...and once it draws, the drawn page's age applies.
+  assert.equal(recheck({ counts: [0, 0, 5, 5], elapsedMs: 750, ageMs: 900 }), null);
+  assert.ok(RECHECK_EMPTY_AGE_MS <= RECHECK_BUSY_CAP_MS, "the empty page's wait fits within the re-reads' own cap");
 });

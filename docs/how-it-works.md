@@ -112,9 +112,13 @@ reads, both taken while the page is quiet (no request out, none started in
 the last 120 ms), find the same number of controls, at most 1 s; while
 requests are still out, equal reads do not count, up to 4 s. A request open
 longer than 2 s (a stream or a long poll the page keeps for its whole life)
-does not keep the page busy. An empty page with nothing on its way
-counts as read after two reads. A page that draws late from a timer, with no
-request, after two reads have agreed, is read before it draws.
+does not keep the page busy. Equal reads also do not count while the page is
+young: until 400 ms after its document arrived or the last action, or 4 s for
+a page with no controls at all, so a single-page app that draws from a timer,
+with no request, is read for as long as the old fixed re-check gave it, and an
+empty shell still drawing is not reported as a dead end. A snapshot taken
+after the page has been up that long reads it twice, 50 ms apart. A page that
+draws from a timer later than that is read before it draws.
 
 Separately, where a **bounce verdict** is about to be made — attach judging a
 storage state, navigate judging coverage — the URL is watched until it holds

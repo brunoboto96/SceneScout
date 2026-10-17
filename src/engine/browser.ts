@@ -800,7 +800,7 @@ export class BrowserEngine {
     foreignOriginOf: (frame) => this.foreignOriginOf(frame),
     harvestRoutes: (elements) => this.harvestRoutes(elements),
     // Only young requests: a stream the page keeps open for its whole life is not content on its way (settle.ts RECHECK_OPEN_MS).
-    requests: () => ({ inFlight: this.requests.openWithin(RECHECK_OPEN_MS), lastRequestStart: this.lastRequestStart }),
+    requests: () => ({ inFlight: this.requests.openWithin(RECHECK_OPEN_MS), lastRequestStart: this.lastRequestStart, changedAt: this.actionStartedAt }),
   });
   private currentFingerprint = "";
   /** URL at the time of the last snapshot — refs are valid only while it matches. */

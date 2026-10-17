@@ -77,6 +77,19 @@ export const RECHECK_CAP_MS = 1000;
 /** Longest while the page still has requests out or just started one: its content may be on the way. */
 export const RECHECK_BUSY_CAP_MS = 4000;
 
+/**
+ * How long after a page loaded, or was last acted on, two equal quiet reads of it count. A single-page app can draw
+ * its route's content from a timer, with no request to wait on; the old fixed re-check never judged a page sooner
+ * than about this long after the action (a 120 ms quiet window, then 300 ms).
+ */
+export const RECHECK_DRAWN_AGE_MS = 400;
+/**
+ * The same for a page with no controls at all: an empty shell is most often one still drawing, and calling it a dead
+ * end is a finding. The old rule read an empty page for about this long. The count is the page's own document's, so a
+ * page whose controls are all inside frames is read this long too, as it was before.
+ */
+export const RECHECK_EMPTY_AGE_MS = 4000;
+
 export interface RecheckState {
   /** How many controls each read so far found, the first read first. */
   counts: readonly number[];
@@ -88,6 +101,11 @@ export interface RecheckState {
   inFlight: number;
   /** Since the most recent request started. */
   sinceLastStartMs: number;
+  /**
+   * How long the page had been up at the latest read: since its document arrived or the latest action, whichever is
+   * later. Measured, not inferred from the reads, so a snapshot taken long after the page drew needs no extra wait.
+   */
+  ageMs: number;
 }
 
 /** A request open longer than this is not content on its way (an EventSource, a long poll): it does not keep the re-reads going. */
@@ -107,19 +125,24 @@ export function recheckBusy(inFlight: number, sinceLastStartMs: number): boolean
  *
  * Two equal reads, both taken while the page was quiet and with the page still
  * quiet (no young request out, none started within QUIET_MS), end it, an empty
- * page included: an empty page with nothing on its way is what it is. While
- * the page is busy, equal reads do not count, up to RECHECK_BUSY_CAP_MS. There is always one re-read. A page that renders
- * late from a timer, with no request, after the reads have agreed is not waited
- * for.
+ * page included once it is old enough (below): one with nothing on its way is what it is. While
+ * the page is busy, equal reads do not count, up to RECHECK_BUSY_CAP_MS. There is always one re-read.
+ *
+ * Nor do they count while the page is young (RECHECK_DRAWN_AGE_MS, or RECHECK_EMPTY_AGE_MS for a page with no
+ * controls): a page that draws from a timer, with no request, is read for at least as long after its load or the
+ * action as the old fixed re-check gave it. A snapshot taken after the page has been up that long is not slowed.
  */
 export function recheckWait(s: RecheckState): number | null {
   const n = s.counts.length;
   const busy = recheckBusy(s.inFlight, s.sinceLastStartMs);
   const quietPair = !(s.busyAt?.[n - 1] ?? false) && !(s.busyAt?.[n - 2] ?? false);
-  if (n >= 2 && s.counts[n - 1] === s.counts[n - 2] && quietPair && !busy) return null;
-  const cap = busy ? RECHECK_BUSY_CAP_MS : RECHECK_CAP_MS;
+  const untilOld = (s.counts[n - 1] === 0 ? RECHECK_EMPTY_AGE_MS : RECHECK_DRAWN_AGE_MS) - s.ageMs;
+  const young = untilOld > 0;
+  if (n >= 2 && s.counts[n - 1] === s.counts[n - 2] && quietPair && !busy && !young) return null;
+  const cap = busy || young ? RECHECK_BUSY_CAP_MS : RECHECK_CAP_MS;
   if (s.elapsedMs >= cap) return null;
-  return Math.min(RECHECK_WAITS_MS[Math.min(n - 1, RECHECK_WAITS_MS.length - 1)], cap - s.elapsedMs);
+  // Young, the next read is taken as the page comes of age rather than up to a whole step after it.
+  return Math.min(RECHECK_WAITS_MS[Math.min(n - 1, RECHECK_WAITS_MS.length - 1)], cap - s.elapsedMs, young ? untilOld : Infinity);
 }
 
 /** How long a navigation that finished without failing still counts as on its way, waiting for its frame to commit it. */
