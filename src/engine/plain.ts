@@ -106,27 +106,29 @@ const ROLE_WORD: Record<string, string> = {
  */
 function control(target: string, kind = "control"): string {
   const t = target.trim();
-  let m = /^(\w+) "(.*)"$/.exec(t);
+  const m = /^(\w+) "(.*)"$/.exec(t);
   if (m) {
     const word = ROLE_WORD[m[1]] ?? m[1];
     return m[2] ? `the "${m[2]}" ${word}` : `the unnamed ${word}`;
   }
-  if ((m = /^role=(\w+)\[name=(?:"(.*)"|'(.*)'|(.*?))\]$/.exec(t))) {
-    const word = ROLE_WORD[m[1]] ?? m[1];
-    const name = m[2] ?? m[3] ?? m[4] ?? "";
+  // A plan's locator, read as flow.ts's parseTarget reads it (that module
+  // cannot be imported here without a cycle), so anything a plan would refuse
+  // (a CSS selector, a chained locator) is quoted as it is rather than half-read.
+  const role = /^role=([a-z]+)(?:\[name=(?:"([^"]*)"|'([^']*)'|([^\]"']*))\])?$/i.exec(t);
+  if (role) {
+    const word = ROLE_WORD[role[1].toLowerCase()] ?? role[1].toLowerCase();
+    const name = role[2] ?? role[3] ?? role[4];
     return name ? `the "${name}" ${word}` : `the unnamed ${word}`;
   }
-  if ((m = /^role=(\w+)$/.exec(t))) return `the unnamed ${ROLE_WORD[m[1]] ?? m[1]}`;
-  if ((m = /^label=(.+)$/.exec(t))) return `the "${m[1]}" field`;
-  if ((m = /^text=(.+)$/.exec(t))) return `"${m[1]}"`;
-  if ((m = /^testid=(.+)$/.exec(t))) {
-    const words = m[1]
-      .replace(/^["']|["']$/g, "")
-      .replace(/[-_]+/g, " ")
-      .trim();
-    return words ? `the "${words}" ${kind}` : `the ${kind}`;
-  }
-  return t;
+  const by = /^(testid|label|text)=(.+)$/.exec(t);
+  if (!by) return t;
+  if (by[1] === "label") return `the "${by[2]}" field`;
+  if (by[1] === "text") return `"${by[2]}"`;
+  const words = by[2]
+    .replace(/^["']|["']$/g, "")
+    .replace(/[-_]+/g, " ")
+    .trim();
+  return words ? `the "${words}" ${kind}` : `the ${kind}`;
 }
 
 /** One action-log step, split into what was done, to what, and on which page. */

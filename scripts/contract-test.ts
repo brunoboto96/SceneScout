@@ -1326,6 +1326,16 @@ test("plain steps: each repro action as a person would do it, and the tester's o
   ];
   for (const [line, want] of cases) assert.equal(plainStep(line), want, line);
   for (const [line] of cases) assert.doesNotMatch(plainStep(line) ?? "", /testid=|text=|label=|role=/, line);
+  // A target the plan's own parser refuses is quoted as it is, never half-read
+  // into words; a role is read in any case, as the plan reads it.
+  const raw: Array<[string, string]> = [
+    ['plan:click role=button[name="Save"][exact] @ http://app.test/x', 'Click role=button[name="Save"][exact]'],
+    ['plan:click role=button[name="Save"] >> nth=1 @ http://app.test/x', 'Click role=button[name="Save"] >> nth=1'],
+    ["plan:click css=.toolbar > button @ http://app.test/x", "Click css=.toolbar > button"],
+    ["plan:click testid= @ http://app.test/x", "Click testid="],
+    ["plan:click role=BUTTON @ http://app.test/x", "Click the unnamed button"],
+  ];
+  for (const [line, want] of raw) assert.equal(plainStep(line), want, line);
 });
 
 test("plain steps: start at the last page the run went to, or at the page the trace began on", () => {
@@ -1641,11 +1651,24 @@ test("a finding's title with a closing fold tag is text in the folded technical 
   const trap = "Save </details> closes early";
   store.addFinding({ severity: "high", category: "http-error", title: trap, detail: "d", url: "http://app.test/a", state: "/a#1" });
   store.addFinding({ severity: "low", category: "visual", title: "Save closes nothing early", detail: "d", url: "http://app.test/b", state: "/b#2" });
+  // A "worth a look" entry has its own heading in the same fold.
+  const look = "Spacing </details> off the grid";
+  store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: look,
+    detail: "d",
+    url: "http://app.test/c",
+    state: "/c#3",
+    tier: "worth_a_look",
+    convention: "a 4px scale",
+  });
   const extras = { routesVisited: 1, routesTotal: 1, designAudits: 0 };
   const both = generateReport(store, [], extras, { write: false }).markdown;
   const folded = both.slice(both.indexOf("## Technical details"));
   assert.ok(!folded.split("\n").some((l) => l.startsWith("#") && l.includes("</details>")), "no raw fold tag from a title in a heading inside the fold");
   assert.match(folded, /### .* Save &lt;\/details&gt; closes early\n/);
+  assert.match(folded, /### Spacing &lt;\/details&gt; off the grid\n/);
   // The contrast: the other title, and the document's balance of folds.
   assert.match(folded, /### .* Save closes nothing early\n/);
   const opens = (both.match(/<details>/g) ?? []).length;
@@ -1656,7 +1679,7 @@ test("a finding's title with a closing fold tag is text in the folded technical 
   assert.ok(!html.includes("&amp;lt;"), "and never double-escaped");
   // Unfolded (dev), nothing is escaped: the document has no fold to close.
   const dev = generateReport(store, [], { ...extras, report: "dev" }, { write: false }).markdown;
-  assert.ok(dev.includes(trap));
+  assert.ok(dev.includes(trap) && dev.includes(`### ${look}`));
 });
 
 test("the Evidence caption names no finding id, and the HTML still hangs the recorded frames under the item", () => {

@@ -147,7 +147,7 @@ function projectName(dir: string): string {
  * when there are none. The first bullet names the id, as a finding's does, so
  * the live view hangs the frames recorded around it under the entry.
  */
-function formatWorthALook(items: readonly Finding[], sessionStart: string): string[] {
+function formatWorthALook(items: readonly Finding[], sessionStart: string, folded = false): string[] {
   if (items.length === 0) return [];
   const lines = [
     `## Worth a look (${items.length})`,
@@ -156,7 +156,8 @@ function formatWorthALook(items: readonly Finding[], sessionStart: string): stri
     ``,
   ];
   for (const f of items) {
-    lines.push(`### ${f.title}`, ``);
+    // Inside the fold a title is text, as a finding's is (findingRenderer).
+    lines.push(`### ${folded ? escapeSummaryText(f.title) : f.title}`, ``);
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}${f.foundAt >= sessionStart ? "" : " · seen in an earlier run"}`);
     lines.push(`- **A defect only if** your project uses ${f.convention ?? "a convention the finding does not name"}`);
     if (f.evidence) lines.push(`- **Seen:** \`${f.evidence}\``);
@@ -850,7 +851,7 @@ export function generateReport(
   roleMatrixSection(lines, memory);
   const gaps = gapLedgerSection(lines, memory, extras);
   findingSections(lines, current, historical, extras, now);
-  lines.push(...formatWorthALook(worthALook, memory.sessionStart));
+  lines.push(...formatWorthALook(worthALook, memory.sessionStart, foldsTechnical(extras)));
   resolvedSection(lines, resolved, extras, now);
   runSettingsSections(lines, extras);
   trailingSections(lines, memory, oracleLog, extras, cov);
