@@ -177,6 +177,40 @@ export async function confirmedPicture<S, V extends { status: string; diff?: { c
   return { shot: again, verdict: judge(again), first: verdict };
 }
 
+/** Whether a verdict is a baseline written with nothing to compare it with: no baseline yet, or one that could not be used, under update. */
+export function writesFreshBaseline(verdict: { status: string; diff?: unknown }): boolean {
+  return verdict.status === "updated" && !verdict.diff;
+}
+
+/**
+ * A baseline written for the first time, confirmed: a picture with nothing to
+ * be compared against (writesFreshBaseline) would become the baseline for
+ * every later compare, so a render that is off for one load (see
+ * confirmedPicture) must not be what is written. `first` is the picture
+ * already taken; a second load is taken, and the baseline is written only
+ * when the two agree (`same`). When they differ a third is taken, and the one
+ * that agrees with either is kept. When all three differ the page draws
+ * differently on every load, `agreed` is false and nothing is to be written.
+ * A load that cannot be taken throws, as the first would.
+ */
+export async function agreedFirstPicture<S, V>(
+  first: { shot: S; verdict: V },
+  take: () => Promise<S>,
+  judge: (shot: S) => V,
+  same: (a: S, b: S) => boolean,
+): Promise<{ shot: S; verdict: V; agreed: boolean; takes: number }> {
+  const second = await take();
+  if (same(first.shot, second)) return { shot: second, verdict: judge(second), agreed: true, takes: 2 };
+  const third = await take();
+  if (same(third, first.shot) || same(third, second)) return { shot: third, verdict: judge(third), agreed: true, takes: 3 };
+  return { shot: third, verdict: judge(third), agreed: false, takes: 3 };
+}
+
+/** What a result says when a first baseline's loads never agreed (agreedFirstPicture): nothing is written, so a later run takes it again. */
+export function unstableFirstNote(takes: number): string {
+  return `${takes} loads drew the page differently each time, so no baseline was written: it is not stable enough to keep one of; run the check again, or fix what moves`;
+}
+
 /**
  * What a result says when its first picture differed and a second load's matched (confirmedPicture): the loads
  * disagree, so the gate passes, and the line says so, so a difference shown on a first visit only is still seen.
