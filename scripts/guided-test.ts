@@ -1721,12 +1721,13 @@ test("prompts: File problems as tickets takes github or jira, refuses anything e
   assert.equal(guidedPromptText(FILE_TICKETS_PROMPT, { to: "" }), bare, "a tracker field left empty is one left out");
 });
 
-test("prompts: Make a team report writes today's plain report and says the team version is coming; Re-check never attaches above Look only", () => {
+test("prompts: Make a team report calls scout_team_report and says where the page is; Re-check never attaches above Look only", () => {
   const report = guidedPromptText(TEAM_REPORT_PROMPT, undefined);
-  assert.ok(report.includes(ACTION_PROMPT.plainReport), "the same request the panel's report button sends");
-  assert.ok(report.includes(NOT_YET["team-report"]));
-  assert.match(report, /report\.html/);
-  assert.match(report, /force: true only when the person says/);
+  assert.match(report, /Call scout_team_report with no arguments/);
+  assert.ok(!/coming in a later version/.test(report), "the team report is no longer promised for later");
+  assert.ok(!report.includes("scout_report"), "it does not fall back to the plain report");
+  assert.match(report, /team-report\.html/);
+  assert.match(report, /nothing is sent anywhere/);
   const recheck = guidedPromptText(RECHECK_PROMPT, undefined);
   assert.ok(recheck.includes(ACTION_PROMPT.recheck), "the same request the panel's re-check button sends");
   assert.match(recheck, /scout_verify with no arguments/);

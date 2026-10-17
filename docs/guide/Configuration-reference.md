@@ -532,7 +532,7 @@ Clients that list the server's prompts offer these as commands, beside `scout_pl
 | `login` | `role` (required), `url` (optional) | Call `scout_login` for that role and wait the way that tool waits. The person signs in in the window it opens. `url` is the app's address when you have it |
 | `check-my-site` | `url` (optional) | Shown as *Check my site*. Call `scout_intake` (with the address when given), follow the guided plan it returns, show progress with `scout_status`, and end with `scout_cards` and the follow-up prompts. Never choose a care level for the person. An address with a user name, password or token in it, or with a space, line break or hidden character, is refused without being repeated |
 | `recheck` | none | Shown as *Re-check after a fix*. Attach in `observe` only, list the open findings with `scout_verify`, re-test each and record its verdict, then show the cards that changed |
-| `team-report` | none | Shown as *Make a team report*. Say the shareable team report is coming in a later version, then write the plain report (`scout_report {report: "qa"}`) and say where `report.html` is |
+| `team-report` | none | Shown as *Make a team report*. Call `scout_team_report` and say where `team-report.html` and its evidence folder are; nothing is sent anywhere |
 | `file-tickets` | `to` (optional) | Shown as *File problems as tickets*. `to` is `github` or `jira`. Files nothing from the chat: show the cards, then give the `scenescout export` command a developer runs (a dry run unless `--yes`), and never ask for a token |
 | `is-it-safe` | none | Shown as *Is it safe to run on my live site?*. Reply with the guided safety explainer word for word, calling no tool |
 

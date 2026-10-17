@@ -2957,6 +2957,69 @@ test("Claude's own attach that writes, and filing tickets, ask the person first;
   assert.match(guided.guardFor(attach("safe-write"), [])!.question, /"safe-write" mode \(May create test data\)/);
 });
 
+test("the results screen makes the team report with no turn for Claude, then offers the page and its folder", () => {
+  const page = "/home/u/site/.scenescout/team-report.html";
+  const folder = "/home/u/site/.scenescout/team-report";
+  // The tool the button calls is the server's own.
+  const resultsSource = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "tools", "results.ts"), "utf8");
+  assert.ok(resultsSource.includes(`"${guided.TEAM_REPORT_TOOL}",`), "the button names the tool the server registers");
+  assert.ok(!guided.DIRECT_TOOLS.includes(guided.TEAM_REPORT_TOOL), "an engine action cannot reach it: only the results screen's own button does");
+
+  const results = drawGuided("desktop", wizard({ step: "results", cards: [cardFixture("0a1b2c3d4e")], cardsTotal: 1 }), STATUS_IDLE);
+  assert.deepEqual(results.press("guided-results-team-report"), { type: "teamReport", payload: undefined });
+  const label = elementsOf(results.tree).find((e) => e.props.key === "guided-results-team-report")!;
+  assert.equal(label.props.label, ACTION_LABEL.teamReport);
+  assert.ok(!results.text.includes(guided.PANEL_WORDS.openReport), "no link before a report is made");
+
+  const writing = drawGuided("desktop", wizard({ step: "results", cards: [], busy: "team-report" }), STATUS_IDLE);
+  assert.ok(writing.text.includes(guided.PANEL_WORDS.writingTeamReport));
+
+  const made = drawGuided("desktop", wizard({ step: "results", cards: [], teamReport: { path: page, folder } }), STATUS_IDLE);
+  assert.ok(made.text.includes(`[${guided.PANEL_WORDS.openReport}](file:///home/u/site/.scenescout/team-report.html)`), made.text);
+  assert.ok(made.text.includes(`[${guided.PANEL_WORDS.showFolder}](file:///home/u/site/.scenescout/team-report)`), made.text);
+
+  const answer = (structuredContent: Record<string, unknown>, isError = false) => ({
+    isError,
+    content: [{ type: "text", text: isError ? "Error: No project is open yet" : `Team report written: ${String(structuredContent.path)}\nmore` }],
+    structuredContent,
+  });
+  assert.deepEqual(guided.readTeamReport(answer({ path: page, folder })), { ok: true, path: page, folder, said: `Team report written: ${page}` });
+  assert.deepEqual(guided.readTeamReport(answer({ path: "C:\\site\\.scenescout\\team-report.html", folder: "C:\\site\\.scenescout\\team-report" })).ok, true);
+  assert.deepEqual(guided.readTeamReport(answer({}, true)), { ok: false, error: "No project is open yet" });
+  // Anything but the page named team-report.html inside a .scenescout/ folder, and its own folder, is never offered as a link.
+  for (const [p, f] of [
+    ["/home/u/Downloads/run-me.command", folder],
+    ["/home/u/site/.scenescout/team-report.html", "/home/u/Downloads"],
+    ["site/.scenescout/team-report.html", "site/.scenescout/team-report"],
+    ["/home/u/site/team-report.html", "/home/u/site/team-report"],
+  ])
+    assert.equal(guided.readTeamReport(answer({ path: p, folder: f })).ok, false, `${p} | ${f}`);
+  // A value an older version or a bad write left in the state is dropped.
+  assert.equal(guided.wizardOf({ teamReport: { path: "relative.html", folder: "x" } }).teamReport, null);
+  assert.deepEqual(guided.wizardOf({ teamReport: { path: page, folder } }).teamReport, { path: page, folder });
+});
+
+test("the team report button cannot be pressed twice while the report is written, and reading the problems still says so", () => {
+  const writing = drawGuided("desktop", wizard({ step: "results", cards: [], busy: "team-report" }), STATUS_IDLE);
+  assert.ok(!elementsOf(writing.tree).some((e) => e.props.key === "guided-results-team-report"), "no second press while the first is being written");
+  const idle = drawGuided("desktop", wizard({ step: "results", cards: [] }), STATUS_IDLE);
+  assert.ok(elementsOf(idle.tree).some((e) => e.props.key === "guided-results-team-report"));
+  // While the problems are being read, the screen says that, not that there are none.
+  const reading = drawGuided("desktop", wizard({ step: "results", cards: [], busy: "cards" }), STATUS_IDLE);
+  assert.ok(reading.text.includes("Reading the problems..."));
+  assert.ok(!reading.text.includes(guided.PANEL_WORDS.noCards), reading.text);
+  // A report already made does not hide that this check found nothing.
+  const made = drawGuided(
+    "desktop",
+    wizard({ step: "results", cards: [], teamReport: { path: "/home/u/site/.scenescout/team-report.html", folder: "/home/u/site/.scenescout/team-report" } }),
+    STATUS_IDLE,
+  );
+  assert.ok(made.text.includes(guided.PANEL_WORDS.noCards), made.text);
+  assert.ok(made.text.includes(guided.PANEL_WORDS.openReport));
+  // A saved state is held to the same rule as the server's answer: only the team report page in a .scenescout/ folder is ever a link.
+  assert.equal(guided.wizardOf({ teamReport: { path: "/home/u/Downloads/run-me.command", folder: "/home/u/Downloads" } }).teamReport, null);
+});
+
 test("the cards, their pictures on disk, and the picture probe are read from what the server sends", () => {
   const withPicture = { ...cardFixture("0a1b2c3d4e"), picture: { file: "shots/0a.png", width: 800, height: 600, what: "the page" } };
   const without = cardFixture("1b2c3d4e5f", { severity: "low" });
