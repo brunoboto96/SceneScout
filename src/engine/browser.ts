@@ -145,6 +145,9 @@ import {
   sharedWorkersAllowed,
   unloadWriteInterception,
   closeWaitsForLeavingWrites,
+  awaitsDroppedNavigationErrorPage,
+  droppedNavigationErrorPage,
+  DROPPED_NAVIGATION_WAIT_MS,
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
@@ -834,6 +837,8 @@ export class BrowserEngine {
   private socketsWarned = false;
   /** When the current action began — requests recorded before this are late arrivals from a previous action. */
   private actionStartedAt = 0;
+  /** When the write policy last dropped a navigation of the driven page's main frame (browsers.ts awaitsDroppedNavigationErrorPage). */
+  private refusedNavigationAt: number | null = null;
   /**
    * Resources created by this RUN (safe-write): id → collection paths.
    * Backed by the shared MemoryStore so every named session in a multi-role
@@ -1736,6 +1741,13 @@ export class BrowserEngine {
       requests.ended(req, true);
       this.watchResponse(req, null);
       this.pageRequests.failed(req, req.failure()?.errorText ?? "", Date.now(), this.guard.refused(req));
+      if (req.isNavigationRequest() && this.guard.refused(req)) {
+        try {
+          if (this.page && req.frame() === this.page.mainFrame()) this.refusedNavigationAt = Date.now();
+        } catch {
+          /* no frame: not the driven page */
+        }
+      }
     });
     context.on("response", (res) => {
       this.noteAuthAnswer(res);
@@ -2590,6 +2602,20 @@ export class BrowserEngine {
   private async afterAction(action: string, target: string, click?: ClickContext): Promise<string> {
     const page = this.requirePage();
     await this.settle();
+    // A navigation the policy dropped is replaced by Chromium's error page only some time after it fails, which can be
+    // after the settle. Read before then, the page looks unmoved and the session is left on the error page.
+    if (
+      awaitsDroppedNavigationErrorPage({
+        engine: this.engineName,
+        url: page.url(),
+        refusedNavigationAt: this.refusedNavigationAt,
+        actionStartedAt: this.actionStartedAt,
+      })
+    ) {
+      const errorPage = droppedNavigationErrorPage(this.engineName);
+      if (errorPage === null) throw new Error("awaitsDroppedNavigationErrorPage waits only in a browser that has an error page");
+      await bestEffort(page.waitForURL((u) => u.href.startsWith(errorPage), { waitUntil: "commit", timeout: DROPPED_NAVIGATION_WAIT_MS }));
+    }
     let url = page.url();
     if (url !== "about:blank" && !this.isSameOrigin(url)) {
       // Either a click carried us off the app's origin, or the write policy
@@ -2597,7 +2623,8 @@ export class BrowserEngine {
       // its error page. The second is the tester's own doing and must say so:
       // reported as an off-origin bounce, it hid the block, and the caller then
       // read the unchanged URL as "the app silently discarded the data".
-      const policyAbortedNavigation = url.startsWith("chrome-error://") && this.blockedRequests.length > 0;
+      const errorPage = droppedNavigationErrorPage(this.engineName);
+      const policyAbortedNavigation = errorPage !== null && url.startsWith(errorPage) && this.blockedRequests.length > 0;
       this.logAction({ action, target, url });
       this.logAction({ action: policyAbortedNavigation ? "write-policy:navigation-blocked" : "origin-fence:bounced", target: url.slice(0, 200), url });
       await bestEffort(page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }));
