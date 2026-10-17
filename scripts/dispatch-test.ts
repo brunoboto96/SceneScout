@@ -21,7 +21,7 @@ import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
 import { bestEffort, settleWithin } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
-import { descendants, extraHandles } from "./smoke/leaks.ts";
+import { busiestOwners, descendants, extraHandles, parseTasklist, parseTcpTable, socketLine, socketsLeft, tcpStateCounts } from "./smoke/leaks.ts";
 import fs from "node:fs";
 import {
   balanceShards,
@@ -319,6 +319,84 @@ test("the smoke open-handle check counts by type, so one more of a kind already 
   assert.deepEqual(extraHandles(["TTYWrap"], ["Timeout", "TCPServerWrap", "TTYWrap"]), ["Timeout", "TCPServerWrap"]);
   // Closing something that was open at the start is not a leak.
   assert.deepEqual(extraHandles(["TTYWrap", "Timeout"], ["TTYWrap"]), []);
+});
+
+test("a suite's own sockets are the TCP handles it opened, not its timers or pipes", () => {
+  assert.deepEqual(socketsLeft(["TTYWrap", "TCPServerWrap"], ["TTYWrap", "TCPServerWrap"]), []);
+  // A stand-in server never closed, and a keep-alive connection to it nobody ended.
+  assert.deepEqual(socketsLeft(["TCPServerWrap"], ["TCPServerWrap", "TCPServerWrap", "TCPSocketWrap", "Timeout", "PipeWrap"]), [
+    "TCPServerWrap",
+    "TCPSocketWrap",
+  ]);
+  // A browser's pipes and a pending timer are the process check's and the end-of-run check's, not this one's.
+  assert.deepEqual(socketsLeft([], ["PipeWrap", "ProcessWrap", "Timeout"]), []);
+  // A socket closed that was open before the suite is not a leak.
+  assert.deepEqual(socketsLeft(["TCPSocketWrap", "TCPServerWrap"], ["TCPServerWrap"]), []);
+});
+
+test("the machine's TCP table is read from netstat on Windows and macOS and from ss on Linux, by state", () => {
+  const windows = [
+    "",
+    "Active Connections",
+    "",
+    "  Proto  Local Address          Foreign Address        State           PID",
+    "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1024",
+    "  TCP    127.0.0.1:52494        0.0.0.0:0              LISTENING       4410",
+    "  TCP    127.0.0.1:52494        127.0.0.1:60001        TIME_WAIT       0",
+    "  TCP    127.0.0.1:60002        127.0.0.1:52494        ESTABLISHED     5120",
+    "  TCP    [::1]:52495            [::1]:60003            CLOSE_WAIT      4410",
+    "  UDP    0.0.0.0:5353           *:*                                    2210",
+  ].join("\r\n");
+  const rows = parseTcpTable(windows);
+  assert.equal(rows.length, 5, "UDP and the headings are not TCP sockets");
+  assert.deepEqual(rows[2], { state: "TIME_WAIT", local: "127.0.0.1:52494", remote: "127.0.0.1:60001", pid: 0 });
+  assert.deepEqual(rows[4], { state: "CLOSE_WAIT", local: "[::1]:52495", remote: "[::1]:60003", pid: 4410 });
+  assert.deepEqual(tcpStateCounts(rows), { LISTEN: 2, TIME_WAIT: 1, ESTABLISHED: 1, CLOSE_WAIT: 1 });
+
+  const mac = [
+    "Active Internet connections (including servers)",
+    "Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)",
+    "tcp4       0      0  127.0.0.1.52494        127.0.0.1.60001        TIME_WAIT",
+    "tcp4       0      0  127.0.0.1.60002        127.0.0.1.52494        ESTABLISHED",
+    "tcp46      0      0  *.52494                *.*                    LISTEN",
+  ].join("\n");
+  assert.deepEqual(tcpStateCounts(parseTcpTable(mac)), { TIME_WAIT: 1, ESTABLISHED: 1, LISTEN: 1 });
+  assert.equal(parseTcpTable(mac)[0].pid, undefined, "macOS netstat -an names no process");
+
+  const linux = [
+    "State      Recv-Q Send-Q Local Address:Port  Peer Address:Port Process",
+    "LISTEN     0      511        127.0.0.1:52494      0.0.0.0:*",
+    "TIME-WAIT  0      0          127.0.0.1:52494    127.0.0.1:60001",
+    "ESTAB      0      0          127.0.0.1:60002    127.0.0.1:52494",
+    "CLOSE-WAIT 1      0          127.0.0.1:60004    127.0.0.1:52494",
+  ].join("\n");
+  assert.deepEqual(tcpStateCounts(parseTcpTable(linux)), { LISTEN: 1, TIME_WAIT: 1, ESTABLISHED: 1, CLOSE_WAIT: 1 });
+  assert.deepEqual(parseTcpTable("garbage\n\n"), []);
+});
+
+test("the socket line names the total and the states, busiest first, and the processes holding most on Windows", () => {
+  const rows = parseTcpTable(
+    [
+      "  TCP    127.0.0.1:1    127.0.0.1:2    TIME_WAIT     0",
+      "  TCP    127.0.0.1:3    127.0.0.1:4    TIME_WAIT     0",
+      "  TCP    127.0.0.1:5    127.0.0.1:6    ESTABLISHED   77",
+      "  TCP    127.0.0.1:7    127.0.0.1:8    ESTABLISHED   77",
+      "  TCP    127.0.0.1:9    0.0.0.0:0      LISTENING     88",
+    ].join("\n"),
+  );
+  assert.equal(socketLine(rows), "5 TCP sockets on this machine: TIME_WAIT 2, ESTABLISHED 2, LISTEN 1");
+  // TIME_WAIT belongs to no process (pid 0), so it is not counted against one.
+  assert.deepEqual(busiestOwners(rows, new Map([[77, "chrome.exe"]]), 3), ["chrome.exe (77): 2", "88: 1"]);
+  assert.deepEqual(busiestOwners(parseTcpTable("tcp4 0 0 127.0.0.1.1 127.0.0.1.2 ESTABLISHED"), new Map(), 3), []);
+  assert.equal(socketLine([]), "0 TCP sockets on this machine");
+  const tasks = parseTasklist('"chrome.exe","5120","Console","1","81,220 K"\r\n"node.exe","4410","Console","1","60,004 K"\r\nINFO: none\r\n');
+  assert.deepEqual(
+    [...tasks],
+    [
+      [5120, "chrome.exe"],
+      [4410, "node.exe"],
+    ],
+  );
 });
 
 test("a smoke shard runs its own suites, and every suite belongs to exactly one shard", () => {
