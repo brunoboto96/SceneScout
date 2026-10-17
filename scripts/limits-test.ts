@@ -3,7 +3,7 @@
  * and a page load may take, where each is set (option > environment >
  * default), the bounds each is held to, what a timeout says (including a
  * scroll of a named target that could not run), and the waits a page gets
- * when a call names none.
+ * when a call names none, and which failed page loads are tried again.
  *
  *   npx tsx --test scripts/limits-test.ts
  */
@@ -16,9 +16,16 @@ import {
   DEFAULT_TIME_LIMITS,
   explainTimeout,
   explicitLimits,
+  formatLoadRetries,
   isTimeoutMessage,
   LIMIT_BOUNDS,
   limitHint,
+  LOAD_RETRIES,
+  LOAD_RETRY_MIN_MS,
+  loadRetryCause,
+  loadRetryNote,
+  loadRetryTimeoutMs,
+  retriedLoadFailure,
   NAV_TIMEOUT_ENV,
   pageTimeouts,
   parseLimit,
@@ -198,4 +205,73 @@ test("a bookkeeping read of a target never outlasts the action, whatever the act
 test("a screenshot keeps Playwright's own 30 s rather than the action limit the page now defaults to", () => {
   assert.equal(SCREENSHOT_TIMEOUT_MS, 30_000);
   assert.ok(SCREENSHOT_TIMEOUT_MS > pageTimeouts(DEFAULT_TIME_LIMITS).timeout);
+});
+
+test("a page load is retried only after net::ERR_NO_BUFFER_SPACE, and only once", () => {
+  const refused = "page.goto: net::ERR_NO_BUFFER_SPACE at http://127.0.0.1:52494/slow-page\nCall log:\n  - navigating";
+  assert.equal(LOAD_RETRIES, 1);
+  assert.equal(loadRetryCause(refused, 0), "ERR_NO_BUFFER_SPACE");
+  // Once retried, a second refusal is the load's failure.
+  assert.equal(loadRetryCause(refused, 1), null);
+  // Every other failure is the app's or the machine's answer, and is reported as it is.
+  for (const other of [
+    "page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:1/",
+    "page.goto: net::ERR_ADDRESS_UNREACHABLE at http://127.0.0.1:1/",
+    "page.goto: net::ERR_INSUFFICIENT_RESOURCES at http://127.0.0.1:1/",
+    "page.goto: Timeout 20000ms exceeded.",
+    "page.goto: NS_ERROR_CONNECTION_REFUSED",
+    "page.goto: net::ERR_NO_BUFFER_SPACE_SOMETHING at http://127.0.0.1:1/",
+    // The code inside the address a failure names is the app's text, not the browser's error.
+    "page.goto: net::ERR_TIMED_OUT at http://127.0.0.1:1/search?q=net::ERR_NO_BUFFER_SPACE",
+    'page.goto: Navigation to "http://127.0.0.1:1/net::ERR_NO_BUFFER_SPACE" is interrupted by another navigation to "http://127.0.0.1:1/"',
+    'page.goto: Timeout 20000ms exceeded.\nCall log:\n  - navigating to "http://127.0.0.1:1/?e=net::ERR_NO_BUFFER_SPACE"',
+  ]) {
+    assert.equal(loadRetryCause(other, 0), null, other);
+  }
+});
+
+test("a retried load is said in the action's result and in the report", () => {
+  const note = loadRetryNote("http://127.0.0.1:8080/things", "ERR_NO_BUFFER_SPACE");
+  assert.match(note, /retried after ERR_NO_BUFFER_SPACE/);
+  assert.ok(note.includes("http://127.0.0.1:8080/things"));
+  assert.deepEqual(formatLoadRetries([]), [], "no retry, no section");
+  const lines = formatLoadRetries([
+    {
+      at: "2026-10-17T10:00:00.000Z",
+      url: "http://127.0.0.1:8080/things",
+      session: "lane-1",
+      cause: "ERR_NO_BUFFER_SPACE",
+      sockets: "150 TCP sockets on this machine: TIME_WAIT 92",
+    },
+  ]);
+  assert.equal(lines[0], "## Page loads retried");
+  const entry = lines.find((l) => l.startsWith("- "));
+  assert.ok(entry, lines.join("\n"));
+  assert.match(entry!, /`http:\/\/127\.0\.0\.1:8080\/things` \(session lane-1\): retried after ERR_NO_BUFFER_SPACE/);
+  assert.ok(entry!.includes("150 TCP sockets on this machine: TIME_WAIT 92"));
+});
+
+test("a retried load gets what is left of its page-load limit, never less than a floor and never unlimited", () => {
+  // Most of the limit is left: the retry has the rest, so the two tries together keep to the limit.
+  assert.equal(loadRetryTimeoutMs(20_000, 2_500), 17_500);
+  // The limit is spent, or nearly: the retry still gets the floor rather than 0, which Playwright reads as no limit.
+  assert.equal(loadRetryTimeoutMs(20_000, 19_900), LOAD_RETRY_MIN_MS);
+  assert.equal(loadRetryTimeoutMs(20_000, 25_000), LOAD_RETRY_MIN_MS);
+  assert.ok(LOAD_RETRY_MIN_MS > 0);
+  // No limit was given: the page's own navigation limit applies to the retry as it did to the first try.
+  assert.equal(loadRetryTimeoutMs(undefined, 2_500), undefined);
+});
+
+test("a retry that failed again says so on the first line its callers show, keeping the rest", () => {
+  const second = new Error("page.goto: net::ERR_NO_BUFFER_SPACE at http://127.0.0.1:1/x\nCall log:\n  - navigating");
+  const out = retriedLoadFailure(second, "ERR_NO_BUFFER_SPACE") as Error;
+  const [first, ...rest] = out.message.split("\n");
+  assert.match(first, /^page\.goto: net::ERR_NO_BUFFER_SPACE at http:\/\/127\.0\.0\.1:1\/x .*retried after ERR_NO_BUFFER_SPACE/);
+  assert.deepEqual(rest, ["Call log:", "  - navigating"]);
+  // A retry that timed out is still a timeout, and still gets the limit's hint.
+  const timedOut = retriedLoadFailure(new Error("page.goto: Timeout 17500ms exceeded."), "ERR_NO_BUFFER_SPACE") as Error;
+  assert.ok(isTimeoutMessage(timedOut.message));
+  assert.match((explainTimeout(timedOut, "nav", 20_000) as Error).message.split("\n")[0], /retried after ERR_NO_BUFFER_SPACE.*page-load limit/);
+  // Not an Error: passed on as it is.
+  assert.equal(retriedLoadFailure("odd", "ERR_NO_BUFFER_SPACE"), "odd");
 });
