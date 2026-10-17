@@ -180,6 +180,8 @@ import {
   LOAD_RETRY_PAUSE_MS,
   loadRetryCause,
   loadRetryNote,
+  loadRetryTimeoutMs,
+  retriedLoadFailure,
   pageTimeouts,
   resolveTimeLimits,
   SCREENSHOT_TIMEOUT_MS,
@@ -1980,7 +1982,10 @@ export class BrowserEngine {
       // Don't leave a half-attached engine (leaked browser, snapshots of about:blank).
       await this.close();
       const explained = explainTimeout(err, "nav", this.limits.navMs);
-      throw new Error(`Could not load ${url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})`);
+      // A load that was retried and loaded before the attach failed is said here, not in a later attach's result.
+      throw new Error(
+        `Could not load ${url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})${this.drainLoadRetries()}`,
+      );
     }
     await this.settle();
     this.logAction({ action: "attach", url: this.page!.url() });
@@ -4071,6 +4076,15 @@ export class BrowserEngine {
     this.leaveChoice = leave;
     try {
       return await this.navigateNow(target);
+    } catch (err) {
+      // A load that was retried and then loaded, before something after it threw: said with this error, not left for
+      // the next action's result.
+      const notes = this.drainLoadRetries();
+      if (!notes || !(err instanceof Error)) throw err;
+      const [first, ...rest] = err.message.split("\n");
+      const out = new Error([first, notes.trim(), ...rest].join("\n"));
+      out.name = err.name;
+      throw out;
     } finally {
       this.leaveChoice = undefined;
       this.onLeaveRefused = null;
@@ -4911,10 +4925,7 @@ export class BrowserEngine {
     let challenge: string | null = null;
     // A load retried after a refused socket says so on the route's line, not in a later action's result.
     const retriesBefore = this.loadRetryNotes.length;
-    const retriedFlag = (): string | null => {
-      const retry = this.loadRetryNotes.splice(retriesBefore)[0];
-      return retry ? `retried after ${retry.cause}` : null;
-    };
+    let retried: string | null = null;
     try {
       const resp = await this.loadPage(page, url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs });
       status = resp?.status() ?? "no-response";
@@ -4961,8 +4972,10 @@ export class BrowserEngine {
       }
     } finally {
       answered.stop();
+      // Taken here, so a route that ends early cannot leave its note for a later action's result.
+      const retry = this.loadRetryNotes.splice(retriesBefore)[0];
+      if (retry) retried = `retried after ${retry.cause}`;
     }
-    const retried = retriedFlag();
     // A feed, a file or data: recorded as what it is and left there. It has no controls to collect or audit, and one
     // that answered leaves the route contract, so it is neither a dead end nor a gap.
     if (resource) {
@@ -5951,9 +5964,12 @@ export class BrowserEngine {
   /**
    * page.goto, tried once more when the machine refused the browser a socket (limits.ts loadRetryCause): the failed
    * load's error page is waited for, the machine's TCP table is logged, and the retry is recorded for the report, and
-   * for the action's result once it has loaded. Any other failure, and a second refusal, is thrown as it is.
+   * for the action's result once it has loaded. The retry has what is left of the load's limit (limits.ts
+   * loadRetryTimeoutMs), so both tries keep to it. Any other failure is thrown as it is; a second failure says it
+   * followed a retry.
    */
   private async loadPage(page: Page, url: string, options: Parameters<Page["goto"]>[1]): Promise<Response | null> {
+    const startedAt = Date.now();
     try {
       return await page.goto(url, options);
     } catch (err) {
@@ -5965,8 +5981,14 @@ export class BrowserEngine {
       console.error(`[scenescout] loading ${shown} failed with net::${cause}; trying once more. Sockets: ${sockets}`);
       this.memory?.loadRetries.push({ at: new Date().toISOString(), url: shown, session: this.sessionKey, cause, sockets });
       await new Promise((resolve) => setTimeout(resolve, LOAD_RETRY_PAUSE_MS));
-      // A retry that fails is thrown as the load's failure; only one that loaded leaves a note for the result.
-      const resp = await page.goto(url, options);
+      // A retry that fails is thrown as the load's failure, saying so; only one that loaded leaves a note for the result.
+      const timeout = loadRetryTimeoutMs(options?.timeout, Date.now() - startedAt);
+      let resp: Response | null;
+      try {
+        resp = await page.goto(url, { ...options, timeout });
+      } catch (again) {
+        throw retriedLoadFailure(again, cause);
+      }
       this.loadRetryNotes.push({ url: shown, cause });
       return resp;
     }

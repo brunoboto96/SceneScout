@@ -224,10 +224,39 @@ export const LOAD_RETRIES = 1;
 /** The pause before the retry, so a machine short of socket buffers has a moment to free one. */
 export const LOAD_RETRY_PAUSE_MS = 500;
 
+/**
+ * The least time a retried load is given. The retry has what is left of the
+ * load's limit, so the two tries together keep to it; a limit already spent
+ * (by the error page's wait and the socket table) still leaves the retry this
+ * much rather than 0, which Playwright reads as no limit at all.
+ */
+export const LOAD_RETRY_MIN_MS = 2000;
+
+/** The timeout for a retried load: the limit less the time the first try and the wait before the retry took. Undefined when the load had no limit of its own. */
+export function loadRetryTimeoutMs(limitMs: number | undefined, elapsedMs: number): number | undefined {
+  if (limitMs === undefined || limitMs <= 0) return limitMs;
+  return Math.max(LOAD_RETRY_MIN_MS, limitMs - elapsedMs);
+}
+
+/**
+ * The error a retried load failed with, saying on its first line (the line
+ * callers show) that it was the retry that failed. The call log below is kept.
+ */
+export function retriedLoadFailure(err: unknown, cause: RetriedLoadError): unknown {
+  if (!(err instanceof Error)) return err;
+  const [first, ...rest] = err.message.split("\n");
+  const out = new Error([`${first} (this load was retried after ${cause}, and failed again)`, ...rest].join("\n"));
+  out.name = err.name;
+  return out;
+}
+
 /** The error to retry a failed page load for, given how many times it was already retried; null when it is not retried. */
 export function loadRetryCause(message: string, retriesSoFar: number): RetriedLoadError | null {
   if (retriesSoFar >= LOAD_RETRIES) return null;
-  return RETRIED_LOAD_ERRORS.find((code) => new RegExp(`\\bnet::${code}(?![A-Z_])`).test(message)) ?? null;
+  // Only the code the browser leads its error with ("page.goto: net::ERR_… at <url>"): the same text inside the
+  // address a failure names, or in its call log, is the app's and not the browser's error.
+  const code = /^(?:[a-z]+\.[a-zA-Z]+: )?net::([A-Z_]+)(?: at |$)/.exec(message.split("\n")[0])?.[1];
+  return RETRIED_LOAD_ERRORS.find((retried) => retried === code) ?? null;
 }
 
 /** The line an action's result carries for a load that was retried, so a flaky machine stays visible. */

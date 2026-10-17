@@ -33,14 +33,21 @@ async function attachError(engine: BrowserEngine, opts: Parameters<BrowserEngine
  * network error the route API can abort with is ERR_NO_BUFFER_SPACE, so the page's own goto stands in for it.
  * Returns how many loads of such a URL were asked for, and the undo.
  */
-function failLoads(page: Page, suffix: string, error: string, times: number): { asked: () => number; restore: () => void } {
+function failLoads(
+  page: Page,
+  suffix: string,
+  error: string,
+  times: number,
+): { asked: () => number; timeouts: Array<number | undefined>; restore: () => void } {
   const proto = Object.getPrototypeOf(page) as { goto: Page["goto"] };
   const real = proto.goto;
   let asked = 0;
   let left = times;
+  const timeouts: Array<number | undefined> = [];
   proto.goto = async function (this: Page, url: string, options?: Parameters<Page["goto"]>[1]) {
     if (url.endsWith(suffix)) {
       asked += 1;
+      timeouts.push(options?.timeout);
       if (left > 0) {
         left -= 1;
         throw new Error(`page.goto: net::${error} at ${url}\nCall log:\n  - navigating to "${url}", waiting until "domcontentloaded"`);
@@ -48,7 +55,7 @@ function failLoads(page: Page, suffix: string, error: string, times: number): { 
     }
     return real.call(this, url, options);
   };
-  return { asked: () => asked, restore: () => (proto.goto = real) };
+  return { asked: () => asked, timeouts, restore: () => (proto.goto = real) };
 }
 
 async function navigateError(engine: BrowserEngine, target: string): Promise<{ result: string; error: string }> {
@@ -72,6 +79,12 @@ async function retriedLoads(engine: BrowserEngine, baseUrl: string, projectDir: 
       fault.asked() === 2 && /retried after ERR_NO_BUFFER_SPACE/.test(once.result) && page.url().endsWith(target),
       `loads asked: ${fault.asked()}; ${(once.result || once.error).slice(0, 400)}`,
     );
+    const [first, retry] = fault.timeouts;
+    check(
+      "...and the retry is given what is left of the page-load limit, so the two tries keep to it",
+      typeof first === "number" && typeof retry === "number" && retry < first && retry > 0,
+      `timeouts: ${JSON.stringify(fault.timeouts)}`,
+    );
   } finally {
     fault.restore();
   }
@@ -86,8 +99,8 @@ async function retriedLoads(engine: BrowserEngine, baseUrl: string, projectDir: 
   try {
     const twice = await navigateError(engine, target);
     check(
-      "a second refusal is not retried again: the load fails after two tries",
-      fault.asked() === 2 && /net::ERR_NO_BUFFER_SPACE/.test(twice.error),
+      "a second refusal is not retried again: the load fails after two tries, and its error says it was retried",
+      fault.asked() === 2 && /net::ERR_NO_BUFFER_SPACE/.test(twice.error) && /retried after ERR_NO_BUFFER_SPACE/.test(twice.error.split("\n")[0]),
       `loads asked: ${fault.asked()}; ${(twice.result || twice.error).slice(0, 400)}`,
     );
   } finally {
