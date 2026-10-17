@@ -2,8 +2,104 @@
  * Redaction of credentials and personal data from text the engine is about to
  * persist or publish. memory.ts re-exports both functions, so importers that
  * reach them through the store are unchanged.
+ *
+ * Every pattern here reads text the app controls, so each runs on the
+ * linear-time engine (linear-regex.ts); memory-test holds this file to no
+ * JavaScript regular expression.
  */
+import { isSpace, LinearRegex, runEnd, SPACE } from "./linear-regex.js";
 import { FIELD_WORDS, maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
+
+const isAsciiDigit = (c: string) => c >= "0" && c <= "9";
+const isAsciiLetter = (c: string) => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+const isAlnum = (c: string) => isAsciiDigit(c) || isAsciiLetter(c);
+const isWordChar = (c: string | undefined) => c !== undefined && (isAlnum(c) || c === "_");
+/** The characters of a bearer or basic credential. */
+const isTokenChar = (c: string) => isAlnum(c) || "._~+/=-".includes(c);
+/** The characters of a keyword-led value. */
+const isValueChar = (c: string) => isAlnum(c) || "._~+/=".includes(c);
+const DIGIT = new LinearRegex("[0-9]");
+
+/** Words that name a code that is not a secret ("error code 123456", "promo code …"). */
+const OTHER_CODE_WORDS = new Set([
+  ...["error", "status", "postal", "zip", "product", "area", "country", "exit", "reference", "promo", "order", "tracking"],
+  ...["response", "http", "reason", "discount", "coupon", "voucher", "gift", "invoice", "referral", "invite", "promotion", "campaign"],
+]);
+
+/**
+ * Whether one of OTHER_CODE_WORDS, a word on its own, and one whitespace
+ * character stand just before `index` (the lookbehind of the sign-in code rule).
+ */
+function afterOtherCodeWord(text: string, index: number): boolean {
+  if (index < 2 || !isSpace(text[index - 1])) return false;
+  let start = index - 1;
+  // The longest word is nine letters; reading one more tells a longer word from it.
+  while (start > 0 && index - 1 - start <= 9 && isAsciiLetter(text[start - 1])) start -= 1;
+  if (isWordChar(text[start - 1])) return false;
+  return OTHER_CODE_WORDS.has(text.slice(start, index - 1).toLowerCase());
+}
+
+interface SecretPattern {
+  re: LinearRegex;
+  /** The text a match is replaced by. */
+  replace: (groups: ReadonlyArray<string | undefined>) => string;
+}
+
+const fixed = (text: string) => (): string => text;
+
+/** The characters a keyword-led value's run is read in, for its entropy signal: the value's own, and a hyphen. */
+const isRunChar = isTokenChar;
+/**
+ * Whether the run of value characters from `start` holds a digit and a letter
+ * (the keyword rule's lookaheads). Candidates come left to right, so the last
+ * run read is kept: a later candidate inside it is answered without reading it
+ * again, and the text is read once. `reset` forgets it, before another text.
+ */
+function makeRunEntropy(): { check: (text: string, start: number) => boolean; reset: () => void } {
+  let runStart = -1;
+  let runStop = -1;
+  let lastDigit = -1;
+  let lastLetter = -1;
+  const reset = () => {
+    runStart = -1;
+    runStop = -1;
+  };
+  const check = (text: string, start: number) => {
+    if (start < runStart || start >= runStop) {
+      runStart = start;
+      runStop = start;
+      lastDigit = -1;
+      lastLetter = -1;
+      while (runStop < text.length && isRunChar(text[runStop])) {
+        if (isAsciiDigit(text[runStop])) lastDigit = runStop;
+        else if (isAsciiLetter(text[runStop])) lastLetter = runStop;
+        runStop += 1;
+      }
+    }
+    return lastDigit >= start && lastLetter >= start;
+  };
+  return { check, reset };
+}
+const runEntropy = makeRunEntropy();
+
+/**
+ * `extend` for an open-ended run of `inRun` characters: where the run that
+ * holds `end` stops. The last run read is kept, so candidates refused inside
+ * one run (the search goes on from the next character) do not read it again.
+ */
+function runExtender(inRun: (c: string) => boolean): (match: { end: number }, text: string) => number {
+  let lastText = "";
+  let start = -1;
+  let stop = -1;
+  return ({ end }, text) => {
+    if (text !== lastText || end < start || end > stop) {
+      lastText = text;
+      start = end;
+      stop = runEnd(text, end, inRun);
+    }
+    return stop;
+  };
+}
 
 /**
  * Secrets an app leaks into its own error UI must not be re-published by the
@@ -12,42 +108,86 @@ import { FIELD_WORDS, maskSecretFieldValues, maskSecretParams, redactPersonal } 
  * but still gets zipped and attached to tickets. Keep a short prefix so the
  * finding stays actionable, drop the rest.
  */
-const SECRET_PATTERNS: Array<[RegExp, string]> = [
+const SECRET_PATTERNS: SecretPattern[] = [
   // A private key's whole block, or its start to the end of the text when the end is cut off.
-  [/-{5}BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-{5}[\s\S]*?(?:-{5}END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-{5}|$)/g, "[private key redacted]"],
+  {
+    re: new LinearRegex(String.raw`-{5}BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-{5}(?s:.)*?(?:-{5}END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-{5}|$)`, {
+      needs: ["private key"],
+    }),
+    replace: fixed("[private key redacted]"),
+  },
   // Providers' key shapes, each by its fixed prefix, so the prefix alone ("the sk-ant prefix") is prose.
-  [/\bsk-ant-[A-Za-z0-9_-]{10,}/g, "sk-ant-[redacted]"],
-  [/\b(xox[abeprs])-[A-Za-z0-9-]{10,}/g, "$1-[redacted]"],
-  [/\bAIza[0-9A-Za-z_-]{30,}/g, "AIza[redacted]"],
-  [/\bglpat-[A-Za-z0-9_-]{20,}/g, "glpat-[redacted]"],
-  [/\bnpm_[A-Za-z0-9]{36,}/g, "npm_[redacted]"],
+  { re: new LinearRegex(String.raw`\bsk-ant-[A-Za-z0-9_-]{10,}`, { needs: ["sk-ant-"] }), replace: fixed("sk-ant-[redacted]") },
+  { re: new LinearRegex(String.raw`\b(xox[abeprs])-[A-Za-z0-9-]{10,}`, { needs: ["xox"] }), replace: (g) => `${g[1]}-[redacted]` },
+  { re: new LinearRegex(String.raw`\bAIza[0-9A-Za-z_-]{30,}`, { needs: ["aiza"] }), replace: fixed("AIza[redacted]") },
+  { re: new LinearRegex(String.raw`\bglpat-[A-Za-z0-9_-]{20,}`, { needs: ["glpat-"] }), replace: fixed("glpat-[redacted]") },
+  { re: new LinearRegex(String.raw`\bnpm_[A-Za-z0-9]{36,}`, { needs: ["npm_"] }), replace: fixed("npm_[redacted]") },
   // Needs the environment marker (sk_live_…) or a digit in the tail, or it
   // eats ordinary identifiers: "pk_customer_identifier" became "pk_[redacted]".
-  [/\b(sk|pk|rk)[-_](?:(?:live|test|proj)[-_][A-Za-z0-9]{8,}|(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{8,})/g, "$1_[redacted]"],
-  [/\bgh[pousr]_[A-Za-z0-9]{16,}/g, "gh?_[redacted]"],
-  [/\bAKIA[0-9A-Z]{12,}/g, "AKIA[redacted]"],
+  // Each tail is read to its least length, then to the end of its run.
+  {
+    re: new LinearRegex(String.raw`\b(sk|pk|rk)[-_](?:((?:live|test|proj)[-_][A-Za-z0-9]{8})|([A-Za-z0-9]{8}))`, {
+      needs: ["k-", "k_"],
+      extend: runExtender(isAlnum),
+      accept: ({ groups, text }) => groups[2] !== undefined || DIGIT.test(text.slice((groups[1] ?? "").length + 1)),
+    }),
+    replace: (g) => `${g[1]}_[redacted]`,
+  },
+  { re: new LinearRegex(String.raw`\bgh[pousr]_[A-Za-z0-9]{16,}`, { needs: ["gh"] }), replace: fixed("gh?_[redacted]") },
+  { re: new LinearRegex(String.raw`\bAKIA[0-9A-Z]{12,}`, { needs: ["akia"] }), replace: fixed("AKIA[redacted]") },
   // Keep the scheme that actually matched: rewriting a Basic-auth finding to
   // say "Bearer" silently changes what the finding claims.
   // Same entropy requirement as the keyword rule: "Basic authentication-required"
   // is prose, and redacting it rewrote a sentence into nonsense.
-  [/\b(Bearer|Basic)\s+(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{16,}/gi, "$1 [redacted]"],
+  {
+    re: new LinearRegex(String.raw`\b((?i:Bearer|Basic))([${SPACE}]+)[A-Za-z0-9._~+/=-]{16}`, {
+      needs: ["bearer", "basic"],
+      extend: runExtender(isTokenChar),
+      accept: ({ groups, text }) => DIGIT.test(text.slice((groups[1] ?? "").length + (groups[2] ?? "").length)),
+    }),
+    replace: (g) => `${g[1]} [redacted]`,
+  },
   // A bearer token of letters only is still a token when it is one unbroken run: prose joins its words with hyphens.
-  // Not Basic: "basic internationalization" is prose of the same shape.
-  [/\b(Bearer)\s+[A-Za-z._~+/=]{16,}(?![A-Za-z0-9._~+/=-])/gi, "$1 [redacted]"],
-  [/\beyJ[A-Za-z0-9._-]{20,}/g, "eyJ[redacted-jwt]"],
+  // Not Basic: "basic internationalization" is prose of the same shape. The last group is the lookahead.
+  {
+    re: new LinearRegex(String.raw`\b((?i:Bearer))[${SPACE}]+[A-Za-z._~+/=]{16,}($|[^A-Za-z0-9._~+/=-])`, {
+      needs: ["bearer"],
+      lookahead: true,
+    }),
+    replace: (g) => `${g[1]} [redacted]`,
+  },
+  { re: new LinearRegex(String.raw`\beyJ[A-Za-z0-9._-]{20,}`, { needs: ["eyj"] }), replace: fixed("eyJ[redacted-jwt]") },
   // Keyword-led values need an entropy signal — a digit AND a letter, no
   // internal word breaks. Without it this matched ordinary English: "Password
   // requirements are not enforced" became "Password [redacted] are not
   // enforced", and a mangled finding just reads as the agent writing nonsense.
-  [/\b(api[-_]?key|secret|password|token)(["'\s:=]+)(?=[A-Za-z0-9._~+/=-]*\d)(?=[A-Za-z0-9._~+/=-]*[A-Za-z])[A-Za-z0-9._~+/=]{12,}/gi, "$1$2[redacted]"],
+  {
+    re: new LinearRegex(String.raw`\b((?i:api[-_]?key|secret|password|token))(["'${SPACE}:=]+)[A-Za-z0-9._~+/=]{12}`, {
+      needs: ["key", "secret", "password", "token"],
+      extend: runExtender(isValueChar),
+      accept: ({ index, groups }, text) => runEntropy.check(text, index + (groups[1] ?? "").length + (groups[2] ?? "").length),
+    }),
+    replace: (g) => `${g[1]}${g[2]}[redacted]`,
+  },
   // A PIN or a sign-in code written after its word: four to eight digits after "PIN" (or "PIN code"), six to eight
   // after "code", "OTP" or "passcode", unless the code is an error, status, postal, product, coupon or invoice one.
-  [/\b(PIN(?:\s+(?:code|number))?)(\s*(?:is\s+|[:=#]\s*)?)\d{4,8}(?!\d|[-./]\d)/gi, "$1$2[redacted]"],
-  [
+  // The last group of each is the lookahead: no digit next, nor a digit after a hyphen (or a dot or slash, after a PIN).
+  {
+    re: new LinearRegex(
+      String.raw`\b((?i:PIN(?:[${SPACE}]+(?:code|number))?))([${SPACE}]*(?:(?i:is)[${SPACE}]+|[:=#][${SPACE}]*)?)[0-9]{4,8}($|[^0-9./-]|[./-](?:$|[^0-9]))`,
+      { needs: ["pin"], lookahead: true },
+    ),
+    replace: (g) => `${g[1]}${g[2]}[redacted]`,
+  },
+  {
     // Six to eight digits, or two groups of three as a text message spaces them ("482 913").
-    /(?<!\b(?:error|status|postal|zip|product|area|country|exit|reference|promo|order|tracking|response|http|reason|discount|coupon|voucher|gift|invoice|referral|invite|promotion|campaign)\s)\b((?:(?:verification|login|sign-in|security|one-time|otp|sms|2fa|mfa|auth|access|confirmation)\s+)?code|otp|passcode)(\s*(?:is\s+|[:=]\s*)?)(?:\d{6,8}|\d{3}[ -]\d{3})(?!\d|-\d)/gi,
-    "$1$2[redacted]",
-  ],
+    re: new LinearRegex(
+      String.raw`\b((?i:(?:(?:verification|login|sign-in|security|one-time|otp|sms|2fa|mfa|auth|access|confirmation)[${SPACE}]+)?code|otp|passcode))` +
+        String.raw`([${SPACE}]*(?:(?i:is)[${SPACE}]+|[:=][${SPACE}]*)?)(?:[0-9]{6,8}|[0-9]{3}[ -][0-9]{3})($|[^0-9-]|-(?:$|[^0-9]))`,
+      { needs: ["code", "otp"], lookahead: true, accept: ({ index }, text) => !afterOtherCodeWord(text, index) },
+    ),
+    replace: (g) => `${g[1]}${g[2]}[redacted]`,
+  },
 ];
 
 /**
@@ -57,22 +197,44 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
  * letters only must end its clause and not be a word about the field, so
  * "Password: required" and "Token: missing after refresh" stay.
  */
-const SET_SECRET_RE =
-  /\b((?:[A-Za-z]+[-_]?)??(?:password|passwd|pwd|passphrase|secret|api[-_]?key|token))(\s*["']?\s*[:=：＝]\s*["']?)(?!\[)([^\s"',;)}\]]+)/gi;
+const SET_SECRET_RE = new LinearRegex(
+  // The value does not start with "[" (a value already masked).
+  String.raw`\b((?:[A-Za-z]+[-_]?)??(?i:password|passwd|pwd|passphrase|secret|api[-_]?key|token))` +
+    String.raw`([${SPACE}]*["']?[${SPACE}]*[:=：＝][${SPACE}]*["']?)([^${SPACE}"',;)}\][][^${SPACE}"',;)}\]]*)`,
+  { needs: ["passw", "pwd", "passphrase", "secret", "key", "token"] },
+);
+const MASKED_SHOWN = new LinearRegex("^[•●∙·*]+$");
+const LETTERS_ONLY = new LinearRegex(String.raw`^\p{L}+$`);
+/** What may follow a value of letters only for it to end its clause. */
+const CLAUSE_END = new LinearRegex(String.raw`^(?:[${SPACE}]*$|[${SPACE}]*[,;)}\]"'\n]|\.(?:[${SPACE}]|$))`);
+
+/**
+ * Whether a value's full stop (`stop`) and the text from `from` on end its
+ * clause, as CLAUSE_END reads them: only the spaces they start with and the
+ * two characters after are read, so a text with many values is read once.
+ */
+function endsClause(stop: string, text: string, from: number): boolean {
+  if (stop !== "") return CLAUSE_END.test((stop + text.slice(from, from + 1)).slice(0, 2));
+  let spaces = from;
+  while (spaces < text.length && isSpace(text[spaces])) spaces += 1;
+  return CLAUSE_END.test(text.slice(from, spaces + 2));
+}
 
 function maskSetSecrets(text: string): { text: string; hits: number } {
   let hits = 0;
-  const out = text.replace(SET_SECRET_RE, (m, name: string, sep: string, raw: string, offset: number, whole: string) => {
+  const out = SET_SECRET_RE.replace(text, ({ text: m, groups, end }) => {
+    const [, name = "", sep = "", raw = ""] = groups;
     // A sentence's full stop is not part of the value.
-    const stop = /\.+$/.exec(raw)?.[0] ?? "";
-    const value = raw.slice(0, raw.length - stop.length);
+    let cut = raw.length;
+    while (cut > 0 && raw[cut - 1] === ".") cut -= 1;
+    const stop = raw.slice(cut);
+    const value = raw.slice(0, cut);
     // Empty, or the dots or stars a masked value is shown as (the engine's own "•••• (masked: …)" included).
-    if (value === "" || /^[•●∙·*]+$/u.test(value)) return m;
-    if (/^\p{L}+$/u.test(value)) {
+    if (value === "" || MASKED_SHOWN.test(value)) return m;
+    if (LETTERS_ONLY.test(value)) {
       if (FIELD_WORDS.has(value.toLowerCase())) return m;
-      const after = stop + whole.slice(offset + m.length);
-      if (!/^(?:\s*$|\s*[,;)}\]"'\n]|\.(?:\s|$))/.test(after)) return m;
-    } else if (value.length < 3 && !/["']/.test(sep)) return m;
+      if (!endsClause(stop, text, end)) return m;
+    } else if (value.length < 3 && !sep.includes('"') && !sep.includes("'")) return m;
     hits += 1;
     return `${name}${sep}[redacted]${stop}`;
   });
@@ -98,15 +260,18 @@ export function redactSecrets(text: string): string {
   const set = maskSetSecrets(params.text);
   let out = set.text;
   let hits = masked.hits + params.hits + set.hits;
-  for (const [re, replacement] of SECRET_PATTERNS) {
-    out = out.replace(re, (...args) => {
+  for (const { re, replace } of SECRET_PATTERNS) {
+    runEntropy.reset();
+    out = re.replace(out, ({ groups }) => {
       hits += 1;
-      return replacement.replace(/\$(\d)/g, (_, n: string) => String(args[Number(n)] ?? ""));
+      return replace(groups);
     });
   }
   out = redactPersonal(out);
   return hits > 0 ? `${out} [${hits} secret${hits === 1 ? "" : "s"} redacted]` : out;
 }
+
+const REDACTED_NOTE = new LinearRegex(String.raw` \[[0-9]+ secrets? redacted\]$`);
 
 /**
  * Routes are links the app printed, and a link can carry a token
@@ -115,5 +280,5 @@ export function redactSecrets(text: string): string {
  */
 export function redactRoute(route: string): string {
   // The trailing "[n secrets redacted]" note belongs to prose; in a route it would read as part of the path.
-  return redactSecrets(route).replace(/ \[\d+ secrets? redacted\]$/, "");
+  return REDACTED_NOTE.replace(redactSecrets(route), "");
 }

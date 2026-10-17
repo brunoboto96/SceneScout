@@ -47,8 +47,10 @@ import {
 } from "./guided-words.js";
 import { DEFAULT_EXPIRY_MARGIN_MINUTES, judgeLifetime, readLifetime, type LifetimeVerdict } from "./expiry.js";
 import { loginCommand, profilePath } from "./profiles.js";
-import { redactSecrets } from "./redact.js";
-import { FIELD_WORDS, redactPersonal, secretParamName, secretWordKind } from "./sensitive.js";
+import { holdsCredential } from "./credential.js";
+import { secretWordKind } from "./sensitive.js";
+
+export { holdsCredential };
 
 /** How careful the run is, in the words the person chooses from. */
 export const CARES = ["look-only", "may-submit-forms", "may-create-test-data"] as const;
@@ -170,152 +172,6 @@ const CHOICE_FIELDS = new Set(["address", "areas", "journey", "tickets", "signIn
 
 const NO_CREDENTIALS =
   "never type a password, code or token into the choices: when your site needs one, a browser window opens for you to sign in as you normally would";
-
-/** Not part of a longer word, in any script: `\b` reads only ASCII letters as letters. */
-const EDGE_BEFORE = "(?<![\\p{L}\\p{N}_])";
-const EDGE_AFTER = "(?![\\p{L}\\p{N}_])";
-
-/**
- * A word that names a secret, as someone writes it in a sentence: "password",
- * "pw", "PIN", "login code", "token", "credentials" and the like, and the
- * word for a password in the languages a journey is most often written in.
- */
-const SECRET_WORD = new RegExp(
-  `${EDGE_BEFORE}(?:password|passwort|passphrase|passcode|pass code|pw|pwd|pin|one-time code|verification code|login code|sign-in code|security code|2fa code|two-factor code|mfa code|authenticator code|otp|token|api key|apikey|secret|credentials?|creds|mot de passe|contraseña|senha|wachtwoord|kennwort|passord|lösenord|hasło|пароль)${EDGE_AFTER}`,
-  "giu",
-);
-
-/** "pass" names a secret only when a value is set against it: "pass: hunter2", "pass=…". */
-const PASS_SET = new RegExp(`${EDGE_BEFORE}pass(?=\\s*[:=])`, "giu");
-
-/** "Sign in" or "log in", then "with" within a short phrase: what follows is how they sign in ("sign in as bob with hunter2"). */
-const SIGN_IN_WITH = /\b(?:sign|log)[\s-]?in\b[^.;\n]{0,60}?\bwith\b/giu;
-
-/** A code as a sign-in asks for one: six to eight digits after the word "code" ("use the code 482913"). */
-const DIGIT_CODE = new RegExp(`${EDGE_BEFORE}code\\s*(?:is\\s*|[:=]\\s*)?\\d{6,8}(?!\\d)`, "iu");
-
-/** How many words after a secret's name are read for its value ("the password for it is Summer2024!"). */
-const VALUE_WINDOW = 5;
-
-/**
- * Words that, straight after a secret's name, make the sentence about the
- * field: what follows is a value to test the field with, not one to sign in
- * with ("test the password strength meter with Summer2024!").
- */
-const ABOUT_THE_FIELD = new Set([
-  "strength",
-  "meter",
-  "field",
-  "fields",
-  "box",
-  "input",
-  "rules",
-  "policy",
-  "requirements",
-  "validation",
-  "complexity",
-  "length",
-]);
-
-/** "pass" then one word: "pass Summer2024!" names its value, "pass the cookie banner" does not. */
-const PASS_WORD = new RegExp(`${EDGE_BEFORE}pass\\s+(\\S+)`, "giu");
-
-/** A user name and a value joined by a colon with no space, as a sign-in pair is written: "bob:Summer2024!". */
-const COLON_PAIR = new RegExp(`${EDGE_BEFORE}\\p{L}[\\p{L}\\p{N}._@-]{0,40}:(?!//)(\\S{6,})`, "giu");
-
-/**
- * A user name and a value either side of a slash with a space beside it, "bob
- * / Summer2024!", read only where the text is about signing in. Without the
- * space it is a path ("reports/2024/q3").
- */
-const SLASH_PAIR = new RegExp(`${EDGE_BEFORE}\\p{L}[\\p{L}\\p{N}._@-]{0,40}(?:\\s+/\\s*|/\\s+)(\\S{6,})`, "giu");
-const ABOUT_SIGNING_IN = /\b(?:(?:sign|log)[\s-]?in|login|user(?:name)?|account|credentials?|as)\b/iu;
-
-/** A value to type when a prompt appears: "Enter Summer2024! when asked for the password". */
-const ENTER_WHEN = /\b(?:enter|type|use)\s+(\S+)\s+(?:when|if|once)\b/giu;
-
-/** A pair's or a prompt's value: read as a value, with a letter in it, and neither a date nor a version. */
-function pairValue(raw: string): boolean {
-  const word = raw.replace(/["'”’)\],.;:?]+$/gu, "");
-  if (!looksLikeValue(word) || !/\p{L}/u.test(word)) return false;
-  return !/^v?\d+(?:[.-]\d+)+[a-z]*$/iu.test(word);
-}
-
-/**
- * Whether a word reads as a credential's value rather than as English: at
- * least four characters with a digit in it, or with a symbol other than a
- * hyphen or an apostrophe. An email address is personal data, not a
- * credential, and does not count; nor do a link, a path on the site, a
- * numbered item ("#42") or a setting written as name=value ("role=editor").
- */
-function looksLikeValue(raw: string): boolean {
-  const word = raw.replace(/^["'“‘(\[]+|["'”’)\],.;:?]+$/gu, "");
-  if (word.length < 4 || /^[^@\s]+@[^@\s]+\.\p{L}{2,}$/u.test(word)) return false;
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(word) || word.startsWith("/") || /^#\d+$/.test(word)) return false;
-  const setting = /^([\p{L}_-]+)=[\p{L}\p{N}_-]+$/u.exec(word);
-  if (setting && !new RegExp(SECRET_WORD.source, "iu").test(setting[1])) return false;
-  return /\p{N}/u.test(word) || /[^\p{L}\p{N}'’-]/u.test(word);
-}
-
-/**
- * Whether the words after position `end` hold a value: one set against the
- * name with a colon or an equals sign ("Password: letmein"), a quoted one
- * straight after it, or one of the next few words that reads as a value.
- */
-function valueFollows(text: string, end: number): boolean {
-  const rest = text.slice(end, end + 120);
-  const set = /^\s*[:=]\s*["'“‘]?([^\s"'”’,;)/]{3,})["'”’]?\s*(?:$|[,;)/]|\.(?:\s|$))/u.exec(rest);
-  if (set && !FIELD_WORDS.has(set[1].toLowerCase())) return true;
-  const quoted = /^\s*(?:is|was|[:=-])?\s*["'“‘]([^"'”’]{4,})["'”’]/u.exec(rest);
-  if (quoted && (/[^\p{L}\s]/u.test(quoted[1]) || !/\s/u.test(quoted[1]))) return true;
-  return rest.split(/\s+/).filter(Boolean).slice(0, VALUE_WINDOW).some(looksLikeValue);
-}
-
-/** Whether an address carries a credential under a query or fragment key the report's redaction does not know. */
-function addressHoldsSecretParam(text: string): boolean {
-  let url: URL;
-  try {
-    url = new URL(text.trim());
-  } catch {
-    return false;
-  }
-  const keys = [...url.searchParams.keys(), ...new URLSearchParams(url.hash.slice(1)).keys()];
-  // The same names the report's redaction masks (sensitive.ts SECRET_PARAM), so the two cannot drift apart.
-  return keys.some(secretParamName);
-}
-
-/**
- * Whether text holds a credential: a shape the report's redaction would mask
- * (a key, a bearer token, `?password=…`, a value typed into a password field),
- * an address with a code, signature, key or session in its query, or one
- * written out in words: a word that names a secret, or "sign in … with",
- * followed by a value: one set against it with a colon ("Password:
- * letmein"), a quoted one, or within a few words one with a digit or a symbol
- * in it, such as "the PIN is 4821" or "the password for it is Summer2024!".
- * Otherwise words of letters only ("the password is required", "the login
- * code screen loads", "Password: required") read as a sentence about the
- * field, so a letters-only password written as "the password is hunter" is
- * not caught: that sentence cannot be told from "the password is required". Email
- * addresses are not credentials here: a journey may name the address to sign
- * up with.
- */
-export function holdsCredential(text: string): boolean {
-  if (redactSecrets(text) !== redactPersonal(text)) return true;
-  if (addressHoldsSecretParam(text) || DIGIT_CODE.test(text)) return true;
-  for (const re of [SECRET_WORD, PASS_SET, SIGN_IN_WITH])
-    for (const m of text.matchAll(re)) {
-      const end = (m.index ?? 0) + m[0].length;
-      // "the password strength meter with …": the value tests the field.
-      if (re === SECRET_WORD && ABOUT_THE_FIELD.has((/^\s+([\p{L}]+)/u.exec(text.slice(end))?.[1] ?? "").toLowerCase())) continue;
-      if (valueFollows(text, end)) return true;
-    }
-  for (const re of [PASS_WORD, ENTER_WHEN]) for (const m of text.matchAll(re)) if (pairValue(m[1])) return true;
-  // An address's host and port is not a pair, and a value with a slash in it is a path ("api:v2/orders").
-  const withoutAddresses = text.replace(/\S+:\/\/\S+/gu, " ");
-  for (const m of withoutAddresses.matchAll(COLON_PAIR)) if (!m[1].includes("/") && pairValue(m[1])) return true;
-  if (ABOUT_SIGNING_IN.test(text)) for (const m of text.matchAll(SLASH_PAIR)) if (pairValue(m[1])) return true;
-  return false;
-}
 
 /** Whether an address is on this computer: only localhost, 127.0.0.1 and ::1 are. */
 export function isLocalAddress(address: string): boolean {

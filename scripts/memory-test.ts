@@ -15,7 +15,10 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import ts from "typescript";
+import { LinearRegex, SPACE } from "../src/engine/linear-regex.ts";
+import { CASE_BOUND_MS, runLinearTimeCases } from "./linear-time-child.ts";
 import {
   chooseProjectFolder,
   documentsDir,
@@ -1579,6 +1582,129 @@ test("a redaction announces itself and keeps the matched scheme", () => {
   assert.ok(out.includes("Basic [redacted]"), `the scheme that matched is preserved: ${out}`);
   assert.ok(!out.includes("Bearer"), "and is not rewritten to a different one");
   assert.ok(/\[1 secret redacted\]/.test(out), `the edit is disclosed: ${out}`);
+});
+
+test("every redaction pattern reads a crafted 1 MB text in linear time (#610)", async () => {
+  // Each text is shaped to make one pattern backtrack. On JavaScript's engine six of them did not finish in a
+  // minute: the name=value rule's spaces and its full stops, a long parameter name or field label, and a field
+  // name of capitals or of digits. On the linear-time engine each takes about a second or less.
+  const { done, stoppedIn } = await runLinearTimeCases("redaction");
+  assert.equal(stoppedIn, null, `still running after ${CASE_BOUND_MS} ms: ${stoppedIn}`);
+  assert.ok(done.length > 0);
+  for (const { name, ms } of done) assert.ok(ms < CASE_BOUND_MS, `${name}: ${ms} ms`);
+});
+
+/**
+ * Where these files build a JavaScript regular expression: a literal, `RegExp`, or a string's `match`, `matchAll` or
+ * `search`, which turn a string argument into one: read with the type checker, by the method a call resolves to, as
+ * the linear-time engine has a `matchAll` of its own and a receiver may be `string | undefined`.
+ */
+function javaScriptRegexUses(files: readonly string[]): string[] {
+  const program = ts.createProgram(files, {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    strict: true,
+    noEmit: true,
+    types: [],
+  });
+  // An import the checker cannot resolve is typed any, and a call on it would go unseen.
+  const errors = ts.getPreEmitDiagnostics(program).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n"));
+  if (errors.length > 0) throw new Error(`the type checker could not read these files: ${errors.join("; ")}`);
+  const checker = program.getTypeChecker();
+  const stringMethod = (call: ts.CallExpression): boolean => {
+    const parent = checker.getResolvedSignature(call)?.declaration?.parent;
+    return parent !== undefined && ts.isInterfaceDeclaration(parent) && parent.name.text === "String" && parent.getSourceFile().hasNoDefaultLib;
+  };
+  const found: string[] = [];
+  for (const file of files) {
+    const source = program.getSourceFile(file);
+    if (!source) throw new Error(`the type checker did not read ${file}`);
+    const visit = (node: ts.Node) => {
+      if (node.kind === ts.SyntaxKind.RegularExpressionLiteral) found.push(`${path.basename(file)}: ${node.getText()}`);
+      if (ts.isIdentifier(node) && node.text === "RegExp") found.push(`${path.basename(file)}: RegExp`);
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ["match", "matchAll", "search"].includes(node.expression.name.text) &&
+        stringMethod(node)
+      )
+        found.push(`${path.basename(file)}: ${node.getText()}`);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  return found;
+}
+
+test("redaction, the field checks and the credential check hold no JavaScript regular expression (#610)", () => {
+  // They read text the app controls; a pattern written for JavaScript's backtracking engine would bring back the
+  // time a crafted text can cost. The linear-time engine is linear-regex.ts.
+  const engine = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "engine");
+  const files = ["redact.ts", "sensitive.ts", "credential.ts", "linear-regex.ts"].map((file) => path.join(engine, file));
+  assert.deepEqual(javaScriptRegexUses(files), [], "these files use JavaScript's engine");
+  // A string's match, matchAll and search turn a string argument into a JavaScript regular expression, with no
+  // literal and no RegExp in sight; split and replace with a string do not. The pair differs only in that.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-regex-guard-"));
+  try {
+    const implicit = path.join(dir, "implicit.ts");
+    const literal = path.join(dir, "literal.ts");
+    // matchAll takes a string at run time; the lib types it as RegExp only, hence the cast.
+    fs.writeFileSync(
+      implicit,
+      'export const a = (t: string, u?: string, v?: "x" | "y") => [t.match("a+"), [...t.matchAll("b+" as never)], t.search("c+"), u?.match("d+"), v?.search("e+")];\n',
+    );
+    fs.writeFileSync(literal, 'export const a = (t: string) => [t.split("a+"), t.replace("b+", ""), t.replaceAll("c+", "")];\n');
+    assert.equal(javaScriptRegexUses([implicit]).length, 5, "a string's match, matchAll and search are found, on an optional string too");
+    assert.deepEqual(javaScriptRegexUses([literal]), [], "a string's split and replace with a string are not");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the linear-time engine gives back what JavaScript's would: lookbehinds, lookaheads, \\s, surrogate pairs (#610)", () => {
+  // A lookbehind of one class: the match starts after the character before, never inside the previous match.
+  const word = new LinearRegex("ab", { notAfter: String.raw`\p{L}` });
+  assert.deepEqual(
+    [...word.matchAll("ab xab ab")].map((m) => m.index),
+    [0, 7],
+  );
+  assert.deepEqual(
+    [...word.matchAll("abab")].map((m) => m.index),
+    [0],
+    "the second ab is after a letter the first match holds",
+  );
+  assert.deepEqual(
+    [...word.matchAll("𝐀ab ab")].map((m) => m.index),
+    [5],
+    "a letter outside the BMP is one character before",
+  );
+  // A lookahead as the last group: read, and left out of the match.
+  const ahead = new LinearRegex("pw($|[^a-z])", { lookahead: true });
+  assert.deepEqual(
+    [...ahead.matchAll("pw pwd pw")].map((m) => [m.index, m.end]),
+    [
+      [0, 2],
+      [7, 9],
+    ],
+  );
+  // JavaScript's \s holds the no-break space and the line separator; RE2's \s does not.
+  assert.equal(new LinearRegex(`a[${SPACE}]b`).test("a\u00a0b"), true);
+  assert.equal(new LinearRegex(`a[${SPACE}]b`).test("a\u2028b"), true);
+  assert.equal(new LinearRegex(`a[${SPACE}]b`).test("a_b"), false);
+  // A refused candidate is tried again from the next character, as a backtracking engine would.
+  const evenRun = new LinearRegex("[0-9]+", { accept: ({ text }) => text.length % 2 === 0 });
+  assert.deepEqual(
+    [...evenRun.matchAll("123")].map((m) => m.text),
+    ["23"],
+  );
+  // split keeps the captured separators, as String.prototype.split does.
+  assert.deepEqual(new LinearRegex("(-)").split("a-b"), "a-b".split(/(-)/));
+  assert.deepEqual(new LinearRegex(`[${SPACE}]+`).split(""), "".split(/\s+/));
+  // needs: text with none of them is not read; each must be lower case and fold as its lower case does.
+  assert.equal(new LinearRegex("Bearer x", { ignoreCase: true, needs: ["bearer"] }).test("BEARER X"), true);
+  assert.throws(() => new LinearRegex("x", { needs: ["Bearer"] }), /lower case/);
+  assert.throws(() => new LinearRegex("x", { needs: ["пароль"] }), /lower case/);
 });
 
 test("typed text and URLs are redacted at the log, not just on findings", () => {
