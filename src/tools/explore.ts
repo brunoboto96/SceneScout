@@ -739,6 +739,8 @@ export function registerExploreTools(): void {
           // In a guided check, the area this session is working on is where the finding was found (its card and scout_cards' filter).
           const area = guidedSessions.get(session)?.area;
           if (area) eng.memory.setArea(filed.finding.id, area);
+          // The mode it was filed in, so a guided re-check of it never attaches above that (guided.ts recheckSpec).
+          eng.memory.setFoundInMode(filed.finding.id, eng.mode);
           const picture = await findingPicture(eng, filed, ref);
           const result = text(filedText(filed, category) + picture.line, session);
           if (picture.image) result.content.push(picture.image);

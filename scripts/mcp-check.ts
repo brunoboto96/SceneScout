@@ -28,6 +28,8 @@ const EXPECTED_TOOLS = [
   "scout_intake",
   "scout_guided_plan",
   "scout_guided_confirm",
+  "scout_recheck_plan",
+  "scout_saved_checks",
   "scout_lane_report",
   "scout_scan",
   "scout_attach",
@@ -1378,6 +1380,9 @@ async function guidedCardsCheck(): Promise<void> {
         teamOut.join(",") !== "evidenceDir,file,folder,manifest,missingPictures,path,pictures,problems"
       )
         fail(`scout_team_report's schemas are not no input and the TeamReport output: ${JSON.stringify({ input: teamTool?.inputSchema, out: teamOut })}`);
+      const savedBefore = await call("scout_saved_checks", { action: "list" });
+      if (!savedBefore.isError || !/pass the site's address/.test(textOf(savedBefore)))
+        fail(`scout_saved_checks before any attach did not ask for the site's address: ${textOf(savedBefore)}`);
       const teamBefore = await call("scout_team_report", {});
       if (!teamBefore.isError || !/attach first/.test(textOf(teamBefore)))
         fail(`scout_team_report before any attach did not say to attach first: ${textOf(teamBefore)}`);
@@ -1458,6 +1463,54 @@ async function guidedCardsCheck(): Promise<void> {
       }
       if (!fs.readFileSync(path.join(projectDir, ".scenescout", "team-report.html"), "utf8").includes("The send button gives no sign it worked"))
         fail("the team report page does not show the check's problem");
+      // The finding was filed in observe: a re-check of it is a Look only plan of its own, attached with its id, then scout_verify.
+      for (const [name, readOnly] of [
+        ["scout_recheck_plan", true],
+        ["scout_saved_checks", false],
+      ] as const) {
+        const t = tools.find((x) => x.name === name);
+        if (t?.annotations?.readOnlyHint !== readOnly || t.annotations.destructiveHint !== false || !t.outputSchema)
+          fail(`${name} is not annotated readOnlyHint ${readOnly}, destructiveHint false, with an outputSchema: ${JSON.stringify(t?.annotations)}`);
+      }
+      const re = await call("scout_recheck_plan", {});
+      const rePlan = re.structuredContent as
+        | { planId: string; mode: string; confirm: unknown; recheck?: { ids: string[] }; calls: Array<{ tool: string; args: Record<string, unknown> }> }
+        | undefined;
+      if (
+        re.isError ||
+        !rePlan ||
+        rePlan.planId === plan.planId ||
+        rePlan.mode !== "observe" ||
+        rePlan.confirm !== null ||
+        !rePlan.recheck?.ids.includes(id) ||
+        rePlan.calls.find((c) => c.tool === "scout_attach")?.args.planId !== rePlan.planId ||
+        !rePlan.calls.some((c) => c.tool === "scout_verify")
+      )
+        fail(`scout_recheck_plan did not build a Look only re-check of the observe finding: ${JSON.stringify(re).slice(0, 800)}`);
+      // Saved checks: the plan's choices, owner-only, under .scenescout/guided/; run again, a new plan; and no credential field.
+      const saved = await call("scout_saved_checks", { action: "save", name: "Forms and pages", planId: plan.planId });
+      const savedFile = path.join(projectDir, ".scenescout", "guided", "forms-and-pages.json");
+      if (saved.isError || !fs.existsSync(savedFile)) fail(`scout_saved_checks did not save the check: ${textOf(saved)}`);
+      if (process.platform !== "win32" && (fs.statSync(savedFile).mode & 0o777) !== 0o600) fail("a saved check is not owner-only");
+      if (Object.keys(JSON.parse(fs.readFileSync(savedFile, "utf8"))).join(",") !== "name,choices,savedAt")
+        fail(`a saved check holds more than its choices: ${fs.readFileSync(savedFile, "utf8")}`);
+      const reSave = await call("scout_saved_checks", { action: "save", name: "Re-check", planId: rePlan!.planId });
+      if (!reSave.isError || !/re-check is not saved/.test(textOf(reSave))) fail(`a re-check was saved: ${textOf(reSave)}`);
+      const listed = (await call("scout_saved_checks", { action: "list" })).structuredContent as { saved: Array<{ name: string }> };
+      if (listed.saved.map((c) => c.name).join(",") !== "Forms and pages") fail(`scout_saved_checks list: ${JSON.stringify(listed)}`);
+      const rerun = await call("scout_saved_checks", { action: "run", name: "forms and pages" });
+      const rerunPlan = (rerun.structuredContent as { plan?: { planId: string; mode: string } } | undefined)?.plan;
+      if (rerun.isError || !rerunPlan || rerunPlan.planId === plan.planId || rerunPlan.mode !== "observe")
+        fail(`scout_saved_checks run did not build a new plan: ${JSON.stringify(rerun).slice(0, 600)}`);
+      fs.writeFileSync(
+        path.join(projectDir, ".scenescout", "guided", "tampered.json"),
+        JSON.stringify({ name: "Tampered", choices: {}, savedAt: "x", cookies: [] }),
+      );
+      const tampered = await call("scout_saved_checks", { action: "run", name: "Tampered" });
+      if (!tampered.isError || !/no field for a password, code, token or cookie/.test(textOf(tampered)))
+        fail(`a saved check with a cookie field was run: ${textOf(tampered)}`);
+      const deleted = await call("scout_saved_checks", { action: "delete", name: "Forms and pages" });
+      if (deleted.isError || fs.existsSync(savedFile)) fail(`scout_saved_checks did not delete the check: ${textOf(deleted)}`);
       const labelled = await call("scout_feedback", { id, verdict: "not-a-bug", reason: "The page reloads on purpose" });
       if (labelled.isError || (labelled.structuredContent as { verdict?: string }).verdict !== "not-a-bug")
         fail(`scout_feedback did not label the finding: ${textOf(labelled)}`);
@@ -1484,7 +1537,7 @@ async function guidedCardsCheck(): Promise<void> {
     fs.rmSync(projectDir, { recursive: true, force: true });
   }
   console.log(
-    "✓ a guided check's progress reaches the pane's poll and the status text, scout_cards shows its card with the area and picture, scout_team_report writes it with its picture and a manifest that matches the files, and a not-a-bug label keeps the finding, leaves it out of the cards and the count, and is exported as a candidate",
+    "✓ a guided check's progress reaches the pane's poll and the status text, scout_cards shows its card with the area and picture, scout_team_report writes it with its picture and a manifest that matches the files, scout_recheck_plan re-checks it in the mode it was found in under a plan of its own, scout_saved_checks saves, lists, runs and deletes a check owner-only and refuses one with a cookie field, and a not-a-bug label keeps the finding, leaves it out of the cards and the count, and is exported as a candidate",
   );
 }
 

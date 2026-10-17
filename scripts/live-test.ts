@@ -51,7 +51,17 @@ import {
   type PaneInput,
 } from "../src/engine/status-pane.ts";
 import { statusPanePage } from "../src/engine/status-pane-page.ts";
-import { CARES, CHECK_AREAS, THOROUGHNESSES, checkGuidedChoices, confirmationReason, guidedPlan, isLocalAddress } from "../src/engine/guided.ts";
+import {
+  buildRecheckPlan,
+  CARES,
+  CHECK_AREAS,
+  THOROUGHNESSES,
+  checkGuidedChoices,
+  confirmationReason,
+  guidedPlan,
+  isLocalAddress,
+} from "../src/engine/guided.ts";
+import { MAX_SAVED_NAME } from "../src/engine/saved-checks.ts";
 import {
   ACTION_LABEL,
   ACTION_PROMPT,
@@ -2631,7 +2641,8 @@ test("each button asks for what it says: the server, Claude, or another step", (
   );
 
   const results = drawGuided("mobile", wizard({ step: "results", cards, cardsTotal: 1, lastChoices: { address: "https://staging.example.com" } }), STATUS_IDLE);
-  assert.deepEqual(results.press("guided-results-recheck"), { type: "send", payload: { text: ACTION_PROMPT.recheck } });
+  // The server builds the re-check's plan, in the care level the problems were found in; Claude is then handed its id.
+  assert.deepEqual(results.press("guided-results-recheck"), { type: "recheck", payload: undefined });
   assert.deepEqual(results.press("guided-results-again"), { type: "runAgain", payload: undefined });
   assert.ok(!elementsOf(results.tree).some((e) => e.props.key === "guided-results-new"), "mobile cannot type a new address");
   // Filing tickets is a turn for Claude, which previews them; the server's own form, listing them, is where the person says yes.
@@ -2800,6 +2811,210 @@ test("a lane's turn ending leaves Claude's own turn running, so Stop goes into i
   assert.deepEqual(submitted, [ACTION_PROMPT.stop]);
   assert.equal(guided.endsMainTurn({ agentId: "lane-1" }), false);
   assert.equal(guided.endsMainTurn({ turnId: "main" }), true);
+});
+
+const SAVED_LIST = [
+  {
+    name: "Shop sign-up on a phone",
+    choices: { address: "https://staging.example.com", areas: ["sign-in", "phone"], signIn: "password", care: "may-create-test-data", thoroughness: "quick" },
+    savedAt: "2026-10-15T09:00:00.000Z",
+    lastRunAt: "2026-10-16T09:00:00.000Z",
+  },
+  {
+    name: "Admin area",
+    choices: { address: "http://localhost:3000", areas: ["forms"], signIn: "none", care: "look-only", thoroughness: "normal" },
+    savedAt: "2026-10-15T09:00:00.000Z",
+  },
+];
+const savedResult = (plan?: Record<string, unknown>, text = "Saved.") => ({
+  content: [{ type: "text", text }],
+  structuredContent: { folder: "/home/u/site/.scenescout/guided", saved: SAVED_LIST, refused: [], ...(plan ? { plan } : {}) },
+});
+
+test("the panel's saved checks: listed on the welcome with Run again and Delete on every surface, saved from the results, and never a re-check", () => {
+  assert.equal(guided.SAVED_NAME_MAX, MAX_SAVED_NAME);
+  const guideSource = fs.readFileSync(path.join(import.meta.dirname, "..", "src", "tools", "guide.ts"), "utf8");
+  assert.ok(guideSource.includes(`export const RECHECK_PLAN_TOOL = "${guided.RECHECK_TOOL}"`));
+  assert.ok(guideSource.includes(`export const SAVED_CHECKS_TOOL = "${guided.SAVED_TOOL}"`));
+  const read = guided.readSaved(savedResult());
+  assert.ok(read.ok);
+  assert.deepEqual(read.saved, [
+    { name: "Shop sign-up on a phone", address: "https://staging.example.com", care: "may-create-test-data", lastRunAt: "2026-10-16T09:00:00.000Z" },
+    { name: "Admin area", address: "http://localhost:3000", care: "look-only", lastRunAt: "" },
+  ]);
+  assert.deepEqual(guided.readSaved({ isError: true, content: [{ type: "text", text: "Error: no project is open yet" }] }), {
+    ok: false,
+    error: "No project is open yet",
+  });
+  const w = wizard({ saved: read.saved });
+  for (const surface of SURFACES) {
+    const drawn = drawGuided(surface, w, STATUS_IDLE);
+    assertDrawable(drawn.tree, surface, "welcome with saved checks");
+    assert.match(drawn.text, /Saved checks/);
+    assert.match(drawn.text, /Shop sign-up on a phone {3}https:\/\/staging\.example\.com · May create test data · last run 2026-10-16/);
+    assert.match(drawn.text, /Admin area {3}http:\/\/localhost:3000 · Look only · never run again/);
+    // Mobile has buttons alone, and these are buttons: a saved check runs there as well.
+    assert.deepEqual(drawn.press("guided-saved-run-shop-sign-up-on-a-phone"), { type: "runSaved", payload: { name: "Shop sign-up on a phone" } });
+    assert.deepEqual(drawn.press("guided-saved-delete-admin-area"), { type: "deleteSaved", payload: { name: "Admin area" } });
+  }
+  // None saved, or none read: no heading.
+  for (const saved of [null, []]) assert.doesNotMatch(drawGuided("desktop", wizard({ saved }), STATUS_IDLE).text, /Saved checks/);
+  // Test ids stay unique when two names read alike, and a name with no ASCII letter still has one.
+  assert.deepEqual(
+    guided.savedKeys([
+      { name: "A b", address: "x", care: "", lastRunAt: "" },
+      { name: "a-B", address: "x", care: "", lastRunAt: "" },
+      { name: "Ölçü", address: "x", care: "", lastRunAt: "" },
+    ]),
+    ["a-b", "a-b-1", "l"],
+  );
+  // What the panel's state kept reads back; anything misshapen is dropped.
+  assert.deepEqual(guided.wizardOf({ saved: [{ name: "Admin area", address: "http://localhost:3000", care: "look-only" }, { name: "" }, 5] }).saved, [
+    { name: "Admin area", address: "http://localhost:3000", care: "look-only", lastRunAt: "" },
+  ]);
+  assert.equal(guided.wizardOf({ saveName: "x".repeat(200) }).saveName.length, MAX_SAVED_NAME);
+  assert.equal(guided.reduce(wizard(), { type: "saveName", value: "Shop" }).saveName, "Shop");
+
+  // Saving: on the results of a plan the panel built, where a name can be typed.
+  const cards = [cardFixture("0a1b2c3d4e")];
+  const plan = planFor({ address: "https://staging.example.com", areas: ["forms"] });
+  const results = wizard({ step: "results", cards, cardsTotal: 1, planId: GUIDED_PLAN_ID, plan, saveName: "Shop" });
+  for (const surface of SURFACES) {
+    const drawn = drawGuided(surface, results, STATUS_IDLE);
+    assertDrawable(drawn.tree, surface, "results with save");
+    const keys = elementsOf(drawn.tree).map((e) => e.props.key);
+    assert.equal(keys.includes("guided-save-check"), surface !== "mobile", `${surface}: save where a name can be typed`);
+    if (surface === "mobile") continue;
+    assert.deepEqual(drawn.press("guided-save-name", "Shop sign-up"), { type: "saveName", payload: { value: "Shop sign-up" } });
+    assert.deepEqual(drawn.press("guided-save-check"), { type: "saveCheck", payload: undefined });
+  }
+  // A re-check is made from problems, not choices: nothing to save. Nor is there with no plan of the panel's.
+  const recheck = JSON.parse(
+    JSON.stringify(
+      buildRecheckPlan(
+        { address: "https://staging.example.com", care: "look-only", foundIn: "look-only", signIn: "none", ids: ["0a1b2c3d4e"], leftOut: [] },
+        GUIDED_PLAN_ID,
+      ),
+    ),
+  );
+  for (const over of [{ plan: recheck }, { planId: null, plan: null }])
+    assert.ok(!elementsOf(drawGuided("desktop", { ...results, ...over }, STATUS_IDLE).tree).some((e) => e.props.key === "guided-save-check"));
+  // While the re-check's plan is built, its button is not there to press twice.
+  const busy = drawGuided("desktop", { ...results, busy: "recheck" }, STATUS_IDLE);
+  assert.ok(busy.text.includes(guided.PANEL_WORDS.rechecking) && !elementsOf(busy.tree).some((e) => e.props.key === "guided-results-recheck"));
+});
+
+test("a saved check run again, and a re-check, are plans like any other: confirmed again where they write, and Run again keeps the last check that was not a re-check", () => {
+  const writes = planFor({ address: "https://staging.example.com", areas: ["forms"], care: "may-create-test-data" });
+  const ran = guided.afterSavedRun(wizard({ step: "welcome" }), savedResult(writes));
+  assert.deepEqual([ran.wizard.step, ran.send, ran.wizard.saved?.length], ["confirm", undefined, 2], "it waits on the person's confirmation");
+  const looks = planFor({ address: "http://localhost:3000", areas: ["forms"] });
+  const started = guided.afterSavedRun(wizard(), savedResult(looks));
+  assert.equal(started.wizard.step, "running");
+  assert.equal(started.send, guided.startPrompt(GUIDED_PLAN_ID));
+  const refused = guided.afterSavedRun(wizard(), { isError: true, content: [{ type: "text", text: 'Error: there is no saved check called "Shop"' }] });
+  assert.deepEqual([refused.wizard.notice, refused.send], [{ tone: "error", text: 'There is no saved check called "Shop"' }, undefined]);
+  assert.equal(guided.afterSavedRun(wizard(), savedResult()).wizard.notice?.tone, "error", "a list with no plan starts nothing");
+  // A re-check's plan: its choices name no area, so they are not what Run again repeats.
+  const last = { address: "https://staging.example.com", areas: ["forms"], signIn: "none", care: "look-only", thoroughness: "normal" };
+  const recheck = JSON.parse(
+    JSON.stringify(
+      buildRecheckPlan(
+        { address: "https://staging.example.com", care: "may-submit-forms", foundIn: "may-submit-forms", signIn: "none", ids: ["a"], leftOut: [] },
+        GUIDED_PLAN_ID,
+      ),
+    ),
+  );
+  const after = guided.afterPlan(wizard({ lastChoices: last }), { structuredContent: recheck });
+  assert.deepEqual([after.wizard.step, after.wizard.lastChoices], ["confirm", last]);
+  // Its confirmation, turned down: Back goes to the results it came from, and there are no choices to run as Look only.
+  const turnedDown = { ...after.wizard, notice: { tone: "error" as const, text: CONFIRM_SAYS.declined } };
+  for (const surface of SURFACES) {
+    const drawn = drawGuided(surface, turnedDown, STATUS_IDLE);
+    assertDrawable(drawn.tree, surface, "a re-check's confirmation");
+    assert.deepEqual(drawn.press("guided-confirm-back"), { type: "go", payload: { step: "results" } });
+    assert.ok(!elementsOf(drawn.tree).some((e) => e.props.key === "guided-confirm-lookonly"), surface);
+  }
+  // A check's own confirmation keeps both.
+  const own = drawGuided(
+    "desktop",
+    { ...turnedDown, plan: planFor({ address: "https://staging.example.com", areas: ["forms"], care: "may-submit-forms" }) },
+    STATUS_IDLE,
+  );
+  assert.deepEqual(own.press("guided-confirm-back"), { type: "go", payload: { step: "configuring" } });
+  assert.deepEqual(own.press("guided-confirm-lookonly"), { type: "lookOnly", payload: undefined });
+});
+
+test("register.js: the welcome lists the saved checks, Run again and Delete call the server, and Check them again hands Claude the re-check's id", async () => {
+  type Hook = ($: unknown, e: any, next: (e: unknown) => Promise<unknown>) => Promise<unknown>;
+  const hooks = new Map<string, Hook[]>();
+  const on = (event: string, ...rest: unknown[]) => {
+    hooks.set(event, [...(hooks.get(event) ?? []), rest[rest.length - 1] as Hook]);
+    return { catch: () => undefined };
+  };
+  const state = new Map<string, { value: unknown; version: number }>();
+  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  const submitted: string[] = [];
+  const looks = planFor({ address: "http://localhost:3000", areas: ["forms"] });
+  const recheck = JSON.parse(
+    JSON.stringify(
+      buildRecheckPlan({ address: "http://localhost:3000", care: "look-only", foundIn: "look-only", signIn: "sso", ids: ["a"], leftOut: [] }, "gp-recheck001"),
+    ),
+  );
+  const $ = {
+    state: {
+      get: async (ref: { key: string }) => state.get(ref.key) ?? { value: undefined, version: 0 },
+      set: async (ref: { key: string }, value: unknown) => {
+        state.set(ref.key, { value, version: (state.get(ref.key)?.version ?? 0) + 1 });
+        return { isSet: true };
+      },
+    },
+    store: { get: async () => true, set: async () => undefined },
+    mcp: {
+      call: async (_server: string, tool: string, args: Record<string, unknown>) => {
+        calls.push({ tool, args });
+        if (tool === guided.SAVED_TOOL)
+          return savedResult(args.action === "run" ? looks : undefined, args.action === "delete" ? 'Deleted the saved check "Admin area".' : "Saved.");
+        if (tool === guided.RECHECK_TOOL) return { content: [{ type: "text", text: "plan" }], structuredContent: recheck };
+        return serverResult(paneData(paneInput()));
+      },
+    },
+    clock: { now: async () => PANE_NOW },
+    session: { surfaces: async () => ["desktop"], append: async () => ({ deny: "idle" }) },
+    prompt: { submit: async (p: { text: string }) => (submitted.push(p.text), {}) },
+    ui: { open: async () => undefined, toast: () => undefined, log: () => undefined, resolve: () => elsFor("desktop") },
+  };
+  registerMod(on as never, {});
+  for (const hook of hooks.get("command.run") ?? []) await hook($, { command: "scenescout-guided" }, async (x) => x);
+  const w = () => guided.wizardOf(state.get("wizard")?.value);
+  assert.deepEqual(calls.find((c) => c.tool === guided.SAVED_TOOL)?.args, { action: "list" }, "opening the panel lists them");
+  assert.equal(w().saved?.length, 2);
+  const [render] = hooks.get("ui.render")!;
+  const press = async (key: string) => {
+    const tree = await render($, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x);
+    const el = elementsOf(tree).find((e) => e.props.key === key);
+    assert.ok(el, `no ${key}`);
+    (el.props.onPress as () => void)();
+    await new Promise((r) => setTimeout(r, 20));
+  };
+  await press("guided-saved-run-admin-area");
+  assert.deepEqual(calls.at(-1), { tool: guided.SAVED_TOOL, args: { action: "run", name: "Admin area" } });
+  assert.deepEqual([w().step, w().planId], ["running", GUIDED_PLAN_ID]);
+  assert.deepEqual(submitted, [guided.startPrompt(GUIDED_PLAN_ID)]);
+  state.set("wizard", { value: { ...w(), step: "welcome" }, version: 99 });
+  await press("guided-saved-delete-admin-area");
+  assert.deepEqual(calls.at(-1), { tool: guided.SAVED_TOOL, args: { action: "delete", name: "Admin area" } });
+  assert.equal(w().notice?.text, 'Deleted the saved check "Admin area".');
+  // From the results: the re-check is built by the server, with how the last check signed in, and Claude is handed its id.
+  state.set("wizard", { value: { ...w(), step: "results", cards: [], lastChoices: { ...looks.choices, signIn: "sso" } }, version: 100 });
+  await press("guided-results-recheck");
+  assert.deepEqual(calls.at(-1), { tool: guided.RECHECK_TOOL, args: { signIn: "sso" } });
+  assert.deepEqual([w().step, w().planId, submitted.at(-1)], ["running", "gp-recheck001", guided.startPrompt("gp-recheck001")]);
+  // Save: the name typed, the plan the panel built.
+  state.set("wizard", { value: { ...w(), step: "results", planId: GUIDED_PLAN_ID, plan: looks, saveName: "Admin area" }, version: 101 });
+  await press("guided-save-check");
+  assert.deepEqual(calls.at(-1), { tool: guided.SAVED_TOOL, args: { action: "save", name: "Admin area", planId: GUIDED_PLAN_ID } });
+  assert.deepEqual([w().saveName, w().notice?.text], ["", "Saved."]);
 });
 
 test("the first-run tour: three panels, Next, Back, Skip and Done, on every surface", () => {

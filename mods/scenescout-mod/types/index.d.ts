@@ -27,6 +27,9 @@ export type ScenescoutModWizard = {
   lastChoices: Record<string, unknown> | null;
   tourPage: number;
   returnTo: ScenescoutModWizard["step"] | null;
+  /** The project's saved checks as the welcome lists them (no choices beyond these, and never a credential). */
+  saved: Array<{ name: string; address: string; care: string; lastRunAt: string }> | null;
+  saveName: string;
 };
 
 export type ScenescoutModStatus = {
