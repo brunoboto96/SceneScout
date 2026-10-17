@@ -8,6 +8,7 @@
  * and the duration format it shares with the server are copied here, and the
  * test holds them equal to the engine's.
  */
+import { plainText } from "./guided.js";
 
 /** The command that opens the pane. */
 export const COMMAND = "scenescout-pane";
@@ -217,7 +218,9 @@ export function sessionLine(s) {
  */
 export function renderPane(els, view) {
   const { Box, Text, Link } = els;
-  const line = (/** @type {string} */ text, /** @type {Record<string, unknown>} */ style = {}) => Text({ ...style, wrap: "truncate-end", children: [text] });
+  // A session's task and the server's text can quote the tested page: drawn as plain text.
+  const line = (/** @type {string} */ text, /** @type {Record<string, unknown>} */ style = {}) =>
+    Text({ ...style, wrap: "truncate-end", children: [plainText(text)] });
   const dim = (/** @type {string} */ text) => line(text, { dimColor: true });
   const live = (/** @type {unknown} */ url, /** @type {string} */ note) => {
     const href = linkHref(url);
@@ -279,6 +282,7 @@ export function renderPane(els, view) {
  * @param {{ kind: string, text?: string, error?: string }} view
  */
 export function fallbackText(view) {
-  if (view.kind === "error") return str(view.error);
-  return str(view.text) || "The SceneScout server has not answered yet.";
+  // Printed into the transcript: each line made plain, the server's own line breaks kept.
+  const text = view.kind === "error" ? str(view.error) : str(view.text) || "The SceneScout server has not answered yet.";
+  return text.split("\n").map(plainText).join("\n");
 }

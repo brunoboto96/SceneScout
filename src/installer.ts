@@ -28,7 +28,8 @@ const LEGACY_SKILL_NAMES = ["frontend-tester", "scenecraft"];
 const LEGACY_MCP_NAMES = ["scenecraft"];
 
 export type RunResult = { status: number | null; stdout: string; stderr: string; missing: boolean };
-export type Runner = (command: string, args: string[], opts?: { cwd?: string }) => RunResult;
+/** `timeoutMs` bounds the command (the real runner's default is a minute). */
+export type Runner = (command: string, args: string[], opts?: { cwd?: string; timeoutMs?: number }) => RunResult;
 
 /** What `spawnRunner` starts. A Windows batch shim is `cmd.exe /d /s /c` plus one already-quoted line. */
 export type SpawnPlan = { command: string; args: string[]; windowsVerbatimArguments?: true };
@@ -140,6 +141,9 @@ export function commandSpawnPlan(
   });
 }
 
+/** How long `doctor` waits for npm to say whether a pinned release exists; a normal answer takes about a second. */
+const NPM_VIEW_TIMEOUT_MS = 15_000;
+
 /** Real runner. `missing` separates "the binary is not installed" from "it ran and failed". */
 export const spawnRunner: Runner = (command, args, opts) => {
   const planned = commandSpawnPlan(command, args, {
@@ -150,9 +154,10 @@ export const spawnRunner: Runner = (command, args, opts) => {
     comSpec: process.env.ComSpec,
     exists: (file) => fs.existsSync(file),
   });
+  const timeoutMs = opts?.timeoutMs ?? 60_000;
   const r = spawnSync(planned.command, planned.args, {
     encoding: "utf8",
-    timeout: 60_000,
+    timeout: timeoutMs,
     cwd: opts?.cwd,
     windowsVerbatimArguments: planned.windowsVerbatimArguments,
   });
@@ -161,7 +166,7 @@ export const spawnRunner: Runner = (command, args, opts) => {
   // was spawned directly and nothing ran: the same outcome as a missing binary.
   const missing = code === "ENOENT" || (process.platform === "win32" && code === "EINVAL");
   // With `encoding` set, a command that never ran still yields "" for stderr: the error is the only account of it.
-  const stderr = r.stderr || (code === "ETIMEDOUT" ? "npm did not finish within 60 s" : r.error ? String(r.error.message) : "");
+  const stderr = r.stderr || (code === "ETIMEDOUT" ? `${command} did not finish within ${timeoutMs / 1000} s` : r.error ? String(r.error.message) : "");
   return { status: r.status, stdout: r.stdout ?? "", stderr, missing };
 };
 
@@ -264,7 +269,13 @@ export function npxServeArgs(version: string): string[] {
 
 /** Whether a registered argument line is this package's npx launcher: unpinned (older installs) or pinned to any release. */
 export function isNpxServeArgs(args: string): boolean {
-  return /^-y scenescout(@\d+\.\d+\.\d+)? serve$/.test(args);
+  return /^-y scenescout(@\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?)? serve$/.test(args);
+}
+
+/** The release an npx launcher line pins, or null when it is unpinned or not this package's launcher. A pre-release such as `3.26.0-beta.1` counts. */
+export function pinnedVersion(args: string): string | null {
+  const match = /^-y scenescout@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?) serve$/.exec(args);
+  return match ? match[1] : null;
 }
 
 /**
@@ -610,6 +621,20 @@ export function diagnose(opts: {
           detail: absolute ? `via ${command} ${serverPath}` : `registered with a bare \`${command}\` command, which Claude Code may not find on its PATH`,
           fix: repair.setup,
         });
+        const pinned = pinnedVersion(serverPath);
+        if (pinned !== null) {
+          // A pin npm does not have makes every launch fail (a release whose publish did not finish). Only a definite "no such version" fails; no npm, or no network, says nothing.
+          // Bounded well under the runner's minute: a registry behind a firewall that drops packets otherwise holds the doctor until the OS gives up on the connection.
+          const view = opts.run("npm", ["view", `${CLI_NAME}@${pinned}`, "version"], { timeoutMs: NPM_VIEW_TIMEOUT_MS });
+          if (!view.missing && view.status !== 0 && /E404|No match found|notarget/i.test(view.stderr + view.stdout)) {
+            checks.push({
+              name: "registered version is published",
+              ok: false,
+              detail: `the registration pins ${CLI_NAME}@${pinned}, which npm does not have`,
+              fix: `${repair.setup}   (or wait for the release's publish to finish)`,
+            });
+          }
+        }
       } else if (!samePath(serverPath, server)) {
         // The usual aftermath of moving or deleting a checkout.
         checks.push({ name: "MCP server registered", ok: false, detail: `registered, but pointing at ${serverPath} — not this install`, fix: repair.setup });

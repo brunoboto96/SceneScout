@@ -8,7 +8,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Page } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
+import { generateReport } from "../../dist/engine/report.js";
 import { check, SLOW_PAGE_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "time limits";
@@ -23,6 +25,123 @@ async function attachError(engine: BrowserEngine, opts: Parameters<BrowserEngine
     return "";
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * Make page loads of URLs ending in `suffix` fail with `error` the next `times` times, as the browser would. No
+ * network error the route API can abort with is ERR_NO_BUFFER_SPACE, so the page's own goto stands in for it.
+ * Returns how many loads of such a URL were asked for, and the undo.
+ */
+function failLoads(
+  page: Page,
+  suffix: string,
+  error: string,
+  times: number,
+): { asked: () => number; timeouts: Array<number | undefined>; restore: () => void } {
+  const proto = Object.getPrototypeOf(page) as { goto: Page["goto"] };
+  const real = proto.goto;
+  let asked = 0;
+  let left = times;
+  const timeouts: Array<number | undefined> = [];
+  proto.goto = async function (this: Page, url: string, options?: Parameters<Page["goto"]>[1]) {
+    if (url.endsWith(suffix)) {
+      asked += 1;
+      timeouts.push(options?.timeout);
+      if (left > 0) {
+        left -= 1;
+        throw new Error(`page.goto: net::${error} at ${url}\nCall log:\n  - navigating to "${url}", waiting until "domcontentloaded"`);
+      }
+    }
+    return real.call(this, url, options);
+  };
+  return { asked: () => asked, timeouts, restore: () => (proto.goto = real) };
+}
+
+async function navigateError(engine: BrowserEngine, target: string): Promise<{ result: string; error: string }> {
+  try {
+    return { result: await engine.navigate(target), error: "" };
+  } catch (err) {
+    return { result: "", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function retriedLoads(engine: BrowserEngine, baseUrl: string, projectDir: string): Promise<void> {
+  const target = "/action-results.html";
+  await engine.attach({ url: baseUrl, projectDir });
+  const page = (engine as unknown as { page: Page }).page;
+
+  let fault = failLoads(page, target, "ERR_NO_BUFFER_SPACE", 1);
+  try {
+    const once = await navigateError(engine, target);
+    check(
+      "a page load refused with ERR_NO_BUFFER_SPACE is tried once more, loads, and the result says it was retried",
+      fault.asked() === 2 && /retried after ERR_NO_BUFFER_SPACE/.test(once.result) && page.url().endsWith(target),
+      `loads asked: ${fault.asked()}; ${(once.result || once.error).slice(0, 400)}`,
+    );
+    const [first, retry] = fault.timeouts;
+    check(
+      "...and the retry is given what is left of the page-load limit, so the two tries keep to it",
+      typeof first === "number" && typeof retry === "number" && retry < first && retry > 0,
+      `timeouts: ${JSON.stringify(fault.timeouts)}`,
+    );
+  } finally {
+    fault.restore();
+  }
+  const report = generateReport(engine.memory!, [], undefined, { write: false }).markdown;
+  check(
+    "...and the report lists that load under the loads retried",
+    /## Page loads retried[\s\S]*action-results\.html` \(session limits\): retried after ERR_NO_BUFFER_SPACE/.test(report),
+    report.slice(report.indexOf("## Page loads retried"), report.indexOf("## Page loads retried") + 400) || "(no such section)",
+  );
+
+  fault = failLoads(page, target, "ERR_NO_BUFFER_SPACE", 2);
+  try {
+    const twice = await navigateError(engine, target);
+    check(
+      "a second refusal is not retried again: the load fails after two tries, and its error says it was retried",
+      fault.asked() === 2 && /net::ERR_NO_BUFFER_SPACE/.test(twice.error) && /retried after ERR_NO_BUFFER_SPACE/.test(twice.error.split("\n")[0]),
+      `loads asked: ${fault.asked()}; ${(twice.result || twice.error).slice(0, 400)}`,
+    );
+  } finally {
+    fault.restore();
+  }
+
+  fault = failLoads(page, target, "ERR_CONNECTION_REFUSED", 1);
+  try {
+    const other = await navigateError(engine, target);
+    check(
+      "any other load failure is not retried",
+      fault.asked() === 1 && /net::ERR_CONNECTION_REFUSED/.test(other.error) && !/retried after/.test(other.error),
+      `loads asked: ${fault.asked()}; ${(other.result || other.error).slice(0, 400)}`,
+    );
+  } finally {
+    fault.restore();
+  }
+
+  // The attach's own first load: the page object is new, its class the same.
+  fault = failLoads(page, target, "ERR_NO_BUFFER_SPACE", 1);
+  try {
+    const attached = await engine.attach({ url: `${baseUrl}${target}`, projectDir });
+    check(
+      "an attach whose first load is refused with ERR_NO_BUFFER_SPACE retries it and says so",
+      fault.asked() === 2 && /retried after ERR_NO_BUFFER_SPACE/.test(attached),
+      `loads asked: ${fault.asked()}; ${attached.slice(-400)}`,
+    );
+  } finally {
+    fault.restore();
+  }
+
+  fault = failLoads(page, target, "ERR_NO_BUFFER_SPACE", 1);
+  try {
+    const crawled = await engine.crawl([target]);
+    check(
+      "a crawled route whose load was retried says so on its line",
+      fault.asked() === 2 && new RegExp(`^${target.replace(".", "\\.")} — 200 .*retried after ERR_NO_BUFFER_SPACE`, "m").test(crawled),
+      `loads asked: ${fault.asked()}; ${crawled.slice(0, 400)}`,
+    );
+  } finally {
+    fault.restore();
   }
 }
 
@@ -139,6 +258,8 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     await engine.attach({ url: baseUrl, projectDir, navTimeoutMs: HIGH_MS, actionTimeoutMs: HIGH_MS });
     const passingFlow = await engine.replayFlow([...flowSteps], "observe");
     check("...while the same flow passes under raised limits", passingFlow.outcome.status === "passed", JSON.stringify(passingFlow.outcome).slice(0, 400));
+
+    await retriedLoads(engine, baseUrl, projectDir);
   } finally {
     if (savedEnv === undefined) delete process.env[NAV_ENV];
     else process.env[NAV_ENV] = savedEnv;

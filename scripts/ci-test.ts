@@ -63,6 +63,7 @@ import {
   JUDGE_SYSTEM,
   JUDGE_TOOL,
   judgeSamplingParams,
+  planDedup,
   samplingAsk,
 } from "../src/engine/dedup.ts";
 import {
@@ -311,6 +312,19 @@ test("base URL: https anywhere, plain http only to this machine, never with cred
   assert.ok(!checkBaseUrl("http://10.0.0.5/v1").ok);
   assert.ok(!checkBaseUrl("https://u:p@llm.example.com/v1").ok);
   assert.ok(!checkBaseUrl("ftp://llm.example.com").ok);
+  assert.ok(checkBaseUrl("http://[::1]:8080/v1").ok, "IPv6 loopback is this machine");
+  assert.ok(!checkBaseUrl("http://localhost.attacker.example/v1").ok, "a host that only starts with localhost is not this machine");
+  assert.deepEqual(checkBaseUrl("HTTPS://LLM.Example.com/v1"), { ok: true, url: "https://llm.example.com/v1" });
+  // The API path is appended to the URL: after a query or a fragment it would land inside them, and the request would go to another path.
+  for (const bad of [
+    "https://llm.example.com/v1?api-version=1",
+    "https://llm.example.com/v1#part",
+    "https://llm.example.com/v1?",
+    "https://llm.example.com/v1#",
+  ]) {
+    const r = checkBaseUrl(bad);
+    assert.ok(!r.ok && /--base-url must carry no query or fragment/.test(r.error), bad);
+  }
 });
 
 // ── which provider ──────────────────────────────────────────────────────────
@@ -3625,6 +3639,54 @@ test("dedup: the judge asks at the lowest effort each API takes; the server's mo
   assert.ok(!missing.ok && /SCENESCOUT_DEDUP_PROVIDER=anthropic needs ANTHROPIC_API_KEY/.test(missing.error));
   assert.throws(() => judgeKeyConfig({ OPENAI_API_KEY: OPENAI_KEY, SCENESCOUT_DEDUP_PROVIDER: "gemini" }), /must be one of anthropic, openai/);
   for (const r of [one, ambiguous, named, none, missing]) assert.ok(!(r.ok ? "" : r.error).includes(OPENAI_KEY), "no message carries a key");
+});
+
+test("dedup: SCENESCOUT_DEDUP_BASE_URL points the judge at a private endpoint under --base-url's rules", () => {
+  const key = { OPENAI_API_KEY: OPENAI_KEY };
+  const custom = judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: " https://llm.internal.example/v1/ " });
+  assert.ok(custom.ok);
+  assert.equal(custom.resolved.baseUrl, "https://llm.internal.example/v1");
+  assert.equal(custom.key, OPENAI_KEY, "the key is still the environment's");
+  const loopback = judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: "http://127.0.0.1:8080/v1" });
+  assert.ok(loopback.ok && loopback.resolved.baseUrl === "http://127.0.0.1:8080/v1");
+  // Unset or blank keeps the provider's own API.
+  for (const blank of [undefined, "", "  "]) {
+    const r = judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: blank });
+    assert.ok(r.ok && r.resolved.baseUrl === "https://api.openai.com/v1");
+  }
+  // Refused, naming the variable and never echoing what was set (it may carry a secret).
+  for (const bad of ["http://10.0.0.5/v1", "https://user:hunter2@llm.example/v1", "ftp://llm.example", "not a url hunter2"]) {
+    assert.throws(
+      () => judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: bad }),
+      (err: Error) => err.message.startsWith("SCENESCOUT_DEDUP_BASE_URL ") && !err.message.includes("hunter2"),
+      bad,
+    );
+  }
+  assert.throws(
+    () => judgeKeyConfig({ ...key, SCENESCOUT_DEDUP_BASE_URL: "https://llm.example/v1#x" }),
+    /^Error: SCENESCOUT_DEDUP_BASE_URL must carry no query or fragment/,
+  );
+  // The rule (a project's dedup ceiling, or the default) never reads the variable, so a bad value cannot stop an attach that keeps the judge off.
+  assert.equal(planDedup("rule", { ...key, SCENESCOUT_DEDUP_BASE_URL: "http://10.0.0.5/v1" }, undefined).mode, "rule");
+  // Without a key there is nothing to send, so the missing key is the answer, as before.
+  const none = judgeKeyConfig({ SCENESCOUT_DEDUP_BASE_URL: "https://llm.internal.example/v1" });
+  assert.ok(!none.ok);
+});
+
+test("dedup: the plan names a private endpoint's host, and the pair goes where the variable says", async () => {
+  const plan = planDedup("judge", { OPENAI_API_KEY: OPENAI_KEY, SCENESCOUT_DEDUP_BASE_URL: "https://llm.internal.example/v1" }, undefined);
+  assert.ok(plan.mode === "judge" && plan.via === "key");
+  assert.match(plan.note, /sent to openai at llm\.internal\.example\./);
+  const seen: string[] = [];
+  const api: typeof fetch = async (input) => {
+    seen.push(String(input));
+    return new Response("{}", { status: 400 });
+  };
+  const ask = httpJudgeAsk(plan.resolved, plan.key, { fetch: api, sleep: async () => {} });
+  await ask("s", [], "k", 2000).catch(() => undefined);
+  assert.ok(seen.length > 0 && seen.every((u) => u.startsWith("https://llm.internal.example/v1/")), seen.join());
+  const plain = planDedup("judge", { OPENAI_API_KEY: OPENAI_KEY }, undefined);
+  assert.ok(plain.mode === "judge" && plain.via === "key" && !/ at /.test(plain.note.split("sent to")[1] ?? ""));
 });
 
 test("dedup: the summary and ci.json say how findings were deduplicated and what the judge's calls cost", () => {
