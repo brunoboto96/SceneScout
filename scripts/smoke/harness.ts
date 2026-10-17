@@ -1126,9 +1126,16 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     }
     // Extensionless /login, because the engine's auth heuristic matches a path
     // SEGMENT — "/login.html" is not a login route and would not exercise it.
+    // `?slowMs=` holds the answer back (at most 5 s), as a loaded sign-in service does (gated-slow-login.html).
     if (urlPath === "/login") {
-      res.writeHead(200, { "content-type": "text/html" });
-      res.end(fs.readFileSync(path.join(appDir, "login.html")));
+      const slowMs = Math.min(Number(new URL(req.url ?? "/", "http://x").searchParams.get("slowMs")) || 0, 5000);
+      const answer = (): void => {
+        if (res.destroyed) return;
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(fs.readFileSync(path.join(appDir, "login.html")));
+      };
+      if (slowMs > 0) setTimeout(answer, slowMs);
+      else answer();
       return;
     }
     // The path comes from the request, so keep it inside the fixture directory:

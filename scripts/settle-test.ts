@@ -12,9 +12,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  ATTACH_URL_QUIET_MS,
   describePace,
   InFlightRequests,
   keepWatchingUrl,
+  NAVIGATION_COMMIT_GRACE_MS,
   normalizePace,
   PACE_MAX_MS,
   QUIET_MS,
@@ -117,6 +119,23 @@ test("a page redirecting in a loop does not hold up the run", () => {
   assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_CAP_MS }), false);
   assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_CAP_MS - 1 }), true);
   assert.ok(URL_QUIET_MS < URL_CAP_MS, "the cap must be reachable");
+});
+
+test("a bounce verdict waits while the page's own navigation is still on its way", () => {
+  // A guard that has fired but whose sign-in page has not answered yet: the address has not changed, and a quiet window
+  // read from the address alone ends before it does. Contrastive pair: the same quiet time, navigating or not.
+  assert.equal(keepWatchingUrl({ sinceChangeMs: URL_QUIET_MS * 2, elapsedMs: 1000, navigating: true }), true);
+  assert.equal(keepWatchingUrl({ sinceChangeMs: URL_QUIET_MS * 2, elapsedMs: 1000, navigating: false }), false);
+  // Still bounded: a navigation that never answers does not hold the run past the cap.
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_CAP_MS, navigating: true }), false);
+});
+
+test("the attach's sign-in verdict watches the address for a longer quiet window", () => {
+  // A guard that fires 600 ms after load passes the run's window and is caught by the attach's.
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 600, elapsedMs: 600 }), false);
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 600, elapsedMs: 600, quietMs: ATTACH_URL_QUIET_MS }), true);
+  assert.equal(keepWatchingUrl({ sinceChangeMs: ATTACH_URL_QUIET_MS, elapsedMs: ATTACH_URL_QUIET_MS, quietMs: ATTACH_URL_QUIET_MS }), false);
+  assert.ok(URL_QUIET_MS < ATTACH_URL_QUIET_MS && ATTACH_URL_QUIET_MS < URL_CAP_MS, "longer than the run's window, and within the cap");
 });
 
 // ── which requests are in flight ─────────────────────────────────────────────
@@ -317,6 +336,72 @@ test("stableUrlOf follows a late redirect and returns where it settled", async (
   assert.equal(await stableUrlOf(() => page, page.now), "http://app.test/login");
   // It kept watching for the whole quiet window after the change, and returned as soon as it had passed.
   assert.equal(page.clock - changedAt, URL_QUIET_MS);
+});
+
+test("stableUrlOf waits out a navigation in flight and returns where it committed", async () => {
+  const page = standInPage("http://app.test/private");
+  let navigating = true;
+  page.onTick = () => {
+    // The sign-in page answers well after the run's quiet window has passed.
+    if (page.ticks === 40) {
+      navigating = false;
+      page.href = "http://app.test/login";
+    }
+  };
+  assert.equal(await stableUrlOf(() => page, page.now, { navigating: () => navigating }), "http://app.test/login");
+  // The contrast: the same page with nothing on its way is read after the quiet window, without the extra wait.
+  const still = standInPage("http://app.test/private");
+  const started = still.clock;
+  assert.equal(await stableUrlOf(() => still, still.now, { navigating: () => false }), "http://app.test/private");
+  assert.equal(still.clock - started, URL_QUIET_MS);
+});
+
+test("stableUrlOf takes the quiet window it is given", async () => {
+  const page = standInPage("http://app.test/private");
+  page.onTick = () => {
+    if (page.clock - 1_000_000 === 600) page.href = "http://app.test/login";
+  };
+  assert.equal(await stableUrlOf(() => page, page.now, { quietMs: ATTACH_URL_QUIET_MS }), "http://app.test/login");
+  const late = standInPage("http://app.test/private");
+  late.onTick = () => {
+    if (late.clock - 1_000_000 === 600) late.href = "http://app.test/login";
+  };
+  assert.equal(await stableUrlOf(() => late, late.now), "http://app.test/private", "the run's window ends before a 600 ms guard");
+});
+
+test("a navigation request is on its way from its start until its frame commits it or it fails", () => {
+  const t = tracker();
+  assert.equal(t.navigating("main"), false);
+  t.started("fetch", "main", false);
+  assert.equal(t.navigating("main"), false, "a fetch is not a navigation");
+  t.started("to-login", "main", true);
+  assert.equal(t.navigating("main"), true);
+  assert.equal(t.navigating("child"), false, "only the frame that sent it");
+  t.navigated("main");
+  assert.equal(t.navigating("main"), false, "committed");
+  t.started("refused", "main", true);
+  t.ended("refused", true);
+  assert.equal(t.navigating("main"), false, "failed");
+  // Finished, not yet committed: a document's body can end before its frame commits it, and the address has not moved.
+  t.started("document", "main", true);
+  t.ended("document", false, 5000);
+  assert.equal(t.navigating("main", 5000 + NAVIGATION_COMMIT_GRACE_MS - 1), true, "finished, waiting for its commit");
+  t.navigated("main");
+  assert.equal(t.navigating("main", 5001), false, "committed");
+  // Answered with no new document (a 204, a download): it finished and never commits, so once the grace has passed
+  // nothing is on its way.
+  t.started("no-content", "main", true);
+  t.ended("no-content", false, 6000);
+  assert.equal(t.navigating("main", 6000 + NAVIGATION_COMMIT_GRACE_MS), false);
+  // Aborted: failed at once, never pending, grace or not.
+  t.started("aborted", "main", true);
+  t.ended("aborted", true, 7000);
+  assert.equal(t.navigating("main", 7001), false);
+  // A redirect: the first hop has finished, the second is on its way, however long after.
+  t.started("hop-1", "main", true);
+  t.ended("hop-1", false, 8000);
+  t.started("hop-2", "main", true);
+  assert.equal(t.navigating("main", 8000 + NAVIGATION_COMMIT_GRACE_MS * 10), true);
 });
 
 test("stableUrlOf stops at its cap on a URL that never holds still", async () => {

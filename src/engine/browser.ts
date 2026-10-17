@@ -101,7 +101,7 @@ import {
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
-import { describePace, InFlightRequests, normalizePace, settlePage, stableUrlOf } from "./settle.js";
+import { ATTACH_URL_QUIET_MS, describePace, InFlightRequests, normalizePace, settlePage, stableUrlOf } from "./settle.js";
 import { FRAME_READ_MS, SnapshotCollector, withinFrameLimit, type SnapshotElement } from "./snapshot-collect.js";
 import {
   AnsweredNavigationError,
@@ -2003,7 +2003,9 @@ export class BrowserEngine {
     // credentials has any to lose, and only it pays for watching the URL on
     // every navigation. An anonymous crawl keeps its full speed.
     this.watchesForBounce = Boolean(storageStatePath);
-    const landed = await this.stableUrl();
+    // With a saved sign-in, the address is watched for longer: an app that sends a signed-out visitor to sign-in from its
+    // scripts some time after load would otherwise pass a stale profile as signed in (settle.ts ATTACH_URL_QUIET_MS).
+    const landed = await this.stableUrl(storageStatePath ? ATTACH_URL_QUIET_MS : undefined);
     const authFailed = Boolean(storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
     this.attachSignInFailed = authFailed;
     // An earlier run may have written down how this app's login state is
@@ -2191,9 +2193,16 @@ export class BrowserEngine {
     });
   }
 
-  /** The URL once it has stopped changing (settle.ts stableUrlOf). */
-  private async stableUrl(): Promise<string> {
-    return stableUrlOf(() => this.page);
+  /**
+   * The URL once it has stopped changing (settle.ts stableUrlOf), waiting too while the page's own navigation is on its
+   * way, and holding still for `quietMs` when given.
+   */
+  private async stableUrl(quietMs?: number): Promise<string> {
+    const navigating = (): boolean => {
+      const page = this.page;
+      return page !== null && !page.isClosed() && this.requests.navigating(page.mainFrame());
+    };
+    return stableUrlOf(() => this.page, Date.now, quietMs !== undefined ? { navigating, quietMs } : { navigating });
   }
 
   /**

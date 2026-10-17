@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area (slow sign-in page)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="gated-slow-login-heading">Gated area</h1>
+    </main>
+    <script>
+      // The same guard as gated.html, sending a signed-out visitor to a sign-in page the server answers slowly
+      // (/login?slowMs=…). The guard fires at once; the address only changes when the sign-in page answers, so a verdict
+      // that reads the address while that navigation is still on its way sees the gated page.
+      setTimeout(function () {
+        try {
+          if (localStorage.getItem("smoke-auth") === "yes") return;
+        } catch (e) {
+          /* storage unavailable — treat as signed out */
+        }
+        location.replace("/login?slowMs=3500&redirectTo=" + encodeURIComponent(location.pathname));
+      }, 40);
+    </script>
+  </body>
+</html>
