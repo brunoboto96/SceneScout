@@ -630,10 +630,11 @@ test("the report answers the tickets in the plain view first and the technical r
   const both = generateReport(store, [], extras, { write: false });
   const md = both.markdown;
   const at = (s: string): number => md.indexOf(s);
-  assert.ok(at("## In plain words") < at("### The tickets"));
-  assert.ok(at("### The tickets") < at("### 1. Export throws"), "the tickets come before the problems");
-  assert.ok(at("### 1. Export throws") < at("## Technical detail"));
-  assert.ok(at("## Technical detail") < at("## Acceptance criteria"));
+  assert.ok(at("## Summary") < at("### The tickets"));
+  assert.ok(at("| 1 | Blocks users | Export throws |") < at("### The tickets"), "the problems table, then the tickets");
+  assert.ok(at("### The tickets") < at("<details><summary>1. Export throws</summary>"), "the tickets come before each problem in full");
+  assert.ok(at("<details><summary>1. Export throws</summary>") < at("## Technical details"));
+  assert.ok(at("## Technical details") < at("## Acceptance criteria"));
   assert.ok(md.includes('| AC1 | Downloads a file | Failed: "Export throws" (problem 1 below) |'));
   assert.match(both.summary, /TICKETS: 1 ticket, 2 criteria — 1 failed and 1 was not tested/);
 

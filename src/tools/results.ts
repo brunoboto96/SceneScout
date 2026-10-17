@@ -186,7 +186,7 @@ export function registerResultTools(): void {
           .enum(REPORT_AUDIENCES)
           .default(DEFAULT_REPORT_AUDIENCE)
           .describe(
-            "Which parts the report carries. 'both' (default): a plain-language section first — a short summary, then each problem with numbered steps, what was expected, what happened, its picture and its impact (blocks users, annoying, cosmetic), each with its technical detail folded beneath — followed by the technical report. 'qa': the plain section alone, for a tester or anyone not technical. 'dev': the technical report alone, as before the plain section existed. It applies to the files this call writes; the live view always shows both.",
+            "Which parts the report carries. 'both' (default): the Summary first — what was checked, when, for how long and how carefully, what was found, the problems as a table with their impact (blocks users, annoying, cosmetic), then each problem folded with its numbered steps, what was expected and what happened — then the Evidence (each problem's picture and the frames recorded before it, only when there is one), then the technical details, folded. 'qa': the Summary and the Evidence alone, for a tester or anyone not technical. 'dev': the technical report alone, unfolded. report.html adds the steps every session took, folded, whichever is chosen. It applies to the files this call writes; the live view always shows both.",
           ),
         session: sessionParam,
       },
