@@ -37,7 +37,10 @@ import {
   logLine,
   evidenceFor,
   guidedSessions,
+  policyFor,
 } from "../server-context.js";
+import { uploadRefusal } from "../engine/project-config.js";
+import { planUploadOptions } from "../engine/uploads.js";
 import { writeDocumentSync } from "../engine/owner-file.js";
 
 type ImageContent = { type: "image"; data: string; mimeType: string };
@@ -210,7 +213,13 @@ export function registerExploreTools(): void {
       "scout_run_plan",
       async ({ steps, onViolation }: { steps: Parameters<BrowserEngine["runPlan"]>[0]; onViolation?: "stop" | "continue" }, session) => {
         try {
-          return text(await engineFor(session).runPlan(steps, onViolation ?? "stop"), session);
+          const eng = engineFor(session);
+          // A step that would upload a file from disk is refused before any step runs, as scout_upload refuses it.
+          for (const [i, step] of steps.entries()) {
+            const refused = step.action === "upload" ? uploadRefusal(policyFor(eng), planUploadOptions(step.value).filePath) : null;
+            if (refused) return errorText(new Error(`scout_run_plan step ${i + 1} ${refused}`));
+          }
+          return text(await eng.runPlan(steps, onViolation ?? "stop"), session);
         } catch (err) {
           return errorText(err);
         }
@@ -311,7 +320,11 @@ export function registerExploreTools(): void {
       "scout_upload",
       async ({ ref, filePath, fixture, name }: { ref?: string; filePath?: string; fixture?: FixtureKind; name?: string }, session) => {
         try {
-          return text(await engineFor(session).upload({ ref, filePath, fixture, name }), session);
+          const eng = engineFor(session);
+          // The config's uploads lock, before the engine's own fence (engine/project-config.ts).
+          const refused = uploadRefusal(policyFor(eng), filePath);
+          if (refused) return errorText(new Error(`scout_upload ${refused}`));
+          return text(await eng.upload({ ref, filePath, fixture, name }), session);
         } catch (err) {
           return errorText(err);
         }

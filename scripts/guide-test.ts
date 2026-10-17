@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { CHECK_OPTION_NAMES, CHECK_RULES, parseCheckArgs, WORTH_A_LOOK_RULES } from "../src/engine/check.ts";
 import { CI_OPTION_NAMES, DEDUP_MODES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
-import { CONFIG_KEYS, PRESET_POLICY, PRESETS } from "../src/engine/project-config.ts";
+import { CONFIG_KEYS, PRESET_POLICY, PRESETS, UPLOAD_MODES } from "../src/engine/project-config.ts";
 import { WRITE_MODES } from "../src/engine/policy.ts";
 import { EVIDENCE_MODES } from "../src/engine/capture.ts";
 import { EXPORT_OPTION_NAMES, parseExportArgs } from "../src/engine/export.ts";
@@ -558,6 +558,7 @@ test("the config file's tables are its keys, each key's values and every preset'
   assert.deepEqual(valuesOf("maxMode"), [...WRITE_MODES]);
   assert.deepEqual(valuesOf("dedup"), [...DEDUP_MODES]);
   assert.deepEqual(valuesOf("evidence"), [...EVIDENCE_MODES]);
+  assert.deepEqual(valuesOf("uploads"), [...UPLOAD_MODES]);
   assert.deepEqual(valuesOf("requireGuidedPlan"), ["true", "false"]);
   const presets = tables(section(REFERENCE, "## The config file")).tables[1];
   assert.ok(presets, "a second table, of the presets");

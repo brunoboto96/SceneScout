@@ -705,6 +705,8 @@ export interface AuthPostList {
   entries: readonly ReadPost[];
   appUrl: string;
   url: string;
+  /** True: a POST must be listed AND look like a sign-in to the path rule (a guided check), so the list only narrows. Default: the list alone decides. */
+  andSignInPath?: boolean;
 }
 
 /**
@@ -832,8 +834,11 @@ function authWordInContext(segments: readonly string[], index: number): boolean 
  */
 export function isAuthExempt(mode: WriteMode, method: string, pathname: string, destructiveWire: boolean, list?: AuthPostList | null): boolean {
   if (method !== "POST" || destructiveWire) return false;
-  // An operator's allowlist replaces the path rule, in every mode.
-  if (list) return matchReadPost(list.entries, list.appUrl, list.url) !== null;
+  // An operator's allowlist replaces the path rule, in every mode; in a guided check it only narrows it.
+  if (list) {
+    const listed = matchReadPost(list.entries, list.appUrl, list.url) !== null;
+    if (!listed || !list.andSignInPath) return listed;
+  }
   if (mode !== "observe") return AUTH_FLOW_RE.test(pathname);
   const segments = pathname.split("/").filter(Boolean);
   if (segments.length === 0) return false;

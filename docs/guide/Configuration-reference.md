@@ -258,6 +258,8 @@ A JSON file a team commits to set what SceneScout may do, which no agent can loo
 | `trustedEmbeds` | a list of `https://host` origins, at most 10 | no limit | The only embedded-frame origins an attach may trust, and the ones it gets when it names none. `[]` allows none |
 | `dedup` | `rule`, `judge` | no limit | The most the dedup setting may be. `rule` keeps the model judge off: `dedup: "judge"` and `--dedup judge` are refused, and `SCENESCOUT_DEDUP=judge` and `ci`'s default are turned down to `rule` |
 | `evidence` | `inline`, `file`, `off` | no limit | The most a finding's picture may do. `file` keeps pictures out of the conversation; `off` takes none. An attach's `evidence` above it is refused, and a default above it is lowered |
+| `uploads` | `fixtures`, `project` | `project` | What `scout_upload` may send. `fixtures` sends only the files it generates: a `filePath`, and a run plan's upload step naming a file, are refused before anything runs, whatever `SCENESCOUT_UPLOAD_ALLOW` lists. `project` leaves it to the [upload fence](Safety-model.md#what-is-written-to-disk), as without a file |
+| `projectsRoot` | an absolute folder | no limit | The folder every project folder must sit inside, by its real path, so a link inside it that leads out is outside it: an attach's `projectPath` (or the folder it would choose when none is given), `scout_login`'s and `scout_scan`'s, and `--project` for `check`, `ci` and a first look. One outside it is refused, naming the folder. Read from the operator's file only: a project's own file that sets it is refused, since the project folder is what it limits |
 
 The presets:
 
@@ -269,8 +271,9 @@ The presets:
 | `trustedEmbeds` | `[]` |
 | `dedup` | `"rule"` |
 | `evidence` | `"file"` |
+| `uploads` | `"fixtures"` |
 
-`strict` is the one-line answer for a team that wants every agent to look only, with nothing named by an argument and nothing sent to a model but the agent's own conversation. A team that needs form submissions sets `"maxMode": "read-only"` beside it.
+`strict` is the one-line answer for a team that wants every agent to look only, with nothing named by an argument, no file from disk uploaded and nothing sent to a model but the agent's own conversation. A team that needs form submissions sets `"maxMode": "read-only"` beside it.
 
 ## Environment variables
 

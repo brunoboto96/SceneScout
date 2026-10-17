@@ -27,8 +27,9 @@
  * Everything else the standard classifier refuses, it refuses
  * (policy-test's fuzz holds it to that).
  *
- * Off by default: SCENESCOUT_STRICT_WRITES=1 turns it on, and an operator
- * policy file will be able to lock it on (`writeClassifier: "strict"`).
+ * Off by default: SCENESCOUT_STRICT_WRITES=1 turns it on. How the config
+ * file will lock it on is project-config.ts writeRulesSettings, which waits on
+ * the browser engine taking it from the attach.
  * Everything here is pure and table-tested in policy-test.
  */
 

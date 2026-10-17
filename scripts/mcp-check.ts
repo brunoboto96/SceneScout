@@ -1579,6 +1579,31 @@ async function configCheck(): Promise<void> {
       const above = await attach({ mode: "read-only" });
       if (!above.isError || !/maxMode "observe"/.test(above.text)) fail(`the strict preset did not refuse a read-only attach:\n${above.text}`);
     });
+    // uploads "fixtures": a file from disk is refused before the engine is asked, in scout_upload and in a plan's upload step.
+    await withServer({ SCENESCOUT_CONFIG: configFile("fixtures.json", { uploads: "fixtures" }) }, async (attach, call) => {
+      const r = await attach({ mode: "observe" });
+      if (r.isError) fail(`an observe attach under uploads "fixtures" was refused:\n${r.text}`);
+      const disk = await call("scout_upload", { filePath: "sample.pdf", task: "Uploading a file" });
+      if (!disk.isError || !/uploads "fixtures" allows only generated files/.test(disk.text))
+        fail(`uploads "fixtures" did not refuse a file from disk in scout_upload:\n${disk.text}`);
+      const step = await call("scout_run_plan", { steps: [{ action: "upload", target: "label=File", value: "sample.pdf" }], task: "Uploading a file" });
+      if (!step.isError || !/step 1 refused by the SceneScout config/.test(step.text))
+        fail(`uploads "fixtures" did not refuse a plan's upload step naming a file:\n${step.text}`);
+      const fixture = await call("scout_upload", { fixture: "pdf", task: "Uploading a file" });
+      if (/SceneScout config/.test(fixture.text)) fail(`uploads "fixtures" refused a generated fixture:\n${fixture.text}`);
+    });
+    // projectsRoot: a project folder outside it is refused at attach and at scan; one inside it is taken.
+    const root = path.join(dir, "root");
+    fs.mkdirSync(path.join(root, "app"), { recursive: true });
+    await withServer({ SCENESCOUT_CONFIG: configFile("root.json", { projectsRoot: root }) }, async (attach, call) => {
+      const outside = await attach({ mode: "observe", session: "outside" });
+      if (!outside.isError || !/is outside the config's projectsRoot/.test(outside.text))
+        fail(`an attach whose projectPath is outside projectsRoot was not refused:\n${outside.text}`);
+      const scan = await call("scout_scan", { projectPath: projectDir });
+      if (!scan.isError || !/is outside the config's projectsRoot/.test(scan.text)) fail(`scout_scan outside projectsRoot was not refused:\n${scan.text}`);
+      const inside = await attach({ mode: "observe", session: "inside", projectPath: path.join(root, "app") });
+      if (inside.isError) fail(`an attach whose projectPath is inside projectsRoot was refused:\n${inside.text}`);
+    });
     // requireGuidedPlan alone: the gate holds from the start, before any plan is built.
     await withServer({ SCENESCOUT_CONFIG: configFile("guided.json", { requireGuidedPlan: true }) }, async (attach) => {
       const r = await attach({ mode: "read-only" });
@@ -1586,10 +1611,13 @@ async function configCheck(): Promise<void> {
         fail(`requireGuidedPlan did not hold the guided gate from the server's start:\n${r.text}`);
     });
     // No operator config, a project file that sets one: the project's file tightens; the same attach without it goes ahead.
-    await withServer({}, async (attach) => {
+    await withServer({}, async (attach, call) => {
       const free = await attach({ session: "free" });
       if (free.isError || free.text.includes("CONFIG") || !/read-only/.test(free.text))
         fail(`with no config, an attach naming no mode did not start in read-only as it always has:\n${free.text}`);
+      // The contrast to uploads "fixtures": with no config, a file from disk goes on to the engine's own fence.
+      const disk = await call("scout_upload", { filePath: "sample.pdf", session: "free", task: "Uploading a file" });
+      if (/SceneScout config/.test(disk.text)) fail(`with no config, scout_upload was refused by a config:\n${disk.text}`);
       fs.mkdirSync(path.join(projectDir, ".scenescout"), { recursive: true });
       fs.writeFileSync(path.join(projectDir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "observe" }));
       const tightened = await attach({ mode: "read-only", session: "tight" });
@@ -1631,7 +1659,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();
