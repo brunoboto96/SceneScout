@@ -286,6 +286,8 @@ Findings stay in `.scenescout/memory.json`. The next run skips states already co
 
 Every attach starts a small local page that shows each session: the tool it is running and for how long, the page it is on as a thumbnail, and a feed of what it just did. A call stuck past its time budget turns its card red. The report button shows the report as it stands mid-run.
 
+A session's close-up has a timeline of its steps. Clicking a step shows the page as it was after it, on every run: the live view holds a frame of each of the last 100 steps per session in memory (at most 12 MB a session), never on disk, and drops them when the session closes. Large pictures (a very wide viewport, say) fill that bound in fewer steps. A step whose frame is no longer held says so; a recorded run keeps every frame on disk instead ([Recording a run](#recording-a-run)). Taking these frames adds a few tens of milliseconds to each step.
+
 ![The live view during a run of three parallel agents against the demo app: one card per session, each with its role and objective, the task it is on, the tool it is running, a picture of its page, and a feed of the actions it just took](../../examples/screenshots/live-view.png)
 
 ```bash
@@ -307,7 +309,7 @@ A client that lists the server's prompts has `live`. It takes no arguments and n
 
 ### When it opens by itself
 
-On a desktop, the engine also opens the live view in your default browser as a session attaches, and the report when `scout_report` writes it, whether or not the browser window is shown. In CI, over SSH, or on Linux with no display, nothing opens. To choose yourself, set `SCENESCOUT_OPEN` to `live`, `report`, `both` or `none` in the server's environment (`none` if you want no tabs), or ask the agent (`scout_attach {open: "none"}`). Opening the page changes nothing about who can reach it.
+On a desktop, the engine also opens the live view in your default browser as a session attaches, and the report when `scout_report` writes it, whether or not the browser window is shown. In CI, over SSH, or on Linux with no display, nothing opens. To choose yourself, set `SCENESCOUT_OPEN` to `live`, `report`, `both` or `none` in the server's environment (`none` if you want no tabs), or ask the agent (`scout_attach {open: "none"}`). Set that way, the live view opens once per server, so a run of many sessions opens one tab; an attach that asks for it itself (`scout_attach {open: "live"}`) opens it every time, or says why it could not. Opening the page changes nothing about who can reach it.
 
 ### Recording a run
 

@@ -10,8 +10,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  annotateFrames,
   classify,
   feedForSession,
+  FrameRing,
+  HELD_FRAME_BYTES,
   formatDuration,
   formatStatus,
   localClock,
@@ -36,7 +39,7 @@ import {
   statusFileName,
   writeLiveToken,
 } from "../src/engine/live.ts";
-import { LIVE_PAGE } from "../src/engine/live-page.ts";
+import { HELD_FRAMES, LIVE_PAGE, LIVE_WORDS } from "../src/engine/live-page.ts";
 import {
   countFindings,
   MCP_APP_MIME,
@@ -103,6 +106,7 @@ import {
   openerCommand,
   openInBrowser,
   openOrSay,
+  opensLiveView,
   type OpenChoice,
   type OpenContext,
   type Spawner,
@@ -702,7 +706,9 @@ test("the close-up groups the feed by task and shows a hovered group's task in t
   assert.match(renderer, /mouseleave/);
   assert.match(LIVE_PAGE, /id="focus-task-head"/);
   assert.match(script, /Doing, for these actions/);
-  assert.match(script, /Nothing was stated for these\./);
+  // A group with no task is the steps before any was set: the brief says that, not that nothing was stated.
+  assert.match(script, /setBrief\('focus-task', hoverTask, WORDS\.noTask\)/);
+  assert.equal(LIVE_WORDS.noTask, "No task was set for these steps.");
   const css = LIVE_PAGE.slice(0, LIVE_PAGE.indexOf("</style>"));
   assert.match(css, /\.feed \.g3 \{ background: rgba\(/, "four tints, so consecutive tasks never share one");
 });
@@ -1335,7 +1341,7 @@ test("one pastel tint per task, and a close-up with no frame says so", () => {
   assert.match(css, /@media \(prefers-color-scheme: light\)[\s\S]*?\.feed \.g0 \{ background: rgba/, "the tints are lifted for a light card too");
   // The card already said when it had no frame; the close-up showed a broken image.
   assert.match(LIVE_PAGE, /#focus \.stage\.empty \.none \{ display: flex; \}/);
-  assert.match(LIVE_PAGE, /No frame available\. The session's page may be closed/);
+  assert.match(LIVE_PAGE, /data-testid="live-focus-none"/);
 });
 
 // ---- the recorded run: its own address, and the frames under each finding ----
@@ -2385,7 +2391,18 @@ test("the panel judges an address and a care level as the engine does", () => {
 
 test("the draft becomes choices the server accepts, or one sentence saying what is missing", () => {
   const d = guided.defaultDraft();
-  assert.deepEqual(d, { address: "", areas: ["sign-in", "forms", "broken-pages"], journey: "", signIn: "none", care: "look-only", thoroughness: "normal" });
+  assert.deepEqual(d, {
+    address: "",
+    areas: ["sign-in", "forms", "broken-pages"],
+    journey: "",
+    signIn: "none",
+    care: "look-only",
+    thoroughness: "normal",
+    cap: null,
+  });
+  // The limit stays with the panel: the server is sent the choices alone.
+  const capped = guided.choicesFromDraft({ ...d, address: "https://staging.example.com", cap: 25 });
+  assert.ok(capped.ok && !("cap" in capped.choices));
   const refused: Array<[string, Partial<typeof d>, RegExp]> = [
     ["no address", {}, /Type the address/],
     ["no scheme", { address: "staging.example.com" }, /starting with http/],
@@ -3366,6 +3383,153 @@ test("where nothing draws, /scenescout-guided says where the check is and what t
   assert.equal(guided.guidedOf(STATUS_RUNNING, null)?.planId, GUIDED_PLAN_ID);
 });
 
+// ---- frames held in memory for the timeline (#616) ------------------------
+
+test("held frames: the last 100 of a session are kept, the oldest goes first, and each session has its own", () => {
+  assert.equal(HELD_FRAMES, 100);
+  const ring = new FrameRing();
+  const keys: string[] = [];
+  for (let i = 0; i < HELD_FRAMES + 1; i += 1) keys.push(ring.put("admin", JPEG)!);
+  assert.deepEqual(ring.held("admin"), { frames: HELD_FRAMES, bytes: HELD_FRAMES * JPEG.length });
+  assert.equal(ring.get(keys[0]), null, "the 101st frame pushes out the first");
+  assert.deepEqual(ring.get(keys[1]), JPEG);
+  assert.deepEqual(ring.get(keys[HELD_FRAMES]), JPEG);
+  // Another session's frames are its own: a busy lane does not push out a quiet one's.
+  const other = ring.put("viewer", JPEG)!;
+  ring.put("admin", JPEG);
+  assert.deepEqual(ring.get(other), JPEG);
+  assert.ok(keys.every((k) => FrameRing.isHeld(k)) && !FrameRing.isHeld("recordings/admin/0001-click.jpg"));
+  // Closing a session drops its frames and nobody else's.
+  ring.drop("admin");
+  assert.deepEqual(ring.held("admin"), { frames: 0, bytes: 0 });
+  assert.equal(ring.get(keys[HELD_FRAMES]), null);
+  assert.deepEqual(ring.get(other), JPEG);
+});
+
+test("held frames: bounded in bytes too, whatever their count, and a frame larger than the bound is not kept", () => {
+  assert.ok(HELD_FRAME_BYTES >= 4 * 1024 * 1024 && HELD_FRAME_BYTES <= 32 * 1024 * 1024, "a bound a run can afford per session");
+  const ring = new FrameRing(100, 10);
+  const a = ring.put("s", Buffer.alloc(4))!;
+  const b = ring.put("s", Buffer.alloc(4))!;
+  const c = ring.put("s", Buffer.alloc(4))!;
+  assert.deepEqual(ring.held("s"), { frames: 2, bytes: 8 });
+  assert.equal(ring.get(a), null);
+  assert.ok(ring.get(b) && ring.get(c));
+  assert.equal(ring.put("s", Buffer.alloc(11)), null, "one frame over the whole bound");
+  assert.deepEqual(ring.held("s"), { frames: 2, bytes: 8 }, "and it pushed nothing out");
+  // Pushed out by size after 2 steps, not by count after 100: the step's wording must not claim it was 100 steps old.
+  const [line] = annotateFrames([{ at: "a", action: "click", url: "u", frame: a }], ring, "s", false);
+  assert.equal(line.noFrame, LIVE_WORDS.agedOut);
+  assert.doesNotMatch(LIVE_WORDS.agedOut, /older than the last \d+ steps/, "a size eviction is not a count eviction");
+  assert.match(LIVE_WORDS.agedOut, /fewer when the pictures are large/);
+});
+
+test("a step's frame in the feed: held, aged out, never kept, and recorded, each said as itself", () => {
+  const ring = new FrameRing(1);
+  const old = ring.put("admin", JPEG)!;
+  const kept = ring.put("admin", JPEG)!;
+  const feed: ActivityLine[] = [
+    { at: "a", action: "click", url: "u", frame: old },
+    { at: "b", action: "click", url: "u", frame: kept },
+    { at: "c", action: "task:set", url: "u" },
+    { at: "d", action: "click", url: "u", frame: "recordings/admin/0004-click.jpg" },
+  ];
+  const off = annotateFrames(feed, ring, "admin", false);
+  assert.deepEqual(off[0], { at: "a", action: "click", url: "u", noFrame: LIVE_WORDS.agedOut }, "an aged-out frame loses its address and says so");
+  assert.deepEqual(off[1], feed[1], "a frame still held is left as it is");
+  assert.equal(off[2].noFrame, LIVE_WORDS.notKept);
+  assert.deepEqual(off[3], feed[3], "a recorded frame is the disk's to answer for");
+  assert.equal(annotateFrames(feed, ring, "admin", true)[2].noFrame, LIVE_WORDS.notKeptRecording);
+  // Closed and attached again under the same name: the steps it held when it closed were dropped, not aged out.
+  ring.drop("admin");
+  const again = annotateFrames(feed, ring, "admin", false);
+  assert.equal(again[1].noFrame, LIVE_WORDS.droppedOnClose);
+  assert.equal(again[0].noFrame, LIVE_WORDS.agedOut, "one pushed out before the close stays aged out");
+  assert.equal(annotateFrames(feed, ring, "viewer", false)[1].noFrame, LIVE_WORDS.agedOut, "another session's close is not this one's");
+  // Each wording is about a past step; none of them is the live failure, which is for a live page that does not answer.
+  assert.match(LIVE_WORDS.agedOut, /older than the frames kept in memory, which are the last 100 steps/);
+  assert.match(LIVE_WORDS.agedOut, /record: true/);
+  assert.match(LIVE_WORDS.agedOut, /SCENESCOUT_RECORD=on/);
+  for (const w of [LIVE_WORDS.agedOut, LIVE_WORDS.droppedOnClose, LIVE_WORDS.notKept, LIVE_WORDS.notKeptRecording, LIVE_WORDS.recordingGone]) {
+    assert.doesNotMatch(w, /may be closed|not answering/, w);
+  }
+  assert.match(LIVE_WORDS.liveFailure, /may be closed, or not answering/);
+});
+
+test("the feed takes a held frame only for the live view: a page written to disk never names one", () => {
+  const log: LoggedAction[] = [
+    { at: "a", action: "click", url: "u", session: "s", heldFrame: "memory/1.jpg" },
+    { at: "b", action: "click", url: "u", session: "s", frame: "recordings/s/0001-click.jpg", heldFrame: "memory/2.jpg" },
+  ];
+  assert.deepEqual(
+    feedForSession(log, "s", 10).map((l) => l.frame),
+    [undefined, "recordings/s/0001-click.jpg"],
+  );
+  assert.deepEqual(
+    feedForSession(log, "s", 10, (x) => x, true).map((l) => l.frame),
+    ["memory/1.jpg", "recordings/s/0001-click.jpg"],
+  );
+});
+
+test("a held frame is served from memory over HTTP, never asked of the disk, and gone once pushed out or closed", async () => {
+  const { provider } = fakeProvider(["admin"]);
+  let diskAsks = 0;
+  provider.frame = async () => {
+    diskAsks += 1;
+    return null;
+  };
+  const feed: ActivityLine[] = [];
+  provider.activity = () => feed;
+  provider.snapshot = () => ({ pid: 1, version: "9.9.9", at: new Date(T0).toISOString(), sessions: [entry("admin", { recording: false })] });
+  const live = new LiveServer(provider, () => T0, new FrameRing(2));
+  try {
+    const { port, token } = await live.start();
+    const first = live.holdFrame("admin", JPEG)!;
+    feed.push({ at: "a", action: "click", url: "u", frame: first });
+    const served = await request(port, `/${token}/record/${first}`);
+    assert.equal(served.status, 200);
+    assert.equal(served.headers["content-type"], "image/jpeg");
+    assert.deepEqual(served.body, JPEG);
+    live.holdFrame("admin", JPEG);
+    const second = live.holdFrame("admin", JPEG)!;
+    assert.equal((await request(port, `/${token}/record/${first}`)).status, 404, "pushed out by newer steps");
+    const activity = JSON.parse((await request(port, `/${token}/api/activity?session=admin`)).body.toString()) as { feed: ActivityLine[] };
+    assert.equal(activity.feed[0].noFrame, LIVE_WORDS.agedOut);
+    assert.equal(activity.feed[0].frame, undefined);
+    const status = JSON.parse((await request(port, `/${token}/api/status`)).body.toString()) as StatusResponse;
+    assert.equal(status.sessions[0].feed[0].noFrame, LIVE_WORDS.agedOut, "the board's feed is checked the same way");
+    live.dropSession("admin");
+    assert.equal((await request(port, `/${token}/record/${second}`)).status, 404, "dropped when the session closes");
+    assert.equal(diskAsks, 0, "a held frame's address is never looked for on disk");
+  } finally {
+    await live.stop();
+  }
+});
+
+test("held frames: a step still running when its session closes keeps nothing; a new attach under the name holds again", () => {
+  const live = new LiveServer(fakeProvider(["admin"]).provider, () => T0, new FrameRing(5));
+  const holder = live.frameHolderFor("admin");
+  assert.ok(holder(JPEG), "an open session holds its frames");
+  // scout_close drops the frames before the browser closes; work a watchdog let run on may still take a picture after that.
+  live.dropSession("admin");
+  assert.equal(holder(JPEG), null, "a frame taken after the close is not kept");
+  assert.equal(live.heldFor("admin").frames, 0, "nothing of a closed session stays in memory");
+  const again = live.frameHolderFor("admin");
+  assert.ok(again(JPEG), "the session attached again under the same name holds frames again");
+  assert.equal(holder(JPEG), null, "the closed attach's holder stays spent");
+  assert.equal(live.heldFor("admin").frames, 1);
+});
+
+test("open: an attach that asks for the live view opens it every time; the default and the environment, once per server", () => {
+  const live = { live: true, report: false, why: "x" };
+  const none = { live: false, report: false, why: "x" };
+  assert.equal(opensLiveView(live, true, true), true, "asked again by an attach after the first window was closed");
+  assert.equal(opensLiveView(live, true, false), true);
+  assert.equal(opensLiveView(live, false, false), true, "the first attach of a server opens it");
+  assert.equal(opensLiveView(live, false, true), false, "a lane attaching later does not open another window");
+  assert.equal(opensLiveView(none, true, false), false);
+});
+
 // ---- The run around the panel: the band, the status line, card labels and queued checks ----
 // The rules live in mods/scenescout-mod/hooks/run.js (and the queue's presses in guided.js).
 
@@ -3618,7 +3782,9 @@ function modHarness(withStatus: boolean, register: typeof registerMod = register
   const lines: Array<string | undefined> = [];
   const logged: string[] = [];
   const toasts: string[] = [];
-  const server = { status: STATUS_RUNNING as unknown };
+  const server = { status: STATUS_RUNNING as unknown, tickets: null as unknown, usage: null as unknown };
+  const timers: Array<{ ms: number; fn: () => unknown }> = [];
+  const stored = new Map<string, unknown>([["tourSeen", true]]);
   /** A tool whose answer waits until its promise settles: a server still building a plan. */
   const held = new Map<string, Promise<void>>();
   const looks = planFor({ address: "http://localhost:3000", areas: ["forms"] });
@@ -3632,7 +3798,7 @@ function modHarness(withStatus: boolean, register: typeof registerMod = register
         return { isSet: true };
       },
     },
-    store: { get: async () => true, set: async () => undefined },
+    store: { get: async (k: string) => stored.get(k), set: async (k: string, v: unknown) => void stored.set(k, v) },
     mcp: {
       call: async (_server: string, tool: string, args: Record<string, unknown>) => {
         calls.push({ tool, args });
@@ -3642,6 +3808,7 @@ function modHarness(withStatus: boolean, register: typeof registerMod = register
           return { isError: true, content: [{ type: "text", text: "Error: \u001b[2J\u001b[31mbad\u0007 address\r\u202e from the page" }] };
         if (tool === guided.SAVED_TOOL) return savedResult(args.action === "run" ? looks : undefined);
         await held.get(tool);
+        if (tool === "scout_ticket_status") return server.tickets ?? { isError: true, content: [{ type: "text", text: "Error: No project is open yet" }] };
         if (tool === guided.PLAN_TOOL)
           return { content: [{ type: "text", text: "plan" }], structuredContent: planFor(args.choices as Record<string, unknown>) };
         if (tool === guided.RECHECK_TOOL)
@@ -3650,9 +3817,19 @@ function modHarness(withStatus: boolean, register: typeof registerMod = register
         return serverResult(s.data as never);
       },
     },
-    clock: { now: async () => PANE_NOW, every: () => ({ cancel: () => undefined }) },
+    clock: {
+      now: async () => PANE_NOW,
+      every: (ms: number, fn: () => unknown) => (timers.push({ ms, fn }), { cancel: () => undefined }),
+    },
     command: { register: async () => undefined },
-    session: { surfaces: async () => ["desktop"], append: async () => ({ deny: "idle" }) },
+    session: {
+      surfaces: async () => ["desktop"],
+      append: async () => ({ deny: "idle" }),
+      usage: async () => {
+        if (!server.usage) throw new TypeError("$.session.usage is not a function");
+        return server.usage;
+      },
+    },
     prompt: { submit: async (p: { text: string }) => (submitted.push(p.text), {}) },
     ui: {
       open: async () => undefined,
@@ -3666,7 +3843,7 @@ function modHarness(withStatus: boolean, register: typeof registerMod = register
   const raise = async (event: string, e: unknown) => {
     for (const { hook } of hooks.get(event) ?? []) await hook($, e, async (x) => x);
   };
-  return { hooks, state, calls, submitted, lines, logged, toasts, server, held, raise, $ };
+  return { hooks, state, calls, submitted, lines, logged, toasts, server, held, timers, stored, raise, $ };
 }
 const build = (withStatus: boolean) => modHarness(withStatus);
 
@@ -3978,4 +4155,360 @@ test("register.js: the results act on their own plan after a queued start, a sec
   await until("a press after the reload is not refused", () => r.calls.some((c) => c.tool === guided.PLAN_TOOL));
   assert.ok(!r.toasts.includes(around.BAND_WORDS.busy));
   release();
+});
+
+// ---- Cost before and during a check, and watched tickets (#511 PR 11) ----
+
+/** Usage as `$.session.usage()` and `session.measure` give it: a subscription's windows, or none with a cost ledger, or neither. */
+const usageWith = (fiveHour: number | null, usd: number | null = 1.25) => ({
+  context: { window: 200_000 },
+  rateLimits:
+    fiveHour === null
+      ? []
+      : [
+          { kind: "seven_day", percentUsed: 40 },
+          { kind: "five_hour", percentUsed: fiveHour },
+        ],
+  ...(usd === null ? {} : { cost: { usd } }),
+});
+
+test("cost: a check is measured in the 5-hour window, else in dollars with no subscription windows, else not at all", () => {
+  assert.deepEqual(around.usageReading(usageWith(12.5)), { unit: "percent", kind: "five_hour", value: 12.5 });
+  assert.deepEqual(around.usageReading({ rateLimits: [{ kind: "spend_limit", percentUsed: 3 }] }), { unit: "percent", kind: "spend_limit", value: 3 });
+  assert.deepEqual(around.usageReading(usageWith(null, 0.4)), { unit: "usd", value: 0.4 }, "no subscription windows: the session's cost");
+  assert.equal(around.usageReading(usageWith(null, null)), null, "neither: nothing to measure");
+  assert.equal(around.usageReading(undefined), null);
+  assert.equal(around.startCostWatch("gp-1", usageWith(null, null), 25, "normal"), null);
+});
+
+test("cost: the estimate before Start is the stated default until three of the person's own checks, then their median", () => {
+  const none = around.costEstimate([], "normal", "percent");
+  assert.deepEqual(none, { amount: around.COST_DEFAULT.percent.normal, own: 0 });
+  assert.equal(
+    around.COST_WORDS.estimate("percent", "Normal", none.amount, none.own),
+    `A Normal check uses about ${around.COST_DEFAULT.percent.normal}% of your 5-hour limit: a starting figure until you have run 3 checks like it.`,
+  );
+  const two = [
+    { unit: "percent" as const, kind: "five_hour", thoroughness: "normal", used: 4 },
+    { unit: "percent" as const, kind: "five_hour", thoroughness: "normal", used: 6 },
+  ];
+  assert.equal(around.costEstimate(two, "normal", "percent").own, 0, "two are not enough");
+  const three = [...two, { unit: "percent" as const, kind: "five_hour", thoroughness: "normal", used: 30 }];
+  assert.deepEqual(around.costEstimate(three, "normal", "percent"), { amount: 6, own: 3 }, "the median, so one long check does not move it far");
+  assert.match(around.COST_WORDS.estimate("percent", "Normal", 6, 3), /usually uses about 6% of your 5-hour limit, from your last 3 checks like it\./);
+  // Another thoroughness or unit is not counted.
+  assert.equal(around.costEstimate(three, "thorough", "percent").own, 0);
+  assert.equal(around.costEstimate(three, "normal", "usd").own, 0);
+  assert.equal(around.costEstimate(three, "normal", "percent", "seven_day").own, 0, "a share of another window is not counted");
+  assert.match(around.costOffer(usageWith(null, null), [], "normal", "Normal").sentence, /does not report usage/);
+  assert.match(around.costOffer({ rateLimits: [{ kind: "seven_day", percentUsed: 3 }] }, [], "normal", "Normal").sentence, /of your weekly limit/);
+  // With no subscription windows: dollars, the person's own once there are three.
+  const dollars = [0.5, 1.5, 1].map((used) => ({ unit: "usd" as const, kind: "", thoroughness: "quick", used }));
+  assert.deepEqual(around.costEstimate(dollars, "quick", "usd"), { amount: 1, own: 3 });
+  assert.match(around.COST_WORDS.estimate("usd", "Quick look", 1, 3), /about \$1 of usage/);
+  // Read back from $.store: misshapen entries left out, the newest kept.
+  assert.deepEqual(around.costHistory([{ unit: "percent", thoroughness: "normal", used: 3 }, { unit: "tokens", used: 1 }, { used: -1 }, 5]), [
+    { unit: "percent", kind: "five_hour", thoroughness: "normal", used: 3 },
+  ]);
+  assert.equal(around.costHistory(Array.from({ length: 40 }, () => ({ unit: "usd", thoroughness: "quick", used: 1 }))).length, around.COST_KEEP);
+  assert.deepEqual(around.costHistory("x"), []);
+});
+
+test("cost: the cap warns once at 80% and asks Claude to stop once at the cap, a window that resets keeps what was used, and no cap says nothing", () => {
+  const watch = around.startCostWatch("gp-1", usageWith(10), 25, "normal")!;
+  assert.deepEqual([watch.unit, watch.start, watch.cap], ["percent", 10, 25]);
+  const steps: Array<[number, string | null]> = [
+    [20, null],
+    [29.9, null],
+    [30, "warn"], // 20 points used: 80% of 25
+    [33, null], // warned once
+    [35, "stop"], // 25 points used
+    [40, null], // stopped once
+  ];
+  let w = watch;
+  for (const [percent, says] of steps) {
+    const next = around.costStep(w, usageWith(percent));
+    assert.equal(next.says, says, `at ${percent}%`);
+    w = next.watch;
+  }
+  assert.equal(around.costUsed(w), 30);
+  // The 5-hour window resets part-way: what was used before it still counts.
+  let r = around.startCostWatch("gp-2", usageWith(90), 25, "normal")!;
+  r = around.costStep(r, usageWith(95)).watch;
+  const reset = around.costStep(r, usageWith(2));
+  assert.equal(around.costUsed(reset.watch), 7);
+  assert.equal(around.costStep(reset.watch, usageWith(14)).says, null, "5 before the reset and 14 after: 19 of 25, short of 80%");
+  assert.equal(around.costStep(reset.watch, usageWith(15)).says, "warn", "5 before and 15 after: 20 of 25");
+});
+
+test("cost: with no subscription windows the cap is in dollars, and a check is measured in the unit it started in", () => {
+  let w = around.startCostWatch("gp-3", usageWith(null, 2), 5, "normal")!;
+  assert.deepEqual([w.unit, w.cap], ["usd", 5]);
+  assert.equal(around.costStep(w, usageWith(null, 5.99)).says, null);
+  const warn = around.costStep(w, usageWith(null, 6));
+  assert.equal(warn.says, "warn");
+  w = warn.watch;
+  assert.equal(around.costStep(w, usageWith(null, 7)).says, "stop");
+  // Windows appear part-way (a subscription's first answer of the session): the check stays measured in the dollars it started in, so its limit still holds.
+  const later = around.costStep(w, usageWith(50, 7));
+  assert.deepEqual([later.says, around.costUsed(later.watch)], ["stop", 5], "a window appearing part-way leaves the limit in force");
+  assert.equal(around.costStep(w, usageWith(50, null)).says, null, "a reading with no dollars says nothing of a check measured in them");
+  assert.match(around.COST_WORDS.toastWarn("$4", "$5"), /Claude will be asked to stop/, "the limit asks Claude to stop; it does not stop the check itself");
+  // A share of another window than the one the check started on is never compared with it.
+  const five = around.startCostWatch("gp-6", usageWith(10), 25, "normal")!;
+  const weekly = around.costStep(five, { rateLimits: [{ kind: "seven_day", percentUsed: 1 }] });
+  assert.deepEqual([weekly.says, around.costUsed(weekly.watch)], [null, 0]);
+  assert.equal(around.costAmount(five, 20, true), "20%");
+  assert.equal(around.costAmount(five, 25), "25% of your 5-hour limit");
+  // A cap not offered in this unit is no cap.
+  assert.equal(around.startCostWatch("gp-4", usageWith(null, 1), 25, "normal")!.cap, null);
+  assert.equal(around.costStep(around.startCostWatch("gp-5", usageWith(1), null, "quick")!, usageWith(99)).says, null, "no cap, no warning");
+});
+
+test("watched tickets: read from scout_ticket_status, toasts only for a change since the last reading, and the open ones in the band", () => {
+  const tickets = (over: Array<Partial<{ open: boolean; finding: string; title: string }>>) =>
+    around.readTicketStatus({
+      structuredContent: {
+        readAt: "",
+        fresh: true,
+        nextReadAt: "",
+        problems: [],
+        tickets: over.map((o, i) => ({
+          id: `aaa000000${i}`,
+          title: o.title ?? `Problem ${i}`,
+          severity: "high",
+          where: "GitHub owner/app",
+          ref: `#${i + 1}`,
+          url: `https://github.example/owner/app/issues/${i + 1}`,
+          open: o.open ?? true,
+          finding: o.finding ?? "open",
+        })),
+      },
+    })!;
+  const before = tickets([{}, {}, { open: false }]);
+  assert.equal(before.length, 3);
+  assert.deepEqual(around.ticketToasts(null, before), [], "a first reading is not news");
+  const after = tickets([{ open: false }, { open: false, finding: "resolved" }, { open: false, finding: "unknown" }]);
+  assert.deepEqual(around.ticketToasts(before, after), [around.TICKET_WORDS.toastClosed("#1", "Problem 0"), around.TICKET_WORDS.toastFixed("#2", "Problem 1")]);
+  assert.deepEqual(around.ticketToasts(after, after), [], "the same reading again says nothing");
+  assert.equal(around.ticketBand(before), "SceneScout · open tickets: #1, #2");
+  assert.equal(around.ticketBand(after), null);
+  // A ticket's title quoted from a page is plain text.
+  assert.equal(tickets([{ title: "Save\u001b[31m fails\u0007" }])[0].title, "Save [31m fails");
+  assert.equal(around.readTicketStatus({ isError: true, content: [{ type: "text", text: "No project is open yet" }] }), null);
+});
+
+test("the panel offers the estimate and the limit before Start, lists the filed tickets with Check again, and the band carries the open ones", () => {
+  const offer = around.costOffer(usageWith(12), [], "normal", "Normal");
+  assert.deepEqual(
+    offer.options.map((o) => o.value),
+    [null, ...around.COST_CAPS.percent],
+  );
+  const noFigures = around.costOffer(usageWith(null, null), [], "normal", "Normal");
+  assert.deepEqual(noFigures, { sentence: around.COST_WORDS.noFigures, options: [] });
+  assert.deepEqual(
+    around.costOffer(usageWith(null, 3), [], "quick", "Quick look").options.map((o) => o.label),
+    ["No limit", "$1 of usage", "$5 of usage", "$20 of usage"],
+    "no subscription windows: the limits are in dollars",
+  );
+  const tickets = [
+    { id: "aaa0000001", title: "Saving answers 500", where: "GitHub owner/app", ref: "#1", url: "u", open: true, finding: "open" },
+    { id: "bbb0000002", title: "A row stays", where: "GitHub owner/app", ref: "#2", url: "u", open: false, finding: "open" },
+    { id: "ccc0000003", title: "Tiny button", where: "Jira QA", ref: "QA-1", url: "u", open: false, finding: "resolved" },
+  ] as Array<{ id: string; title: string; where: string; ref: string; url: string; open: boolean; finding: "open" | "resolved" | "unknown" }>;
+  for (const surface of SURFACES) {
+    if (surface !== "mobile") {
+      const els = elsFor(surface);
+      const acts: Acted[] = [];
+      const tree = guided.renderGuided(els as never, wizard({ step: "configuring" }), { surface, status: STATUS_IDLE, cost: offer }, (type, payload) =>
+        acts.push({ type, payload }),
+      );
+      assertDrawable(tree, surface, "configuring with a cost offer");
+      assert.ok(shown(tree).includes(offer.sentence));
+      (elementsOf(tree).find((e) => e.props.key === "guided-config-cap-25")!.props.onPress as () => void)();
+      assert.deepEqual(acts.at(-1), { type: "cap", payload: { value: 25 } });
+      assert.equal(guided.reduce(wizard(), { type: "cap", value: 25 }).draft.cap, 25);
+      assert.equal(guided.reduce(wizard(), { type: "cap", value: "lots" }).draft.cap, null);
+      const marked = guided.renderGuided(
+        els as never,
+        wizard({ step: "configuring", draft: { ...guided.defaultDraft(), cap: 25 } }),
+        { surface, status: STATUS_IDLE, cost: offer },
+        () => undefined,
+      );
+      assert.match(shown(marked), /\(o\) 25% of my 5-hour limit/);
+      const none = guided.renderGuided(els as never, wizard({ step: "configuring" }), { surface, status: STATUS_IDLE, cost: noFigures }, () => undefined);
+      assert.ok(shown(none).includes(around.COST_WORDS.noFigures) && !elementsOf(none).some((e) => String(e.props.key).startsWith("guided-config-cap")));
+    }
+    const acts: Acted[] = [];
+    const welcome = guided.renderGuided(elsFor(surface) as never, wizard(), { surface, status: STATUS_IDLE, tickets }, (type, payload) =>
+      acts.push({ type, payload }),
+    );
+    assertDrawable(welcome, surface, "welcome with tickets");
+    assert.match(shown(welcome), /#1 open · Saving answers 500/);
+    assert.match(shown(welcome), /QA-1 closed · fixed and confirmed · Tiny button/);
+    const again = elementsOf(welcome).filter((e) => String(e.props.key).startsWith("guided-ticket-again-"));
+    assert.equal(again.length, 1, "only a closed ticket whose problem is still here offers Check again");
+    (again[0].props.onPress as () => void)();
+    assert.deepEqual(acts.at(-1), { type: "send", payload: { text: guided.ACTION_PROMPT.again("bbb0000002") } });
+  }
+  // The band: the open tickets when nothing else is going, and the check before them when one is.
+  assert.equal(around.bandLine(wizard(), STATUS_IDLE, tickets), "SceneScout · open tickets: #1");
+  assert.match(around.bandLine(wizard({ step: "running" }), STATUS_RUNNING, tickets) ?? "", /^SceneScout · Now:/);
+  assert.equal(around.statusLine(wizard(), STATUS_IDLE, tickets), "SceneScout · open tickets: #1");
+});
+
+test("register.js: a check is measured from its start, warned at 80% and stopped at the person's limit, kept for the next estimate; filed tickets are watched", async () => {
+  const m = modHarness(true);
+  await m.raise("session.start", {});
+  const w = () => guided.wizardOf(m.state.get("wizard")?.value);
+  m.server.usage = usageWith(10);
+  m.server.status = STATUS_IDLE;
+  // A check started from the panel with a limit of 25% of the 5-hour window.
+  m.state.set("wizard", {
+    value: { ...w(), step: "configuring", draft: { ...guided.defaultDraft(), address: "http://localhost:3000", cap: 25 } },
+    version: 10,
+  });
+  const [pane] = m.hooks.get("ui.render")!;
+  const drawn = await pane.hook(m.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x);
+  assert.ok(shown(drawn).includes(around.COST_WORDS.estimate("percent", "Normal", around.COST_DEFAULT.percent.normal, 0)));
+  (elementsOf(drawn).find((e) => e.props.key === "guided-config-start")!.props.onPress as () => void)();
+  await until("started", () => m.submitted.length === 1);
+  await until("measured", () => (m.state.get("cost")?.value as { start?: number } | undefined)?.start === 10);
+  const planId = (m.state.get("cost")?.value as { planId: string }).planId;
+  const measure = async (percent: number) => m.raise("session.measure", { ...usageWith(percent), changed: ["rateLimits"] });
+  await measure(20);
+  // Before the server shows the check going, a reading counts but warns of nothing and stops nothing.
+  await measure(30);
+  assert.equal(m.toasts.filter((t) => /has used/.test(t)).length, 0);
+  m.server.status = statusWith({ planId, phase: "exploring" });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  await measure(30);
+  assert.deepEqual(
+    m.toasts.filter((t) => /has used/.test(t)),
+    [around.COST_WORDS.toastWarn("20%", "25% of your 5-hour limit")],
+  );
+  await measure(35);
+  assert.ok(m.toasts.includes(around.COST_WORDS.toastStop("25% of your 5-hour limit")));
+  assert.equal(m.submitted.at(-1), guided.ACTION_PROMPT.stop, "Claude is asked to stop and write what it has");
+  await measure(40);
+  assert.equal(m.submitted.filter((t) => t === guided.ACTION_PROMPT.stop).length, 1, "asked once");
+  // The check ends: what it used is kept for the next estimate, and the watch ends.
+  m.server.status = statusWith({ planId, phase: "done" });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  assert.equal(m.state.get("cost")?.value, null);
+  assert.deepEqual(m.stored.get(around.COST_STORE_KEY), [{ unit: "percent", kind: "five_hour", thoroughness: "normal", used: 30 }]);
+  // Another check in its place ends a watch with nothing kept; a re-check is measured but not kept for the estimate.
+  m.state.set("cost", { value: around.startCostWatch("gp-gone0000001", usageWith(10), 25, "normal"), version: 950 });
+  m.server.status = statusWith({ planId: "gp-other000001", phase: "exploring" });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  assert.equal(m.state.get("cost")?.value, null);
+  m.state.set("cost", { value: around.startCostWatch("gp-recheck0001", usageWith(10), null, "normal", false), version: 960 });
+  m.server.status = statusWith({ planId: "gp-recheck0001", phase: "done" });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  assert.equal((m.stored.get(around.COST_STORE_KEY) as unknown[]).length, 1, "the re-check is not kept");
+
+  // Filed tickets: the first reading says nothing; a ticket closed since is toasted; the band shows the open ones.
+  const ticketTimer = m.timers.find((t) => t.ms === around.TICKET_POLL_MS)!;
+  const ticketsResult = (open1: boolean) => ({
+    content: [{ type: "text", text: "tickets" }],
+    structuredContent: {
+      readAt: "",
+      fresh: true,
+      nextReadAt: "",
+      problems: [],
+      tickets: [
+        { id: "aaa0000001", title: "Saving answers 500", severity: "high", where: "GitHub owner/app", ref: "#1", url: "u", open: open1, finding: "open" },
+        { id: "bbb0000002", title: "A row stays", severity: "low", where: "GitHub owner/app", ref: "#2", url: "u", open: true, finding: "open" },
+      ],
+    },
+  });
+  m.server.tickets = ticketsResult(true);
+  await ticketTimer.fn();
+  assert.equal(m.toasts.filter((t) => /ticket #/.test(t)).length, 0);
+  m.server.tickets = ticketsResult(false);
+  await ticketTimer.fn();
+  assert.deepEqual(
+    m.toasts.filter((t) => /ticket #/.test(t)),
+    [around.TICKET_WORDS.toastClosed("#1", "Saving answers 500")],
+  );
+  const band = m.hooks.get("ui.render")!.find((h) => (h.matcher as { component?: string })?.component === "AbovePrompt")!;
+  assert.match(
+    shown(await band.hook(m.$, { component: "AbovePrompt", surface: "terminal", props: { hasSurvey: false } }, async () => null)),
+    /open tickets: #2/,
+  );
+  // No project open on the server: the watch keeps what it had and says nothing.
+  m.server.tickets = null;
+  await ticketTimer.fn();
+  assert.equal((m.state.get("tickets")?.value as unknown[]).length, 2);
+  // Every ticket closed: one more reading, then the watch stops asking the server until something could change.
+  const statusCalls = () => m.calls.filter((c) => c.tool === "scout_ticket_status").length;
+  const allClosed = ticketsResult(false);
+  (allClosed.structuredContent.tickets[1] as { open: boolean }).open = false;
+  m.server.tickets = allClosed;
+  await ticketTimer.fn();
+  const afterClosed = statusCalls();
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed, "no open ticket: no polling");
+  // Another call is no reason to read; Claude filing a ticket is: the watch reads once more, and keeps reading while one is open.
+  await m.raise("tool.call", { tool: "mcp__scenescout__scout_ticket_preview", ids: ["aaa0000001"] });
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed);
+  await m.raise("tool.call", { tool: "mcp__scenescout__scout_ticket_file", previewId: "p" });
+  m.server.tickets = ticketsResult(true);
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed + 2);
+  // Every ticket closed again and the watch stopped; a check that ends (a re-check may have found a problem gone) reads once more.
+  m.server.tickets = allClosed;
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed + 3);
+  m.server.status = statusWith({ planId: "gp-recheck0002", phase: "done" });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), afterClosed + 4, "one reading after the check ended");
+  // A tracker that could not be read keeps the tickets it had and the watch going; an answer that is not fresh is asked again.
+  m.server.tickets = ticketsResult(true);
+  await m.raise("tool.call", { tool: "mcp__scenescout__scout_ticket_file", previewId: "p" });
+  await ticketTimer.fn();
+  const failed = {
+    ...ticketsResult(true),
+    structuredContent: { ...ticketsResult(true).structuredContent, tickets: [], problems: ["GitHub owner/app: could not be read (timeout)"] },
+  };
+  m.server.tickets = failed;
+  await ticketTimer.fn();
+  assert.deepEqual(
+    (m.state.get("tickets")?.value as Array<{ ref: string; open: boolean }>).map((t) => [t.ref, t.open]),
+    [
+      ["#1", true],
+      ["#2", true],
+    ],
+    "a failed read is not every ticket gone",
+  );
+  const beforeStale = statusCalls();
+  m.server.tickets = allClosed;
+  await m.raise("tool.call", { tool: "mcp__scenescout__scout_ticket_file", previewId: "p" });
+  m.server.tickets = { ...allClosed, structuredContent: { ...allClosed.structuredContent, fresh: false } };
+  await ticketTimer.fn();
+  m.server.tickets = allClosed;
+  await ticketTimer.fn();
+  await ticketTimer.fn();
+  assert.equal(statusCalls(), beforeStale + 2, "a kept answer leaves the filing's reading owed; the fresh one settles it");
+  assert.deepEqual(
+    around.mergeTickets([{ id: "a", title: "", where: "Jira QA", ref: "QA-1", url: "", open: true, finding: "open" }], [], ["Jira QA: could not be read"]),
+    [{ id: "a", title: "", where: "Jira QA", ref: "QA-1", url: "", open: true, finding: "open" }],
+  );
+  assert.equal(around.ticketsDue(null, false), false);
+  assert.equal(around.ticketsDue([], true), true, "asked: read once");
+  assert.equal(around.ticketsDue([{ id: "a", title: "", where: "", ref: "#1", url: "", open: true, finding: "open" }], false), true);
+  assert.equal(around.filesTickets({ tool: "mcp__scenescout__scout_ticket_file" }), true);
+  assert.equal(around.filesTickets({ tool: "mcp__other__scout_ticket_preview" }), false);
+
+  // A build without $.session.usage: no estimate and no limit.
+  const old = modHarness(true);
+  old.state.set("wizard", { value: { ...guided.initialWizard(), step: "configuring" }, version: 1 });
+  const [oldPane] = old.hooks.get("ui.render")!;
+  assert.ok(shown(await oldPane.hook(old.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x)).includes(around.COST_WORDS.noFigures));
 });

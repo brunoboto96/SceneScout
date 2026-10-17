@@ -10,15 +10,19 @@
 import path from "node:path";
 import { z } from "zod";
 import { MAX_PREVIEW_IDS, TicketPreviews } from "../engine/ticket-preview.js";
-import { fileTickets, previewTickets } from "../ticket-run.js";
+import { TICKET_STATUS_EVERY_MS, TicketStatusReads, ticketStatusText } from "../engine/ticket-status.js";
+import { fileTickets, previewTickets, ticketStatus } from "../ticket-run.js";
 import { errorText, projectEngine, server } from "../server-context.js";
-import { askWithForm } from "./guide.js";
+import { askWithForm, projectDirFor } from "./guide.js";
 
 export const TICKET_PREVIEW_TOOL = "scout_ticket_preview";
 export const TICKET_FILE_TOOL = "scout_ticket_file";
+export const TICKET_STATUS_TOOL = "scout_ticket_status";
 
 /** The previews this server holds: in this process only, so a restart drops them all. */
 const previews = new TicketPreviews();
+/** The last read of each project's filed tickets, so a tracker is asked at most once every five minutes. */
+const statusReads = new TicketStatusReads();
 
 /** The open project's folder, with what it has found written to disk first, since the export reads the file. */
 function openProject(): string {
@@ -48,6 +52,25 @@ const FILE_OUTPUT = {
   outcome: z.enum(["confirmed", "went-back", "declined", "cancelled", "failed", "unsupported", "unknown", "expired", "altered", "empty", "could-not-file"]),
   tellPerson: z.string(),
   tickets: z.array(z.object({ id: z.string(), ref: z.string(), url: z.string() })),
+  problems: z.array(z.string()),
+};
+
+const STATUS_OUTPUT = {
+  readAt: z.string(),
+  fresh: z.boolean(),
+  nextReadAt: z.string(),
+  tickets: z.array(
+    z.object({
+      id: z.string(),
+      title: z.string(),
+      severity: z.enum(["high", "medium", "low", ""]),
+      finding: z.enum(["open", "resolved", "unknown"]),
+      where: z.string(),
+      ref: z.string(),
+      url: z.string(),
+      open: z.boolean(),
+    }),
+  ),
   problems: z.array(z.string()),
 };
 
@@ -103,6 +126,29 @@ export function registerTicketTools(): void {
         });
         const { text, ...structured } = got;
         return { content: [{ type: "text" as const, text: `${text}\nTell the person: "${got.tellPerson}"` }], structuredContent: structured };
+      } catch (err) {
+        return errorText(err);
+      }
+    },
+  );
+  server.registerTool(
+    TICKET_STATUS_TOOL,
+    {
+      title: "Read filed tickets' state",
+      description:
+        "List the tickets this project filed (with scout_ticket_file or `scenescout export`) and whether each is still open in GitHub or Jira, with whether its problem is still open in this project. " +
+        `Reads each tracker at most once every ${TICKET_STATUS_EVERY_MS / 60_000} minutes per project; a call sooner answers what the last read found (fresh: false, with when the next read is due). ` +
+        "Only a tracker the server's settings point at is read, with the sign-in from its environment. Sends nothing but reads; touches no browser. With no check open in this conversation, pass the site's address so SceneScout finds its folder.",
+      inputSchema: {
+        address: z.string().max(2048).optional().describe("The site's address, when no check is open in this conversation"),
+      },
+      outputSchema: STATUS_OUTPUT,
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    async ({ address }: { address?: string }) => {
+      try {
+        const status = await ticketStatus(await projectDirFor(address), statusReads, { env: process.env });
+        return { content: [{ type: "text" as const, text: ticketStatusText(status) }], structuredContent: { ...status } };
       } catch (err) {
         return errorText(err);
       }

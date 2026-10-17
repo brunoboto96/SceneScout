@@ -480,3 +480,23 @@ test("a queued check starting while the person reads the results leaves them the
   expect(calls.filter((c) => c.tool === "scout_saved_checks" && c.args.action === "run").length).toBe(1);
   await ui.unmount();
 });
+
+test("before Start, the panel says what a check like this uses and offers a limit, in the unit this Claude Code reports", async ($, on) => {
+  runServer(on, [], { done: false });
+  answerCommands(on);
+  mock.clock(on, { now: 1_000 });
+  const usage = { value: { startedAt: 0, context: { window: 200_000 }, rateLimits: [{ kind: "five_hour", percentUsed: 12 }], cost: { usd: 0.5 } } };
+  on("session.usage", async () => usage);
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop", props: PROPS });
+  await ui.press({ key: "guided-welcome-check" });
+  expect(
+    await ui.find({ type: "Text", text: /A Normal check uses about 8% of your 5-hour limit: a starting figure until you have run 3 checks like it\./ }),
+  ).toBeDefined();
+  await ui.press({ key: "guided-config-cap-25" });
+  expect(await ui.find({ key: "guided-config-cap-25" })).toMatchObject({ props: { label: "(o) 25% of my 5-hour limit" } });
+  // No subscription windows: dollars.
+  usage.value = { startedAt: 0, context: { window: 200_000 }, rateLimits: [], cost: { usd: 0.5 } };
+  await ui.press({ key: "guided-config-thorough-quick" });
+  expect(await ui.find({ key: "guided-config-cap-5" })).toMatchObject({ props: { label: "( ) $5 of usage" } });
+  await ui.unmount();
+});
