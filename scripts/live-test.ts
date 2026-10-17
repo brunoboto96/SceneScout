@@ -88,9 +88,10 @@ import {
 import { CARD_IMPACTS, cardActions as engineCardActions, cardText, errorAction, guidedProgress, nextActions } from "../src/engine/progress.ts";
 import { plainCard } from "../src/engine/plain.ts";
 import { AREA_FIELDS, FORM_CHOICES } from "../src/intake.ts";
-import type { Finding } from "../src/engine/memory.ts";
+import { FEEDBACK_VERDICTS, type Finding } from "../src/engine/memory.ts";
 import * as mod from "../mods/scenescout-mod/hooks/pane.js";
 import * as guided from "../mods/scenescout-mod/hooks/guided.js";
+import * as around from "../mods/scenescout-mod/hooks/run.js";
 import { register as registerMod } from "../mods/scenescout-mod/hooks/register.js";
 import {
   COULD_NOT_OPEN,
@@ -3362,4 +3363,326 @@ test("where nothing draws, /scenescout-guided says where the check is and what t
   // A check of another plan is not passed off as the panel's.
   assert.equal(guided.guidedOf(STATUS_RUNNING, "gp-9999999999"), null);
   assert.equal(guided.guidedOf(STATUS_RUNNING, null)?.planId, GUIDED_PLAN_ID);
+});
+
+// ---- The run around the panel: the band, the status line, card labels and queued checks ----
+// The rules live in mods/scenescout-mod/hooks/run.js (and the queue's presses in guided.js).
+
+const QUEUED_WRITES = { name: "Shop sign-up on a phone", address: "https://staging.example.com", care: "may-create-test-data" as const };
+const QUEUED_LOOKS = { name: "Admin area", address: "http://localhost:3000", care: "look-only" as const };
+const STATUS_DONE = statusWith({ phase: "done", now: "Finished" });
+
+test("the band and the status line carry the check's now sentence and its problem count, and say nothing once it has ended", () => {
+  const w = wizard({ step: "running", planId: GUIDED_PLAN_ID });
+  const g = guided.guidedOf(STATUS_RUNNING, null)!;
+  assert.equal(around.bandLine(w, STATUS_RUNNING), `SceneScout · Now: ${g.now} · 1 problem so far`);
+  assert.equal(around.statusLine(w, STATUS_RUNNING), around.bandLine(w, STATUS_RUNNING));
+  // The count adds up the four impacts.
+  const counts: Array<[Record<string, number>, string]> = [
+    [{ blocksUsers: 0, annoying: 0, cosmetic: 0, worthALook: 0 }, "no problems so far"],
+    [{ blocksUsers: 0, annoying: 1, cosmetic: 0, worthALook: 0 }, "1 problem so far"],
+    [{ blocksUsers: 2, annoying: 1, cosmetic: 1, worthALook: 1 }, "5 problems so far"],
+  ];
+  for (const [problems, said] of counts) assert.ok(around.bandLine(w, statusWith({ problems }))!.endsWith(said), said);
+  // What the check needs of the person leads.
+  const needs = statusWith({ phase: "needs-you", needsYou: { kind: "sign-in-expired", sentence: "Your sign-in has run out.", actions: [] } });
+  assert.equal(around.bandLine(w, needs), "SceneScout needs you: Your sign-in has run out.");
+  // A check that has ended, a server that does not answer, or none at all: no band, and the status line is cleared.
+  for (const status of [STATUS_DONE, statusWith({ phase: "stopped" }), STATUS_DOWN, STATUS_IDLE]) {
+    assert.equal(around.bandLine(w, status), null);
+    assert.equal(around.statusLine(w, status), undefined);
+  }
+  // The queue rides along, and keeps the band up once the check has ended.
+  const queued = wizard({ step: "running", planId: GUIDED_PLAN_ID, queue: [QUEUED_LOOKS, QUEUED_WRITES] });
+  assert.ok(around.bandLine(queued, STATUS_RUNNING)!.endsWith(" · 2 queued"));
+  assert.equal(around.bandLine(queued, STATUS_DONE), 'SceneScout · 2 checks queued, next: "Admin area"');
+  // A queued check waiting on the person's yes says so, in place of everything else.
+  const waiting = wizard({ step: "confirm", planId: GUIDED_PLAN_ID, fromQueue: "Admin area" });
+  assert.equal(around.bandLine(waiting, STATUS_DONE), around.BAND_WORDS.confirmNext("Admin area"));
+  assert.equal(around.bandLine({ ...waiting, fromQueue: null }, STATUS_DONE), null, "a check confirmed from the panel is not a queued one");
+  // The status line is one line, cut where it would run long.
+  const long = statusWith({ now: `Typing ${"a".repeat(300)}` });
+  assert.equal(around.statusLine(w, long)!.length, around.STATUS_MAX);
+  assert.ok(around.statusLine(w, long)!.endsWith("..."));
+});
+
+test("the band draws on the two surfaces that have it, keeps what is beneath, and its button opens the panel", () => {
+  for (const surface of ["terminal", "desktop"] as Surface[]) {
+    const opened: number[] = [];
+    const alone = around.renderBand(elsFor(surface) as never, "SceneScout · Now: Opening / · no problems so far", null, () => opened.push(1));
+    assertDrawable(alone, surface, "band");
+    assert.equal(shown(alone), "SceneScout · Now: Opening / · no problems so far\nOpen the panel");
+    (elementsOf(alone).find((e) => e.props.key === "guided-band-open")!.props.onPress as () => void)();
+    assert.deepEqual(opened, [1]);
+    const beneath = { type: "Text", props: { children: ["another mod's row"] } };
+    const kept = around.renderBand(elsFor(surface) as never, "x", beneath, () => undefined);
+    assert.ok(shown(kept).endsWith("another mod's row"), "the rows beneath are drawn under the line, not dropped");
+  }
+});
+
+test("the mod polls with the panel closed only while there is a check to keep in view", () => {
+  const idle = wizard();
+  const at = { now: PANE_NOW, sentAt: PANE_NOW - 60_000 };
+  assert.equal(around.keepsPolling(true, idle, STATUS_IDLE, at), true, "an open panel always polls");
+  assert.equal(around.keepsPolling(false, idle, STATUS_IDLE, at), false);
+  assert.equal(around.keepsPolling(false, idle, STATUS_RUNNING, at), true, "a check going");
+  assert.equal(around.keepsPolling(false, idle, STATUS_DONE, at), false, "a check that has ended");
+  assert.equal(around.keepsPolling(false, wizard({ queue: [QUEUED_LOOKS] }), STATUS_DONE, at), true, "a check waiting to start");
+  // A plan handed to Claude that the server does not show yet: polled until it is seen to end, or for a while at most.
+  const handed = wizard({ step: "running", planId: "gp-handed0001" });
+  assert.equal(around.keepsPolling(false, handed, STATUS_IDLE, at), true);
+  assert.equal(around.keepsPolling(false, handed, STATUS_IDLE, { ...at, sentAt: PANE_NOW - around.HANDED_WAIT_MS }), false, "Claude never started it");
+  assert.equal(around.keepsPolling(false, handed, statusWith({ planId: "gp-handed0001", phase: "done" }), at), false);
+});
+
+test("a queued check starts one at a time, in the order queued, only when nothing is going and Claude is idle", () => {
+  const at = { isWorking: false, now: PANE_NOW, sentAt: PANE_NOW - 60_000 };
+  const queued = wizard({ step: "running", planId: GUIDED_PLAN_ID, queue: [QUEUED_LOOKS, QUEUED_WRITES] });
+  assert.deepEqual(around.nextQueued(queued, STATUS_DONE, at), QUEUED_LOOKS, "first in, first out");
+  // Each condition as a pair: the same moment with one fact changed.
+  assert.equal(around.nextQueued(queued, STATUS_RUNNING, at), null, "the check is still going");
+  assert.equal(around.nextQueued(queued, STATUS_DONE, { ...at, isWorking: true }), null, "Claude is still working");
+  assert.equal(around.nextQueued({ ...queued, busy: "plan" }, STATUS_DONE, at), null, "the panel is busy");
+  assert.equal(around.nextQueued({ ...queued, step: "confirm" }, STATUS_DONE, at), null, "a plan waits on the person's yes");
+  assert.equal(around.nextQueued(queued, STATUS_DOWN, at), null, "the server does not answer");
+  assert.equal(around.nextQueued({ ...queued, queue: [] }, STATUS_DONE, at), null, "nothing queued");
+  // A plan just handed to Claude that the server does not show yet: wait out the grace before reading it as ended.
+  const handed = { ...queued, planId: "gp-handed0001" };
+  assert.equal(around.nextQueued(handed, STATUS_IDLE, { ...at, sentAt: PANE_NOW - 1_000 }), null);
+  assert.deepEqual(around.nextQueued(handed, STATUS_IDLE, { ...at, sentAt: PANE_NOW - around.QUEUE_GRACE_MS }), QUEUED_LOOKS);
+  // Seen to end, no grace is needed.
+  assert.deepEqual(around.nextQueued(queued, STATUS_DONE, { ...at, sentAt: PANE_NOW - 1_000 }), QUEUED_LOOKS);
+});
+
+test("the queue: a saved check is queued with its own care level, once, at most five, removed by name, and the list closes when the step changes", () => {
+  const saved = guided.readSaved(savedResult());
+  assert.ok(saved.ok);
+  let w = wizard({ step: "running", planId: GUIDED_PLAN_ID, saved: saved.saved });
+  w = guided.reduce(w, { type: "queuePick" });
+  assert.equal(w.queuing, true);
+  w = guided.reduce(w, { type: "queueAdd", name: "Admin area" });
+  w = guided.reduce(w, { type: "queuePick" });
+  w = guided.reduce(w, { type: "queueAdd", name: "Shop sign-up on a phone" });
+  assert.deepEqual(w.queue, [QUEUED_LOOKS, QUEUED_WRITES], "each keeps the care level it was saved with");
+  assert.equal(w.queuing, false, "queuing one closes the list");
+  assert.equal(w.notice?.text, guided.PANEL_WORDS.queueAdded("Shop sign-up on a phone"));
+  const again = guided.reduce(w, { type: "queueAdd", name: "Admin area" });
+  assert.deepEqual([again.queue.length, again.notice?.text], [2, guided.PANEL_WORDS.queueAlready("Admin area")]);
+  const unknown = guided.reduce(w, { type: "queueAdd", name: "Not saved" });
+  assert.deepEqual([unknown.queue.length, unknown.notice?.tone], [2, "error"]);
+  const many = Array.from({ length: 7 }, (_, i) => ({ name: `Check ${i}`, address: "http://localhost:3000", care: "look-only", lastRunAt: "" }));
+  let full = wizard({ saved: many });
+  for (const c of many) full = guided.reduce(full, { type: "queueAdd", name: c.name });
+  assert.equal(full.queue.length, guided.QUEUE_MAX);
+  assert.equal(full.notice?.text, guided.PANEL_WORDS.queueFull);
+  assert.deepEqual(guided.reduce(w, { type: "queueRemove", name: "Admin area" }).queue, [QUEUED_WRITES]);
+  // The list belongs to the running check: leaving it closes the list and keeps the queue.
+  const open = guided.reduce(w, { type: "queuePick" });
+  const left = guided.reduce(open, { type: "go", step: "results" });
+  assert.deepEqual([left.queuing, left.queue.length], [false, 2]);
+  // No saved check to queue: the list says how to make one.
+  assert.equal(guided.reduce(wizard({ step: "running" }), { type: "queuePick" }).notice?.text, guided.PANEL_WORDS.queueNoSaved);
+  // Read back from $.state: a bad entry, a care level the panel does not know and a second copy are dropped.
+  const read = guided.wizardOf({
+    queue: [
+      QUEUED_LOOKS,
+      { ...QUEUED_LOOKS },
+      { name: "x", address: "http://a", care: "destructive" },
+      { name: "", address: "http://a", care: "look-only" },
+      3,
+    ],
+    queuing: "yes",
+  });
+  assert.deepEqual([read.queue, read.queuing, read.fromQueue], [[QUEUED_LOOKS], false, null]);
+});
+
+test("a queued check starts on a plan of its own: confirmed again where its care level writes, never inheriting the check before it, and not at all if its care level changed", () => {
+  const writes = planFor({ address: "https://staging.example.com", areas: ["sign-in", "phone"], signIn: "password", care: "may-create-test-data" });
+  const looks = planFor({ address: "http://localhost:3000", areas: ["forms"] });
+  // The check before was accepted: its plan, its yes.
+  const before = wizard({
+    step: "running",
+    planId: "gp-before00001",
+    plan: { ...writes, planId: "gp-before00001", confirm: { ...writes.confirm, accepted: true } },
+  });
+  const next = around.afterQueuedRun(before, savedResult(writes), QUEUED_WRITES);
+  assert.equal(next.send, undefined, "nothing starts on the yes given to the check before");
+  assert.deepEqual([next.wizard.step, next.wizard.planId, next.wizard.fromQueue], ["confirm", GUIDED_PLAN_ID, QUEUED_WRITES.name]);
+  assert.equal(next.wizard.plan.confirm.accepted, false);
+  // Its own yes, in the server's form, is what starts it.
+  const yes = guided.afterConfirm(next.wizard, {
+    structuredContent: { planId: GUIDED_PLAN_ID, accepted: true, outcome: "accepted", tellPerson: "Thank you." },
+  });
+  assert.equal(yes.send, guided.startPrompt(GUIDED_PLAN_ID));
+  // One that needs no confirmation starts Claude straight away.
+  const plain = around.afterQueuedRun(before, savedResult(looks), QUEUED_LOOKS);
+  assert.deepEqual([plain.wizard.step, plain.send, plain.wizard.fromQueue], ["running", guided.startPrompt(GUIDED_PLAN_ID), null]);
+  // The same saved check, changed to another care level since it was queued: it does not start, either way round.
+  for (const [plan, entry] of [
+    [writes, { ...QUEUED_WRITES, care: "look-only" as const }],
+    [looks, { ...QUEUED_LOOKS, care: "may-submit-forms" as const }],
+  ] as const) {
+    const changed = around.afterQueuedRun(before, savedResult(plan), entry);
+    assert.equal(changed.send, undefined);
+    assert.equal(changed.wizard.step, "welcome");
+    assert.match(changed.wizard.notice?.text ?? "", /did not start/);
+  }
+  // A saved check that is gone: the server's refusal, and nothing starts.
+  const gone = around.afterQueuedRun(before, { isError: true, content: [{ type: "text", text: "Error: no saved check is named that" }] }, QUEUED_LOOKS);
+  assert.deepEqual([gone.send, gone.wizard.notice?.text], [undefined, "No saved check is named that"]);
+});
+
+test("the queue and the card labels draw on every surface, and each button asks for what it says", () => {
+  const saved = guided.readSaved(savedResult());
+  assert.ok(saved.ok);
+  const cards = [cardFixture("0a1b2c3d4e")];
+  for (const surface of SURFACES) {
+    const running = drawGuided(surface, wizard({ step: "running", planId: GUIDED_PLAN_ID, saved: saved.saved, queue: [QUEUED_WRITES] }), STATUS_RUNNING);
+    assertDrawable(running.tree, surface, "running with a queue");
+    assert.match(running.text, /1\. Shop sign-up on a phone · May create test data · asks you to confirm when it starts/);
+    assert.deepEqual(running.press("guided-queue-another"), { type: "queuePick", payload: undefined });
+    assert.deepEqual(running.press("guided-queue-remove-shop-sign-up-on-a-phone"), { type: "queueRemove", payload: { name: QUEUED_WRITES.name } });
+    const picking = drawGuided(
+      surface,
+      wizard({ step: "running", planId: GUIDED_PLAN_ID, saved: saved.saved, queue: [QUEUED_WRITES], queuing: true }),
+      STATUS_RUNNING,
+    );
+    assertDrawable(picking.tree, surface, "queue list");
+    assert.deepEqual(picking.press("guided-queue-add-admin-area"), { type: "queueAdd", payload: { name: "Admin area" } });
+    assert.ok(!elementsOf(picking.tree).some((e) => e.props.key === "guided-queue-add-shop-sign-up-on-a-phone"), "a queued check is not offered twice");
+    assert.deepEqual(picking.press("guided-queue-close"), { type: "queuePick", payload: undefined });
+    // Once the check has ended, the queue is shown but nothing more can be queued.
+    const ended = drawGuided(surface, wizard({ step: "running", planId: GUIDED_PLAN_ID, queue: [QUEUED_WRITES] }), STATUS_DONE);
+    assert.ok(!elementsOf(ended.tree).some((e) => e.props.key === "guided-queue-another"));
+    assert.ok(elementsOf(ended.tree).some((e) => e.props.key === "guided-queue-remove-shop-sign-up-on-a-phone"));
+
+    const results = drawGuided(surface, wizard({ step: "results", cards, cardsTotal: 1 }), STATUS_IDLE);
+    assertDrawable(results.tree, surface, "results with labels");
+    assert.deepEqual(results.press("guided-results-0a1b2c3d4e-not-a-bug"), { type: "feedback", payload: { id: "0a1b2c3d4e", verdict: "not-a-bug" } });
+    assert.deepEqual(results.press("guided-results-0a1b2c3d4e-confirmed"), { type: "feedback", payload: { id: "0a1b2c3d4e", verdict: "confirmed" } });
+    const card = drawGuided(surface, wizard({ step: "card", cards, cardId: "0a1b2c3d4e" }), STATUS_IDLE);
+    assert.deepEqual(card.press("guided-card-confirmed"), { type: "feedback", payload: { id: "0a1b2c3d4e", verdict: "confirmed" } });
+    assert.equal(elementsOf(card.tree).find((e) => e.props.key === "guided-card-confirmed")?.props.label, guided.PANEL_WORDS.confirmedBug);
+  }
+  // A label already given is said, and its button is gone; the other stays, so the person can change their mind.
+  for (const [verdict, said, offered] of [
+    ["not-a-bug", guided.PANEL_WORDS.markedNotABug, "confirmed"],
+    ["confirmed", guided.PANEL_WORDS.markedConfirmed, "not-a-bug"],
+  ] as const) {
+    const marked = [{ ...cards[0], feedback: { verdict, at: "2026-10-03T10:00:00.000Z" } }];
+    for (const [step, prefix] of [
+      ["results", "guided-results-0a1b2c3d4e"],
+      ["card", "guided-card"],
+    ] as const) {
+      const drawn = drawGuided("desktop", wizard({ step, cards: marked, cardsTotal: 1, cardId: "0a1b2c3d4e" }), STATUS_IDLE);
+      assert.ok(drawn.text.includes(said), `${step}: ${verdict}`);
+      const keys = elementsOf(drawn.tree).map((e) => String(e.props.key));
+      assert.ok(!keys.includes(`${prefix}-${verdict}`) && keys.includes(`${prefix}-${offered}`), `${step}: ${verdict}`);
+    }
+  }
+  assert.deepEqual(guided.FEEDBACK_VERDICTS, [...FEEDBACK_VERDICTS]);
+  assert.deepEqual(guided.feedbackChoices({}), ["not-a-bug", "confirmed"]);
+});
+
+test("register.js: the status line follows the check, a queued check starts once when the check ends, and a build without the status line or the band keeps the panel", async () => {
+  type Hook = ($: unknown, e: any, next: (e: unknown) => Promise<unknown>) => Promise<unknown>;
+  const build = (withStatus: boolean) => {
+    const hooks = new Map<string, Array<{ matcher: unknown; hook: Hook }>>();
+    const on = (event: string, ...rest: unknown[]) => {
+      hooks.set(event, [...(hooks.get(event) ?? []), { matcher: rest.length > 1 ? rest[0] : null, hook: rest[rest.length - 1] as Hook }]);
+      return { catch: () => undefined };
+    };
+    const state = new Map<string, { value: unknown; version: number }>();
+    const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+    const submitted: string[] = [];
+    const lines: Array<string | undefined> = [];
+    const logged: string[] = [];
+    const toasts: string[] = [];
+    const server = { status: STATUS_RUNNING as unknown };
+    const looks = planFor({ address: "http://localhost:3000", areas: ["forms"] });
+    const $ = {
+      state: {
+        get: async (ref: { key: string }) => state.get(ref.key) ?? { value: undefined, version: 0 },
+        set: async (ref: { key: string }, value: unknown, opts?: { ifVersion?: number }) => {
+          const held = state.get(ref.key)?.version ?? 0;
+          if (opts?.ifVersion !== undefined && opts.ifVersion !== held) return { isSet: false };
+          state.set(ref.key, { value, version: held + 1 });
+          return { isSet: true };
+        },
+      },
+      store: { get: async () => true, set: async () => undefined },
+      mcp: {
+        call: async (_server: string, tool: string, args: Record<string, unknown>) => {
+          calls.push({ tool, args });
+          if (tool === guided.SAVED_TOOL && args.action === "run" && args.name === "Gone")
+            return { isError: true, content: [{ type: "text", text: "Error: no saved check is named that" }] };
+          if (tool === guided.SAVED_TOOL) return savedResult(args.action === "run" ? looks : undefined);
+          const s = server.status as { data?: unknown };
+          return serverResult(s.data as never);
+        },
+      },
+      clock: { now: async () => PANE_NOW },
+      session: { surfaces: async () => ["desktop"], append: async () => ({ deny: "idle" }) },
+      prompt: { submit: async (p: { text: string }) => (submitted.push(p.text), {}) },
+      ui: {
+        open: async () => undefined,
+        toast: (t: string) => toasts.push(t),
+        log: (t: string) => logged.push(t),
+        resolve: () => elsFor("desktop"),
+        ...(withStatus ? { status: (t: string | undefined) => lines.push(t) } : {}),
+      },
+    };
+    registerMod(on as never, {});
+    const raise = async (event: string, e: unknown) => {
+      for (const { hook } of hooks.get(event) ?? []) await hook($, e, async (x) => x);
+    };
+    return { hooks, state, calls, submitted, lines, logged, toasts, server, raise, $ };
+  };
+
+  const m = build(true);
+  await m.raise("command.run", { command: "scenescout-guided" });
+  const g = guided.guidedOf(STATUS_RUNNING, null)!;
+  assert.deepEqual(m.lines, [`SceneScout · Now: ${g.now} · 1 problem so far`]);
+  await m.raise("command.run", { command: "scenescout-guided" });
+  assert.equal(m.lines.length, 1, "a poll that changes nothing sets nothing");
+  // Follow the check, queue the saved check that looks only, and let the check end.
+  const w = () => guided.wizardOf(m.state.get("wizard")?.value);
+  const second = { ...QUEUED_LOOKS, name: "Second" };
+  m.state.set("wizard", { value: { ...w(), step: "running", planId: "gp-before00001", queue: [QUEUED_LOOKS, second] }, version: 50 });
+  m.server.status = statusWith({ planId: "gp-before00001", phase: "done" });
+  // Several polls while the first is being started: it starts once, and the second waits for it.
+  await Promise.all([1, 2, 3].map(() => m.raise("command.run", { command: "scenescout-guided" })));
+  const runs = () => m.calls.filter((c) => c.tool === guided.SAVED_TOOL && c.args.action === "run");
+  assert.deepEqual(runs(), [{ tool: guided.SAVED_TOOL, args: { action: "run", name: "Admin area" } }], "one start, not two");
+  assert.deepEqual([w().queue, w().step, m.submitted], [[second], "running", [guided.startPrompt(GUIDED_PLAN_ID)]]);
+  // A queued check that cannot start is said in a toast, which shows with the panel closed.
+  m.state.set("wizard", { value: { ...w(), planId: "gp-before00001", queue: [{ ...QUEUED_LOOKS, name: "Gone" }] }, version: 55 });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  assert.deepEqual(m.toasts, ['SceneScout: the queued check "Gone" did not start. No saved check is named that']);
+  // The band: drawn from the same state, under the matcher on AbovePrompt; a survey keeps it.
+  const band = m.hooks.get("ui.render")!.find((h) => (h.matcher as { component?: string })?.component === "AbovePrompt")!;
+  m.state.set("wizard", { value: { ...w(), queue: [QUEUED_WRITES] }, version: 60 });
+  const tree = await band.hook(m.$, { component: "AbovePrompt", surface: "terminal", props: { hasSurvey: false } }, async () => null);
+  assert.match(shown(tree), /1 check queued, next: "Shop sign-up on a phone"/);
+  const survey = { type: "engine", ref: 0 };
+  assert.equal(await band.hook(m.$, { component: "AbovePrompt", surface: "terminal", props: { hasSurvey: true } }, async () => survey), survey);
+  // A label the server does not know is never sent.
+  const before = m.calls.length;
+  m.state.set("wizard", { value: { ...w(), step: "card", cards: [cardFixture("0a1b2c3d4e")], cardId: "0a1b2c3d4e" }, version: 70 });
+  const [pane] = m.hooks.get("ui.render")!;
+  const drawn = await pane.hook(m.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x);
+  const confirmed = elementsOf(drawn).find((e) => e.props.key === "guided-card-confirmed")!;
+  (confirmed.props.onPress as () => void)();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(m.calls.slice(before), [{ tool: guided.FEEDBACK_TOOL, args: { id: "0a1b2c3d4e", verdict: "confirmed" } }]);
+
+  // An older build: no status line. The poll still lands and the panel draws; the refusal is logged once, not on every poll.
+  const old = build(false);
+  await old.raise("command.run", { command: "scenescout-guided" });
+  old.server.status = statusWith({ now: "Opening /another" });
+  await old.raise("command.run", { command: "scenescout-guided" });
+  assert.equal((old.state.get("status")?.value as { kind: string }).kind, "data");
+  assert.equal(old.logged.filter((t) => /status line/.test(t)).length, 1);
+  const [oldPane] = old.hooks.get("ui.render")!;
+  assert.ok(shown(await oldPane.hook(old.$, { requestId: mod.PANE_ID, surface: "desktop" }, async (x) => x)).includes(guided.PANEL_WORDS.checkSite));
 });

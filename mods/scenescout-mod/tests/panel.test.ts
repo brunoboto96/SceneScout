@@ -232,3 +232,157 @@ test("saved checks: the finished check can be named and saved, and Check them ag
   await ui.unmount();
   finished.on = false;
 });
+
+// ---- The run around the panel: the band, card labels and queued checks ----
+
+const BAND = { plugin: PLUGIN, component: "AbovePrompt", requestId: "band" } as const;
+const bandProps = (hasSurvey = false) => ({ hasSurvey, isWorking: false, maxRows: 6, bodyColumns: 80 }) as never;
+const RUNNING = {
+  planId: "gp-running0001",
+  title: "Checking staging.example.com",
+  phase: "exploring",
+  now: "Opening /orders",
+  story: ["Opening /orders"],
+  areas: [],
+  problems: { blocksUsers: 1, annoying: 1, cosmetic: 0, worthALook: 0 },
+  latest: [],
+  next: [],
+};
+const QUEUED_SAVED = [{ name: "Admin area", address: "https://staging.example.com", care: "may-create-test-data", lastRunAt: "" }];
+
+/** What Claude Code itself does beneath the mod: draws nothing of its own in the band, opens the pane, sets the status line. */
+function engineBeneath(on: any, statusLines: Array<string | undefined>) {
+  on("ui.render", { component: "AbovePrompt" }, async () => ({ type: "engine", ref: 0 }));
+  on("ui.open", async () => ({ value: { isPlaced: true } }));
+  on("ui.status", async (_$: unknown, e: { text?: string }) => {
+    statusLines.push(e.text);
+    return { value: undefined };
+  });
+}
+
+/** A server whose guided check runs until `run.done`, whose one saved check writes, and which records every call. */
+function runServer(on: any, calls: Array<{ tool: string; args: Record<string, unknown> }>, run: { done: boolean }) {
+  on("mcp.call", async (_$: unknown, e: { tool: string; args: Record<string, unknown> }) => {
+    calls.push({ tool: e.tool, args: e.args });
+    if (e.tool === "scout_status_poll")
+      return {
+        value: status(
+          run.done
+            ? { ...RUNNING, phase: "done", now: "Finished", next: [{ kind: "direct", tool: "scout_cards", label: "See the problems", args: {} }] }
+            : RUNNING,
+        ),
+      };
+    if (e.tool === "scout_saved_checks")
+      return {
+        value: {
+          content: [{ type: "text", text: "Saved checks." }],
+          structuredContent: { saved: QUEUED_SAVED, refused: [], ...(e.args.action === "run" ? { plan: PLAN } : {}) },
+        },
+      };
+    if (e.tool === "scout_cards")
+      return {
+        value: {
+          content: [{ type: "text", text: "cards" }],
+          structuredContent: { cards: [{ id: "f1", title: "Save button does nothing", impact: "Blocks users", page: "/things" }], total: 1 },
+        },
+      };
+    if (e.tool === "scout_feedback") return { value: { content: [{ type: "text", text: "Labelled." }], structuredContent: { findingId: "f1" } } };
+    if (e.tool === "scout_guided_confirm")
+      return {
+        value: {
+          content: [{ type: "text", text: "accepted" }],
+          structuredContent: { planId: PLAN.planId, accepted: true, outcome: "accepted", tellPerson: "Thank you.", mode: "safe-write" },
+        },
+      };
+    return { value: { isError: true, content: [{ type: "text", text: "not here" }] } };
+  });
+}
+
+test("the band above the prompt carries what the check is doing now and its problems, yields to a survey, and opens the panel", async ($, on) => {
+  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  const lines: Array<string | undefined> = [];
+  runServer(on, calls, { done: false });
+  answerCommands(on);
+  engineBeneath(on, lines);
+  mock.clock(on, { now: 1_000 });
+  await $.command.run({ command: "scenescout-guided", args: "" } as never);
+  // The status line says the same, for a person who keeps neither the panel nor the band in view.
+  expect(lines.at(-1)).toBe("SceneScout · Now: Opening /orders · 2 problems so far");
+  for (const surface of ["terminal", "desktop"] as const) {
+    const band = await $.ui.mount({ ...BAND, surface, props: bandProps() });
+    expect(await band.find({ type: "Text", text: /Now: Opening \/orders · 2 problems so far/ })).toBeDefined();
+    expect(await band.find({ key: "guided-band-open" })).toBeDefined();
+    await band.unmount();
+    const survey = await $.ui.mount({ ...BAND, surface, props: bandProps(true) });
+    expect(await survey.findAll({ key: "guided-band-open" })).toEqual([]);
+    await survey.unmount();
+  }
+});
+
+test("a card takes Not a bug or Confirmed, each sent to scout_feedback, and offers the other once one is given", async ($, on) => {
+  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  runServer(on, calls, { done: true });
+  answerCommands(on);
+  mock.clock(on, { now: 1_000 });
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop", props: PROPS });
+  await $.command.run({ command: "scenescout-guided", args: "" } as never);
+  await ui.press({ key: "guided-welcome-follow" });
+  await ui.press({ key: "guided-running-see-the-problems" });
+  const feedback = () => calls.filter((c) => c.tool === "scout_feedback").map((c) => c.args);
+  await ui.press({ key: "guided-results-f1-not-a-bug" });
+  expect(feedback()).toEqual([{ id: "f1", verdict: "not-a-bug" }]);
+  expect(await ui.find({ type: "Text", text: /You marked this not a bug/ })).toBeDefined();
+  expect(await ui.findAll({ key: "guided-results-f1-not-a-bug" })).toEqual([]);
+  await ui.press({ key: "guided-results-open-f1" });
+  expect(await ui.findAll({ key: "guided-card-not-a-bug" })).toEqual([]);
+  await ui.press({ key: "guided-card-confirmed" });
+  expect(feedback()).toEqual([
+    { id: "f1", verdict: "not-a-bug" },
+    { id: "f1", verdict: "confirmed" },
+  ]);
+  expect(await ui.find({ type: "Text", text: /You confirmed this is a bug/ })).toBeDefined();
+  expect(await ui.find({ key: "guided-card-not-a-bug" })).toBeDefined();
+  await ui.unmount();
+});
+
+test("a queued check starts when the running one ends, on its own plan, and waits for its own confirmation", async ($, on) => {
+  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  const sent: string[] = [];
+  const run = { done: false };
+  runServer(on, calls, run);
+  answerCommands(on);
+  engineBeneath(on, []);
+  on("prompt.submit", async (_$: unknown, e: { text: string }) => {
+    sent.push(e.text);
+    return { text: e.text };
+  });
+  mock.clock(on, { now: 1_000 });
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop", props: PROPS });
+  await $.command.run({ command: "scenescout-guided", args: "" } as never);
+  await ui.press({ key: "guided-welcome-follow" });
+  await ui.press({ key: "guided-queue-another" });
+  await ui.press({ key: "guided-queue-add-admin-area" });
+  expect(await ui.find({ type: "Text", text: /1\. Admin area · May create test data · asks you to confirm when it starts/ })).toBeDefined();
+  expect(await ui.find({ key: "guided-queue-remove-admin-area" })).toBeDefined();
+  // While the check runs, nothing starts.
+  await $.command.run({ command: "scenescout-guided", args: "" } as never);
+  expect(calls.some((c) => c.tool === "scout_saved_checks" && c.args.action === "run")).toBe(false);
+  const band = await $.ui.mount({ ...BAND, surface: "terminal", props: bandProps() });
+  expect(await band.find({ type: "Text", text: /1 queued/ })).toBeDefined();
+  await band.unmount();
+  // It ends: the queued check's own plan is built, and it waits on the preview; nothing is sent to Claude yet.
+  run.done = true;
+  await $.command.run({ command: "scenescout-guided", args: "" } as never);
+  expect(calls.filter((c) => c.tool === "scout_saved_checks" && c.args.action === "run")).toEqual([
+    { tool: "scout_saved_checks", args: { action: "run", name: "Admin area" } },
+  ]);
+  expect(sent).toEqual([]);
+  expect(await ui.find({ key: "guided-confirm-yes" })).toMatchObject({ props: { label: "Yes, it is a test copy" } });
+  const waiting = await $.ui.mount({ ...BAND, surface: "desktop", props: bandProps() });
+  expect(await waiting.find({ type: "Text", text: /"Admin area" is next, and waits for your yes/ })).toBeDefined();
+  await waiting.unmount();
+  await ui.press({ key: "guided-confirm-yes" });
+  expect(calls.filter((c) => c.tool === "scout_guided_confirm")).toEqual([{ tool: "scout_guided_confirm", args: { planId: PLAN.planId } }]);
+  expect(sent).toEqual([`Run the SceneScout guided plan ${PLAN.planId}: call scout_guided_plan {planId: "${PLAN.planId}"} and follow it.`]);
+  await ui.unmount();
+});

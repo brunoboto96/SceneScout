@@ -5,10 +5,12 @@
  * that starts a check in plain words, follows it and shows what it found; a
  * question to the person before Claude's own SceneScout calls that would send
  * things to a site; and, when the user sets `lane_model`, the model SceneScout
- * lane agents start on. The scenescout plugin, its skill and its server work
- * the same without it.
+ * lane agents start on. While a guided check runs, a band above the prompt
+ * and the status line keep it in view with the panel closed, and saved checks
+ * the person queued start one at a time when it ends. The scenescout plugin,
+ * its skill and its server work the same without it.
  *
- * Every rule lives in ./pane.js and ./guided.js, which have no mods API in
+ * Every rule lives in ./pane.js, ./guided.js and ./run.js, which have no mods API in
  * them and are table-tested. This file only wires those rules to events. It
  * imports nothing from `claude-code`, so the tests can load it in Node.
  */
@@ -18,6 +20,7 @@ import {
   CONFIRM_TOOL,
   DIRECT_TOOLS,
   FEEDBACK_TOOL,
+  FEEDBACK_VERDICTS,
   PANEL_WORDS,
   PLAN_TOOL,
   RECHECK_TOOL,
@@ -44,6 +47,7 @@ import {
   TOUR_SEEN_KEY,
   wizardOf,
 } from "./guided.js";
+import { BAND_WORDS, afterQueuedRun, bandLine, keepsPolling, nextQueued, renderBand, statusLine } from "./run.js";
 
 // What a drawing reads lives in $.state (types/index.d.ts), so a reload of the mod keeps the panel where it was.
 const WIZARD = { plugin: "scenescout-mod", key: "wizard" };
@@ -61,6 +65,18 @@ let lastGood = null;
 let timer = null;
 /** Whether a model turn is running: a message then goes into it rather than waiting for a turn of its own. */
 let isWorking = false;
+/**
+ * When the panel last sent Claude a message, so a queued check does not start
+ * before Claude has begun the last plan: null for a message sent since the
+ * last poll, which that poll stamps with its own time.
+ */
+let sentAt = 0;
+/** The status line as last set, so a poll that changes nothing sets nothing. */
+let shownStatus;
+/** Whether this Claude Code refused the status line: then it is not asked again. */
+let noStatusLine = false;
+/** Whether a queued check is being started, so a second poll meanwhile starts nothing. */
+let isStarting = false;
 
 export function register(on, options) {
   const lane = laneModelSetting(options?.lane_model);
@@ -70,7 +86,10 @@ export function register(on, options) {
     // session.start runs again after a reload of this mod; keep one timer.
     timer?.cancel();
     timer = $.clock.every(POLL_MS, async () => {
-      if (isOpen) await poll($, servers);
+      if (isOpen) return poll($, servers);
+      const now = await $.clock.now();
+      const w = wizardOf((await $.state.get(WIZARD)).value);
+      if (keepsPolling(false, w, (await $.state.get(STATUS)).value ?? { kind: "loading" }, { now, sentAt: sentAt ?? now })) await poll($, servers);
     });
     if (lane.error) $.ui.log(lane.error);
     // Last, because a refused name throws and skips the rest of this hook.
@@ -117,6 +136,20 @@ export function register(on, options) {
     return renderGuided(els, wizard, { surface: e.surface, status, picture: shown, runPane }, (type, payload = {}) => {
       // Fired, never awaited: a press must not hold anything up while the server or a form answers.
       void perform($, servers, type, payload).catch((err) => $.ui.toast(`SceneScout: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300)));
+    });
+  });
+
+  // The band above the prompt (design 2.3): the check's "now" sentence and its problems, with the panel closed.
+  // A build without the band never raises it, and the panel and the status line work the same.
+  on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
+    if (e.props?.hasSurvey) return next(e);
+    const line = bandLine(wizardOf((await $.state.get(WIZARD)).value), (await $.state.get(STATUS)).value ?? { kind: "loading" });
+    if (!line) return next(e);
+    const els = $.ui.resolve(e);
+    // Another mod's band, or the engine's, stays beneath this line.
+    const below = await next(e);
+    return renderBand(els, line, below, () => {
+      void openPanel($, servers, "guided").catch((err) => $.ui.toast(`SceneScout: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300)));
     });
   });
 
@@ -218,6 +251,7 @@ async function callServer($, servers, tool, args) {
  * asked; a refusal is said in a toast.
  */
 async function sendToClaude($, text) {
+  sentAt = null;
   if (sendRoute(isWorking) === "append") {
     try {
       const appended = await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } });
@@ -345,6 +379,7 @@ async function perform($, servers, type, payload) {
       await updateWizard($, (w) => reduce(w, { type, ...payload }));
       return probePicture($, servers, String(payload.id ?? ""), String(payload.surface ?? ""));
     case "feedback": {
+      if (!FEEDBACK_VERDICTS.includes(String(payload.verdict))) return;
       const result = await callServer($, servers, FEEDBACK_TOOL, { id: payload.id, verdict: payload.verdict });
       const failed = result?.isError === true;
       return updateWizard($, (w) => ({
@@ -479,5 +514,72 @@ async function poll($, servers) {
     await $.state.set(STATUS, next ?? reported ?? unreachable(failures, await $.clock.now()));
   } finally {
     isPolling = false;
+  }
+  await afterPoll($, servers);
+}
+
+/** After each poll: the status line, and the next queued check when the one before it has ended. */
+async function afterPoll($, servers) {
+  const w = wizardOf((await $.state.get(WIZARD)).value);
+  const status = (await $.state.get(STATUS)).value ?? { kind: "loading" };
+  setStatusLine($, statusLine(w, status));
+  const now = await $.clock.now();
+  sentAt ??= now;
+  if (isStarting) return;
+  const entry = nextQueued(w, status, { isWorking, now, sentAt });
+  if (!entry) return;
+  isStarting = true;
+  try {
+    await startQueued($, servers, entry);
+  } finally {
+    isStarting = false;
+  }
+}
+
+/** The status line, on a build that has one; an older build keeps the band and the panel. */
+function setStatusLine($, text) {
+  if (noStatusLine || text === shownStatus) return;
+  shownStatus = text;
+  try {
+    $.ui.status(text);
+  } catch (err) {
+    // Said once: the line is not tried again in this load of the mod.
+    noStatusLine = true;
+    $.ui.log(
+      `SceneScout: the status line could not be set, so only the band and the panel show the check: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Start the queued check at the head of the queue: take it off the queue
+ * (only if it is still the head, so two polls never start it twice), have the
+ * server build its own plan, and preview its confirmation where its care level
+ * needs one, opening the panel for the person's yes, or start Claude on it.
+ */
+async function startQueued($, servers, entry) {
+  let claimed = false;
+  await updateWizard($, (w) => {
+    claimed = w.queue[0]?.name === entry.name;
+    return claimed ? { ...w, queue: w.queue.slice(1), queuing: false, busy: "plan" } : w;
+  });
+  if (!claimed) return;
+  await planAndStart(
+    $,
+    servers,
+    "plan",
+    () => callServer($, servers, SAVED_TOOL, { action: "run", name: entry.name }),
+    (w, result) => afterQueuedRun(w, result, entry),
+  );
+  const w = wizardOf((await $.state.get(WIZARD)).value);
+  if (w.step !== "confirm" || w.fromQueue !== entry.name) {
+    // Started, or not: one that did not start is said where the person sees it with the panel closed too.
+    if (w.notice?.tone === "error") $.ui.toast(BAND_WORDS.toastNotStarted(entry.name, w.notice.text).slice(0, 300));
+    return;
+  }
+  $.ui.toast(BAND_WORDS.toastConfirm(entry.name));
+  if ((await $.session.surfaces()).length > 0) {
+    isOpen = true;
+    await $.ui.open({ id: PANE_ID, title: "SceneScout", closeOnEscape: true });
   }
 }
