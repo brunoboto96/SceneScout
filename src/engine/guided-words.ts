@@ -449,7 +449,7 @@ export const ACTION_LABEL = {
 /** What a button that starts a turn for the agent says, word for word. */
 export const ACTION_PROMPT = {
   stop: "Stop the SceneScout run now and write what you have.",
-  recheck: "Check the open SceneScout problems again with scout_verify and tell me which are gone.",
+  recheck: "Check the open SceneScout problems again: call scout_recheck_plan, follow the plan it returns, and tell me which are gone.",
   plainReport: 'Write the SceneScout report in plain words: scout_report {report: "qa"}.',
   fileTickets:
     "File SceneScout problems as tickets: show me the open ones with scout_cards, ask me which and where (GitHub or Jira), preview them with scout_ticket_preview, then call scout_ticket_file so I confirm in SceneScout's own form.",
@@ -517,4 +517,36 @@ export const SIGN_IN_AGAIN = {
   label: ACTION_LABEL.signInAgain,
   command: (command: string) => `To sign in again from a terminal instead: ${command}`,
   prompt: (address: string, role: string) => `Sign me in to ${address} again for SceneScout: call scout_login ${JSON.stringify({ url: address, role })}.`,
+} as const;
+
+// ---- Re-check after a fix (design 2.7) ----
+
+const count = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+
+/** What a re-check plan says: its objective, what the person is told, and why a problem is left for another re-check. */
+export const RECHECK_WORDS = {
+  objective: (n: number) => `Check again ${count(n, "problem", "problems")} found earlier, and say which are gone, still there or changed.`,
+  tellPerson: (n: number, care: Care) =>
+    `I will check again ${count(n, "problem", "problems")} found earlier, in ${CARE_LABEL[care]}: a re-check never uses a care level looser than the one a problem was found in.`,
+  looserCare: (n: number, care: Care) =>
+    `${count(n, "other problem was", "other problems were")} found in ${CARE_LABEL[care]}, so ${n === 1 ? "it is" : "they are"} left for a re-check of ${n === 1 ? "its" : "their"} own, which asks you to confirm that care level where it needs it.`,
+  otherSite: (n: number) =>
+    `${count(n, "other problem is", "other problems are")} on another site, so ${n === 1 ? "it is" : "they are"} left for a re-check of that site.`,
+  capped: (care: Care) =>
+    `The SceneScout config set by whoever runs SceneScout allows nothing looser than ${CARE_LABEL[care]}, so a problem that needs more is left open, and I say so.`,
+  none: "No problem an earlier check found is still open, so there is nothing to check again.",
+  noneOnSite: (where: string) => `No problem an earlier check found is still open on ${where}, so there is nothing to check again there.`,
+} as const;
+
+// ---- Saved checks (design 2.8) ----
+
+/** What scout_saved_checks says, and the words the panel shows beside a saved check. */
+export const SAVED_WORDS = {
+  saved: (name: string) => `Saved "${name}". Run it again from the guided panel's welcome, or say: run my saved SceneScout check "${name}".`,
+  replaced: (name: string) => `Saved "${name}" over the saved check of that name.`,
+  deleted: (name: string) => `Deleted the saved check "${name}". Nothing else was changed.`,
+  none: "No saved checks yet. Save one when a check is finished.",
+  run: (name: string) =>
+    `Running the saved check "${name}" again, with the care level it was saved with. Where that care level needs it, you are asked to confirm it again.`,
+  noRecheck: "A re-check is not saved: save the check it re-checked, and re-check from its results.",
 } as const;

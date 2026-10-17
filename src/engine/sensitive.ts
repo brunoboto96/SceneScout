@@ -507,15 +507,17 @@ function cardShaped(groups: readonly string[], seps: readonly string[], i: numbe
 }
 
 /**
- * The card numbers among a run's digit groups, each the longest that starts at
- * its group, so a date or a quantity written just before a card number does
- * not hide it. A group is never split: digits inside a longer id stay.
+ * Where the card numbers among a run's digit groups lie, as offsets into the
+ * run. Each is the longest that starts at its group, so a date or a quantity
+ * written just before a card number does not hide it. A group is never split:
+ * digits inside a longer id stay.
  */
-function redactCardsInRun({ text: run }: LinearMatch): string {
+function cardSpansInRun(run: string): Array<{ from: number; to: number }> {
   const parts = DIGIT_SEPARATOR_RE.split(run).map((part) => part ?? "");
   const groups = parts.filter((_, i) => i % 2 === 0);
   const seps = parts.filter((_, i) => i % 2 === 1);
-  let out = "";
+  const spans: Array<{ from: number; to: number }> = [];
+  let offset = 0;
   let i = 0;
   while (i < groups.length) {
     let end = -1;
@@ -526,16 +528,53 @@ function redactCardsInRun({ text: run }: LinearMatch): string {
       digits += groups[j];
       if (cardShaped(groups, seps, i, j) && isCardNumber(digits)) end = j;
     }
-    if (i > 0) out += parts[2 * i - 1];
+    if (i > 0) offset += parts[2 * i - 1].length;
     if (end === -1) {
-      out += groups[i];
+      offset += groups[i].length;
       i += 1;
     } else {
-      out += "[card number redacted]";
+      let to = offset;
+      for (let k = i; k <= end; k++) to += groups[k].length + (k > i ? parts[2 * k - 1].length : 0);
+      spans.push({ from: offset, to });
+      offset = to;
       i = end + 1;
     }
   }
-  return out;
+  return spans;
+}
+
+function redactCardsInRun({ text: run }: LinearMatch): string {
+  let out = "";
+  let last = 0;
+  for (const { from, to } of cardSpansInRun(run)) {
+    out += `${run.slice(last, from)}[card number redacted]`;
+    last = to;
+  }
+  return out + run.slice(last);
+}
+
+/** The most a card number can take in text: 19 digits and a separator of up to five characters between groups. */
+const CARD_WINDOW = 130;
+
+/**
+ * Where the card number that spans position `at` ends, or null if none does.
+ * A credential read up to `at` that stops inside a card number leaves the rest
+ * of the card in clear. Only the text within a card's length of `at` is read,
+ * so asking at many places in one text stays linear.
+ */
+export function cardEndAcross(text: string, at: number): number | null {
+  let from = Math.max(0, at - CARD_WINDOW);
+  // A digit run is read whole, so the window starts where a run does.
+  while (from > 0 && from < at && isDigit(text[from - 1])) from += 1;
+  const window = text.slice(from, at + CARD_WINDOW);
+  for (const run of DIGIT_RUN_RE.matchAll(window)) {
+    for (const { from: start, to } of cardSpansInRun(run.text)) {
+      const absStart = from + run.index + start;
+      const absEnd = from + run.index + to;
+      if (absStart < at && absEnd > at) return absEnd;
+    }
+  }
+  return null;
 }
 
 /**

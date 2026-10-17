@@ -8,7 +8,7 @@
  * JavaScript regular expression.
  */
 import { isSpace, LinearRegex, runEnd, SPACE } from "./linear-regex.js";
-import { FIELD_WORDS, maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
+import { cardEndAcross, FIELD_WORDS, maskSecretFieldValues, maskSecretParams, redactPersonal } from "./sensitive.js";
 
 const isAsciiDigit = (c: string) => c >= "0" && c <= "9";
 const isAsciiLetter = (c: string) => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
@@ -101,6 +101,13 @@ function runExtender(inRun: (c: string) => boolean): (match: { end: number }, te
   };
 }
 
+const tokenRun = runExtender(isTokenChar);
+/** `extend` for a bearer or basic token: its run, and on to the end of a card number the run stops inside. */
+function tokenExtender(match: { end: number }, text: string): number {
+  const end = tokenRun(match, text);
+  return cardEndAcross(text, end) ?? end;
+}
+
 /**
  * Secrets an app leaks into its own error UI must not be re-published by the
  * tool that found them. Findings quote app output verbatim, and that output has
@@ -142,7 +149,7 @@ const SECRET_PATTERNS: SecretPattern[] = [
   {
     re: new LinearRegex(String.raw`\b((?i:Bearer|Basic))([${SPACE}]+)[A-Za-z0-9._~+/=-]{16}`, {
       needs: ["bearer", "basic"],
-      extend: runExtender(isTokenChar),
+      extend: tokenExtender,
       accept: ({ groups, text }) => DIGIT.test(text.slice((groups[1] ?? "").length + (groups[2] ?? "").length)),
     }),
     replace: (g) => `${g[1]} [redacted]`,
@@ -222,23 +229,37 @@ function endsClause(stop: string, text: string, from: number): boolean {
 
 function maskSetSecrets(text: string): { text: string; hits: number } {
   let hits = 0;
-  const out = SET_SECRET_RE.replace(text, ({ text: m, groups, end }) => {
-    const [, name = "", sep = "", raw = ""] = groups;
+  let out = "";
+  let last = 0;
+  let at = 0;
+  // A refused match resumes the scan right after its name, not after its value: the value may hold, or be followed
+  // by, the name of another secret ("password:secret ＝…").
+  for (;;) {
+    const match = SET_SECRET_RE.exec(text, at);
+    if (!match) break;
+    const [, name = "", sep = "", raw = ""] = match.groups;
     // A sentence's full stop is not part of the value.
     let cut = raw.length;
     while (cut > 0 && raw[cut - 1] === ".") cut -= 1;
     const stop = raw.slice(cut);
     const value = raw.slice(0, cut);
-    // Empty, or the dots or stars a masked value is shown as (the engine's own "•••• (masked: …)" included).
-    if (value === "" || MASKED_SHOWN.test(value)) return m;
-    if (LETTERS_ONLY.test(value)) {
-      if (FIELD_WORDS.has(value.toLowerCase())) return m;
-      if (!endsClause(stop, text, end)) return m;
-    } else if (value.length < 3 && !sep.includes('"') && !sep.includes("'")) return m;
+    const refused =
+      // Empty, or the dots or stars a masked value is shown as (the engine's own "•••• (masked: …)" included).
+      value === "" ||
+      MASKED_SHOWN.test(value) ||
+      (LETTERS_ONLY.test(value)
+        ? FIELD_WORDS.has(value.toLowerCase()) || !endsClause(stop, text, match.end)
+        : value.length < 3 && !sep.includes('"') && !sep.includes("'"));
+    if (refused) {
+      at = match.index + name.length;
+      continue;
+    }
     hits += 1;
-    return `${name}${sep}[redacted]${stop}`;
-  });
-  return { text: out, hits };
+    out += `${text.slice(last, match.index)}${name}${sep}[redacted]${stop}`;
+    last = match.end;
+    at = match.end;
+  }
+  return { text: out + text.slice(last), hits };
 }
 
 /**

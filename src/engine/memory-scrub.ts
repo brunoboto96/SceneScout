@@ -26,9 +26,11 @@ import { writeOwnerOnlySync } from "./owner-file.js";
  * learns to hide something it kept before. 2: short and letters-only values
  * set against a secret's name, more providers' keys, PINs and sign-in codes,
  * more field words, cards split by slashes, spelled-out email addresses and
- * more words for a phone (#550).
+ * more words for a phone (#550). 3: a secret set after a refused one
+ * (`password:secret ＝…`), and the rest of a card number a Bearer or Basic
+ * token stops inside (#619).
  */
-export const REDACTION_VERSION = 2;
+export const REDACTION_VERSION = 3;
 
 type Redact = (text: string) => string;
 
