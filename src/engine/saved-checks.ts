@@ -228,3 +228,10 @@ export function deleteSavedCheck(projectDir: string, name: unknown): { ok: true;
   fs.rmSync(file);
   return { ok: true, deleted: true, name: checked.value };
 }
+
+/** What deleting a saved check answers: deleting one that is already gone is a success that says so, so a second press or tab is not an error. */
+export function deleteSavedCheckReply(projectDir: string, name: unknown): { ok: true; text: string } | { ok: false; error: string } {
+  const gone = deleteSavedCheck(projectDir, name);
+  if (!gone.ok) return gone;
+  return { ok: true, text: gone.deleted ? SAVED_WORDS.deleted(gone.name) : SAVED_WORDS.alreadyGone(gone.name) };
+}

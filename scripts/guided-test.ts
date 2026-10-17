@@ -89,6 +89,7 @@ import {
   checkSavedCheck,
   checkSavedName,
   deleteSavedCheck,
+  deleteSavedCheckReply,
   listSavedChecks,
   MAX_SAVED_CHECKS,
   readSavedCheck,
@@ -2019,6 +2020,11 @@ test("saved check: kept in .scenescout/guided/ owner-only and git-ignored; a fil
     assert.throws(() => writeSavedCheck(project, { ...SAVED, choices: { ...SAVED.choices, address: "https://me:pw@x.example.com" } }));
     assert.deepEqual(deleteSavedCheck(project, "Shop sign-up on a phone"), { ok: true, deleted: true, name: "Shop sign-up on a phone" });
     assert.deepEqual(deleteSavedCheck(project, "Shop sign-up on a phone"), { ok: true, deleted: false, name: "Shop sign-up on a phone" });
+    // Deleting twice is not an error: a second tab, or a double press, finds it already gone and is told so.
+    assert.deepEqual(deleteSavedCheckReply(project, "Shop sign-up on a phone"), { ok: true, text: SAVED_WORDS.alreadyGone("Shop sign-up on a phone") });
+    writeSavedCheck(project, SAVED);
+    assert.deepEqual(deleteSavedCheckReply(project, "Shop sign-up on a phone"), { ok: true, text: SAVED_WORDS.deleted("Shop sign-up on a phone") });
+    assert.equal(deleteSavedCheckReply(project, "../edited").ok, false, "a name that climbs out is still refused");
     assert.equal(deleteSavedCheck(project, "../edited").ok, false, "a name that climbs out deletes nothing");
     assert.ok(fs.existsSync(path.join(savedChecksDir(project), "edited.json")));
     // The most a project keeps.

@@ -3019,6 +3019,14 @@ test("register.js: the welcome lists the saved checks, Run again and Delete call
   await press("guided-saved-delete-yes-admin-area");
   assert.deepEqual(calls.at(-1), { tool: guided.SAVED_TOOL, args: { action: "delete", name: "Admin area" } });
   assert.deepEqual([w().notice?.text, w().deleting], ['Deleted the saved check "Admin area".', null]);
+  // Leaving the welcome with a delete question open drops the question: it is not waiting when the person comes back.
+  state.set("wizard", { value: { ...w(), step: "welcome", deleting: "Admin area" }, version: 99.5 });
+  assert.equal(guided.reduce(w(), { type: "go", step: "safety" }).deleting, null);
+  assert.equal(guided.reduce(w(), { type: "newCheck" }).deleting, null);
+  assert.equal(guided.reduce(w(), { type: "tour" }).deleting, null);
+  assert.equal(guided.reduce(w(), { type: "follow", planId: "gp-abcdefghij" }).deleting, null);
+  assert.equal(guided.reduce(w(), { type: "openCard", id: "x" }).deleting, null);
+  assert.equal(guided.reduce(w(), { type: "dismiss" }).deleting, "Admin area", "an action that stays on the welcome keeps the question");
   // From the results: the re-check is built by the server, on the last check's site and with how it signed in, and Claude is handed its id.
   state.set("wizard", { value: { ...w(), step: "results", cards: [], lastChoices: { ...looks.choices, signIn: "sso" } }, version: 100 });
   await press("guided-results-recheck");

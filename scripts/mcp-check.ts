@@ -1511,6 +1511,9 @@ async function guidedCardsCheck(): Promise<void> {
         fail(`a saved check with a cookie field was run: ${textOf(tampered)}`);
       const deleted = await call("scout_saved_checks", { action: "delete", name: "Forms and pages" });
       if (deleted.isError || fs.existsSync(savedFile)) fail(`scout_saved_checks did not delete the check: ${textOf(deleted)}`);
+      const deletedAgain = await call("scout_saved_checks", { action: "delete", name: "Forms and pages" });
+      if (deletedAgain.isError || !/already deleted/.test(textOf(deletedAgain)))
+        fail(`deleting a check that was already gone was not a success that says so: ${textOf(deletedAgain)}`);
       const labelled = await call("scout_feedback", { id, verdict: "not-a-bug", reason: "The page reloads on purpose" });
       if (labelled.isError || (labelled.structuredContent as { verdict?: string }).verdict !== "not-a-bug")
         fail(`scout_feedback did not label the finding: ${textOf(labelled)}`);

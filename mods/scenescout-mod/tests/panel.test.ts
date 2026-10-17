@@ -28,11 +28,36 @@ const PLAN = {
   confirm: { reason: "creates-data", sentence: 'You chose "May create test data" for https://staging.example.com.', accepted: false },
 };
 
+const SAVED = [{ name: "Admin area", address: "https://staging.example.com", care: "look-only", lastRunAt: "2026-10-17T11:00:00.000Z" }];
+
+const FINISHED = { planId: PLAN.planId, phase: "done", next: [{ kind: "direct", tool: "scout_cards", label: "See the problems" }] };
+const finished = { on: false };
+
 /** Answer the server's tools from memory, and record every call. */
 function server(on: any, calls: Array<{ tool: string; args: unknown }>) {
   on("mcp.call", async (_$: unknown, e: { tool: string; args: Record<string, unknown> }) => {
     calls.push({ tool: e.tool, args: e.args });
-    if (e.tool === "scout_status_poll") return { value: status() };
+    if (e.tool === "scout_status_poll") return { value: status(finished.on ? FINISHED : undefined) };
+    if (e.tool === "scout_cards")
+      return {
+        value: {
+          content: [{ type: "text", text: "cards" }],
+          structuredContent: { cards: [{ id: "f1", title: "Save button does nothing", severity: "high" }], total: 1 },
+        },
+      };
+    if (e.tool === "scout_saved_checks") {
+      const args = e.args as { action: string };
+      return {
+        value: { content: [{ type: "text", text: args.action === "delete" ? "Deleted." : "Saved." }], structuredContent: { saved: SAVED, refused: [] } },
+      };
+    }
+    if (e.tool === "scout_recheck_plan")
+      return {
+        value: {
+          content: [{ type: "text", text: "plan" }],
+          structuredContent: { ...PLAN, planId: "gp-recheck001", recheck: { ids: ["a"] }, confirm: null, mode: "read-only" },
+        },
+      };
     if (e.tool === "scout_guided_plan") return { value: { content: [{ type: "text", text: "plan" }], structuredContent: PLAN } };
     if (e.tool === "scout_guided_confirm")
       return {
@@ -151,4 +176,59 @@ test("a plan the person started from the panel is not asked about a second time 
   await $.tool.call({ tool: "mcp__scenescout__scout_attach", tool_use_id: "t2", url: "http://localhost:3000", mode: "read-only" } as never);
   expect(asked).toBe(1);
   await ui.unmount();
+});
+
+const answerCommands = (on: any) => {
+  on("session.surfaces", async () => ({ value: ["desktop"] }));
+  on("command.run", async () => ({}));
+};
+
+test("saved checks: Delete asks first and a Keep or leaving the welcome drops the question; Run again reaches the server", async ($, on) => {
+  const calls: Array<{ tool: string; args: { action?: string } }> = [];
+  server(on, calls as never);
+  answerCommands(on);
+  mock.clock(on, { now: 1_000 });
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop", props: PROPS });
+  await $.command.run({ command: "scenescout-guided", args: "" } as never);
+  const deletes = () => calls.filter((c) => c.tool === "scout_saved_checks" && c.args.action === "delete");
+  await ui.press({ key: "guided-saved-delete-admin-area" });
+  expect(await ui.find({ key: "guided-saved-delete-yes-admin-area" })).toBeDefined();
+  await ui.press({ key: "guided-saved-delete-keep-admin-area" });
+  expect(deletes()).toEqual([]);
+  // Leaving the welcome with the question open: it is gone when the person comes back.
+  await ui.press({ key: "guided-saved-delete-admin-area" });
+  await ui.press({ key: "guided-welcome-safety" });
+  await ui.press({ key: "guided-safety-back" });
+  expect(await ui.findAll({ key: "guided-saved-delete-yes-admin-area" })).toEqual([]);
+  await ui.press({ key: "guided-saved-delete-admin-area" });
+  await ui.press({ key: "guided-saved-delete-yes-admin-area" });
+  expect(deletes()).toEqual([{ tool: "scout_saved_checks", args: { action: "delete", name: "Admin area" } }]);
+  await ui.press({ key: "guided-saved-run-admin-area" });
+  expect(calls.some((c) => c.tool === "scout_saved_checks" && c.args.action === "run")).toBe(true);
+  await ui.unmount();
+});
+
+test("saved checks: the finished check can be named and saved, and Check them again plans a re-check", async ($, on) => {
+  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  server(on, calls as never);
+  on("prompt.submit", async (_$: unknown, e: { text: string }) => ({ text: e.text }));
+  mock.clock(on, { now: 1_000 });
+  answerCommands(on);
+  finished.on = true;
+  const ui = await $.ui.mount({ ...PANE, surface: "desktop", props: PROPS });
+  await $.command.run({ command: "scenescout-guided", args: "" } as never);
+  await ui.press({ key: "guided-welcome-check" });
+  await ui.input({ key: "guided-config-address", text: "https://staging.example.com" });
+  await ui.press({ key: "guided-config-start" });
+  await ui.press({ key: "guided-confirm-yes" });
+  await ui.press({ key: "guided-running-see-the-problems" });
+  await ui.input({ key: "guided-save-name", text: "Settings page" });
+  await ui.press({ key: "guided-save-check" });
+  expect(calls.filter((c) => c.tool === "scout_saved_checks" && c.args.action === "save")).toEqual([
+    { tool: "scout_saved_checks", args: { action: "save", name: "Settings page", planId: PLAN.planId } },
+  ]);
+  await ui.press({ key: "guided-results-recheck" });
+  expect(calls.some((c) => c.tool === "scout_recheck_plan")).toBe(true);
+  await ui.unmount();
+  finished.on = false;
 });
