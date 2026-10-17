@@ -1184,12 +1184,13 @@ export function renderGuided(els, w, ctx, act) {
   }
   if (w.notice) rows.push(text(w.notice.text, w.notice.tone === "error" ? { color: "red" } : { color: "green" }));
   // A queued check that started, or waits on a yes, while the person was elsewhere: said, with Follow it, and nothing moved.
+  // One waiting on a yes is said on every screen but its preview, whatever cleared `started`: the preview is the only place to give the yes.
   const startedPlan = guidedOf(ctx.status, w.planId);
   const startedEnded = startedPlan !== null && (startedPlan.phase === "done" || startedPlan.phase === "stopped");
-  if (w.started && w.step !== "confirm" && !startedEnded)
+  if (w.step !== "confirm" && (w.fromQueue || (w.started && !startedEnded)))
     rows.push(
       row([
-        text(w.fromQueue ? PANEL_WORDS.queuedWaits(w.started) : PANEL_WORDS.queuedStarted(w.started), { color: "yellow", wrap: "truncate-end" }),
+        text(w.fromQueue ? PANEL_WORDS.queuedWaits(w.fromQueue) : PANEL_WORDS.queuedStarted(w.started ?? ""), { color: "yellow", wrap: "truncate-end" }),
         button("guided-queued-follow", PANEL_WORDS.follow, () => act("followQueued"), { variant: "primary" }),
       ]),
     );

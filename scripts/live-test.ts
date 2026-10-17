@@ -3638,6 +3638,8 @@ function modHarness(withStatus: boolean, register: typeof registerMod = register
         calls.push({ tool, args });
         if (tool === guided.SAVED_TOOL && args.action === "run" && args.name === "Gone")
           return { isError: true, content: [{ type: "text", text: "Error: no saved check is named that" }] };
+        if (tool === guided.SAVED_TOOL && args.action === "run" && args.name === "Coded")
+          return { isError: true, content: [{ type: "text", text: "Error: \u001b[2J\u001b[31mbad\u0007 address\r\u202e from the page" }] };
         if (tool === guided.SAVED_TOOL) return savedResult(args.action === "run" ? looks : undefined);
         await held.get(tool);
         if (tool === guided.PLAN_TOOL)
@@ -3891,6 +3893,31 @@ test("Back on a queued check's preview keeps it at the head of the queue and pau
     structuredContent: { planId: GUIDED_PLAN_ID, accepted: true, outcome: "accepted", tellPerson: "Thank you." },
   });
   assert.deepEqual([yes.wizard.fromQueue, yes.wizard.started], [null, null]);
+});
+
+test("a queued check waiting on a yes can be followed from every screen, also after Back from the results goes to the running check", () => {
+  const writes = planFor({ address: "https://staging.example.com", areas: ["sign-in"], signIn: "password", care: "may-create-test-data" });
+  const onResults = guided.openResults(wizard({ step: "running", planId: "gp-before00001" }));
+  const asks = around.afterQueuedRun(onResults, savedResult(writes), QUEUED_WRITES).wizard;
+  for (const step of ["running", "welcome", "results"]) {
+    const there = guided.reduce(asks, { type: "go", step });
+    const drawn = drawGuided("desktop", there, STATUS_DONE);
+    assert.ok(drawn.text.includes(guided.PANEL_WORDS.queuedWaits(QUEUED_WRITES.name)), `${step}: the waiting check is said`);
+    assert.deepEqual(drawn.press("guided-queued-follow"), { type: "followQueued", payload: undefined }, step);
+    assert.equal(guided.reduce(there, { type: "followQueued" }).step, "confirm", step);
+  }
+});
+
+test("register.js: a toast carries the server's or a page's words as plain text", async () => {
+  const m = modHarness(true);
+  const w = () => guided.wizardOf(m.state.get("wizard")?.value);
+  m.state.set("wizard", { value: { ...w(), step: "running", planId: "gp-before00001", queue: [{ ...QUEUED_LOOKS, name: "Coded" }] }, version: 50 });
+  m.server.status = statusWith({ planId: "gp-before00001", phase: "done" });
+  await m.raise("command.run", { command: "scenescout-guided" });
+  const said = m.toasts.filter((t) => /did not start/.test(t));
+  assert.equal(said.length, 1, m.toasts.join("\n"));
+  assert.doesNotMatch(said[0], CONTROL_CHAR);
+  assert.match(said[0], /\[2J \[31mbad address from the page$/);
 });
 
 test("register.js: the results act on their own plan after a queued start, a second press while a plan is built starts nothing, and a reload drops the guard", async () => {

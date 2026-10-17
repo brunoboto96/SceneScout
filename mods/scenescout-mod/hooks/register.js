@@ -49,7 +49,7 @@ import {
   TOUR_SEEN_KEY,
   wizardOf,
 } from "./guided.js";
-import { BAND_WORDS, afterQueuedRun, bandLine, keepsPolling, nextQueued, renderBand, statusLine } from "./run.js";
+import { BAND_WORDS, afterQueuedRun, bandLine, keepsPolling, nextQueued, plainLine, renderBand, statusLine } from "./run.js";
 
 // What a drawing reads lives in $.state (types/index.d.ts), so a reload of the mod keeps the panel where it was.
 const WIZARD = { plugin: "scenescout-mod", key: "wizard" };
@@ -144,7 +144,7 @@ export function register(on, options) {
     const shown = picture && picture.id === wizard.cardId ? picture : null;
     return renderGuided(els, wizard, { surface: e.surface, status, picture: shown, runPane }, (type, payload = {}) => {
       // Fired, never awaited: a press must not hold anything up while the server or a form answers.
-      void perform($, servers, type, payload).catch((err) => $.ui.toast(`SceneScout: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300)));
+      void perform($, servers, type, payload).catch((err) => toast($, `SceneScout: ${err instanceof Error ? err.message : String(err)}`));
     });
   });
 
@@ -158,7 +158,7 @@ export function register(on, options) {
     // Another mod's band, or the engine's, stays beneath this line.
     const below = await next(e);
     return renderBand(els, line, below, () => {
-      void openPanel($, servers, "guided").catch((err) => $.ui.toast(`SceneScout: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300)));
+      void openPanel($, servers, "guided").catch((err) => toast($, `SceneScout: ${err instanceof Error ? err.message : String(err)}`));
     });
   });
 
@@ -265,7 +265,7 @@ async function sendToClaude($, text) {
     try {
       const appended = await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } });
       if (!appended?.deny) {
-        $.ui.toast("SceneScout: sent to Claude, which reads it at its next step.");
+        toast($, "SceneScout: sent to Claude, which reads it at its next step.");
         return;
       }
     } catch {
@@ -275,12 +275,12 @@ async function sendToClaude($, text) {
   try {
     void $.prompt.submit({ text }).then(
       (r) => {
-        if (r?.drop) $.ui.toast(`SceneScout: the message was not sent: ${r.drop}`.slice(0, 300));
+        if (r?.drop) toast($, `SceneScout: the message was not sent: ${r.drop}`);
       },
-      (err) => $.ui.toast(`SceneScout: the message was not sent: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300)),
+      (err) => toast($, `SceneScout: the message was not sent: ${err instanceof Error ? err.message : String(err)}`),
     );
   } catch {
-    $.ui.toast(`SceneScout: this Claude Code cannot send for you. Say this to Claude: ${text}`.slice(0, 600));
+    toast($, `SceneScout: this Claude Code cannot send for you. Say this to Claude: ${text}`, 600);
   }
 }
 
@@ -289,10 +289,15 @@ async function buildAndStart($, servers, choices) {
   return planAndStart($, servers, "plan", () => callServer($, servers, PLAN_TOOL, { choices }), afterPlan);
 }
 
+/** A toast as plain text, at most `max` characters: a server's error sentence or a check's name in it can quote the tested page. */
+function toast($, text, max = 300) {
+  $.ui.toast(plainLine(text).slice(0, max));
+}
+
 /** Run `fn`, which builds a plan, unless one is being built already; a press meanwhile is told so. */
 async function guarded($, fn) {
   if (isBuilding) {
-    $.ui.toast(BAND_WORDS.busy);
+    toast($, BAND_WORDS.busy);
     return;
   }
   isBuilding = true;
@@ -392,7 +397,7 @@ async function perform($, servers, type, payload) {
       // Back on a queued check's preview: kept first in line, the queue paused, and said where the person sees it.
       const name = wizardOf((await $.state.get(WIZARD)).value).fromQueue;
       await updateWizard($, (w) => reduce(w, { type: "queueBack" }));
-      if (name) $.ui.toast(BAND_WORDS.toastKept(name).slice(0, 300));
+      if (name) toast($, BAND_WORDS.toastKept(name));
       return;
     }
     case "saveCheck": {
@@ -462,7 +467,7 @@ async function perform($, servers, type, payload) {
       } catch {
         // An older build without prompt.fill: the toast below says what to type.
       }
-      if (!filled?.isFilled) $.ui.toast(`SceneScout: say "${PANEL_WORDS.mobileFill.trim()} ..." to Claude.`);
+      if (!filled?.isFilled) toast($, `SceneScout: say "${PANEL_WORDS.mobileFill.trim()} ..." to Claude.`);
       return updateWizard($, (w) => ({ ...w, step: "configuring", notice: null }));
     }
     default:
@@ -616,8 +621,8 @@ async function startQueued($, servers, entry) {
     (w, result) => afterQueuedRun(w, result, entry),
   );
   const w = wizardOf((await $.state.get(WIZARD)).value);
-  if (w.fromQueue === entry.name) $.ui.toast(BAND_WORDS.toastConfirm(entry.name).slice(0, 300));
-  else if (w.started === entry.name) $.ui.toast(BAND_WORDS.toastStarted(entry.name).slice(0, 300));
+  if (w.fromQueue === entry.name) toast($, BAND_WORDS.toastConfirm(entry.name));
+  else if (w.started === entry.name) toast($, BAND_WORDS.toastStarted(entry.name));
   // One that did not start is said where the person sees it with the panel closed too.
-  else if (w.notice?.tone === "error") $.ui.toast(BAND_WORDS.toastNotStarted(entry.name, w.notice.text).slice(0, 300));
+  else if (w.notice?.tone === "error") toast($, BAND_WORDS.toastNotStarted(entry.name, w.notice.text));
 }
