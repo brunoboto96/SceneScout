@@ -555,7 +555,7 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   // Its $.state values are declared in the contract the manifest names.
   assert.equal(shown.types, "./types/index.d.ts");
   const contract = fs.readFileSync(path.join(dir, "types", "index.d.ts"), "utf8");
-  for (const key of ["wizard", "status", "picture", "confirmed"]) {
+  for (const key of ["wizard", "status", "picture", "confirmed", "tickets", "cost"]) {
     assert.match(contract, new RegExp(`\\b${key}: `), `the contract declares ${key}`);
     assert.ok(register.includes(`{ plugin: "scenescout-mod", key: "${key}" }`), `register.js keeps ${key} in $.state`);
   }
@@ -596,6 +596,8 @@ test("the mod registers its hooks as the settings say: the panel and its guard a
     ["ui.render", { component: "AbovePrompt" }],
     // The question before Claude's own SceneScout call that would send things to a site.
     ["tool.call", null],
+    // Each change in the session's usage, for the limit the person set on a check.
+    ["session.measure", null],
   ];
   assert.equal(COMMAND, "scenescout-pane");
   assert.equal(GUIDED_COMMAND, "scenescout-guided");

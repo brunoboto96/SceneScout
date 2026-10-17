@@ -305,6 +305,11 @@ export const PANEL_WORDS = {
   queuedWaits: (/** @type {string} */ name) => `"${name}" is next, and waits for your yes.`,
   queuePaused: "The queue is paused: nothing in it starts until you go on.",
   queueResume: "Go on",
+  capHeading: "Stop the check at",
+  ticketsHeading: "Tickets SceneScout filed:",
+  ticketOpen: "open",
+  ticketClosed: "closed",
+  ticketFixed: "fixed and confirmed",
 };
 
 /** Impact, as a short mark in front of a card's title. */
@@ -313,7 +318,7 @@ export const IMPACT_MARK = { "Blocks users": "!", Annoying: "~", Cosmetic: ".", 
 // ---- The wizard ----
 
 /** @typedef {"look-only" | "may-submit-forms" | "may-create-test-data"} Care */
-/** @typedef {{ address: string, areas: string[], journey: string, signIn: string, care: Care, thoroughness: string }} Draft */
+/** @typedef {{ address: string, areas: string[], journey: string, signIn: string, care: Care, thoroughness: string, cap: number | null }} Draft */
 /** @typedef {{ tone: "info" | "error", text: string }} Notice */
 /**
  * @typedef {{
@@ -355,6 +360,8 @@ export function defaultDraft() {
     signIn: "none",
     care: /** @type {Care} */ ("look-only"),
     thoroughness: "normal",
+    // No limit unless the person sets one (design 2.11); never sent to the server, which plans by choices alone.
+    cap: /** @type {number | null} */ (null),
   };
 }
 
@@ -447,6 +454,7 @@ export function wizardOf(value) {
       signIn: Object.hasOwn(SIGN_IN_LABEL, str(draft.signIn)) ? str(draft.signIn) : base.draft.signIn,
       care: /** @type {Care} */ (CARES.includes(str(draft.care)) ? str(draft.care) : base.draft.care),
       thoroughness: THOROUGHNESSES.includes(str(draft.thoroughness)) ? str(draft.thoroughness) : base.draft.thoroughness,
+      cap: typeof draft.cap === "number" && Number.isFinite(draft.cap) && draft.cap > 0 ? draft.cap : null,
     },
     planId: str(value.planId) || null,
     plan: isRecord(value.plan) ? value.plan : null,
@@ -615,6 +623,10 @@ function step(w, action) {
     }
     case "care":
       return CARES.includes(action.value) ? { ...w, draft: { ...w.draft, care: action.value } } : w;
+    case "cap": {
+      const v = action.value;
+      return { ...w, draft: { ...w.draft, cap: typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null } };
+    }
     case "thoroughness":
       return THOROUGHNESSES.includes(action.value) ? { ...w, draft: { ...w.draft, thoroughness: action.value } } : w;
     case "signIn":
@@ -1133,7 +1145,10 @@ export function liveHref(/** @type {unknown} */ url) {
 
 /**
  * @typedef {(type: string, payload?: Record<string, unknown>) => void} Act
- * @typedef {{ surface: string, status: { kind: string, data?: any, error?: string }, picture?: { svg?: string, width?: number, height?: number, why?: string } | null, runPane?: unknown }} Context
+ * @typedef {{ value: number | null, label: string }} CapOption
+ * @typedef {{ sentence: string, options: CapOption[] }} CostOffer what the configuring screen says a check uses, and the limits the person may set (run.js's costOffer)
+ * @typedef {{ id: string, title: string, where: string, ref: string, url: string, open: boolean, finding: "open" | "resolved" | "unknown" }} WatchedTicket
+ * @typedef {{ surface: string, status: { kind: string, data?: any, error?: string }, picture?: { svg?: string, width?: number, height?: number, why?: string } | null, runPane?: unknown, cost?: CostOffer | null, tickets?: WatchedTicket[] | null }} Context
  */
 
 /**
@@ -1299,6 +1314,32 @@ export function renderGuided(els, w, ctx, act) {
     if (w.queue.length) out.push(...queueRows(false));
     // A run started some other way: what the run pane shows.
     if (!g && ctx.runPane && ctx.status.kind !== "error") out.push(column([ctx.runPane], { marginTop: 1 }));
+    // The tickets SceneScout filed for this project, watched: a closed one whose problem is still here offers Check again.
+    const tickets = ctx.tickets ?? [];
+    if (tickets.length) {
+      const keys = savedKeys(tickets.map((t) => ({ name: `${t.where} ${t.ref}`, address: "x", care: "", lastRunAt: "" })));
+      out.push(
+        column(
+          [
+            text(PANEL_WORDS.ticketsHeading, { bold: true }),
+            ...tickets
+              .slice(0, 10)
+              .map((t, i) =>
+                row([
+                  text(
+                    `${t.ref} ${t.open ? PANEL_WORDS.ticketOpen : PANEL_WORDS.ticketClosed}${t.finding === "resolved" ? ` · ${PANEL_WORDS.ticketFixed}` : ""} · ${t.title}`,
+                    { wrap: "truncate-end", ...(t.open ? {} : { dimColor: true }) },
+                  ),
+                  ...(!t.open && t.finding === "open"
+                    ? [button(`guided-ticket-again-${keys[i]}`, ACTION_LABEL.again, () => act("send", { text: ACTION_PROMPT.again(t.id) }))]
+                    : []),
+                ]),
+              ),
+          ],
+          { marginTop: 1 },
+        ),
+      );
+    }
     out.push(row([dim(PANEL_WORDS.newHere), button("guided-welcome-tour", PANEL_WORDS.takeTour, () => act("tour"), { plain: true })]));
     return out;
   }
@@ -1402,6 +1443,26 @@ export function renderGuided(els, w, ctx, act) {
       if (held) out.push(dim(held));
     }
     if (confirmReason(d.care, d.address.trim())) out.push(text(PANEL_WORDS.willConfirm, { color: "yellow" }));
+    // What a check like this uses, and a limit the person may set (design 2.11); nothing where this Claude Code reports no usage.
+    if (ctx.cost) {
+      out.push(dim(ctx.cost.sentence));
+      if (ctx.cost.options.length)
+        out.push(
+          row([
+            text(PANEL_WORDS.capHeading, { bold: true }),
+            ...ctx.cost.options.map((o) =>
+              button(
+                `guided-config-cap-${o.value === null ? "none" : String(o.value).replace(".", "-")}`,
+                `${d.cap === o.value ? "(o)" : "( )"} ${o.label}`,
+                () => act("cap", { value: o.value }),
+                {
+                  plain: true,
+                },
+              ),
+            ),
+          ]),
+        );
+    }
     return out;
   }
 

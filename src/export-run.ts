@@ -811,6 +811,50 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
   }
 }
 
+/**
+ * Read back, from the tracker, the issues the record holds for these
+ * findings: whether each is open, from the labelled listing (closed issues
+ * too), and by its number where the listing does not show it. Sends nothing
+ * but reads. Throws a redacted message when the tracker cannot be read.
+ */
+export async function readFiledIssues(
+  o: ExportOptions,
+  deps: Omit<ExportDeps, "log" | "error">,
+  recorded: Readonly<Record<string, { ref: string; number: number }>>,
+): Promise<Map<string, FiledIssue>> {
+  const credentials = trackerCredentials(o.to, deps.env);
+  const secrets = credentialSecrets(deps.env);
+  if (!credentials.ok) throw new Error(redactKeys(credentials.error, secrets));
+  const http: Http = {
+    fetchImpl: deps.fetchImpl ?? fetch,
+    wait: deps.wait ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+    timeoutMs: deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    retries: deps.retries ?? DEFAULT_RETRIES,
+    now: deps.now ?? Date.now,
+    random: deps.random ?? Math.random,
+  };
+  const tracker =
+    o.to === "github"
+      ? githubApi(o.github, client(o.github.apiUrl, { ...credentials.headers, ...GITHUB_HEADERS }, http))
+      : jiraApi(o.jira, client(o.jira.baseUrl, credentials.headers, http));
+  try {
+    const listed = (await tracker.existing(true)).map;
+    const out = new Map<string, FiledIssue>();
+    for (const [id, entry] of Object.entries(recorded)) {
+      const issue = listed.get(id);
+      if (issue) {
+        out.set(id, issue);
+        continue;
+      }
+      const read = await tracker.read(entry.ref, entry.number);
+      if (read && read.ids.includes(id)) out.set(id, read.issue);
+    }
+    return out;
+  } catch (err) {
+    throw new Error(redactKeys(err instanceof Error ? err.message : String(err), secrets));
+  }
+}
+
 /** What the per-finding steps of an export share: its settings, its tracker, what it filed and updated, and its problems. */
 interface ExportRun {
   o: ExportOptions;
