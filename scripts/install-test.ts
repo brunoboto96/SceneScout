@@ -1307,6 +1307,31 @@ test("the error page is left by going back unless a POST loaded the page before 
   assert.equal(errorPageExit(null), "get");
 });
 
+test("the error page is left for about:blank, with no GET, when the page's address reads as a destructive command", () => {
+  // Contrastive pairs: the same method, an address that differs only in the command word or its place.
+  assert.equal(errorPageExit("POST", "https://app.test/things/9/cancel"), "blank");
+  assert.equal(errorPageExit("POST", "https://app.test/things/9"), "get");
+  assert.equal(errorPageExit("POST", "https://app.test/things/9/delete"), "blank");
+  assert.equal(errorPageExit("POST", "https://app.test/things?action=delete"), "blank");
+  assert.equal(errorPageExit("POST", "https://app.test/things?action=list"), "get");
+  // `archive` names a listing page unless a record's id comes just before it.
+  assert.equal(errorPageExit("POST", "https://app.test/things/9/archive"), "blank");
+  assert.equal(errorPageExit("POST", "https://app.test/blog/archive"), "get");
+  // A load this session did not see is judged the same way.
+  assert.equal(errorPageExit(null, "https://app.test/unsubscribe?token=abc"), "blank");
+  assert.equal(errorPageExit(null, "https://app.test/subscribe?token=abc"), "get");
+  // Judged whether or not SCENESCOUT_REFUSE_DESTRUCTIVE_GETS is on: the rule takes no setting.
+  const before = process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS;
+  delete process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS;
+  try {
+    assert.equal(errorPageExit("PUT", "https://app.test/orders/3/cancel"), "blank");
+  } finally {
+    if (before !== undefined) process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS = before;
+  }
+  // A page a GET loaded is gone back to: the browser does not send a POST again, whatever the address says.
+  assert.equal(errorPageExit("GET", "https://app.test/things/9/cancel"), "back");
+});
+
 test("shared workers are taken from the page in every mode that blocks anything", () => {
   // Their requests cannot be intercepted in any browser; the smoke suite proves the DELETE no longer arrives.
   assert.equal(sharedWorkersAllowed("observe"), false);
