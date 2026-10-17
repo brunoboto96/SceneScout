@@ -1317,6 +1317,11 @@ test("the error page is left for about:blank, with no GET, when the page's addre
   // `archive` names a listing page unless a record's id comes just before it.
   assert.equal(errorPageExit("POST", "https://app.test/things/9/archive"), "blank");
   assert.equal(errorPageExit("POST", "https://app.test/blog/archive"), "get");
+  // A method override in the query, and a command word percent-encoded in the path, read as what the server decodes.
+  assert.equal(errorPageExit("POST", "https://app.test/api/things/9?_method=DELETE"), "blank");
+  assert.equal(errorPageExit("POST", "https://app.test/api/things/9?_method=PATCH"), "get");
+  assert.equal(errorPageExit("POST", "https://app.test/things/9/%64elete"), "blank");
+  assert.equal(errorPageExit("POST", "https://app.test/things/9/%64etails"), "get");
   // A load this session did not see is judged the same way.
   assert.equal(errorPageExit(null, "https://app.test/unsubscribe?token=abc"), "blank");
   assert.equal(errorPageExit(null, "https://app.test/subscribe?token=abc"), "get");
