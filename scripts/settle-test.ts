@@ -20,6 +20,11 @@ import {
   normalizePace,
   PACE_MAX_MS,
   QUIET_MS,
+  RECHECK_BUSY_CAP_MS,
+  RECHECK_CAP_MS,
+  RECHECK_OPEN_MS,
+  RECHECK_WAITS_MS,
+  recheckWait,
   SETTLE_CAP_MS,
   SETTLE_TICK_MS,
   settlePage,
@@ -50,6 +55,16 @@ test("the quiet window runs from the action too, not only from the last request"
   assert.equal(shouldKeepWaiting(state({ elapsedMs: 0 })), true);
   assert.equal(shouldKeepWaiting(state({ elapsedMs: QUIET_MS - 1 })), true);
   assert.equal(shouldKeepWaiting(state({ elapsedMs: QUIET_MS })), false);
+});
+
+test("a read after a settled action does not wait the quiet window again; a request since it does", () => {
+  // A snapshot changes nothing on the page, so the action's quiet window is not run again from the read: the wait
+  // before it already saw the page quiet, and only a request started since can make it busy again.
+  assert.equal(shouldKeepWaiting(state({ elapsedMs: 0, read: true })), false);
+  assert.equal(shouldKeepWaiting(state({ elapsedMs: 0, sinceLastStartMs: QUIET_MS - 1, read: true })), true);
+  assert.equal(shouldKeepWaiting(state({ elapsedMs: 0, inFlight: 1, read: true })), true);
+  // An action still gets it: that is where a request through a service worker comes from.
+  assert.equal(shouldKeepWaiting(state({ elapsedMs: 0 })), true);
 });
 
 test("a request still out is waited for", () => {
@@ -423,4 +438,61 @@ test("stableUrlOf returns the URL so far once the session leaves the page", asyn
   };
   assert.equal(await stableUrlOf(() => current, page.now), "http://app.test/a");
   assert.equal(page.ticks, 1);
+});
+
+// ── re-reading the page's controls before a snapshot (snapshot-collect.ts) ──
+
+const recheck = (over: Partial<Parameters<typeof recheckWait>[0]> = {}) =>
+  recheckWait({ counts: [5], elapsedMs: 0, inFlight: 0, sinceLastStartMs: QUIET_MS * 10, ...over });
+
+test("the re-check waits grow from a short first one, and two equal reads of a quiet page end it", () => {
+  assert.deepEqual([...RECHECK_WAITS_MS], [50, 100, 200, 400]);
+  assert.equal(recheck(), 50, "one re-check always: the first read may have caught the page mid-render");
+  assert.equal(recheck({ counts: [5, 5], elapsedMs: 50 }), null);
+  // The count moved: read again, after a longer wait.
+  assert.equal(recheck({ counts: [3, 5], elapsedMs: 50 }), 100);
+  assert.equal(recheck({ counts: [3, 5, 5], elapsedMs: 150 }), null);
+  assert.equal(recheck({ counts: [1, 2, 3, 4], elapsedMs: 350 }), 400);
+  assert.equal(recheck({ counts: [1, 2, 3, 4, 5], elapsedMs: 750 }), 250, "the last wait is cut to the cap");
+  assert.equal(recheck({ counts: [1, 2, 3, 4, 5, 6], elapsedMs: RECHECK_CAP_MS }), null, "and a page that keeps changing is read at the cap");
+});
+
+test("an empty page that stays empty is stable after two reads; one rendering late is waited for", () => {
+  // The old rule never counted an empty page stable and slept eight times on it (4 s per visit to a dead end).
+  assert.equal(recheck({ counts: [0] }), 50);
+  assert.equal(recheck({ counts: [0, 0], elapsedMs: 50 }), null, "quiet and still empty: nothing is coming");
+  // The same page with its data still on the way: not stable while a request is out or has just started.
+  assert.equal(recheck({ counts: [0, 0], elapsedMs: 50, inFlight: 1 }), 100);
+  assert.equal(recheck({ counts: [0, 0], elapsedMs: 50, sinceLastStartMs: QUIET_MS - 1 }), 100);
+  // ...and it renders: two equal reads once quiet end the wait.
+  assert.equal(recheck({ counts: [0, 0, 7], elapsedMs: 150 }), 200);
+  assert.equal(recheck({ counts: [0, 0, 7, 7], elapsedMs: 350 }), null);
+});
+
+test("a page whose shell is drawn while its content loads is not stable while its requests are out", () => {
+  // Navigation and a sidebar already listed, the route's own controls on their way: equal counts are not enough.
+  assert.equal(recheck({ counts: [12, 12], elapsedMs: 50, inFlight: 2 }), 100);
+  assert.equal(recheck({ counts: [12, 12, 12, 12, 12], elapsedMs: 750, inFlight: 2 }), 400, "busy, it may go past the quiet cap");
+  assert.equal(recheck({ counts: [12, 12], elapsedMs: RECHECK_BUSY_CAP_MS, inFlight: 2 }), null, "but never past its own");
+  assert.ok(RECHECK_BUSY_CAP_MS > RECHECK_CAP_MS && RECHECK_BUSY_CAP_MS <= 4000, "no longer than the old eight re-checks of an empty page");
+});
+
+test("two equal reads count only when both were taken while the page was quiet", () => {
+  // The first of the pair was read while the data was still on its way, the second just after it landed and before
+  // the app drew it: equal, but the shell twice. One more read, now quiet, decides.
+  assert.equal(recheck({ counts: [12, 12], busyAt: [true, false], elapsedMs: 50 }), 100);
+  assert.equal(recheck({ counts: [12, 12, 12], busyAt: [true, false, false], elapsedMs: 150 }), null);
+});
+
+test("a request the page keeps open for its life (a stream, a long poll) stops counting once it is old", () => {
+  const t = tracker();
+  t.started("stream", "top", false, 0);
+  t.started("data", "top", false, RECHECK_OPEN_MS);
+  assert.equal(t.count, 2);
+  // At RECHECK_OPEN_MS + 50: the stream is old, the data request young.
+  assert.equal(t.openWithin(RECHECK_OPEN_MS, RECHECK_OPEN_MS + 50), 1);
+  t.ended("data");
+  assert.equal(t.openWithin(RECHECK_OPEN_MS, RECHECK_OPEN_MS + 50), 0, "only the stream is left, and it is the page's way of working");
+  // So a page with only an old stream out reads as quiet, and equal reads end the wait.
+  assert.equal(recheck({ counts: [12, 12], elapsedMs: 50, inFlight: t.openWithin(RECHECK_OPEN_MS, RECHECK_OPEN_MS + 50) }), null);
 });

@@ -3979,7 +3979,9 @@ test("png: the compact encoding reads back exactly, three channels when opaque a
   const clear = picture(9, 9, [0, 0, 0, 0], { x: 2, y: 2, w: 3, h: 3, rgba: [255, 0, 0, 128] });
   assert.deepEqual(Buffer.from(decodePng(encodePngCompact(clear)).data), Buffer.from(clear.data));
   assert.equal(encodePngCompact(clear)[25], 6, "RGBA");
-  assert.ok(encodePngCompact(opaque).length < encodePng(opaque).length, "smaller than the diff's encoding");
+  // On a picture big enough for its filters to matter: on a few hundred pixels zlib's framing is most of either file.
+  const page = picture(400, 240, [250, 250, 250, 255], { x: 40, y: 30, w: 200, h: 60, rgba: [20, 90, 200, 255] });
+  assert.ok(encodePngCompact(page).length < encodePng(page).length, "smaller than the diff's encoding");
 });
 
 test("png: shrinking averages what each pixel covers and never enlarges", () => {

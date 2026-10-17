@@ -31,6 +31,7 @@ import { elementKey, keyAliasSteps, normalizePath, ordinalKeys, routeBase, type 
 import { FORMS_INVENTORY_SCRIPT, formIdentity, formStatus, type FormFacts } from "./forms.js";
 import { NAME_RULE, type KeyAliasSteps } from "./memory.js";
 import { destructiveLabelOf } from "./policy.js";
+import { recheckBusy, recheckWait } from "./settle.js";
 
 export interface SnapshotElement extends InteractableInfo {
   /** The frame it was collected from; absent for the page itself. */
@@ -122,6 +123,8 @@ export interface SnapshotHost {
   foreignOriginOf(frame: Frame): string | null;
   /** Feed a collect's elements to the route list (browser.ts harvestRoutes). */
   harvestRoutes(elements: SnapshotElement[]): void;
+  /** The page's requests now: how many young ones are out (settle.ts RECHECK_OPEN_MS), and when the latest started (Date.now's clock). */
+  requests(): { inFlight: number; lastRequestStart: number };
 }
 
 /** The interactables of the page the host drives, their refs, and the snapshots kept for diffs. */
@@ -226,15 +229,26 @@ export class SnapshotCollector {
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,
     // nav) passes a zero-check while the route content is still loading.
-    // Retry until two consecutive probes agree on the element count, so we
-    // snapshot the hydrated page, not the loading state.
+    // Read again until two reads agree on the element count once the page is
+    // quiet (settle.ts recheckWait), so we snapshot the hydrated page, not the
+    // loading state.
+    const busyNow = (): boolean => {
+      const { inFlight, lastRequestStart } = this.host.requests();
+      return recheckBusy(inFlight, Date.now() - lastRequestStart);
+    };
+    const busyAt = [busyNow()];
     let rawElements: RawElement[] = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
-    for (let attempt = 0; attempt < 8; attempt++) {
-      await page.waitForTimeout(rawElements.length === 0 ? 500 : 300);
-      const probe = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
-      const stable = probe.length === rawElements.length && probe.length > 0;
-      rawElements = probe;
-      if (stable) break;
+    const counts = [rawElements.length];
+    const started = Date.now();
+    for (;;) {
+      const { inFlight, lastRequestStart } = this.host.requests();
+      const now = Date.now();
+      const wait = recheckWait({ counts, busyAt, elapsedMs: now - started, inFlight, sinceLastStartMs: now - lastRequestStart });
+      if (wait === null) break;
+      await page.waitForTimeout(wait);
+      busyAt.push(busyNow());
+      rawElements = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
+      counts.push(rawElements.length);
     }
 
     const cut = rawElements.filter((r) => r.cut) as CutElement[];

@@ -1594,7 +1594,7 @@ const raw = (name: string, over: Partial<RawStandIn> = {}): RawStandIn => ({
  * A page that answers the collector's element read with the next of `reads`
  * (repeating the last), its form read with `forms`, and has no frames.
  */
-function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknown[] } = {}) {
+function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknown[]; busyReads?: number } = {}) {
   const top = { name: "top" };
   const state = { url: opts.url ?? "http://app.test/things", reads: [...reads], elementReads: 0, harvested: 0 };
   const page = {
@@ -1618,6 +1618,8 @@ function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknow
     harvestRoutes: () => {
       state.harvested += 1;
     },
+    // A request stays out until the page has been read `busyReads` times: content on its way.
+    requests: () => ({ inFlight: state.elementReads < (opts.busyReads ?? 0) ? 1 : 0, lastRequestStart: 0 }),
   });
   return { collector, state };
 }
@@ -1641,12 +1643,24 @@ test("a collect reads the page again until two reads agree, so a hydrating page 
   assert.equal(state.harvested, 1);
 });
 
-test("an empty page is read again rather than taken at its first answer", async () => {
+test("an empty page is read again rather than taken at its first answer, and twice is enough when nothing is coming", async () => {
   const { collector, state } = collectorOn([[]]);
   const { elements } = await collector.collect();
   assert.equal(elements.length, 0);
-  // Two empty reads never count as agreeing: the read gives up after its retries.
-  assert.equal(state.elementReads, 9);
+  // Quiet and empty twice: nothing is on its way (settle.ts recheckWait). The old rule read it nine times.
+  assert.equal(state.elementReads, 2);
+});
+
+test("an empty page whose content is still on its way is read until it has drawn", async () => {
+  // The same empty first reads, with a request out until the fourth: what it drew then is what is listed.
+  const { collector, state } = collectorOn([[], [], [], [raw("Menu"), raw("Save")]], { busyReads: 4 });
+  const { elements } = await collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.name),
+    ["Menu", "Save"],
+  );
+  // The fourth read drew it while the request was still out; two more, both quiet, agree.
+  assert.equal(state.elementReads, 6, "two equal reads, both taken once quiet");
 });
 
 test("a re-snapshot of a kept route gives an unchanged element its old ref, and a new one a new ref", async () => {
@@ -1776,6 +1790,7 @@ test("a frame's controls are listed in the page's coordinates, masked when anoth
     formRead: (_what, work) => work,
     foreignOriginOf: (f) => (f === (frame as unknown) ? "https://embed.example" : null),
     harvestRoutes: () => {},
+    requests: () => ({ inFlight: 0, lastRequestStart: 0 }),
   });
   const { elements } = await collector.collect();
   const inFrame = elements.find((el) => el.frame);
