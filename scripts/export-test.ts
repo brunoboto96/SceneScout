@@ -85,6 +85,7 @@ import {
   ticketConfirmVerdict,
   ticketExportArgs,
   TicketPreviews,
+  ticketTitle,
   trackerEnv,
   type KeptPreview,
   type TicketPreview,
@@ -2977,7 +2978,7 @@ test("tickets: GitHub: a preview reads the tracker and sends nothing; the person
     fs.writeFileSync(memoryPath, JSON.stringify(memory));
 
     const asked = confirmWith(FILE_IT);
-    const filed = await fileTickets(got.preview.previewId, dir, store, asked.confirm, ticketDeps(env));
+    const filed = await fileTickets(got.preview.previewId, store, asked.confirm, ticketDeps(env));
     assert.equal(asked.forms.length, 1, "the person was asked once");
     assert.match(asked.forms[0].message, /You are about to file 2 tickets in GitHub owner\/app:/);
     assert.equal(filed.filed, true, filed.text);
@@ -2999,7 +3000,7 @@ test("tickets: GitHub: a preview reads the tracker and sends nothing; the person
 
     // Used once: the same preview files nothing again.
     const again = confirmWith(FILE_IT);
-    const second = await fileTickets(got.preview.previewId, dir, store, again.confirm, ticketDeps(env));
+    const second = await fileTickets(got.preview.previewId, store, again.confirm, ticketDeps(env));
     assert.equal(second.outcome, "unknown");
     assert.equal(again.forms.length, 0);
     assert.equal(posts(gh).length, 2);
@@ -3025,7 +3026,7 @@ test("tickets: Jira: preview then file against the stand-in, with the site from 
       "one read, no create",
     );
     assert.equal(got.preview.where, "Jira QA");
-    const filed = await fileTickets(got.preview.previewId, dir, store, confirmWith(FILE_IT).confirm, ticketDeps(env));
+    const filed = await fileTickets(got.preview.previewId, store, confirmWith(FILE_IT).confirm, ticketDeps(env));
     assert.equal(filed.filed, true, filed.text);
     assert.deepEqual(
       filed.tickets.map((t) => t.ref),
@@ -3056,7 +3057,7 @@ test("tickets: a preview past its ten minutes, or whose problems changed, is ref
     const old = await preview();
     now += PREVIEW_TTL_MS;
     const late = confirmWith(FILE_IT);
-    const expired = await fileTickets(old, dir, store, late.confirm, ticketDeps(env, clock));
+    const expired = await fileTickets(old, store, late.confirm, ticketDeps(env, clock));
     assert.deepEqual([expired.filed, expired.outcome, expired.tellPerson], [false, "expired", TICKET_SAYS.expired]);
     assert.equal(late.forms.length, 0, "the person is not asked about a stale list");
 
@@ -3066,7 +3067,7 @@ test("tickets: a preview past its ten minutes, or whose problems changed, is ref
     const original = fs.readFileSync(memoryPath, "utf8");
     fs.writeFileSync(memoryPath, original.replace("Saving a thing answers 500", "Saving a thing answers 502"));
     const changed = confirmWith(FILE_IT);
-    const altered = await fileTickets(fresh, dir, store, changed.confirm, ticketDeps(env, clock));
+    const altered = await fileTickets(fresh, store, changed.confirm, ticketDeps(env, clock));
     assert.deepEqual([altered.filed, altered.outcome, altered.tellPerson], [false, "altered", TICKET_SAYS.altered]);
     assert.equal(changed.forms.length, 0);
 
@@ -3075,7 +3076,6 @@ test("tickets: a preview past its ten minutes, or whose problems changed, is ref
     const waited = await preview();
     const during = await fileTickets(
       waited,
-      dir,
       store,
       confirmWith(() => {
         fs.writeFileSync(memoryPath, original.replace('"runs":2', '"runs":3'));
@@ -3090,7 +3090,6 @@ test("tickets: a preview past its ten minutes, or whose problems changed, is ref
     const slow = await preview();
     const tooLate = await fileTickets(
       slow,
-      dir,
       store,
       confirmWith(() => {
         now += PREVIEW_TTL_MS;
@@ -3104,7 +3103,7 @@ test("tickets: a preview past its ten minutes, or whose problems changed, is ref
     // Contrast: the same preview, fresh and unchanged, files.
     const good = await preview();
     now += PREVIEW_TTL_MS - 60_000;
-    const ok = await fileTickets(good, dir, store, confirmWith(FILE_IT).confirm, ticketDeps(env, clock));
+    const ok = await fileTickets(good, store, confirmWith(FILE_IT).confirm, ticketDeps(env, clock));
     assert.equal(ok.filed, true, ok.text);
     assert.equal(posts(gh).length, 1);
   } finally {
@@ -3130,17 +3129,17 @@ test("tickets: without the person's yes nothing is filed: going back, a decline,
       const got = await previewTickets({ ids: ["aaa0000001"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env));
       assert.ok(got.ok);
       const asked = confirmWith(answer);
-      const r = await fileTickets(got.preview.previewId, dir, store, asked.confirm, ticketDeps(env));
+      const r = await fileTickets(got.preview.previewId, store, asked.confirm, ticketDeps(env));
       assert.deepEqual([r.filed, r.outcome, r.tickets], [false, outcome, []], JSON.stringify(answer));
       assert.equal(asked.forms.length, 1);
       assert.match(r.text, /Nothing was filed/);
       // The preview is used: retrying it on the person's behalf gets nowhere.
-      const retry = await fileTickets(got.preview.previewId, dir, store, confirmWith(FILE_IT).confirm, ticketDeps(env));
+      const retry = await fileTickets(got.preview.previewId, store, confirmWith(FILE_IT).confirm, ticketDeps(env));
       assert.equal(retry.outcome, "unknown", "a declined preview cannot be filed by calling again");
     }
     assert.equal(posts(gh).length, 0);
     assert.equal(
-      (await fileTickets("tp-AAAAAAAAAAAAAAAA", dir, store, confirmWith(FILE_IT).confirm, ticketDeps(env))).outcome,
+      (await fileTickets("tp-AAAAAAAAAAAAAAAA", store, confirmWith(FILE_IT).confirm, ticketDeps(env))).outcome,
       "unknown",
       "an id the server never made",
     );
@@ -3193,7 +3192,7 @@ test("tickets: the token never reaches a preview, a filing, a refusal or the per
     const got = await previewTickets({ ids: ["aaa0000001", "bbb0000002"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env));
     assert.ok(got.ok);
     const asked = confirmWith(FILE_IT);
-    const filed = await fileTickets(got.preview.previewId, dir, store, asked.confirm, ticketDeps(env));
+    const filed = await fileTickets(got.preview.previewId, store, asked.confirm, ticketDeps(env));
     assert.equal(filed.filed, true, filed.text);
     const everything = JSON.stringify({ got, filed, forms: asked.forms });
     assert.ok(!everything.includes(GH_TOKEN), "nothing a tool returns, or the form shows, holds the token");
@@ -3229,6 +3228,70 @@ test("tickets: Jira: a finding held back after a create that may have gone throu
     );
     assert.match(got.preview.leftOut[0].reason, /^held back/);
   } finally {
+    await jira.close();
+  }
+});
+
+test("tickets: the form shows each title as the ticket will carry it, with a mention or a link from the page made inert", async () => {
+  const gh = await standInGitHub();
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const sly = finding({ id: "fff0000006", title: "Ping @acme/admins and see https://evil.example/confirm" });
+    const dir = projectWith([sly]);
+    const store = new TicketPreviews();
+    const got = await previewTickets({ ids: ["fff0000006"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env));
+    assert.ok(got.ok, got.ok ? "" : got.error);
+    const asked = confirmWith(FILE_IT);
+    const filed = await fileTickets(got.preview.previewId, store, asked.confirm, ticketDeps(env));
+    assert.equal(filed.filed, true, filed.text);
+    const titleFiled = gh.issues[0].title;
+    assert.equal(titleFiled, githubIssue(sly, { severityName: null, labels: [], screenshots: "off" }).title);
+    assert.ok(asked.forms[0].message.includes(`1. ${titleFiled} (high)`), "the form names the ticket as it is filed");
+    assert.ok(!asked.forms[0].message.includes("https://evil.example"), "no live link in the form");
+    assert.ok(!asked.forms[0].message.includes("@acme/admins"), "no live mention in the form");
+    // Contrast: a plain title reads the same in the form and the ticket.
+    assert.equal(ticketTitle({ title: "Saving a thing answers 500" }), "Saving a thing answers 500");
+  } finally {
+    await gh.close();
+  }
+});
+
+test("tickets: where the app cannot show the form, nothing is filed and the result gives the export command for exactly the preview", async () => {
+  const gh = await standInGitHub();
+  const jira = await standInJira();
+  try {
+    const dir = projectWith(THREE);
+    const store = new TicketPreviews();
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const got = await previewTickets({ ids: ["aaa0000001", "ccc0000003"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env));
+    assert.ok(got.ok);
+    const r = await fileTickets(got.preview.previewId, store, confirmWith({ kind: "unsupported" }).confirm, ticketDeps(env));
+    assert.deepEqual([r.filed, r.outcome], [false, "unsupported"]);
+    assert.ok(r.text.includes(`npx -y scenescout export --to github --repo owner/app --only aaa0000001,ccc0000003 --project ${dir}`), r.text);
+    assert.match(r.text, /adding --yes files them/i);
+    const command = r.text
+      .split("\n")
+      .find((l) => l.includes("npx -y scenescout export"))!
+      .trim();
+    const parsed = parseExportArgs(command.split(" ").slice(4), dir, env);
+    assert.ok(parsed.ok && parsed.options.dryRun && parsed.options.includeWorthALook, "the command is one export takes, and a dry run");
+    assert.ok(!r.text.includes(GH_TOKEN));
+
+    const jenv = { JIRA_EMAIL, JIRA_API_TOKEN: JIRA_TOKEN, JIRA_BASE_URL: jira.url };
+    const j = await previewTickets({ ids: ["bbb0000002"], to: "jira", target: "QA" }, dir, store, ticketDeps(jenv));
+    assert.ok(j.ok, j.ok ? "" : j.error);
+    const jr = await fileTickets(j.preview.previewId, store, confirmWith({ kind: "unsupported" }).confirm, ticketDeps(jenv));
+    assert.ok(jr.text.includes(`--to jira --jira-url ${jira.url} --jira-project QA --only bbb0000002`), jr.text);
+    assert.ok(!jr.text.includes(JIRA_TOKEN));
+
+    // Contrast: a person who declines is not handed a command to file it anyway.
+    const d = await previewTickets({ ids: ["aaa0000001"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env));
+    assert.ok(d.ok);
+    const dr = await fileTickets(d.preview.previewId, store, confirmWith({ kind: "declined" }).confirm, ticketDeps(env));
+    assert.ok(!dr.text.includes("scenescout export"), dr.text);
+    assert.equal(posts(gh).length, 0);
+  } finally {
+    await gh.close();
     await jira.close();
   }
 });

@@ -15,7 +15,7 @@
  * inert body, severity map and cap as `scenescout export`.
  */
 import crypto from "node:crypto";
-import { githubIssue, oneLine, TRACKER_LABEL, type ExportOptions, type Tracker } from "./export.js";
+import { githubIssue, inertPlain, TRACKER_LABEL, type ExportOptions, type Tracker } from "./export.js";
 import type { ConfirmFormOutcome } from "./guided.js";
 import type { Finding } from "./memory.js";
 import { TICKET_ANSWER, TICKET_FIELD, TICKET_SAYS, ticketFormIntro, ticketFormLines } from "./guided-words.js";
@@ -64,6 +64,21 @@ export function checkTicketTarget(to: unknown, target: unknown): TicketTarget {
 export function ticketExportArgs(t: Extract<TicketTarget, { ok: true }>, ids: readonly string[], projectDir: string): string[] {
   const where = t.to === "github" ? ["--to", "github", "--repo", t.target] : ["--to", "jira", "--jira-project", t.target];
   return [...where, "--project", projectDir, "--only", ids.join(","), "--include-worth-a-look", "--dry-run"];
+}
+
+/**
+ * The `scenescout export` command that files what a preview listed, for a
+ * developer to run where the app cannot show the confirmation form. Without
+ * --yes it is a dry run; the credentials stay in that terminal's environment.
+ */
+export function ticketExportCommand(o: ExportOptions, ids: readonly string[]): string {
+  const where = o.to === "github" ? `--to github --repo ${o.github.repo}` : `--to jira --jira-url ${o.jira.baseUrl} --jira-project ${o.jira.projectKey}`;
+  return `npx -y scenescout export ${where} --only ${ids.join(",")} --project ${shellWord(o.projectDir)} --include-worth-a-look`;
+}
+
+/** A folder as one shell word: bare when it is plain, else in double quotes. */
+function shellWord(s: string): string {
+  return /^[A-Za-z0-9_./:\\-]+$/.test(s) ? s : `"${s.replace(/(["\\$`])/g, "\\$1")}"`;
 }
 
 /**
@@ -120,9 +135,13 @@ export interface KeptPreview {
   createdMs: number;
 }
 
-/** A ticket's line, one line of plain text with no control characters. */
+/**
+ * A ticket's line as the issue will carry it: one line with no control
+ * characters, and a mention or a link from the page made inert, so the form
+ * names the ticket in the words that are filed and nothing in it is live.
+ */
 export function ticketTitle(f: Pick<Finding, "title">): string {
-  return oneLine(f.title, FORM_TITLE_CHARS) || "SceneScout finding";
+  return inertPlain(f.title, FORM_TITLE_CHARS) || "SceneScout finding";
 }
 
 /**

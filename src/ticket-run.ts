@@ -27,6 +27,7 @@ import {
   ticketConfirmForm,
   ticketConfirmVerdict,
   ticketExportArgs,
+  ticketExportCommand,
   ticketTitle,
   trackerEnv,
   trackerWhere,
@@ -166,10 +167,10 @@ export function previewText(p: TicketPreview): string {
  * File a preview: only while it is fresh and its findings read as they did,
  * only on the person's yes in the form `confirm` shows, and only the findings
  * it listed. The preview is used up by the attempt, whatever its outcome.
+ * Its findings are read from the project it was made in, whichever is open now.
  */
 export async function fileTickets(
   previewId: unknown,
-  projectDir: string,
   store: TicketPreviews,
   confirm: (form: ReturnType<typeof ticketConfirmForm>) => Promise<ConfirmFormOutcome>,
   deps: TicketDeps,
@@ -178,19 +179,30 @@ export async function fileTickets(
   const env = trackerEnv(deps.env);
   const secrets = credentialSecrets(env);
   const clean = (s: string): string => redactKeys(s, secrets);
-  const refused = (outcome: FileResult["outcome"], tellPerson: string): FileResult => ({
+  const refused = (outcome: FileResult["outcome"], tellPerson: string, cli?: string): FileResult => ({
     filed: false,
     outcome,
     tellPerson,
     tickets: [],
     problems: [],
-    text: `Nothing was filed (${outcome}). Do not call scout_ticket_file again unless the person asks to file: it needs a new preview from scout_ticket_preview.`,
+    text: clean(
+      [
+        `Nothing was filed (${outcome}). Do not call scout_ticket_file again unless the person asks to file: it needs a new preview from scout_ticket_preview.`,
+        // Only where the app has no form to ask with: a developer can file the same list from a terminal, after its dry run.
+        ...(cli
+          ? [
+              `Give the person this command for a developer to run from a terminal, with the tracker's sign-in in that terminal's environment. Without --yes it is a dry run that lists what it would file; adding --yes files them, each problem once:`,
+              `  ${cli}`,
+            ]
+          : []),
+      ].join("\n"),
+    ),
   });
   const id = typeof previewId === "string" ? previewId : "";
   const kept = store.get(id, now());
   const digestNow = (k: KeptPreview): string | null => {
     const ids = k.preview.toFile.map((t) => t.id);
-    const found = currentFindings(projectDir, ids, k.options);
+    const found = currentFindings(k.options.projectDir, ids, k.options);
     return found ? previewDigest(k.preview.where, found) : null;
   };
   const before = checkPreview(kept, now(), kept ? digestNow(kept) : null);
@@ -202,7 +214,17 @@ export async function fileTickets(
   store.take(id);
   const k = kept!;
   const verdict = ticketConfirmVerdict(await confirm(ticketConfirmForm(k.preview)));
-  if (!verdict.confirmed) return refused(verdict.outcome, verdict.tellPerson);
+  if (!verdict.confirmed)
+    return refused(
+      verdict.outcome,
+      verdict.tellPerson,
+      verdict.outcome === "unsupported"
+        ? ticketExportCommand(
+            k.options,
+            k.preview.toFile.map((t) => t.id),
+          )
+        : undefined,
+    );
   // The form may have waited: the preview must still be fresh and its findings unchanged when the filing starts.
   const after = checkPreview(k, now(), digestNow(k));
   if (!after.ok) return refused(after.why, TICKET_SAYS[after.why]);

@@ -96,7 +96,9 @@ export function registerTicketTools(): void {
     },
     async ({ previewId }: { previewId: string }, extra) => {
       try {
-        const got = await fileTickets(previewId, openProject(), previews, (form) => askWithForm(form.message, form.requestedSchema, extra, TICKET_FILE_TOOL), {
+        // What the open project has found goes to disk first, so a preview of it is checked against what it holds now.
+        openProject();
+        const got = await fileTickets(previewId, previews, (form) => askWithForm(form.message, form.requestedSchema, extra, TICKET_FILE_TOOL), {
           env: process.env,
         });
         const { text, ...structured } = got;
