@@ -102,6 +102,9 @@ import {
   NEXT_FRAME_SCRIPT,
   STOP_ANIMATIONS_SCRIPT,
   steadyPicture,
+  confirmedPicture,
+  retakenFor,
+  retakenNote,
   unsteadyNote,
   VISUAL_DIRNAME,
   visualFiles,
@@ -3316,6 +3319,50 @@ test("baselines: a picture is kept once two taken a frame apart are the same, ne
   );
 });
 
+test("baselines: a picture that differs from its baseline is taken again from a fresh load, and only a difference that repeats is kept", async () => {
+  // A renderer can, now and then, draw a page's text a pixel off for the whole of one load: the picture is steady, yet
+  // the next load draws it as it always does. A real change repeats on every load; that draw does not.
+  type Verdict = { status: "matches" | "changed" | "updated" | "no-baseline" | "unusable"; diff?: { changedPixels: number; sizeChanged: boolean } };
+  const run = async (pictures: string[], verdicts: Record<string, Verdict>) => {
+    const taken: string[] = [];
+    const out = await confirmedPicture(
+      async () => {
+        const shot = pictures[taken.length];
+        if (shot === undefined) throw new Error("no more pictures");
+        taken.push(shot);
+        return shot;
+      },
+      (shot: string) => verdicts[shot],
+    );
+    return { ...out, taken };
+  };
+  const same: Verdict = { status: "matches", diff: { changedPixels: 0, sizeChanged: false } };
+  const off: Verdict = { status: "changed", diff: { changedPixels: 82, sizeChanged: false } };
+  const restyled: Verdict = { status: "changed", diff: { changedPixels: 4000, sizeChanged: false } };
+
+  // The usual case: one picture, judged once.
+  assert.deepEqual(await run(["a"], { a: same }), { shot: "a", verdict: same, first: null, taken: ["a"] });
+  // The rare draw: the second load matches, so the target matches, and the first verdict is kept for the log.
+  assert.deepEqual(await run(["odd", "a"], { odd: off, a: same }), { shot: "a", verdict: same, first: off, taken: ["odd", "a"] });
+  // A real change repeats, and the second picture is the one reported.
+  assert.deepEqual(await run(["new", "new2"], { new: restyled, new2: restyled }), { shot: "new2", verdict: restyled, first: restyled, taken: ["new", "new2"] });
+  // update: a baseline is rewritten only when the difference repeats.
+  const rewrite: Verdict = { status: "updated", diff: { changedPixels: 82, sizeChanged: false } };
+  assert.equal((await run(["odd", "a"], { odd: rewrite, a: same })).verdict, same);
+  // A change of size with no pixel compared is a difference too.
+  const resized: Verdict = { status: "changed", diff: { changedPixels: 0, sizeChanged: true } };
+  assert.deepEqual((await run(["big", "big2"], { big: resized, big2: resized })).taken, ["big", "big2"]);
+  // A baseline from another system rewritten with no pixel changed has nothing to confirm: one load.
+  const otherSystem: Verdict = { status: "updated", diff: { changedPixels: 0, sizeChanged: false } };
+  assert.deepEqual((await run(["a"], { a: otherSystem })).taken, ["a"]);
+  // Nothing to compare with is never retaken: no baseline yet, one that cannot be used, or one written for the first time.
+  for (const v of [{ status: "no-baseline" }, { status: "unusable" }, { status: "updated" }] as Verdict[]) {
+    assert.deepEqual((await run(["a"], { a: v })).taken, ["a"], v.status);
+  }
+  // A second load that fails is the target's failure, not hidden behind the first picture.
+  await assert.rejects(run(["odd"], { odd: off }), /no more pictures/);
+});
+
 test("baselines: the next-frame script waits for two animation frames, and for a second when frames never come", async () => {
   const frames: Array<() => void> = [];
   const timers: Array<{ fn: () => void; ms: number }> = [];
@@ -3342,6 +3389,24 @@ test("baselines: a picture that never held still says so on its line of the repo
   assert.match(
     report,
     /_\(the picture was still changing after about 5s, so the last one taken is used: something on the page keeps moving, and a comparison of it may not repeat\)_/,
+  );
+});
+
+test("baselines: a target whose first picture differed and whose second load matched says so on its line of the report", () => {
+  // The two loads disagree: the gate passes on the second, and the line still shows that one load differed, so a
+  // difference that shows only on a first visit (a one-time banner, a cold cache) is in the report, not only the log.
+  const note = retakenNote(4.12);
+  assert.equal(note, "a first load's picture was 4.12% different and a second load's matched: a difference on one load only is not reported as a change");
+  const matched = { ...changedPlan, status: "matches" as const, diff: { ...changedPlan.diff!, percent: 0, changedPixels: 0 }, retaken: note };
+  // Only when the loads disagreed: no retake, or a difference that repeated, carries no note.
+  assert.deepEqual(retakenFor({ diff: { percent: 4.12 } }, { status: "matches" }), { retaken: note });
+  assert.deepEqual(retakenFor(null, { status: "matches" }), {});
+  assert.deepEqual(retakenFor({ diff: { percent: 4.12 } }, { status: "changed" }), {});
+  assert.deepEqual(retakenFor({ diff: { percent: 4.12 } }, { status: "updated" }), {});
+  const report = formatCheck({ ...result([]), baselines: baselineRun([matched]) });
+  assert.match(
+    report,
+    /matches \(0% changed\) _\(a first load's picture was 4\.12% different and a second load's matched: a difference on one load only is not reported as a change\)_/,
   );
 });
 
