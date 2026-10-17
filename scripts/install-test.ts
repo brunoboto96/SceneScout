@@ -69,6 +69,8 @@ import {
   writeRedirectHopsJudged,
   frameUnloadWritesMayGoUnissued,
   closeWaitsForLeavingWrites,
+  awaitsDroppedNavigationErrorPage,
+  droppedNavigationErrorPage,
 } from "../src/browsers.ts";
 
 import { INTAKE_QUESTIONS, introQuestions } from "../src/intake.ts";
@@ -1266,6 +1268,29 @@ test("the focus audit presses the key that reaches buttons and links in that bro
   assert.equal(focusAdvanceKey("webkit", "linux"), "Tab");
   assert.equal(focusAdvanceKey("chromium", "darwin"), "Tab");
   assert.equal(focusAdvanceKey("firefox", "darwin"), "Tab");
+});
+
+test("only Chromium replaces a navigation the policy dropped with its own error page", () => {
+  assert.equal(droppedNavigationErrorPage("chromium"), "chrome-error://");
+  assert.equal(droppedNavigationErrorPage("firefox"), null);
+  assert.equal(droppedNavigationErrorPage("webkit"), null);
+});
+
+test("an action waits for the error page of a navigation it had dropped, and only then", () => {
+  const page = "http://127.0.0.1:4000/form.html";
+  const base = { engine: "chromium" as const, url: page, refusedNavigationAt: 1050, actionStartedAt: 1000 };
+  // The case that left a session on the error page: the navigation failed during this action and the page has not moved yet.
+  assert.equal(awaitsDroppedNavigationErrorPage(base), true);
+  // Refused in the same millisecond the action began still counts as this action's.
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, refusedNavigationAt: 1000 }), true);
+  // Already there: nothing to wait for (the engine goes back from it).
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, url: "chrome-error://chromewebdata/" }), false);
+  // Dropped during an earlier action, or never: this action did not drop one.
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, refusedNavigationAt: 999 }), false);
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, refusedNavigationAt: null }), false);
+  // Firefox and WebKit stay on the page, so waiting would only cost the bound.
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, engine: "firefox" }), false);
+  assert.equal(awaitsDroppedNavigationErrorPage({ ...base, engine: "webkit" }), false);
 });
 
 test("shared workers are taken from the page in every mode that blocks anything", () => {

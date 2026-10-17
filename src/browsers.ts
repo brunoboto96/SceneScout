@@ -255,6 +255,43 @@ export function closeWaitsForLeavingWrites(engine: BrowserEngineName): boolean {
 }
 
 /**
+ * The address of the page a browser shows in place of a top-level navigation
+ * the write policy dropped (a native form posting a write), or null where it
+ * shows none. Chromium commits its own error page, chrome-error://chromewebdata/,
+ * and a script on it cannot reach the app: a scout_request sent from there
+ * fails with "Failed to fetch". Firefox and WebKit stay on the page the
+ * navigation was leaving.
+ */
+export function droppedNavigationErrorPage(engine: BrowserEngineName): string | null {
+  return engine === "chromium" ? "chrome-error://" : null;
+}
+
+/** How long an action waits for the error page of a navigation the policy dropped to replace the page. */
+export const DROPPED_NAVIGATION_WAIT_MS = 2000;
+
+/**
+ * Whether an action must wait for the browser's error page before the page is
+ * read. Chromium fails the dropped navigation first and commits its error page
+ * some time later: 40 to 60 ms on an idle machine, longer under load, which can
+ * outlast the settle's quiet window. Read before it commits, the page still
+ * looks like the one clicked, the engine does not go back, and the session is
+ * left on the error page for every call that follows. Only a main-frame
+ * navigation the policy refused during this action counts, and only until the
+ * page is on the error page. A page that moves itself elsewhere in the same
+ * action never shows one, and that action pays the whole wait.
+ */
+export function awaitsDroppedNavigationErrorPage(input: {
+  engine: BrowserEngineName;
+  url: string;
+  refusedNavigationAt: number | null;
+  actionStartedAt: number;
+}): boolean {
+  const errorPage = droppedNavigationErrorPage(input.engine);
+  if (errorPage === null || input.refusedNavigationAt === null) return false;
+  return input.refusedNavigationAt >= input.actionStartedAt && !input.url.startsWith(errorPage);
+}
+
+/**
  * Whether a write carried on by a redirect (a 307 or 308 keeps the method and
  * the body) is judged at its new address. The route handler sees only the
  * first request of a redirect in every engine. In Chromium the browser-level
