@@ -99,20 +99,23 @@ export function decodePng(buf: Uint8Array): RgbaImage {
     const filter = raw[y * (stride + 1)];
     const src = y * (stride + 1) + 1;
     const out = y * stride;
-    for (let x = 0; x < stride; x++) {
-      const left = x >= channels ? rows[out + x - channels] : 0;
-      const up = y > 0 ? rows[out - stride + x] : 0;
-      const upLeft = y > 0 && x >= channels ? rows[out - stride + x - channels] : 0;
-      const v = raw[src + x];
-      let r: number;
-      if (filter === 0) r = v;
-      else if (filter === 1) r = v + left;
-      else if (filter === 2) r = v + up;
-      else if (filter === 3) r = v + ((left + up) >> 1);
-      else if (filter === 4) r = v + paeth(left, up, upLeft);
-      else throw new Error(`the PNG uses row filter ${filter}, which does not exist`);
-      rows[out + x] = r & 0xff;
-    }
+    if (filter > 4) throw new Error(`the PNG uses row filter ${filter}, which does not exist`);
+    // The filter is the row's, so it is chosen once here rather than for every byte.
+    const above = out - stride;
+    const hasUp = y > 0;
+    if (filter === 0) rows.set(raw.subarray(src, src + stride), out);
+    else if (filter === 1) for (let x = 0; x < stride; x++) rows[out + x] = (raw[src + x] + (x >= channels ? rows[out + x - channels] : 0)) & 0xff;
+    else if (filter === 2) for (let x = 0; x < stride; x++) rows[out + x] = (raw[src + x] + (hasUp ? rows[above + x] : 0)) & 0xff;
+    else if (filter === 3)
+      for (let x = 0; x < stride; x++)
+        rows[out + x] = (raw[src + x] + (((x >= channels ? rows[out + x - channels] : 0) + (hasUp ? rows[above + x] : 0)) >> 1)) & 0xff;
+    else
+      for (let x = 0; x < stride; x++) {
+        const left = x >= channels ? rows[out + x - channels] : 0;
+        const up = hasUp ? rows[above + x] : 0;
+        const upLeft = hasUp && x >= channels ? rows[above + x - channels] : 0;
+        rows[out + x] = (raw[src + x] + paeth(left, up, upLeft)) & 0xff;
+      }
   }
   if (channels === 4) return { width, height, data: rows };
   const data = new Uint8Array(width * height * 4);
@@ -319,17 +322,7 @@ export function encodePngCompact(img: RgbaImage): Buffer {
     let best = Infinity;
     const out = y * (stride + 1);
     for (let filter = 0; filter <= 4; filter++) {
-      let sum = 0;
-      for (let x = 0; x < stride; x++) {
-        const left = x >= channels ? rows[row + x - channels] : 0;
-        const up = y > 0 ? rows[row - stride + x] : 0;
-        const upLeft = y > 0 && x >= channels ? rows[row - stride + x - channels] : 0;
-        const v = rows[row + x];
-        const p = filter === 0 ? 0 : filter === 1 ? left : filter === 2 ? up : filter === 3 ? (left + up) >> 1 : paeth(left, up, upLeft);
-        const f = (v - p) & 0xff;
-        trial[x] = f;
-        sum += f < 128 ? f : 256 - f;
-      }
+      const sum = filterRow(filter, rows, row, stride, channels, y > 0, trial);
       if (sum < best) {
         best = sum;
         raw[out] = filter;
@@ -342,7 +335,29 @@ export function encodePngCompact(img: RgbaImage): Buffer {
   header.writeUInt32BE(img.height, 4);
   header[8] = 8;
   header[9] = opaque ? 2 : 6;
-  return Buffer.concat([SIGNATURE, chunk("IHDR", header), chunk("IDAT", deflateSync(raw, { level: 9 })), chunk("IEND", new Uint8Array(0))]);
+  // Level 6, zlib's default: on screenshots of a web app level 9 took about twice as long for a file 2-3% smaller.
+  return Buffer.concat([SIGNATURE, chunk("IHDR", header), chunk("IDAT", deflateSync(raw, { level: 6 })), chunk("IEND", new Uint8Array(0))]);
+}
+
+/**
+ * One row filtered by one PNG filter into `out`, returning the sum the filter
+ * choice compares (each byte read as a signed distance from zero).
+ */
+function filterRow(filter: number, rows: Uint8Array, row: number, stride: number, channels: number, hasUp: boolean, out: Uint8Array): number {
+  const above = row - stride;
+  let sum = 0;
+  for (let x = 0; x < stride; x++) {
+    let p = 0;
+    if (filter === 1) p = x >= channels ? rows[row + x - channels] : 0;
+    else if (filter === 2) p = hasUp ? rows[above + x] : 0;
+    else if (filter === 3) p = ((x >= channels ? rows[row + x - channels] : 0) + (hasUp ? rows[above + x] : 0)) >> 1;
+    else if (filter === 4)
+      p = paeth(x >= channels ? rows[row + x - channels] : 0, hasUp ? rows[above + x] : 0, hasUp && x >= channels ? rows[above + x - channels] : 0);
+    const f = (rows[row + x] - p) & 0xff;
+    out[x] = f;
+    sum += f < 128 ? f : 256 - f;
+  }
+  return sum;
 }
 
 /** The most a picture is shrunk to fit its bytes: below this on its longer side it is no longer worth showing. */

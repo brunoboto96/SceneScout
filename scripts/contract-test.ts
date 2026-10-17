@@ -20,7 +20,8 @@ import { crawledRoute, crawlLine, mainStateFlag } from "../src/engine/crawl.ts";
 import { MemoryStore, reachedRoutes, type ActionLogEntry } from "../src/engine/memory.ts";
 import { COLLECT_INTERACTABLES_SCRIPT, MASKED_NAME } from "../src/engine/collector.ts";
 import { FORMS_INVENTORY_SCRIPT } from "../src/engine/forms.ts";
-import { keyAtXpath, SnapshotCollector, SNAPSHOTS_KEPT, type SnapshotElement } from "../src/engine/snapshot-collect.ts";
+import { RECHECK_EMPTY_AGE_MS } from "../src/engine/settle.ts";
+import { keyAtXpath, PAGE_AGE_SCRIPT, SnapshotCollector, SNAPSHOTS_KEPT, type SnapshotElement } from "../src/engine/snapshot-collect.ts";
 import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
   classifyFilledStates,
@@ -1757,9 +1758,10 @@ const raw = (name: string, over: Partial<RawStandIn> = {}): RawStandIn => ({
  * A page that answers the collector's element read with the next of `reads`
  * (repeating the last), its form read with `forms`, and has no frames.
  */
-function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknown[] } = {}) {
+function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknown[]; busyReads?: number; ageMs?: number } = {}) {
   const top = { name: "top" };
-  const state = { url: opts.url ?? "http://app.test/things", reads: [...reads], elementReads: 0, harvested: 0 };
+  // The page's age starts at `ageMs` (by default long since loaded) and grows by every wait the collector asks for.
+  const state = { url: opts.url ?? "http://app.test/things", reads: [...reads], elementReads: 0, harvested: 0, ageMs: opts.ageMs ?? 60_000 };
   const page = {
     evaluate: async (script: string) => {
       if (script === COLLECT_INTERACTABLES_SCRIPT) {
@@ -1767,9 +1769,12 @@ function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknow
         return state.reads.length > 1 ? state.reads.shift() : state.reads[0];
       }
       if (script === FORMS_INVENTORY_SCRIPT) return opts.forms ?? [];
+      if (script === PAGE_AGE_SCRIPT) return state.ageMs;
       throw new Error("unexpected page read");
     },
-    waitForTimeout: async () => {},
+    waitForTimeout: async (ms: number) => {
+      state.ageMs += ms;
+    },
     url: () => state.url,
     mainFrame: () => top,
     frames: () => [top],
@@ -1781,6 +1786,8 @@ function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknow
     harvestRoutes: () => {
       state.harvested += 1;
     },
+    // A request stays out until the page has been read `busyReads` times: content on its way.
+    requests: () => ({ inFlight: state.elementReads < (opts.busyReads ?? 0) ? 1 : 0, lastRequestStart: 0, changedAt: 0 }),
   });
   return { collector, state };
 }
@@ -1804,12 +1811,58 @@ test("a collect reads the page again until two reads agree, so a hydrating page 
   assert.equal(state.harvested, 1);
 });
 
-test("an empty page is read again rather than taken at its first answer", async () => {
+test("an empty page is read again rather than taken at its first answer, and twice is enough when nothing is coming", async () => {
   const { collector, state } = collectorOn([[]]);
   const { elements } = await collector.collect();
   assert.equal(elements.length, 0);
-  // Two empty reads never count as agreeing: the read gives up after its retries.
-  assert.equal(state.elementReads, 9);
+  // Quiet and empty twice: nothing is on its way (settle.ts recheckWait). The old rule read it nine times.
+  assert.equal(state.elementReads, 2);
+});
+
+test("an empty page whose content is still on its way is read until it has drawn", async () => {
+  // The same empty first reads, with a request out until the fourth: what it drew then is what is listed.
+  const { collector, state } = collectorOn([[], [], [], [raw("Menu"), raw("Save")]], { busyReads: 4 });
+  const { elements } = await collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.name),
+    ["Menu", "Save"],
+  );
+  // The fourth read drew it while the request was still out; two more, both quiet, agree.
+  assert.equal(state.elementReads, 6, "two equal reads, both taken once quiet");
+});
+
+test("an empty page that has only just loaded is read until it has been up long enough to call it a dead end", async () => {
+  // The same page as above, empty and quiet throughout, but read 150 ms after it loaded: an empty shell that draws
+  // from a timer looks exactly like this at first.
+  const young = collectorOn([[]], { ageMs: 150 });
+  await young.collector.collect();
+  assert.ok(young.state.ageMs >= RECHECK_EMPTY_AGE_MS, `read until the page had been up ${RECHECK_EMPTY_AGE_MS} ms (got ${young.state.ageMs})`);
+  assert.ok(young.state.elementReads > 2);
+  // ...and when it draws in that time, what it drew is listed.
+  const late = collectorOn([[], [], [], [], [raw("Menu"), raw("Save")]], { ageMs: 150 });
+  const { elements } = await late.collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.name),
+    ["Menu", "Save"],
+  );
+});
+
+test("a drawn page that has only just loaded is read until it has been up long enough for a timer to draw the rest", async () => {
+  // A shell with its navigation drawn and the route's controls added from a timer, with no request: the first two
+  // reads agree on the shell. Read long after the load, two reads are enough.
+  const young = collectorOn([[raw("Menu")], [raw("Menu")], [raw("Menu")], [raw("Menu"), raw("Save")]], { ageMs: 150 });
+  const { elements } = await young.collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.name),
+    ["Menu", "Save"],
+  );
+  const old = collectorOn([[raw("Menu")], [raw("Menu")], [raw("Menu")], [raw("Menu"), raw("Save")]]);
+  assert.deepEqual(
+    (await old.collector.collect()).elements.map((el) => el.name),
+    ["Menu"],
+    "a page up for a while is not slowed",
+  );
+  assert.equal(old.state.elementReads, 2);
 });
 
 test("a re-snapshot of a kept route gives an unchanged element its old ref, and a new one a new ref", async () => {
@@ -1939,6 +1992,7 @@ test("a frame's controls are listed in the page's coordinates, masked when anoth
     formRead: (_what, work) => work,
     foreignOriginOf: (f) => (f === (frame as unknown) ? "https://embed.example" : null),
     harvestRoutes: () => {},
+    requests: () => ({ inFlight: 0, lastRequestStart: 0, changedAt: 0 }),
   });
   const { elements } = await collector.collect();
   const inFrame = elements.find((el) => el.frame);

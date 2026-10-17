@@ -451,11 +451,12 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await page.evaluate(() => {
       (document.getElementById("embed") as HTMLIFrameElement).src = "about:blank";
     });
+    // Read as the app sees it: an about:blank the app loaded is the app's own document, readable from the page, while
+    // the foreign one before it is not. Playwright's frame URL is not the measure here: in Firefox its protocol can
+    // leave out this one navigation's commit, and the frame then keeps its old address for the rest of the wait. The
+    // engine's rule only refuses a frame it sees on data: or blob:, which that address is not either way.
     await until("the embed to be back on about:blank", () =>
-      page
-        .mainFrame()
-        .childFrames()
-        .some((f) => f.url() === "about:blank"),
+      page.evaluate(() => (document.getElementById("embed") as HTMLIFrameElement).contentDocument?.URL === "about:blank").catch(() => false),
     );
     await page.evaluate((href) => {
       const a = document.createElement("a");

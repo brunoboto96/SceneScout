@@ -101,7 +101,7 @@ import {
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
-import { ATTACH_URL_QUIET_MS, describePace, InFlightRequests, normalizePace, settlePage, stableUrlOf } from "./settle.js";
+import { ATTACH_URL_QUIET_MS, describePace, InFlightRequests, normalizePace, RECHECK_OPEN_MS, settlePage, stableUrlOf } from "./settle.js";
 import { FRAME_READ_MS, SnapshotCollector, withinFrameLimit, type SnapshotElement } from "./snapshot-collect.js";
 import {
   AnsweredNavigationError,
@@ -799,6 +799,8 @@ export class BrowserEngine {
     formRead: (what, work) => this.formRead(what, work),
     foreignOriginOf: (frame) => this.foreignOriginOf(frame),
     harvestRoutes: (elements) => this.harvestRoutes(elements),
+    // Only young requests: a stream the page keeps open for its whole life is not content on its way (settle.ts RECHECK_OPEN_MS).
+    requests: () => ({ inFlight: this.requests.openWithin(RECHECK_OPEN_MS), lastRequestStart: this.lastRequestStart, changedAt: this.actionStartedAt }),
   });
   private currentFingerprint = "";
   /** URL at the time of the last snapshot — refs are valid only while it matches. */
@@ -2208,14 +2210,20 @@ export class BrowserEngine {
     return this.page;
   }
 
-  private async settle(): Promise<void> {
+  /** Wait until the page has settled (settle.ts settlePage). `read` for a wait before a read, which sends nothing. */
+  private async settle(read = false): Promise<void> {
     const page = this.requirePage();
-    await settlePage(page, {
-      inFlight: () => this.inFlight,
-      lastRequestStart: () => this.lastRequestStart,
-      paceMs: () => this.paceMs,
-      current: () => this.page,
-    });
+    await settlePage(
+      page,
+      {
+        inFlight: () => this.inFlight,
+        lastRequestStart: () => this.lastRequestStart,
+        paceMs: () => this.paceMs,
+        current: () => this.page,
+      },
+      Date.now,
+      read,
+    );
   }
 
   /**
@@ -2389,7 +2397,7 @@ export class BrowserEngine {
   async snapshot(full = false): Promise<string> {
     const page = this.requirePage();
     const memory = this.memory!;
-    await this.settle();
+    await this.settle(true);
 
     const { elements, truncated, forms, cut, prev: prevSnap, matched, aliases } = await this.snapshots.collect();
     const url = page.url();
