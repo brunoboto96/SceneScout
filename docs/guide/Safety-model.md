@@ -12,14 +12,16 @@ Only test apps you own or are authorised to test.
 
 | Mode | How to ask for it | What leaves the page |
 |---|---|---|
-| `observe` | `--observe`, `scout_attach {mode: "observe"}` | `GET` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token ([what counts](#what-counts-as-signing-in-in-observe)), and any `POST` you name as a read. Signing up, changing or resetting a password and creating users are refused like any other write |
-| `read-only` (default) | `--read-only` | Ordinary form submissions (a plain `POST`) go through. `PUT`, `PATCH`, `DELETE`, destructive-looking `POST`s and clicks on destructive-labelled controls (delete, revoke, archive and the like) are refused |
-| `safe-write` | `--safe-write` | Anything that creates. Changes and deletes only on records this run created, never on data that was there before |
-| `destructive` | `--allow-destructive` | Everything |
+| `observe` | `scout_attach {mode: "observe"}`; `--mode observe` for `check`, `ci` and a first look (the first look's default) | `GET`, `HEAD` and `OPTIONS` requests only, plus what a session needs to exist: signing in, signing out and refreshing a token ([what counts](#what-counts-as-signing-in-in-observe)), and any `POST` you name as a read. Signing up, changing or resetting a password and creating users are refused like any other write |
+| `read-only` (default) | `scout_attach {mode: "read-only"}`; `--mode read-only` (the default for `check` and `ci`) | Ordinary form submissions (a plain `POST`) go through. `PUT`, `PATCH`, `DELETE`, destructive-looking `POST`s and clicks on destructive-labelled controls (delete, revoke, archive and the like) are refused |
+| `safe-write` | `scout_attach {mode: "safe-write"}`; `--mode safe-write` for `ci` | Anything that creates. Changes and deletes only on records this run created, never on data that was there before |
+| `destructive` | `scout_attach {mode: "destructive"}`; `--mode destructive --allow-destructive` for `ci` | Everything |
+
+In a chat, the `/scenescout` skill also takes `--observe`, `--read-only`, `--safe-write` and `--allow-destructive` as arguments. Those are words for the agent, which then passes the mode to `scout_attach`; they are not options of the `scenescout` command.
 
 `read-only` blocks the requests that change or remove what is there by name (`PUT`, `PATCH`, `DELETE` and destructive-looking `POST`s); it does not mean nothing is ever created or changed. A contact form, a comment or a sign-up submitted in `read-only` reaches the server and can create a record, and an app that saves an edit with a plain `POST` (a profile, a setting) has that record changed. That is why the method picks `observe` for a remote URL with no source in front of it, where the data is more likely to be real, and moves to `read-only` only when you say form submissions are acceptable there.
 
-`destructive` is for a disposable, seeded environment. The agent never chooses it on its own; it needs you to say so. `scenescout ci` needs two options together (`--mode destructive --allow-destructive`) so that a mode value copied from another workflow cannot turn it on.
+`destructive` is for a disposable, seeded environment. The skill and the server's instructions tell the agent never to choose it unless you say so, but over MCP that is an instruction, not a rule: `scout_attach` accepts any mode the agent passes. What holds it back without the agent's cooperation is a [config file](#the-config-file-sets-the-limits-an-agent-cannot-loosen) whose `maxMode` is below it, an open [guided plan](#care-levels-in-a-guided-check) (which never reaches `destructive`), or, in Claude Code with the [mod](Ways-to-use-it.md#the-claude-code-mod), the question it asks before a `scout_attach` that writes. `scenescout ci` needs two options together (`--mode destructive --allow-destructive`) so that a mode value copied from another workflow cannot turn it on.
 
 `scenescout check` accepts only `observe` and `read-only`, and replays saved flows under observe's rule unless `--flow-writes allow` is given. A first look (`scenescout <url>`) is often pointed at a live app, so it runs in `observe` unless `--mode read-only` is given, and accepts no other mode.
 
@@ -99,6 +101,41 @@ In `observe` and `read-only` a click is also refused before it happens when the 
 
 ## What is a guarantee and what is best effort
 
+A guarantee here is a rule the engine applies to every request or input of its kind, so it holds whatever the agent does or the page is called. Best effort is a judgement about meaning (is this `POST` a delete? is this path a sign-in?) made by matching names, which an app can defeat by naming things differently. Each row names the module that holds the rule, so it can be checked against the code; the rules in those modules are table-tested in `policy-test` and the browser behaviour in the smoke suites.
+
+What each mode does with each kind of request, on the network:
+
+| Request | `observe` | `read-only` | `safe-write` | `destructive` |
+|---|---|---|---|---|
+| `GET`, `HEAD`, `OPTIONS` with no method override (page loads, links, images, a script's reads) | Out | Out | Out | Out |
+| `PUT`, `PATCH`, `DELETE`, or any request whose method override names one | Refused | Refused | Out only on a record this run created | Out |
+| A plain `POST` (a form, a script's save) | Refused, except signing in, signing out, refreshing a token and the `POST`s you named as reads | Out | Out | Out |
+| A `POST` that looks destructive | Refused | Refused, unless it addresses a record a `safe-write` session created in this server process | Out only on a record this run created | Out |
+| A write an embedded frame of another origin sends outside the app | Refused | Refused, except from the app's sign-in page (a captcha, say) | Refused, except from the app's sign-in page or an origin you named as a trusted embed | Out |
+| A write sent as a page is left (a beacon, a `keepalive` fetch) | Judged by the rows above | Judged by the rows above | Judged by the rows above | Out |
+| A page load whose address is a destructive command (`/unsubscribe?…`) | Out, unless destructive page loads are refused | Out, unless destructive page loads are refused | Out | Out |
+| A message over a WebSocket | Not inspected | Not inspected | Not inspected | Not inspected |
+
+Which of those rules is a guarantee, and which is best effort:
+
+| Protection | Kind | Where it acts | Module |
+|---|---|---|---|
+| The method rule, method overrides included | Guarantee | Network: the context's route handler | `policy.ts` (`allowsWrite`, `writeMethod`), `route-guard.ts` |
+| Writes sent as a page is left | Guarantee | Network: in Chromium the browser-level interception, elsewhere the route handler | `unload.ts`, `browsers.ts` (`unloadWriteInterception`) |
+| Writes from embedded frames of another origin, and the hostile input refused there | Guarantee for a write the browser attributes to a frame of another origin. A popup such a frame opens, or a page it moves the session to, is recognised from the `Origin` and `Referer` headers and the page that sent it, which is best effort, and so is the sign-in page's exception, judged by the page's path | Network for the writes; the engine for typed input | `policy.ts` (`foreignWrite`, `hostileForEmbed`, `withForeignFrameSandbox`) |
+| `scout_request` reaches the app's own origin only, under the same policy | Guarantee | The engine, then the network | `request.ts`, `route-guard.ts` |
+| No shared workers below `destructive`, no service workers in Firefox and WebKit | Guarantee | The browser context | `browsers.ts` (`sharedWorkersAllowed`, `serviceWorkerPolicy`) |
+| The guided gate: once a plan exists (or from the start, with `requireGuidedPlan`), no attach above `observe` without a plan's id, on the plan's site, in no mode above the plan's, and confirmed by the person where its care level needs that | Guarantee within the server process | The MCP server | `guided.ts` (`GuidedPlans`, `guidedAttachVerdict`) |
+| The config file's ceiling | Guarantee within the server process; the file itself is on disk ([what it does not do](#the-config-file-sets-the-limits-an-agent-cannot-loosen)) | The server or command, as it starts | `project-config.ts` |
+| The tools an unattended `scenescout ci` run's model is given | Guarantee | The run | `ci.ts` (`CI_TOOLS`) |
+| Whether a `POST` is destructive | Best effort: words in the path, and a command key or a GraphQL mutation's name in the first 2,000 characters of the body; the query and the whole body too under `SCENESCOUT_STRICT_WRITES` | Network | `policy.ts` (`isDestructiveRequest`), `strict-writes.ts` |
+| Whether a GraphQL request is a write | Best effort. A `POST` you named as a read is refused when its body holds a `mutation` or `subscription`, or a persisted query whose text cannot be read. Outside that, a GraphQL `POST` is judged like any `POST`: by a destructive word after `mutation`, in the operation's or a field's name | Network | `policy.ts` (`graphqlWriteOperation`, `readPostAllowed`, `isDestructiveRequest`) |
+| A click on a destructive-labelled control, in `observe` and `read-only` | Best effort: the control's own name | The engine, before the click; the request it would send is still judged on the network | `policy.ts` (`isDestructive`, `destructiveLabelOf`) |
+| `observe`'s sign-in exemption | Best effort: the path, unless `SCENESCOUT_AUTH_POSTS` lists the sign-in requests | Network | `policy.ts` (`isAuthExempt`) |
+| Which records `safe-write` may change | Best effort: ids read from create responses; when unsure, the write is refused | Network | `ownership.ts` |
+| Redaction of the text a run keeps, and secret fields painted in pictures | Best effort: field facts and credential shapes | Before anything is written or returned | `redact.ts`, `sensitive.ts`, `secret-pixels.ts` |
+| The credential-file refusal on upload | Guarantee for the names and folders it lists; a credential saved under another name inside the project is not recognised | The engine | `uploads.ts` |
+
 - **The method rule is a guarantee.** `observe` lets out only `GET`, `HEAD` and `OPTIONS` (the exceptions above aside); `read-only` refuses every `PUT`, `PATCH` and `DELETE`; `safe-write` allows them only on records the run created. A request is judged as the method it names, not only the one it is sent with: a `POST` carrying `X-HTTP-Method-Override`, `X-HTTP-Method` or `X-Method-Override`, or `_method` in its query or in a form, multipart or JSON body, is judged as the method named there, in every mode but `destructive`, whether the page, a beacon or `scout_request` sent it. The field name is read as the servers that honour it read it, so `%5Fmethod`, `.method`, `[_method]` and ` _method` count too. Only these names count: an app whose server takes the method from a header or field of its own choosing (`method` without the underscore, say) is judged by the method the request was sent with. An override never loosens: a `POST` naming `GET` is still a `POST`. The refusal names both (`POST as DELETE`).
 - **Whether a `POST` is destructive is best effort.** `read-only` refuses a `POST` whose path or body looks destructive (`/items/3/delete`, `{"action":"delete"}`, a GraphQL `deleteUser` mutation), but that is pattern matching, and an app can name a delete anything. A plain `POST` to a neutral path goes out in `read-only`. When nothing may change, use `observe`.
 
@@ -142,7 +179,10 @@ The engine records the identifiers of records created in this server process, fr
 
 ## Things the policy does not see
 
-- **WebSocket messages.** Only HTTP is inspected. The engine says so when the app opens a socket.
+- **WebSocket messages.** Only HTTP is inspected. In `observe` the engine says so, once per session, when the app opens a socket; in the other modes it does not, since they let writes out anyway. A `scenescout check` report lists the sockets each saved flow's page opened.
+- **What a `GET` does on the server.** Page loads, links and a script's reads go out in every mode, to the app and to any other site the page loads from. A link that changes something just by being opened (an unsubscribe or a one-click confirm link), or a server that changes data on a `GET`, is not stopped, unless [destructive page loads are refused](#stricter-judgement-of-destructive-writes), and that setting recognises only addresses that read as a command.
+- **Later hops of a redirect in Firefox and WebKit.** A `307` or `308` redirect keeps a write's method and body. The first request is judged in every browser; in Chromium the browser-level interception judges each later hop too, but Firefox and WebKit follow it without asking ([ADR 2](../adr/0002-enforce-the-write-policy-at-the-network-layer.md)). Use Chromium, the default, where that matters.
+- **What an allowed request does.** The policy decides whether a request leaves, not what the server does with it: a plain `POST` that `read-only` lets out can change a record that was there.
 - **Service workers outside Chromium.** The policy intercepts requests, and only Chromium lets a request a service worker sends be intercepted, so Firefox and WebKit are not allowed to register service workers.
 - **Shared workers.** A request a shared worker sends cannot be intercepted in any browser, so pages get no shared workers unless the mode is `destructive`, and the app does that work on the page instead.
 
@@ -172,6 +212,8 @@ Frames that were not read are listed on a `FRAMES` line, and the summary should 
 ## The project folder is the trust boundary
 
 The folder an attach names as `projectPath` decides what the run may touch on your machine. `.scenescout/` is kept there, a file `scout_upload` attaches must be inside it, and a ticket file `scout_tickets` reads must be inside it too, unless the server's `SCENESCOUT_TICKET_DIRS` names the folder the ticket is in. Both fences follow symbolic links first, so a link inside the project that points elsewhere is outside it. A ticket path outside these folders is refused with the same message whether or not the file is there, so the refusal does not tell an agent what exists elsewhere on the disk. The agent chooses `projectPath` when it attaches, so these fences hold only while it names the project you meant: an agent told to attach with your home folder as the project could upload ordinary files under it. The credential refusal above holds whatever the project is, so `.ssh/`, `.aws/` and `.env` files stay out either way, but your documents would not. Point it at the project, and treat a `projectPath` you did not expect in an attach's result as a reason to stop the run. To take that choice away from the agent, set `projectsRoot` in the [config file](Configuration-reference.md#the-config-file): every project folder must then sit inside that folder by its real path, and an attach, `scout_login` or `scout_scan` naming one outside it is refused.
+
+`.scenescout/ASSUMPTIONS.md` in that folder is what earlier runs learned about the app, in prose. The agent reads it back with `scout_note {action: "read"}`, as the skill tells it to at the start of a run, and an attach whose sign-in failed quotes its setup section. So it is input to the agent, like the app's own pages: anyone who can write that file can put instructions in front of the next run's agent. Treat it as untrusted text, keep it out of the reach of people you would not let steer a run, and read a change to it before the next run if the folder is shared.
 
 ## Keys and forks in CI
 
