@@ -114,7 +114,8 @@ async function attachVerdictWaitsForLateSignIn(baseUrl: string, authProject: str
 }
 
 /**
- * The crawl's per-route sign-in check on a route whose scripts send a signed-out visitor to sign-in after load.
+ * The crawl's per-route sign-in check on a route whose scripts send a signed-out visitor to sign-in 200 ms after load,
+ * well inside the 0.4 s the crawl watches the address for, so a loaded machine still has margin.
  * Contrastive pair: the same route crawled with a saved sign-in that has gone stale (AUTH-REDIRECT) and one that signs
  * in (a healthy route), beside a route that never redirects.
  */
@@ -124,7 +125,7 @@ async function crawlWaitsForLateSignIn(baseUrl: string, authProject: string, dea
     const engine = new BrowserEngine();
     try {
       await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: state });
-      return await engine.crawl(["/gated-late.html", "/covered.html"]);
+      return await engine.crawl(["/gated-soon.html", "/covered.html"]);
     } finally {
       await engine.close().catch(() => {});
     }
@@ -132,15 +133,15 @@ async function crawlWaitsForLateSignIn(baseUrl: string, authProject: string, dea
   const line = (out: string, page: string): string => out.split("\n").find((l) => l.startsWith(`/${page} — `)) ?? "";
   const stale = await crawlWith(deadState);
   check(
-    "a crawled route that redirects to sign-in 600 ms after load is AUTH-REDIRECT with a stale sign-in",
-    /AUTH-REDIRECT/.test(line(stale, "gated-late.html")),
+    "a crawled route that redirects to sign-in 200 ms after load is AUTH-REDIRECT with a stale sign-in",
+    /AUTH-REDIRECT/.test(line(stale, "gated-soon.html")),
     stale,
   );
   check("...while a route that stays put is not", line(stale, "covered.html") !== "" && !/AUTH-REDIRECT/.test(line(stale, "covered.html")), stale);
   const fresh = await crawlWith(liveState);
   check(
     "the same route crawled with a sign-in that works is a healthy page",
-    line(fresh, "gated-late.html") !== "" && !/AUTH-REDIRECT|REDIRECTED/.test(line(fresh, "gated-late.html")),
+    line(fresh, "gated-soon.html") !== "" && !/AUTH-REDIRECT|REDIRECTED/.test(line(fresh, "gated-soon.html")),
     fresh,
   );
 }
