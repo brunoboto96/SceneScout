@@ -61,7 +61,12 @@ import {
   HELD_BACK,
   NEEDS_YOU_SENTENCE,
   NOW_SENTENCE,
-  NOT_YET,
+  TICKET_ANSWER,
+  TICKET_SAYS,
+  ticketFormIntro,
+  ticketFormLines,
+  ticketNoSignIn,
+  ticketsFiled,
   PROMPT_TITLE,
   ACTION_PROMPT,
   AREA_NOT_REACHED,
@@ -1699,7 +1704,7 @@ test("prompts: an argument named for a credential, or one a prompt does not take
   assert.throws(() => guidedPromptText("check-everything", undefined), /no guided prompt/);
 });
 
-test("prompts: File problems as tickets takes github or jira, refuses anything else unrepeated, and files nothing from the chat yet", () => {
+test("prompts: File problems as tickets takes github or jira, refuses anything else unrepeated, and files only through the preview and the person's form", () => {
   for (const to of ["ghp_A1b2C3d4E5f6G7h8", "gitlab", "GitHub "]) {
     const error = promptRefusal(() => guidedPromptText(FILE_TICKETS_PROMPT, { to }));
     assert.match(error, /to must be github or jira/);
@@ -1709,15 +1714,25 @@ test("prompts: File problems as tickets takes github or jira, refuses anything e
   const github = guidedPromptText(FILE_TICKETS_PROMPT, { to: "github" });
   const jira = guidedPromptText(FILE_TICKETS_PROMPT, { to: "jira" });
   for (const text of [bare, github, jira]) {
-    assert.ok(text.includes(NOT_YET["file-tickets"]), "says plainly that the guided version is not here yet");
-    assert.match(text, /Do not file anything/);
-    assert.match(text, /never paste a token into the chat/i);
-    assert.match(text, /scout_cards/);
+    assert.ok(!/coming in a later version/.test(text), "filing from the chat is no longer promised for later");
+    // The order: the cards, the preview, then the filing the person confirms.
+    const cards = text.indexOf("Call scout_cards");
+    const preview = text.indexOf("Call scout_ticket_preview");
+    const file = text.indexOf("call scout_ticket_file");
+    assert.ok(cards >= 0 && cards < preview && preview < file, "cards, then the preview, then the filing");
+    assert.match(text, /files only if they say yes there/);
+    assert.match(text, /you cannot answer it/);
+    assert.match(text, /do not call it again unless they ask/);
+    assert.ok(text.includes(TICKET_SAYS.unsupported), "where no form can be shown, the plain sentence");
+    assert.ok(text.includes(ticketNoSignIn("GitHub or Jira")), "and where the tracker has no sign-in");
+    assert.match(text, /Never ask for a token, and never pass one to a tool/);
   }
+  assert.ok(github.includes('to "github", with target the repository as owner/name') && !github.includes('to "jira"'));
+  assert.ok(jira.includes('to "jira", with target the project key') && !jira.includes('to "github"'));
+  assert.ok(bare.includes('to "github"') && bare.includes('to "jira"'), "with no tracker named, both");
+  // The command line stays the way where the form cannot be shown.
   assert.ok(github.includes("npx -y scenescout export --to github --repo owner/app") && !github.includes("--to jira"));
   assert.ok(jira.includes("--to jira --jira-url") && !jira.includes("--to github"));
-  assert.ok(bare.includes("--to github") && bare.includes("--to jira"), "with no tracker named, both commands");
-  assert.match(github, /a dry run/);
   assert.equal(guidedPromptText(FILE_TICKETS_PROMPT, { to: "" }), bare, "a tracker field left empty is one left out");
 });
 
@@ -1784,7 +1799,17 @@ test("prompts: under the operator's maxMode a guided prompt never offers a care 
 });
 
 test("prompts: every sentence the chat shows a person from them is plain", () => {
-  for (const s of [...Object.values(PROMPT_TITLE), ...Object.values(NOT_YET), ...CARES.map(careCapSentence)]) {
+  for (const s of [
+    ...Object.values(PROMPT_TITLE),
+    ...Object.values(TICKET_SAYS),
+    ticketNoSignIn("GitHub"),
+    ticketsFiled(2, "GitHub acme/shop"),
+    ticketFormIntro(2, "Jira QA"),
+    ...ticketFormLines({ toFile: [{ severity: "high", title: "A title" }], alreadyFiled: [1], later: [1], cap: 20 }),
+    TICKET_ANSWER.file(1),
+    TICKET_ANSWER.file(3),
+    ...CARES.map(careCapSentence),
+  ]) {
     assert.doesNotMatch(s, /scout_|observe|read-only|safe-write|destructive|\bPOST\b|\bGET\b|\bHTTP\b|\bAPI\b|_/, `"${s}" is not plain`);
   }
 });

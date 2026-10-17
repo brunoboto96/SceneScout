@@ -15,7 +15,7 @@
  * is not used, because it rejects a request that omits `arguments`.
  */
 import { CARES, caresWithin, checkAddress, type Care } from "./engine/guided.js";
-import { ACTION_PROMPT, CARE_LABEL, careCapSentence, NOT_YET, PROMPT_TITLE, SAFETY_EXPLAINER } from "./engine/guided-words.js";
+import { ACTION_PROMPT, CARE_LABEL, careCapSentence, PROMPT_TITLE, SAFETY_EXPLAINER, TICKET_SAYS, ticketNoSignIn } from "./engine/guided-words.js";
 import type { WriteMode } from "./engine/policy.js";
 import { validateRoleName } from "./engine/profiles.js";
 
@@ -183,7 +183,7 @@ export const GUIDED_PROMPTS: readonly ListedPrompt[] = [
     name: FILE_TICKETS_PROMPT,
     title: PROMPT_TITLE[FILE_TICKETS_PROMPT],
     description:
-      "Show the problems, then give the command a developer runs to file them as GitHub or Jira issues, after a dry run that lists what it would file. Files nothing from the chat, and never asks for a token.",
+      "Show the problems, preview the chosen ones as GitHub or Jira tickets, and file them only once you say yes in a form SceneScout shows you. The tracker's sign-in comes from the extension's settings, never from the chat.",
     arguments: [{ name: "to", description: "Where the team keeps its tickets: github or jira. Leave it out to see both.", required: false }],
   },
   {
@@ -289,21 +289,37 @@ const EXPORT_TOKEN = {
   jira: "JIRA_EMAIL and JIRA_API_TOKEN",
 } as const;
 
+/** Where each tracker's tickets go, as scout_ticket_preview's target takes it. */
+const TICKET_TARGET = {
+  github: 'to "github", with target the repository as owner/name (such as acme/shop)',
+  jira: "to \"jira\", with target the project key (such as QA); the Jira site's address comes from SceneScout's settings",
+} as const;
+
 function fileTickets(given: Record<string, unknown>): string {
   // A field left empty is the optional argument left out, as an empty address is for check-my-site.
   const to = given.to === "" ? undefined : given.to;
   // The refusal never repeats the value: a token pasted into the wrong box would be printed back.
   if (to !== undefined && to !== "github" && to !== "jira") throw new Error("to must be github or jira");
   const trackers: ReadonlyArray<keyof typeof EXPORT_COMMAND> = to === undefined ? ["github", "jira"] : [to];
+  const where =
+    to === undefined
+      ? `Ask where the team keeps its tickets, GitHub or Jira, and where in it, unless this conversation already says. For GitHub pass ${TICKET_TARGET.github}; for Jira pass ${TICKET_TARGET.jira}.`
+      : `The person chose ${to === "github" ? "GitHub" : "Jira"}: pass ${TICKET_TARGET[to]}. Ask for it unless this conversation already says.`;
   const commands = trackers.map((t) => `   ${EXPORT_COMMAND[t]}\n   (its sign-in comes from ${EXPORT_TOKEN[t]} in that terminal's environment)`);
   return [
-    `The person picked ${quoted(PROMPT_TITLE[FILE_TICKETS_PROMPT])}. Tell them first, in these words: ${quoted(NOT_YET["file-tickets"])}`,
+    `The person picked ${quoted(PROMPT_TITLE[FILE_TICKETS_PROMPT])}.`,
     "",
-    "Do not file anything from this chat, and do not ask for a token.",
     "1. Call scout_cards and show the problems worst first, so the person can say which should become tickets. Note the ids of the ones they choose. " +
       OPEN_FIRST,
-    `2. Give them the command for a developer to run in the project's folder, from a terminal:\n${commands.join("\n")}\n   Without --yes it is a dry run: it lists what it would file and what is already filed, and creates nothing in the tracker. Adding --yes files them, each problem once. --only followed by the chosen ids, comma-separated, files just those; --project followed by the folder SceneScout keeps its notes in reads that folder.`,
-    "3. Tell them the token is set in the terminal's environment by whoever runs the command: never paste a token into the chat.",
+    `2. ${where}`,
+    "3. Call scout_ticket_preview with the chosen ids, to and target. It sends nothing. Show the person what it lists: each ticket that would be filed, the ones already filed (which are not filed again), and any that wait for the next filing.",
+    "4. When they want them filed, call scout_ticket_file with the previewId it returned. SceneScout then shows the person a form listing the tickets, and files only if they say yes there. You can ask for that form; you cannot answer it. If they go back, turn it down or close it, tell them nothing was filed, and do not call it again unless they ask (it needs a new preview).",
+    "5. When it has filed them, show each ticket's link.",
+    "",
+    `If the preview says there is no sign-in for the tracker, tell them, in these words: ${quoted(ticketNoSignIn("GitHub or Jira"))}`,
+    `If this app cannot show the form, tell them, in these words: ${quoted(TICKET_SAYS.unsupported)} Then give them the command for a developer to run in the project's folder, from a terminal:\n${commands.join("\n")}\n   Without --yes it is a dry run: it lists what it would file and what is already filed, and creates nothing in the tracker. Adding --yes files them, each problem once. --only followed by the chosen ids, comma-separated, files just those; --project followed by the folder SceneScout keeps its notes in reads that folder.`,
+    "",
+    "Never ask for a token, and never pass one to a tool: if the person pastes one into the chat, tell them it should go in the extension's settings instead, and that they should replace it, since it has been shown.",
   ].join("\n");
 }
 

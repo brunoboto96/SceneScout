@@ -48,6 +48,7 @@ import { registerSessionTools, registerCloseTool } from "./tools/sessions.js";
 import { registerExploreTools } from "./tools/explore.js";
 import { registerStatusTools } from "./tools/status.js";
 import { registerResultTools } from "./tools/results.js";
+import { registerTicketTools } from "./tools/tickets.js";
 
 registerGuideTools();
 registerLaneTools();
@@ -55,6 +56,7 @@ registerSessionTools();
 registerExploreTools();
 registerStatusTools();
 registerResultTools();
+registerTicketTools();
 registerCloseTool();
 
 async function main(): Promise<void> {

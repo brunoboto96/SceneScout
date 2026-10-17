@@ -76,6 +76,8 @@ import {
 
 import { INTAKE_QUESTIONS, introQuestions } from "../src/intake.ts";
 import { explorePrompt, loadPlaybook, PLAYBOOK_RELATIVE_PATH, SERVER_INSTRUCTIONS, stripFrontMatter } from "../src/playbook.ts";
+import { trackerCredentials } from "../src/engine/export.ts";
+import { trackerEnv } from "../src/engine/ticket-preview.ts";
 import { GUIDED_PROMPTS, guidedPromptText, livePrompt, loginPrompt, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../src/prompts.ts";
 
 import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
@@ -682,9 +684,45 @@ test("the desktop extension's manifest has every required field, the package's v
     "an absolute path inside the bundle, whatever folder the app starts it from",
   );
   assert.equal(manifest.compatibility?.runtimes?.node, `${pkg.engines.node}.0.0`, "the Node it needs is the package's");
-  // Nothing to configure and nothing secret: the bundle starts the engine as it is.
-  assert.deepEqual(manifest.server.mcp_config.env ?? {}, {});
-  assert.equal(manifest.user_config, undefined);
+  // The only settings are the trackers' sign-ins for filing tickets, each optional: with none the engine starts as it is.
+  assert.deepEqual(Object.keys(manifest.user_config ?? {}), ["github_token", "jira_base_url", "jira_email", "jira_api_token"]);
+});
+
+test("the desktop extension's settings are the trackers' sign-ins, optional, the secrets marked sensitive, reaching the server as the variables export reads", () => {
+  const manifest = readManifest();
+  const config = (manifest.user_config ?? {}) as Record<string, { type: string; title: string; sensitive?: boolean; required?: boolean }>;
+  const env = manifest.server.mcp_config.env ?? {};
+  const wanted: Record<string, { variable: string; sensitive: boolean }> = {
+    github_token: { variable: "GH_TOKEN", sensitive: true },
+    jira_base_url: { variable: "JIRA_BASE_URL", sensitive: false },
+    jira_email: { variable: "JIRA_EMAIL", sensitive: false },
+    jira_api_token: { variable: "JIRA_API_TOKEN", sensitive: true },
+  };
+  for (const [key, w] of Object.entries(wanted)) {
+    assert.equal(config[key]?.type, "string", key);
+    assert.equal(config[key]?.required, false, `${key}: SceneScout works without it`);
+    assert.equal(config[key]?.sensitive, w.sensitive, `${key}: a secret is kept by the host and never shown`);
+    assert.equal(env[w.variable], `\${user_config.${key}}`, `${key} reaches the server as ${w.variable}`);
+  }
+  assert.deepEqual(
+    Object.keys(env).sort(),
+    Object.values(wanted)
+      .map((w) => w.variable)
+      .sort(),
+    "no other variable is set",
+  );
+  // Filled in, they are the credentials an export reads; left empty, or passed as the bare placeholder, they are none.
+  const filled = trackerEnv({
+    GH_TOKEN: "ghp_0123456789abcdef",
+    JIRA_EMAIL: "qa@example.com",
+    JIRA_API_TOKEN: "jira-0123456789",
+    JIRA_BASE_URL: "https://x.atlassian.net",
+  });
+  assert.equal(trackerCredentials("github", filled).ok, true);
+  assert.equal(trackerCredentials("jira", filled).ok, true);
+  const empty = trackerEnv(Object.fromEntries(Object.entries(env).map(([k, v]) => [k, v])));
+  assert.deepEqual(empty, {}, "an unfilled placeholder is not a value");
+  assert.equal(trackerCredentials("github", trackerEnv({ GH_TOKEN: "" })).ok, false);
 });
 
 test("the desktop extension declares the guided prompts the server lists, each with the text it sends when given nothing", () => {

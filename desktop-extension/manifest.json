@@ -4,7 +4,7 @@
   "display_name": "SceneScout",
   "version": "3.27.0",
   "description": "Exploratory UI testing: Claude explores a running web app like a curious user, finds what is broken or confusing, and writes a coverage-checked report.",
-  "long_description": "SceneScout gives Claude a real browser to test a web app with. Ask it to test an address, for example http://localhost:3000, and it visits the pages, tries the forms and buttons, notes what is broken or confusing, and writes a report. If you would rather not write a prompt, pick \"Check my site\" from the extension's prompts: a short form asks for the address, what to check and how careful to be, and Look only is the default.\n\nEvery request the page sends is checked against a write policy at the network layer. By default it refuses PUT, PATCH, DELETE and requests that look destructive, while ordinary form submissions (a plain POST) go through, so a form can still create a record or change one that was there, such as a saved profile. For a site that holds real data, ask it to observe only: then only GET, HEAD and OPTIONS requests leave the page, plus signing in, signing out and refreshing a token, and any POST you name as a read that does not look destructive. By default a link is opened like any page, so a link that changes something just by being opened, such as an unsubscribe link, is followed. Only HTTP is inspected: messages over a WebSocket are not. Only test apps you own or are authorised to test.\n\nThe test browser downloads on first use: the first test fetches it once (about 200 MB) and carries on. If that download fails, SceneScout says why and gives the command to run by hand: `npx -y scenescout install --browser-only`.\n\nWhat it reaches: the site you test and whatever its pages load, Playwright's download servers once for the browser, and a model provider only if whoever runs it sets one up for the duplicate judge. It sends no telemetry. It keeps its notes, reports and saved sign-ins in a .scenescout folder in the project (Documents/SceneScout/<site> when there is no project), serves its live view on this computer only (127.0.0.1), and opens that and the report in your default browser. The full list: https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md#what-it-reaches",
+  "long_description": "SceneScout gives Claude a real browser to test a web app with. Ask it to test an address, for example http://localhost:3000, and it visits the pages, tries the forms and buttons, notes what is broken or confusing, and writes a report. If you would rather not write a prompt, pick \"Check my site\" from the extension's prompts: a short form asks for the address, what to check and how careful to be, and Look only is the default. \"File problems as tickets\" files the problems you choose in GitHub or Jira after a preview, and only once you say yes in SceneScout's own form; the tracker's sign-in goes in this extension's settings, never in the chat.\n\nEvery request the page sends is checked against a write policy at the network layer. By default it refuses PUT, PATCH, DELETE and requests that look destructive, while ordinary form submissions (a plain POST) go through, so a form can still create a record or change one that was there, such as a saved profile. For a site that holds real data, ask it to observe only: then only GET, HEAD and OPTIONS requests leave the page, plus signing in, signing out and refreshing a token, and any POST you name as a read that does not look destructive. By default a link is opened like any page, so a link that changes something just by being opened, such as an unsubscribe link, is followed. Only HTTP is inspected: messages over a WebSocket are not. Only test apps you own or are authorised to test.\n\nThe test browser downloads on first use: the first test fetches it once (about 200 MB) and carries on. If that download fails, SceneScout says why and gives the command to run by hand: `npx -y scenescout install --browser-only`.\n\nWhat it reaches: the site you test and whatever its pages load, Playwright's download servers once for the browser, and a model provider only if whoever runs it sets one up for the duplicate judge. It sends no telemetry. It keeps its notes, reports and saved sign-ins in a .scenescout folder in the project (Documents/SceneScout/<site> when there is no project), serves its live view on this computer only (127.0.0.1), and opens that and the report in your default browser. The full list: https://github.com/brunoboto96/SceneScout/blob/main/docs/guide/Ways-to-use-it.md#what-it-reaches",
   "author": {
     "name": "brunoboto96",
     "url": "https://github.com/brunoboto96"
@@ -22,7 +22,42 @@
     "mcp_config": {
       "command": "node",
       "args": ["${__dirname}/dist/mcp-server.js"],
-      "env": {}
+      "env": {
+        "GH_TOKEN": "${user_config.github_token}",
+        "JIRA_BASE_URL": "${user_config.jira_base_url}",
+        "JIRA_EMAIL": "${user_config.jira_email}",
+        "JIRA_API_TOKEN": "${user_config.jira_api_token}"
+      }
+    }
+  },
+  "user_config": {
+    "github_token": {
+      "type": "string",
+      "title": "GitHub token (for filing tickets)",
+      "description": "Only needed to file problems as GitHub issues. A token that can create issues in the repository. Kept by Claude Desktop and passed to SceneScout as GH_TOKEN; never shown in the chat.",
+      "sensitive": true,
+      "required": false
+    },
+    "jira_base_url": {
+      "type": "string",
+      "title": "Jira site address (for filing tickets)",
+      "description": "Only needed to file problems in Jira, e.g. https://your-site.atlassian.net. Passed to SceneScout as JIRA_BASE_URL.",
+      "sensitive": false,
+      "required": false
+    },
+    "jira_email": {
+      "type": "string",
+      "title": "Jira account email (for filing tickets)",
+      "description": "Only needed to file problems in Jira: the email of the account the API token belongs to. Passed to SceneScout as JIRA_EMAIL.",
+      "sensitive": false,
+      "required": false
+    },
+    "jira_api_token": {
+      "type": "string",
+      "title": "Jira API token (for filing tickets)",
+      "description": "Only needed to file problems in Jira. Kept by Claude Desktop and passed to SceneScout as JIRA_API_TOKEN; never shown in the chat.",
+      "sensitive": true,
+      "required": false
     }
   },
   "prompts": [
@@ -46,9 +81,9 @@
     },
     {
       "name": "file-tickets",
-      "description": "Show the problems, then give the command a developer runs to file them as GitHub or Jira issues, after a dry run that lists what it would file. Files nothing from the chat, and never asks for a token.",
+      "description": "Show the problems, preview the chosen ones as GitHub or Jira tickets, and file them only once you say yes in a form SceneScout shows you. The tracker's sign-in comes from the extension's settings, never from the chat.",
       "arguments": ["to"],
-      "text": "The person picked \"File problems as tickets\". Tell them first, in these words: \"Filing problems as tickets from the chat is coming in a later version. For now a developer can file them from a terminal, after first seeing a list of what would be filed.\"\n\nDo not file anything from this chat, and do not ask for a token.\n1. Call scout_cards and show the problems worst first, so the person can say which should become tickets. Note the ids of the ones they choose. If it says no project is open, or \"Not attached.\", open one with scout_attach in mode \"observe\": the site's address and the folder SceneScout keeps its notes in, from this conversation, or ask the person for them. Then call it again.\n2. Give them the command for a developer to run in the project's folder, from a terminal:\n   npx -y scenescout export --to github --repo owner/app\n   (its sign-in comes from GH_TOKEN (or GITHUB_TOKEN) in that terminal's environment)\n   npx -y scenescout export --to jira --jira-url https://your-site.atlassian.net --jira-project KEY\n   (its sign-in comes from JIRA_EMAIL and JIRA_API_TOKEN in that terminal's environment)\n   Without --yes it is a dry run: it lists what it would file and what is already filed, and creates nothing in the tracker. Adding --yes files them, each problem once. --only followed by the chosen ids, comma-separated, files just those; --project followed by the folder SceneScout keeps its notes in reads that folder.\n3. Tell them the token is set in the terminal's environment by whoever runs the command: never paste a token into the chat."
+      "text": "The person picked \"File problems as tickets\".\n\n1. Call scout_cards and show the problems worst first, so the person can say which should become tickets. Note the ids of the ones they choose. If it says no project is open, or \"Not attached.\", open one with scout_attach in mode \"observe\": the site's address and the folder SceneScout keeps its notes in, from this conversation, or ask the person for them. Then call it again.\n2. Ask where the team keeps its tickets, GitHub or Jira, and where in it, unless this conversation already says. For GitHub pass to \"github\", with target the repository as owner/name (such as acme/shop); for Jira pass to \"jira\", with target the project key (such as QA); the Jira site's address comes from SceneScout's settings.\n3. Call scout_ticket_preview with the chosen ids, to and target. It sends nothing. Show the person what it lists: each ticket that would be filed, the ones already filed (which are not filed again), and any that wait for the next filing.\n4. When they want them filed, call scout_ticket_file with the previewId it returned. SceneScout then shows the person a form listing the tickets, and files only if they say yes there. You can ask for that form; you cannot answer it. If they go back, turn it down or close it, tell them nothing was filed, and do not call it again unless they ask (it needs a new preview).\n5. When it has filed them, show each ticket's link.\n\nIf the preview says there is no sign-in for the tracker, tell them, in these words: \"SceneScout has no sign-in for GitHub or Jira yet. Whoever set it up adds one in the desktop extension's settings, or in the environment SceneScout starts in. Never paste it into the chat.\"\nIf this app cannot show the form, tell them, in these words: \"This app cannot show the confirmation form, so tickets cannot be filed from here. A developer can file them from a terminal, after first seeing a list of what would be filed.\" Then give them the command for a developer to run in the project's folder, from a terminal:\n   npx -y scenescout export --to github --repo owner/app\n   (its sign-in comes from GH_TOKEN (or GITHUB_TOKEN) in that terminal's environment)\n   npx -y scenescout export --to jira --jira-url https://your-site.atlassian.net --jira-project KEY\n   (its sign-in comes from JIRA_EMAIL and JIRA_API_TOKEN in that terminal's environment)\n   Without --yes it is a dry run: it lists what it would file and what is already filed, and creates nothing in the tracker. Adding --yes files them, each problem once. --only followed by the chosen ids, comma-separated, files just those; --project followed by the folder SceneScout keeps its notes in reads that folder.\n\nNever ask for a token, and never pass one to a tool: if the person pastes one into the chat, tell them it should go in the extension's settings instead, and that they should replace it, since it has been shown."
     },
     {
       "name": "is-it-safe",

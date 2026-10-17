@@ -119,6 +119,29 @@ a writing mode.
 - The plan states its time and page limits (`THOROUGHNESS_BUDGET`) so a guided
   run is never unbounded.
 
+## Filing tickets (added with the ticket tools, #511)
+
+Filing problems as tickets from a guided surface (`scout_ticket_preview`, then
+`scout_ticket_file`) follows the same rule. The preview reads the tracker and
+sends nothing. Filing sends only after the person says yes in the server's own
+form, which lists every ticket by title and where it goes; the model can ask
+for that form and cannot answer it, so text on the page under test cannot talk
+a run into writing to the team's tracker. Where the host cannot show the form,
+nothing is filed, and the person is given the `scenescout export` command a
+developer runs instead.
+
+A preview binds what the person saw: it is held in the server process only,
+under a random id, lasts ten minutes, and is used by the first filing that
+reaches the form, whatever the answer. Its findings are fingerprinted as the
+issues `export.ts` would write them (their title, facts, steps and evidence)
+together with the tracker and project, and the filing is refused when that
+fingerprint has changed since, both before the form and again after it. Only
+the previewed findings are filed, and no more of them than were listed. The
+tracker's token comes from the server's environment, which the desktop
+extension fills from settings it keeps as secrets; no tool takes one, and
+nothing a tool returns or a form shows carries it. `export-test` holds each of
+these, including a declined, closed, failed or absent form filing nothing.
+
 ## Failure direction
 
 When it is unclear whether an address is on this computer, it is treated as a

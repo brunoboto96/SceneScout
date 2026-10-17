@@ -249,6 +249,14 @@ Making it again replaces the last team report, and removes only the evidence fil
 
 `scout_report {report}` chooses which parts a report carries: `both` (default) the plain section and then the technical report, `qa` the plain section alone, `dev` the technical report alone. It applies to the files `scout_report` writes; the live view's report always shows both.
 
+### Filing problems as tickets
+
+To put problems where the team works, say "file these as tickets", pick *File problems as tickets* in the chat's prompt menu, or press **File as tickets** on the guided panel's results. Claude asks which problems and where (a GitHub repository, or a Jira project), and `scout_ticket_preview` shows what would happen: each ticket it would file, the ones already filed, and any over the limit of one filing (20), which wait for the next. Nothing is sent yet.
+
+When you want them filed, `scout_ticket_file` shows you SceneScout's own form listing the tickets, and files them only if you say yes there. Claude can ask for that form but cannot answer it, so text on the site under test cannot talk it into filing. A preview lasts 10 minutes and is used once; if one of its problems is found again or changes after it was made, nothing is filed until you make a new preview. Each ticket's link comes back once it is filed. The tickets are the same ones [`scenescout export`](Ways-to-use-it.md#filing-findings-as-issues) files, with the same marker, so neither files a problem twice.
+
+The tracker's sign-in is set up once, where whoever installed SceneScout keeps settings: the desktop extension's settings in Claude Desktop, or the environment Claude Code starts in ([Desktop extension settings](Configuration-reference.md#desktop-extension-settings)). It is never typed into the chat, and never shown in a result.
+
 ### The technical report
 
 It follows the plain section, worst first:
