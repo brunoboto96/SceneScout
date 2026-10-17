@@ -56,6 +56,9 @@ repeatable, and what an unmet one does to the gate.
   load in a few hundred: the picture holds still, so no stillness check tells
   it apart, and the next load draws the page as always. A real change shows on
   both loads, so it still fails the gate; the threshold stays where it was.
+  When the loads disagree the target passes, and its line in the report says
+  how far the first picture was off, so a difference only one load shows (a
+  first visit's banner, a cold cache) is visible rather than only logged.
 - **An unmet baseline is high, like a broken flow.** A change past
   `--baseline-threshold` (default 0.1%), any change of size, a baseline that
   cannot be used, and a target that could not be pictured are each one

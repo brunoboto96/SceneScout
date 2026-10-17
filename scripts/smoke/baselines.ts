@@ -38,6 +38,7 @@ interface Result {
   detail?: string;
   partial?: string;
   unsteady?: string;
+  retaken?: string;
   baseline: string;
   diff?: { percent: number; changedPixels: number; sizeChanged: boolean };
   files?: { expected: string; actual: string; diff: string };
@@ -200,6 +201,7 @@ export async function run(): Promise<void> {
         once.results.length === 1 &&
         once.results[0].status === "matches" &&
         once.results[0].diff?.percent === 0 &&
+        /^a first load's picture was [\d.]+% different and a second load's matched/.test(once.results[0].retaken ?? "") &&
         /baseline page on \/once\.html: the first picture was [\d.]+% different; taken again from a fresh load/.test(once.out) &&
         !fs.existsSync(path.join(once.dir, "visual")),
       `${once.status} ${oddLoads} ${JSON.stringify(once.results)}\n${once.out.slice(-800)}`,

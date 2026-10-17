@@ -103,6 +103,8 @@ import {
   STOP_ANIMATIONS_SCRIPT,
   steadyPicture,
   confirmedPicture,
+  retakenFor,
+  retakenNote,
   unsteadyNote,
   VISUAL_DIRNAME,
   visualFiles,
@@ -3387,6 +3389,24 @@ test("baselines: a picture that never held still says so on its line of the repo
   assert.match(
     report,
     /_\(the picture was still changing after about 5s, so the last one taken is used: something on the page keeps moving, and a comparison of it may not repeat\)_/,
+  );
+});
+
+test("baselines: a target whose first picture differed and whose second load matched says so on its line of the report", () => {
+  // The two loads disagree: the gate passes on the second, and the line still shows that one load differed, so a
+  // difference that shows only on a first visit (a one-time banner, a cold cache) is in the report, not only the log.
+  const note = retakenNote(4.12);
+  assert.equal(note, "a first load's picture was 4.12% different and a second load's matched: a difference on one load only is not reported as a change");
+  const matched = { ...changedPlan, status: "matches" as const, diff: { ...changedPlan.diff!, percent: 0, changedPixels: 0 }, retaken: note };
+  // Only when the loads disagreed: no retake, or a difference that repeated, carries no note.
+  assert.deepEqual(retakenFor({ diff: { percent: 4.12 } }, { status: "matches" }), { retaken: note });
+  assert.deepEqual(retakenFor(null, { status: "matches" }), {});
+  assert.deepEqual(retakenFor({ diff: { percent: 4.12 } }, { status: "changed" }), {});
+  assert.deepEqual(retakenFor({ diff: { percent: 4.12 } }, { status: "updated" }), {});
+  const report = formatCheck({ ...result([]), baselines: baselineRun([matched]) });
+  assert.match(
+    report,
+    /matches \(0% changed\) _\(a first load's picture was 4\.12% different and a second load's matched: a difference on one load only is not reported as a change\)_/,
   );
 });
 

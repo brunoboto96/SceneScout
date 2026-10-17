@@ -177,6 +177,19 @@ export async function confirmedPicture<S, V extends { status: string; diff?: { c
   return { shot: again, verdict: judge(again), first: verdict };
 }
 
+/**
+ * What a result says when its first picture differed and a second load's matched (confirmedPicture): the loads
+ * disagree, so the gate passes, and the line says so, so a difference shown on a first visit only is still seen.
+ */
+export function retakenNote(firstPercent: number): string {
+  return `a first load's picture was ${firstPercent}% different and a second load's matched: a difference on one load only is not reported as a change`;
+}
+
+/** The note a target's result carries from confirmedPicture: only when the loads disagreed and the second matched. */
+export function retakenFor(first: { diff?: { percent: number } } | null, verdict: { status: string }): { retaken: string } | Record<string, never> {
+  return first?.diff && verdict.status === "matches" ? { retaken: retakenNote(first.diff.percent) } : {};
+}
+
 /** What a result says when its picture never held still (steadyPicture): a comparison of it may not repeat. */
 export function unsteadyNote(budgetMs: number): string {
   return `the picture was still changing after about ${budgetMs / 1000}s, so the last one taken is used: something on the page keeps moving, and a comparison of it may not repeat`;
@@ -437,6 +450,8 @@ export interface BaselineResult {
   partial?: string;
   /** The picture never held still within the action limit, so the last one taken is used (steadyPicture). */
   unsteady?: string;
+  /** The first picture differed and a second load's matched, so the second is the one judged (confirmedPicture). */
+  retaken?: string;
   /** The comparison, when one was made. */
   diff?: BaselineDiff;
   /** Its baseline's PNG, relative to the baselines folder. */

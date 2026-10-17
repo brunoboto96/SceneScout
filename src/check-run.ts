@@ -18,6 +18,7 @@ import {
   isVisualPicture,
   confirmedPicture,
   judgeBaseline,
+  retakenFor,
   missingTargetsMessage,
   parseBaselineTargets,
   readStoredBaseline,
@@ -626,6 +627,8 @@ async function takeBaselines(
         ...verdict,
         ...(shot.cut ? { partial: shot.cut } : {}),
         ...(shot.unsteady ? { unsteady: shot.unsteady } : {}),
+        // The loads disagree: the second is judged, and the line keeps the first's difference in view.
+        ...retakenFor(picture.first, verdict),
       };
       if (verdict.status === "updated") {
         fs.mkdirSync(path.dirname(at(dir, files.png)), { recursive: true });
