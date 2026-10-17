@@ -9,6 +9,7 @@ import path from "node:path";
 import { z } from "zod";
 import { computeGaps, coverageView, formatRouteCoverage, generateReport, lastFrames, runRecordOf } from "../engine/report.js";
 import { teamReportData, teamReportText, writeTeamReport } from "../engine/team-report.js";
+import { endedCheckRecap, recapImage } from "./status.js";
 import { DEFAULT_REPORT_AUDIENCE, REPORT_AUDIENCES, type ReportAudience } from "../engine/plain.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "../engine/verify.js";
 import {
@@ -664,7 +665,12 @@ export function registerResultTools(): void {
           generatedAt: new Date().toISOString(),
         });
         const report = writeTeamReport(memory.dir, data);
-        return { content: [{ type: "text" as const, text: teamReportText(report) }], structuredContent: { ...report } };
+        // In the chat, the end-of-check card comes with the report (design 2.9): only for the guided check this report's cover describes, once it has ended.
+        const ended = carried ? endedCheckRecap() : null;
+        return {
+          content: [{ type: "text" as const, text: teamReportText(report) }, ...(ended ? [recapImage(ended.figures)] : [])],
+          structuredContent: { ...report },
+        };
       } catch (err) {
         return errorText(err);
       }

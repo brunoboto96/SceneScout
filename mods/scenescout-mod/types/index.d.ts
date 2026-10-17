@@ -85,6 +85,17 @@ export type ScenescoutModCost = {
   record: boolean;
 } | null;
 
+/** The end-of-check card as scout_recap sent it (hooks/guided.js's readRecap). */
+export type ScenescoutModRecap = {
+  planId: string;
+  title: string;
+  address: string;
+  date: string;
+  rows: Array<[string, string]>;
+  svg: string | null;
+  file: string | null;
+} | null;
+
 export type ScenescoutModPicture = { id: string; svg?: string; width?: number; height?: number; why?: string } | null;
 
 declare module "claude-code" {
@@ -96,6 +107,7 @@ declare module "claude-code" {
       confirmed: string[];
       tickets: ScenescoutModTicket[] | null;
       cost: ScenescoutModCost;
+      recap: ScenescoutModRecap;
     };
   }
 }

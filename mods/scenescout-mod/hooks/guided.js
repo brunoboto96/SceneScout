@@ -19,6 +19,7 @@
  * calls `act(type, payload)`, which register.js answers, so a test can press
  * every button and read what it asked for.
  */
+import { GAME_WORDS, renderBestiary } from "./game.js";
 
 // ---- Names ----
 
@@ -36,6 +37,8 @@ export const FEEDBACK_VERDICTS = ["not-a-bug", "confirmed"];
 export const QUEUE_MAX = 5;
 /** The team report: written by the server, with no turn for Claude (design 3.8). Only the results screen's own button calls it. */
 export const TEAM_REPORT_TOOL = "scout_team_report";
+/** The end-of-check card (design 2.9): built by the server from the check's figures; the panel draws it and saves it on a press. */
+export const RECAP_TOOL = "scout_recap";
 /** A re-check of the open problems: the server builds its plan, and Claude is handed only its id (design 3.8). Only the results screen's own button calls it. */
 export const RECHECK_TOOL = "scout_recheck_plan";
 /** The person's saved checks: listed on the welcome, saved from the results, run again or deleted, with no turn for Claude. */
@@ -310,6 +313,9 @@ export const PANEL_WORDS = {
   ticketOpen: "open",
   ticketClosed: "closed",
   ticketFixed: "fixed and confirmed",
+  recapHeading: "End-of-check card",
+  saveRecap: "Save as picture",
+  recapSaved: (/** @type {string} */ file) => `Saved the card as ${file}`,
 };
 
 /** Impact, as a short mark in front of a card's title. */
@@ -391,6 +397,32 @@ export function initialWizard() {
     started: null,
     queuePaused: false,
     results: null,
+  };
+}
+
+/**
+ * The end-of-check card as scout_recap sent it, or null: its plan, its lines,
+ * and its picture only when it is an SVG document the server made and fits
+ * the Svg element's limit.
+ *
+ * @param {any} result
+ * @returns {{ planId: string, title: string, address: string, date: string, rows: Array<[string, string]>, svg: string | null, file: string | null } | null}
+ */
+export function readRecap(result) {
+  const s = isRecord(result) && isRecord(result.structuredContent) ? result.structuredContent : null;
+  if (!s || result.isError === true || !str(s.planId) || !Array.isArray(s.rows)) return null;
+  const svg = str(s.svg);
+  return {
+    planId: str(s.planId),
+    title: plainLine(str(s.title)),
+    address: plainLine(str(s.address)),
+    date: plainLine(str(s.date)),
+    rows: s.rows
+      .filter((r) => Array.isArray(r) && r.length === 2)
+      .slice(0, 12)
+      .map((r) => /** @type {[string, string]} */ ([plainLine(str(r[0])), plainLine(str(r[1]))])),
+    svg: svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg"') && svg.length <= SVG_SOURCE_MAX ? svg : null,
+    file: str(s.file) || null,
   };
 }
 
@@ -1148,7 +1180,7 @@ export function liveHref(/** @type {unknown} */ url) {
  * @typedef {{ value: number | null, label: string }} CapOption
  * @typedef {{ sentence: string, options: CapOption[] }} CostOffer what the configuring screen says a check uses, and the limits the person may set (run.js's costOffer)
  * @typedef {{ id: string, title: string, where: string, ref: string, url: string, open: boolean, finding: "open" | "resolved" | "unknown" }} WatchedTicket
- * @typedef {{ surface: string, status: { kind: string, data?: any, error?: string }, picture?: { svg?: string, width?: number, height?: number, why?: string } | null, runPane?: unknown, cost?: CostOffer | null, tickets?: WatchedTicket[] | null }} Context
+ * @typedef {{ surface: string, status: { kind: string, data?: any, error?: string }, picture?: { svg?: string, width?: number, height?: number, why?: string } | null, runPane?: unknown, cost?: CostOffer | null, tickets?: WatchedTicket[] | null, recap?: ReturnType<typeof readRecap>, game?: { about: Array<{ id: string, impact: string }>, defeated: number } | null }} Context
  */
 
 /**
@@ -1555,6 +1587,7 @@ export function renderGuided(els, w, ctx, act) {
           : []),
       ]),
     );
+    if (finished) out.push(...recapRows(str(g.planId)));
     out.push(...queueRows(!finished));
     if (ctx.runPane) out.push(column([ctx.runPane], { marginTop: 1 }));
     return out;
@@ -1657,6 +1690,8 @@ export function renderGuided(els, w, ctx, act) {
       const made = [link(PANEL_WORDS.openReport, fileHref(w.teamReport.path)), link(PANEL_WORDS.showFolder, fileHref(w.teamReport.folder))].filter(Boolean);
       if (made.length) out.push(row(made));
     }
+    const ownPlan = own.planId;
+    if (ownPlan) out.push(...recapRows(ownPlan));
     for (const card of cards) {
       out.push(
         column([
@@ -1702,7 +1737,25 @@ export function renderGuided(els, w, ctx, act) {
         button("guided-results-back", PANEL_WORDS.back, () => act("go", { step: w.planId ? "running" : "welcome" })),
       ]),
     );
+    // The game layer, when the person turned it on: beside the cards, never in them.
+    if (ctx.game) out.push(renderBestiary(els, /** @type {any} */ (ctx.game)));
     return out;
+  }
+
+  /**
+   * The end-of-check card for this plan, once the server made it: the picture
+   * where the surface draws Svg, else its lines, and Save as picture. With the
+   * game layer on, its count is said under the card, in the panel only.
+   */
+  function recapRows(/** @type {string} */ planId) {
+    const r = ctx.recap;
+    if (!r || r.planId !== planId) return [];
+    const rows = [heading(PANEL_WORDS.recapHeading)];
+    if (canDraw && r.svg) rows.push(els.Svg({ source: r.svg, alt: `${r.title}: ${r.address}`.slice(0, 200), width: 320, height: 180 }));
+    else rows.push(text(`${r.title}: ${r.address}${r.date ? ` · ${r.date}` : ""}`, { wrap: "truncate-end" }), ...r.rows.map(([k, v]) => text(`  ${k}: ${v}`)));
+    if (ctx.game) rows.push(dim(GAME_WORDS.count(ctx.game.defeated, ctx.game.about.length)));
+    rows.push(row([button("guided-recap-save", PANEL_WORDS.saveRecap, () => act("saveRecap"))]));
+    return [column(rows, { marginTop: 1 })];
   }
 
   function cardRows() {
