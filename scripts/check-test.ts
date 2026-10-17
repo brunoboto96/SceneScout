@@ -103,6 +103,9 @@ import {
   STOP_ANIMATIONS_SCRIPT,
   steadyPicture,
   confirmedPicture,
+  agreedFirstPicture,
+  unstableFirstNote,
+  writesFreshBaseline,
   retakenFor,
   retakenNote,
   unsteadyNote,
@@ -3361,6 +3364,62 @@ test("baselines: a picture that differs from its baseline is taken again from a 
   }
   // A second load that fails is the target's failure, not hidden behind the first picture.
   await assert.rejects(run(["odd"], { odd: off }), /no more pictures/);
+});
+
+test("baselines: a baseline written for the first time is written only when two loads agree, a third deciding", async () => {
+  // A baseline with nothing to compare it with becomes the reference for every later compare, so an off draw must not be it.
+  type Verdict = { status: string; diff?: { changedPixels: number; sizeChanged: boolean } };
+  const fresh: Verdict = { status: "updated" };
+  assert.equal(writesFreshBaseline(fresh), true, "no baseline yet, or one replaced because it could not be used, under update");
+  assert.equal(writesFreshBaseline({ status: "updated", diff: { changedPixels: 0, sizeChanged: false } }), false, "a rewrite has a baseline to compare with");
+  assert.equal(writesFreshBaseline({ status: "no-baseline" }), false, "compare writes nothing");
+  assert.equal(writesFreshBaseline({ status: "matches" }), false);
+
+  const run = async (loads: string[]) => {
+    const taken: string[] = [];
+    const take = async () => {
+      const shot = loads[taken.length + 1];
+      if (shot === undefined) throw new Error("no more pictures");
+      taken.push(shot);
+      return shot;
+    };
+    const out = await agreedFirstPicture(
+      { shot: loads[0], verdict: fresh },
+      take,
+      () => fresh,
+      (a, b) => a === b,
+    );
+    return { ...out, taken };
+  };
+  // The usual case: two loads agree, and the second is written.
+  assert.deepEqual(await run(["a", "a"]), { shot: "a", verdict: fresh, agreed: true, takes: 2, taken: ["a"] });
+  // The first load was the odd one: the third agrees with the second.
+  assert.deepEqual(await run(["odd", "a", "a"]), { shot: "a", verdict: fresh, agreed: true, takes: 3, taken: ["a", "a"] });
+  // The second load was the odd one: the third agrees with the first.
+  assert.deepEqual(await run(["a", "odd", "a"]), { shot: "a", verdict: fresh, agreed: true, takes: 3, taken: ["odd", "a"] });
+  // Three different pictures: nothing agrees, so nothing is to be written.
+  const unstable = await run(["a", "b", "c"]);
+  assert.equal(unstable.agreed, false);
+  assert.equal(unstable.takes, 3);
+  // The report line and the issue each give the reason and say once that nothing was written.
+  const unstableResult: BaselineResult = {
+    path: "/plans",
+    element: "page",
+    status: "not-captured",
+    detail: unstableFirstNote(3),
+    baseline: "chromium/plans-1/page.png",
+  };
+  const updateRun = baselineRun([unstableResult], { mode: "update" });
+  const line = formatCheck({ ...result(checkFindings([route()], ORIGIN, [], [], updateRun).issues), baselines: updateRun })
+    .split("\n")
+    .find((l) => l.startsWith("- ⊘ "));
+  const evidence = baselineEvidence(unstableResult, updateRun) ?? "";
+  for (const said of [line ?? "", evidence]) {
+    assert.match(said, /no two of 3 loads drew the page the same/, said);
+    assert.equal(said.match(/not written|no baseline was written/g)?.length, 1, `says once that nothing was written: ${said}`);
+  }
+  // A load that cannot be taken is the target's failure.
+  await assert.rejects(run(["a"]), /no more pictures/);
 });
 
 test("baselines: the next-frame script waits for two animation frames, and for a second when frames never come", async () => {

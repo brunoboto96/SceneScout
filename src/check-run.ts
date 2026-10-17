@@ -16,7 +16,10 @@ import {
   defaultBaselinesDir,
   elementTarget,
   isVisualPicture,
+  agreedFirstPicture,
   confirmedPicture,
+  unstableFirstNote,
+  writesFreshBaseline,
   judgeBaseline,
   retakenFor,
   missingTargetsMessage,
@@ -546,6 +549,11 @@ function shownDir(dir: string, projectDir: string): string {
   return rel.startsWith("..") || path.isAbsolute(rel) ? dir : rel.split(path.sep).join("/");
 }
 
+/** Whether two decoded pictures are the same size and every pixel is the same. */
+function samePixels(a: { width: number; height: number; data: Uint8Array }, b: { width: number; height: number; data: Uint8Array }): boolean {
+  return a.width === b.width && a.height === b.height && Buffer.compare(a.data, b.data) === 0;
+}
+
 /** A baseline target's picture could not be taken: the target's result, with the reason, not the check's failure. */
 class NotCaptured extends Error {
   constructor(readonly why: string) {
@@ -608,7 +616,17 @@ async function takeBaselines(
       };
       // A picture that differs from its baseline is taken again from a fresh load, and only a difference that repeats is kept.
       // Only a picture that could not be taken is the target's result; an error judging it is the check's own.
-      const picture = await confirmedPicture(take, judge).catch((err: unknown) => {
+      const picture = await (async () => {
+        const confirmed = await confirmedPicture(take, judge);
+        // A baseline with nothing to compare it with is written only when two loads agree.
+        if (!writesFreshBaseline(confirmed.verdict)) return confirmed;
+        const agreed = await agreedFirstPicture(confirmed, take, judge, (a, b) => samePixels(a.image, b.image));
+        if (!agreed.agreed) {
+          log(`  baseline ${shown}: ${agreed.takes} loads disagreed; no baseline written`);
+          throw new NotCaptured(unstableFirstNote(agreed.takes));
+        }
+        return { ...confirmed, shot: agreed.shot, verdict: agreed.verdict };
+      })().catch((err: unknown) => {
         if (err instanceof NotCaptured) return err;
         throw err;
       });

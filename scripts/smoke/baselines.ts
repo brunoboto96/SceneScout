@@ -207,6 +207,27 @@ export async function run(): Promise<void> {
       `${once.status} ${oddLoads} ${JSON.stringify(once.results)}\n${once.out.slice(-800)}`,
     );
 
+    // A baseline taken for the first time on a load drawn differently: two loads disagree, a third decides, and what is
+    // written is the page as every other load draws it, the same picture a run with no odd load wrote.
+    const onceFirstDir = path.join(work, "once-first-baselines");
+    fs.mkdirSync(onceFirstDir);
+    fs.writeFileSync(path.join(onceFirstDir, "targets.json"), JSON.stringify({ targets: [{ path: "/once.html" }] }));
+    oddLoads = 1;
+    const onceFirst = await checkWith("update", "once-first", onceFirstDir);
+    const normalPng = of(once, "page")?.baseline;
+    const firstPng = of(onceFirst, "page")?.baseline;
+    check(
+      "a first baseline taken on a load drawn differently is confirmed by a second and third load, and what is written is the usual picture",
+      onceFirst.status === 0 &&
+        oddLoads === 0 &&
+        onceFirst.results.length === 1 &&
+        onceFirst.results[0].status === "updated" &&
+        !!normalPng &&
+        !!firstPng &&
+        fs.readFileSync(path.join(onceFirstDir, ...firstPng.split("/"))).equals(fs.readFileSync(path.join(onceDir, ...normalPng.split("/")))),
+      `${onceFirst.status} ${oddLoads} ${JSON.stringify(onceFirst.results)}\n${onceFirst.out.slice(-800)}`,
+    );
+
     variant = "after";
     const restyled = await checkWith("compare", "restyled");
     const card = of(restyled, "testid=plan");
