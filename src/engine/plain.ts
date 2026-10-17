@@ -12,6 +12,8 @@ import { describePicture, readFindingPicture } from "./capture.js";
 import { CHECK_AREAS, type CheckArea } from "./guided.js";
 import { isWorthALook, knownFeedback, seenOnOf, type Finding, type FindingCategory } from "./memory.js";
 import type { OracleKind, OracleViolation } from "./oracles.js";
+import type { WriteMode } from "./policy.js";
+import { MODE_CARE_LABEL } from "./guided-words.js";
 
 /** Which parts a report carries: the plain view and the technical one ("both"), or one of them. */
 export const REPORT_AUDIENCES = ["both", "qa", "dev"] as const;
@@ -212,8 +214,74 @@ export interface PlainInput {
   lastFrames?: ReadonlyMap<string, string>;
   /** Which parts the document carries; decides where the technical detail is said to be. */
   audience: ReportAudience;
-  /** The answer to each ticket the run was given, already in plain words; it comes before the problems. */
+  /** The answer to each ticket the run was given, already in plain words; it comes after the problems table. */
   tickets?: readonly string[];
+  /** What was checked, when and how carefully, for the sentence that opens the summary. */
+  run?: PlainRun;
+}
+
+/** What the summary's first sentence says about the check itself. Every part is optional and left out when unknown. */
+export interface PlainRun {
+  /** The site checked, as an origin. */
+  site?: string;
+  /** The write mode the run used, said as its care level. */
+  mode?: WriteMode;
+  /** The first and last action of this run (ISO). Left out where the report is compared byte for byte. */
+  startedAt?: string;
+  endedAt?: string;
+}
+
+/**
+ * Make app-controlled text safe inside a Markdown table cell. The backslash
+ * must be escaped FIRST: escaping only the pipe turns an input of `\|` into
+ * `\\|`, which Markdown reads as a literal backslash followed by a live
+ * column separator — the app's own error text could then break the table, or
+ * forge an extra column in a report people trust. Newlines end a row, so they
+ * are flattened too.
+ */
+export function escapeTableCell(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
+/**
+ * Text for inside a raw HTML element in Markdown (a `<summary>`), where
+ * Markdown escapes do not apply. The HTML report decodes these back
+ * before escaping again, so a title reads the same in both.
+ */
+export function escapeSummaryText(text: string): string {
+  return text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] as string).replace(/\r?\n/g, " ");
+}
+
+/** How long a run took, in words: "under a minute", "4 minutes", "1 hour 5 minutes". */
+export function plainDuration(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return `${h} hour${h === 1 ? "" : "s"}${m ? ` ${m} minute${m === 1 ? "" : "s"}` : ""}`;
+}
+
+/** "2026-10-17 12:04", the minute an ISO time names, in UTC; anything shorter is returned as it is. */
+function minuteOf(iso: string): string {
+  return iso.length >= 16 ? `${iso.slice(0, 10)} ${iso.slice(11, 16)}` : iso;
+}
+
+/**
+ * The sentence that says what was checked: the site, when and for how long,
+ * and the care level. Null when the report knows none of it.
+ */
+export function plainCheckedLine(run: PlainRun | undefined): string | null {
+  if (!run) return null;
+  const parts: string[] = [`SceneScout checked ${run.site ?? "the app"}`];
+  if (run.startedAt) {
+    const took = run.endedAt ? plainDuration(Date.parse(run.endedAt) - Date.parse(run.startedAt)) : "";
+    parts.push(` on ${minuteOf(run.startedAt)} UTC${took ? `, for ${took}` : ""}`);
+  }
+  if (run.mode) parts.push(`, with the care level "${MODE_CARE_LABEL[run.mode]}"`);
+  if (!run.site && !run.startedAt && !run.mode) return null;
+  return `${parts.join("")}.`;
 }
 
 const count = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
@@ -243,7 +311,7 @@ export function plainSummary(input: PlainInput): string[] {
       .map(([s, one, many]) => `${by(s)} ${by(s) === 1 ? one : many}`);
     lines.push(`This run found ${count(current.length, "problem")}: ${joinAnd(split)}.${where}`);
   }
-  const elsewhere = input.audience === "qa" ? "" : " They are listed in the technical detail below.";
+  const elsewhere = input.audience === "qa" ? "" : " They are listed in the technical details below.";
   if (input.historical > 0) {
     lines.push(
       ``,
@@ -264,7 +332,7 @@ export function plainSummary(input: PlainInput): string[] {
       lines.push(`- ${plainWording(kind).problem} (${n === 1 ? "once" : `${n} times`})`);
   }
   if (input.gaps.length > 0) {
-    lines.push(``, `The run left ${count(input.gaps.length, "thing")} unchecked.${input.audience === "qa" ? "" : " The gap ledger below says which."}`);
+    lines.push(``, `The run left ${count(input.gaps.length, "thing")} unchecked.${input.audience === "qa" ? "" : " The technical details list which."}`);
     if (input.audience === "qa") {
       lines.push(``);
       for (const g of input.gaps) lines.push(`- ${g}`);
@@ -371,40 +439,99 @@ export function plainCard(f: Finding, opts: { lastFrame?: string; area?: CheckAr
   };
 }
 
+/** The heading the plain part opens with, and the one the pictures are under. */
+export const SUMMARY_HEADING = "Summary";
+export const EVIDENCE_HEADING = "Evidence";
+/** The heading the technical report sits under when the plain part comes first. */
+export const TECHNICAL_HEADING = "Technical details";
+/** The fold inside each problem that holds its id, category, severity, evidence and route. */
+export const TECHNICAL_DETAIL_FOLD = "Details for developers";
+
 /**
- * One finding in plain words, with its technical detail folded beneath it.
- * Every word comes from its card; only the location is the finding's whole
- * address, as the report has always printed it.
+ * The problems this run found as one table, worst first: the overview a
+ * reader takes in before deciding which one to open.
+ */
+export function plainProblemTable(current: readonly Finding[]): string[] {
+  if (current.length === 0) return [];
+  const lines = [`| # | Impact | Problem | Where | What you'd see | What was expected |`, `|---:|---|---|---|---|---|`];
+  current.forEach((f, i) => {
+    const c = plainCard(f);
+    lines.push(`| ${i + 1} | ${c.impact} | ${escapeTableCell(c.title)} | ${escapeTableCell(c.page)} | ${c.problem} | ${c.expected} |`);
+  });
+  return [...lines, ``];
+}
+
+/**
+ * One finding in plain words, folded under its number and title: where it
+ * was, the steps to see it, what was expected and what happened, and its
+ * technical detail in a fold of its own. Its picture is under Evidence. Every word comes from its
+ * card; only the location is the finding's whole address, as the report has
+ * always printed it.
  */
 export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, "lastFrames" | "audience">): string[] {
   const card = plainCard(f, { lastFrame: input.lastFrames?.get(f.id) });
   const lines = [
-    `### ${index}. ${card.title}`,
+    `<details><summary>${index}. ${escapeSummaryText(card.title)}</summary>`,
     ``,
     `**${card.impact}** · ${card.problem} · on ${f.url}${card.alsoOn.length > 0 ? `, and also seen on ${card.alsoOn.join(", ")}` : ""}`,
     ``,
   ];
-  if (card.picture) lines.push(`![What the page showed](${card.picture.file})`, ``);
   if (card.steps.length > 0) {
     lines.push(`**What was done:**`, ``);
     card.steps.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
     lines.push(``);
   }
   lines.push(`**What was expected:** ${card.expected}`, ``, `**What happened:** ${card.happened}`, ``);
-  lines.push(`<details><summary>Technical detail</summary>`, ``);
-  // "Finding id", not "Id": the HTML and the live view hang a finding's recorded
-  // frames under the list that names its "Id", and that is the full entry's.
+  if (card.picture) lines.push(`**Picture:** under ${EVIDENCE_HEADING}, as problem ${index}.`, ``);
+  // The id, category, severity and route are for whoever fixes it, so they
+  // fold once more under their own name: a Summary reader who opened the
+  // problem for its steps does not read them unasked. "Finding id", not "Id":
+  // the HTML hangs a finding's recorded frames under the list that names its
+  // "Id" when there is no Evidence section to hold them.
+  lines.push(`<details><summary>${TECHNICAL_DETAIL_FOLD}</summary>`, ``);
   lines.push(`- **Finding id:** \`${card.id}\` · **Category:** ${card.technical.category} · **Severity:** ${card.severity}`);
   if (card.technical.evidence) lines.push(`- **Evidence:** \`${card.technical.evidence}\``);
   lines.push(`- **Route:** \`${card.technical.route}\``);
-  if (input.audience !== "qa") lines.push(`- The full entry, with the repro trace and a test skeleton, is under the same id in the technical detail below.`);
-  lines.push(``, `</details>`, ``);
+  if (input.audience !== "qa") lines.push(`- The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.`);
+  lines.push(``, `</details>`, ``, `</details>`, ``);
   return lines;
 }
 
-/** The whole plain section: the summary, then each problem this run found, worst first. */
+/**
+ * The pictures: each problem that has one, under its number and title. The
+ * line under the title ends with the finding's id, which is where the HTML
+ * report puts the frames recorded before it was filed. Empty, with no heading,
+ * when no problem has a picture, so a run that was not recorded and took no
+ * pictures has no Evidence section at all.
+ */
+export function formatEvidenceSection(input: Pick<PlainInput, "current" | "lastFrames">): string[] {
+  const lines: string[] = [];
+  input.current.forEach((f, i) => {
+    const card = plainCard(f, { lastFrame: input.lastFrames?.get(f.id) });
+    if (!card.picture) return;
+    lines.push(`### ${i + 1}. ${card.title.replace(/\s*\r?\n\s*/g, " ")}`, ``, `**${card.impact}** · on ${card.page} · finding \`${card.id}\``, ``);
+    lines.push(`![What the page showed](${card.picture.file})`, ``);
+  });
+  if (lines.length === 0) return [];
+  return [`## ${EVIDENCE_HEADING}`, ``, `What the page showed for each problem, numbered as in the summary.`, ``, ...lines];
+}
+
+/**
+ * The plain part: the summary (what was checked, what was found, the problems
+ * as a table, the tickets, then each problem folded), then the Evidence.
+ */
 export function formatPlainSection(input: PlainInput): string[] {
-  const lines = [`## In plain words`, ``, ...plainSummary(input), ``, ...(input.tickets ?? [])];
-  input.current.forEach((f, i) => lines.push(...plainFinding(f, i + 1, input)));
+  // What was checked and what was found, as one opening paragraph.
+  const checked = plainCheckedLine(input.run);
+  const [found, ...rest] = plainSummary(input);
+  // The problems table straight after it, then what else the run noticed.
+  const lines = [`## ${SUMMARY_HEADING}`, ``, checked ? `${checked} ${found}` : found, ``, ...plainProblemTable(input.current)];
+  lines.push(...rest.slice(rest[0] === "" ? 1 : 0), ``);
+  lines.push(...(input.tickets ?? []));
+  if (input.current.length > 0) {
+    lines.push(`### Each problem`, ``, `Open a problem for the steps to see it, what was expected and what happened.`, ``);
+    input.current.forEach((f, i) => lines.push(...plainFinding(f, i + 1, input)));
+  }
+  lines.push(...formatEvidenceSection(input));
   return lines;
 }

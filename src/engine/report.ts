@@ -22,7 +22,7 @@ import { calibrate, formatCalibration } from "./calibration.js";
 import { formatPace, measurePace } from "./pace.js";
 import { formatLoadRetries } from "./limits.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
-import { DEFAULT_REPORT_AUDIENCE, formatPlainSection, pictureOf, type ReportAudience } from "./plain.js";
+import { DEFAULT_REPORT_AUDIENCE, escapeTableCell, formatPlainSection, pictureOf, TECHNICAL_HEADING, type PlainRun, type ReportAudience } from "./plain.js";
 import { formatTicketsPlain, formatTicketsTechnical, ticketSummaryLine, type TicketReportInput } from "./tickets.js";
 import { COLLECTOR_CAP } from "./collector.js";
 import { buildRunRecord, fromRunLine, type RunRecord } from "./from-run.js";
@@ -393,17 +393,8 @@ function offersSubmit(elements: Record<string, unknown>): boolean {
 // then means "we did not look far enough", not "there is nothing to submit" —
 // never suppress on that basis.
 
-/**
- * Make app-controlled text safe inside a Markdown table cell. The backslash
- * must be escaped FIRST: escaping only the pipe turns an input of `\|` into
- * `\\|`, which Markdown reads as a literal backslash followed by a live
- * column separator — the app's own error text could then break the table, or
- * forge an extra column in a report people trust. Newlines end a row, so they
- * are flattened too.
- */
-export function escapeTableCell(text: string): string {
-  return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
-}
+/** Kept here too: callers import the table-cell escape from the report. */
+export { escapeTableCell };
 
 /**
  * Split routes where something was typed/picked/attached into the ones that
@@ -707,11 +698,17 @@ export function lastFrames(memory: MemoryStore): Map<string, string> {
   );
 }
 
+/** Whether the technical report is folded under its own heading: only when the plain part comes first. */
+function foldsTechnical(extras: ReportExtras | undefined): boolean {
+  return (extras?.report ?? DEFAULT_REPORT_AUDIENCE) === "both";
+}
+
 /**
  * The document for an audience. `technical` is the report's lines, its title
- * and date before the first section. The plain section is built only when it
- * is printed: "both" puts it between the date and the technical report, which
- * gets a heading of its own, and "qa" prints it alone.
+ * and date before the first section. The plain part is built only when it is
+ * printed: "both" puts the Summary and the Evidence between the date and the
+ * technical report, which goes under a heading of its own, folded, and "qa"
+ * prints the plain part alone.
  */
 export function withAudience(technical: readonly string[], audience: ReportAudience, plain: () => string[]): string {
   if (audience === "dev") return technical.join("\n");
@@ -724,12 +721,38 @@ export function withAudience(technical: readonly string[], audience: ReportAudie
   return [
     ...head,
     ...plain(),
-    `## Technical detail`,
+    `## ${TECHNICAL_HEADING}`,
     ``,
-    `Everything below is for developers: requests, oracles, routes and ids, the gap ledger and a test skeleton for each finding.`,
+    `<details><summary>For developers: run metrics, page scores, the gap ledger, each finding with its requests, route, id and a test skeleton, and what was left unexplored.</summary>`,
     ``,
-    ...body,
+    ...body.slice(0, body.length - [...body].reverse().findIndex((l) => l !== "")),
+    ``,
+    `</details>`,
+    ``,
   ].join("\n");
+}
+
+/** What the summary says about the check itself: the site, when and how long (unless timing is left out), and the care level. */
+function plainRunOf(memory: MemoryStore, extras: ReportExtras | undefined): PlainRun {
+  const actions = memory.actionsThisRun();
+  let site: string | undefined;
+  for (const a of actions) {
+    try {
+      const u = new URL(a.url);
+      if (u.protocol === "http:" || u.protocol === "https:") {
+        site = u.origin;
+        break;
+      }
+    } catch {
+      // A step with no address (a press, a note) says nothing about the site.
+    }
+  }
+  const timed = extras?.pace !== false && actions.length > 0;
+  return {
+    ...(site ? { site } : {}),
+    ...(extras?.mode ? { mode: extras.mode } : {}),
+    ...(timed ? { startedAt: actions[0].at, endedAt: actions[actions.length - 1].at } : {}),
+  };
 }
 
 /**
@@ -783,7 +806,7 @@ export function generateReport(
   lines.push(``);
   lines.push(`Generated: ${new Date().toISOString()}`);
   lines.push(``);
-  lines.push(`## Summary`);
+  lines.push(`## Run metrics`);
   lines.push(``);
   lines.push(`| Metric | Value |`);
   lines.push(`|---|---|`);
@@ -834,6 +857,7 @@ export function generateReport(
       gaps,
       lastFrames: frames,
       audience: extras?.report ?? DEFAULT_REPORT_AUDIENCE,
+      run: plainRunOf(memory, extras),
       tickets: formatTicketsPlain({
         ...ticketInput,
         problemNumber: new Map(current.map((f, i) => [f.id, i + 1])),
@@ -989,7 +1013,7 @@ function gapLedgerSection(lines: string[], memory: MemoryStore, extras: ReportEx
 }
 
 /** A finding's full entry, written to `lines`: open, or `complete` for a resolved one. */
-function findingRenderer(lines: string[]): (f: Finding, complete?: boolean) => void {
+function findingRenderer(lines: string[], folded = false): (f: Finding, complete?: boolean) => void {
   const renderFinding = (f: Finding, complete = false): void => {
     lines.push(complete ? `### 🟢 [COMPLETE] ${f.title}` : `### ${SEVERITY_ICON[f.severity]} [${f.severity.toUpperCase()}] ${f.title}`);
     lines.push(``);
@@ -1012,15 +1036,17 @@ function findingRenderer(lines: string[]): (f: Finding, complete?: boolean) => v
       lines.push(`- **Re-tested:**${sayVerification(f).replace(/^ · /, " ")}${f.verifyNote ? ` — ${f.verifyNote}` : ""}`);
     }
     lines.push(``);
-    lines.push(f.detail);
+    // Inside the fold, a detail line that is itself a fold's tag would open or close one; it is written as text.
+    lines.push(folded ? f.detail.replace(/^(\s*)<(\/?(?:details|summary)\b)/gim, "$1&lt;$2") : f.detail);
     lines.push(``);
     if (f.repro.length > 0) {
-      lines.push(`<details><summary>Repro trace (last actions before finding)</summary>`);
+      // Inside the folded technical part the trace is a plain list: a fold in
+      // a fold is one more click, and not every Markdown viewer nests them.
+      lines.push(folded ? `**Repro trace (last actions before finding):**` : `<details><summary>Repro trace (last actions before finding)</summary>`);
       lines.push(``);
       f.repro.forEach((step, i) => lines.push(`${i + 1}. ${step}`));
       lines.push(``);
-      lines.push(`</details>`);
-      lines.push(``);
+      if (!folded) lines.push(`</details>`, ``);
     }
     lines.push("```ts");
     lines.push(playwrightSkeleton(f));
@@ -1032,7 +1058,7 @@ function findingRenderer(lines: string[]): (f: Finding, complete?: boolean) => v
 
 /** The findings seen this session in full, then the historical ones in full or as an index. */
 function findingSections(lines: string[], current: Finding[], historical: Finding[], extras: ReportExtras | undefined, now: number): void {
-  const renderFinding = findingRenderer(lines);
+  const renderFinding = findingRenderer(lines, foldsTechnical(extras));
   lines.push(`## Findings — seen this session (${current.length})`);
   lines.push(``);
   if (current.length === 0) lines.push(`None recorded or re-confirmed this session.`, ``);
@@ -1072,7 +1098,7 @@ function findingSections(lines: string[], current: Finding[], historical: Findin
 
 /** The resolved findings, in full or as an index. */
 function resolvedSection(lines: string[], resolved: Finding[], extras: ReportExtras | undefined, now: number): void {
-  const renderFinding = findingRenderer(lines);
+  const renderFinding = findingRenderer(lines, foldsTechnical(extras));
   if (resolved.length > 0) {
     lines.push(`## ✅ Resolved (${resolved.length})`);
     lines.push(``);

@@ -814,7 +814,7 @@ async function ticketsCheck(client: Client): Promise<void> {
     const md = fs.readFileSync(path.join(projectDir, ".scenescout", "report.md"), "utf8");
     const plain = md.indexOf("### The tickets");
     const technical = md.indexOf("## Acceptance criteria");
-    if (plain < 0 || technical < 0 || !(plain < md.indexOf("## Technical detail") && md.indexOf("## Technical detail") < technical))
+    if (plain < 0 || technical < 0 || !(plain < md.indexOf("## Technical details") && md.indexOf("## Technical details") < technical))
       fail(`the report does not answer the ticket in the plain view first and the technical report after:\n${md.slice(0, 1500)}`);
     assertClosedAll(await call("scout_close", { all: true }));
     console.log(
