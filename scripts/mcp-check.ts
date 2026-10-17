@@ -67,6 +67,7 @@ const EXPECTED_TOOLS = [
   "scout_team_report",
   "scout_ticket_preview",
   "scout_ticket_file",
+  "scout_ticket_status",
 ];
 
 type ToolText = { content: Array<{ type: string; text?: string }> };
@@ -1332,14 +1333,28 @@ async function ticketToolsCheck(): Promise<void> {
       if (JSON.stringify(outProps) !== JSON.stringify(outputs))
         fail(`${name}'s output schema is ${JSON.stringify(outProps)}, expected ${JSON.stringify(outputs)}`);
     }
+    // The watch reads only: annotated read-only and idempotent, its one input optional, and no credential.
+    const status = tool("scout_ticket_status");
+    const sa = status?.annotations;
+    if (sa?.readOnlyHint !== true || sa?.destructiveHint !== false || sa?.idempotentHint !== true || sa?.openWorldHint !== true)
+      fail(`scout_ticket_status is not annotated read-only, idempotent and open-world: ${JSON.stringify(sa)}`);
+    const statusIn = status?.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+    if (JSON.stringify(Object.keys(statusIn.properties ?? {})) !== JSON.stringify(["address"]) || (statusIn.required ?? []).length > 0)
+      fail(`scout_ticket_status takes ${JSON.stringify(statusIn)}, expected an optional address only`);
+    const statusOut = Object.keys((status?.outputSchema as { properties?: Record<string, unknown> } | undefined)?.properties ?? {});
+    if (JSON.stringify(statusOut) !== JSON.stringify(["readAt", "fresh", "nextReadAt", "tickets", "problems"]))
+      fail(`scout_ticket_status's output schema is ${JSON.stringify(statusOut)}`);
     const call = async (name: string, args: Record<string, unknown>): Promise<Result> => (await client.callTool({ name, arguments: args })) as Result;
     const preview = await call("scout_ticket_preview", { ids: ["a1b2c3d4e5"], to: "github", target: "acme/shop" });
     const file = await call("scout_ticket_file", { previewId: "tp-AAAAAAAAAAAAAAAA" });
-    return { preview, file };
+    const watch = await call("scout_ticket_status", {});
+    return { preview, file, watch };
   });
   for (const [name, r] of Object.entries(out))
     if (!r.isError || !/No project is open yet/.test(textOf(r))) fail(`${name} with no project open did not say to attach first: ${textOf(r)}`);
-  console.log("✓ scout_ticket_preview and scout_ticket_file are annotated and schema'd, take no credential, and refuse with no project open");
+  console.log(
+    "✓ scout_ticket_preview, scout_ticket_file and scout_ticket_status are annotated and schema'd, take no credential, and refuse with no project open",
+  );
 }
 
 /**

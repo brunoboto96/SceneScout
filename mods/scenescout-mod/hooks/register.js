@@ -16,6 +16,7 @@
  */
 import { PANE_ID, POLL_MS, callPlan, fallbackText, laneModelSetting, readResult, renderPane, serverCandidates, spawnModel, unreachable } from "./pane.js";
 import {
+  ACTION_PROMPT,
   CARDS_TOOL,
   CONFIRM_TOOL,
   DIRECT_TOOLS,
@@ -27,6 +28,7 @@ import {
   RESULTS_LIMIT,
   SAVED_TOOL,
   TEAM_REPORT_TOOL,
+  THOROUGHNESS_LABEL,
   afterConfirm,
   afterPlan,
   afterSavedRun,
@@ -49,13 +51,42 @@ import {
   TOUR_SEEN_KEY,
   wizardOf,
 } from "./guided.js";
-import { BAND_WORDS, afterQueuedRun, bandLine, keepsPolling, nextQueued, plainLine, renderBand, statusLine } from "./run.js";
+import {
+  BAND_WORDS,
+  COST_STORE_KEY,
+  COST_WORDS,
+  TICKET_POLL_MS,
+  TICKET_STATUS_TOOL,
+  afterQueuedRun,
+  bandLine,
+  costAmount,
+  costHistory,
+  costOffer,
+  costStep,
+  costUsed,
+  filesTickets,
+  isFinished,
+  keepsPolling,
+  mergeTickets,
+  nextQueued,
+  plainLine,
+  readTicketStatus,
+  renderBand,
+  startCostWatch,
+  statusLine,
+  ticketToasts,
+  ticketsDue,
+} from "./run.js";
 
 // What a drawing reads lives in $.state (types/index.d.ts), so a reload of the mod keeps the panel where it was.
 const WIZARD = { plugin: "scenescout-mod", key: "wizard" };
 const STATUS = { plugin: "scenescout-mod", key: "status" };
 const PICTURE = { plugin: "scenescout-mod", key: "picture" };
 const CONFIRMED = { plugin: "scenescout-mod", key: "confirmed" };
+/** The tickets SceneScout filed for the project, as the last scout_ticket_status reading had them. */
+const TICKETS = { plugin: "scenescout-mod", key: "tickets" };
+/** The check being measured against the person's limit (design 2.11), or null. */
+const COST = { plugin: "scenescout-mod", key: "cost" };
 
 /** Whether the pane is open; the timer polls only while it is. */
 let isOpen = false;
@@ -65,6 +96,14 @@ let isPolling = false;
 let lastGood = null;
 /** The poll timer, so a second session.start replaces it rather than adding one. */
 let timer = null;
+/** The watched tickets' timer, every TICKET_POLL_MS, replaced like the poll's on a reload. */
+let ticketTimer = null;
+/** Whether something since the last reading could have changed the filed tickets: a load of the mod, a filing, a check that ended. */
+let ticketsAsked = true;
+/** The last guided check seen ended, so its end re-arms the ticket watch once. */
+let endedPlan = null;
+/** The limit the person set for a plan still waiting on their yes, by plan id. In this load only: a reload starts that check with no limit. */
+const capFor = new Map();
 /** Whether a model turn is running: a message then goes into it rather than waiting for a turn of its own. */
 let isWorking = false;
 /**
@@ -92,6 +131,18 @@ export function register(on, options) {
   on("session.start", async ($, e, next) => {
     // session.start runs again after a reload of this mod; keep one timer.
     timer?.cancel();
+    ticketTimer?.cancel();
+    // Filed tickets are watched while Claude Code is open and one of them is open; the server reads each tracker at most every five minutes anyway.
+    ticketsAsked = true;
+    ticketTimer = $.clock.every(TICKET_POLL_MS, async () => {
+      if (!ticketsDue((await $.state.get(TICKETS)).value ?? null, ticketsAsked)) return;
+      // What was owed is settled only by a fresh reading: one that failed, or a kept one, is asked again at the next tick.
+      const settled = await watchTickets($, servers).catch((err) => {
+        $.ui.log(`SceneScout: the filed tickets could not be read: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      });
+      if (settled) ticketsAsked = false;
+    });
     // A plan being built when the mod reloaded is not being built by this load: its busy mark would hold the queue for good.
     await updateWizard($, (w) => (w.busy === "plan" || w.busy === "recheck" ? { ...w, busy: null } : w));
     timer = $.clock.every(POLL_MS, async () => {
@@ -142,7 +193,9 @@ export function register(on, options) {
     const picture = (await $.state.get(PICTURE)).value ?? null;
     const runPane = status.kind === "data" || status.kind === "text" ? renderPane(els, status) : null;
     const shown = picture && picture.id === wizard.cardId ? picture : null;
-    return renderGuided(els, wizard, { surface: e.surface, status, picture: shown, runPane }, (type, payload = {}) => {
+    const tickets = (await $.state.get(TICKETS)).value ?? null;
+    const cost = wizard.step === "configuring" ? await costOfferNow($, wizard.draft.thoroughness) : null;
+    return renderGuided(els, wizard, { surface: e.surface, status, picture: shown, runPane, cost, tickets }, (type, payload = {}) => {
       // Fired, never awaited: a press must not hold anything up while the server or a form answers.
       void perform($, servers, type, payload).catch((err) => toast($, `SceneScout: ${err instanceof Error ? err.message : String(err)}`));
     });
@@ -152,7 +205,11 @@ export function register(on, options) {
   // A build without the band never raises it, and the panel and the status line work the same.
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props?.hasSurvey) return next(e);
-    const line = bandLine(wizardOf((await $.state.get(WIZARD)).value), (await $.state.get(STATUS)).value ?? { kind: "loading" });
+    const line = bandLine(
+      wizardOf((await $.state.get(WIZARD)).value),
+      (await $.state.get(STATUS)).value ?? { kind: "loading" },
+      (await $.state.get(TICKETS)).value ?? null,
+    );
     if (!line) return next(e);
     const els = $.ui.resolve(e);
     // Another mod's band, or the engine's, stays beneath this line.
@@ -169,16 +226,22 @@ export function register(on, options) {
     if (!guardFor(e, [])) return next(e);
     const guard = guardFor(e, (await $.state.get(CONFIRMED)).value ?? []);
     if (!guard) return next(e);
+    // Claude filing tickets, once the call has run: the watch reads them at its next tick.
+    const go = async () => {
+      const result = await next(e);
+      if (filesTickets(e)) ticketsAsked = true;
+      return result;
+    };
     let answer = "";
     try {
       answer = await $.ui.ask(guard.question, [guard.allow, guard.refuse]);
     } catch (err) {
       // An older Claude Code build has no dialog to ask with: the server's form still decides.
-      if (err instanceof TypeError && /\bask\b.*not a function|not a function.*\bask\b/.test(err.message)) return next(e);
+      if (err instanceof TypeError && /\bask\b.*not a function|not a function.*\bask\b/.test(err.message)) return go();
       // Dismissed, or nobody to ask (claude -p): that is a no.
       return { deny: guard.deny };
     }
-    return answer === guard.allow ? next(e) : { deny: guard.deny };
+    return answer === guard.allow ? go() : { deny: guard.deny };
   }).catch(($, e, next) =>
     next.called
       ? next(e)
@@ -186,6 +249,12 @@ export function register(on, options) {
         ? { deny: "The SceneScout mod could not ask the person first, so this call was not made. Ask the person what they want." }
         : next(e),
   );
+
+  // Each change in the session's usage: a check being measured is warned at 80% of the person's limit and stopped at it (design 2.11).
+  on("session.measure", async ($, e, next) => {
+    await measureCheck($, servers, e);
+    return next(e);
+  });
 
   // Registered only when the user chose a model: with lane_model empty the mod never sees a spawn.
   if (lane.model) {
@@ -285,8 +354,8 @@ async function sendToClaude($, text) {
 }
 
 /** Build a plan from these choices, then preview its confirmation or start Claude on it. */
-async function buildAndStart($, servers, choices) {
-  return planAndStart($, servers, "plan", () => callServer($, servers, PLAN_TOOL, { choices }), afterPlan);
+async function buildAndStart($, servers, choices, cap = null) {
+  return planAndStart($, servers, "plan", () => callServer($, servers, PLAN_TOOL, { choices }), afterPlan, cap);
 }
 
 /** A toast as plain text, at most `max` characters: a server's error sentence or a check's name in it can quote the tested page. */
@@ -313,7 +382,7 @@ async function guarded($, fn) {
  * Claude on it, as `after` reads the answer: a new check, a re-check, or a
  * saved check run again.
  */
-async function planAndStart($, servers, busy, ask, after) {
+async function planAndStart($, servers, busy, ask, after, cap = null) {
   await updateWizard($, (w) => ({ ...w, busy, notice: null }));
   const result = await ask();
   let send;
@@ -326,6 +395,9 @@ async function planAndStart($, servers, busy, ask, after) {
   });
   // The person pressed Start on a plan that needs no form: Claude's attach with it is theirs, so it is not asked about again.
   if (send && planId) await rememberConfirmed($, planId);
+  if (send && planId) await startCost($, planId, cap);
+  // A plan waiting on the person's yes keeps its limit until they give it.
+  else if (planId && cap !== null) capFor.set(planId, cap);
   if (send) await sendToClaude($, send);
 }
 
@@ -358,7 +430,8 @@ async function perform($, servers, type, payload) {
           const text = checked.error;
           return updateWizard($, (x) => ({ ...x, notice: { tone: "error", text } }));
         }
-        return buildAndStart($, servers, checked.choices);
+        // The limit the person set on this screen applies to this check, and to no other start.
+        return buildAndStart($, servers, checked.choices, w.draft.cap);
       });
     case "lookOnly":
       return guarded($, async () => {
@@ -366,7 +439,7 @@ async function perform($, servers, type, payload) {
         const choices = w.plan?.choices;
         if (!choices) return updateWizard($, (x) => reduce(x, { type: "go", step: "configuring" }));
         await updateWizard($, (x) => ({ ...x, draft: { ...x.draft, care: "look-only" } }));
-        return buildAndStart($, servers, { ...choices, care: "look-only" });
+        return buildAndStart($, servers, { ...choices, care: "look-only" }, w.draft.cap);
       });
     case "runAgain":
       return guarded($, async () => {
@@ -486,7 +559,11 @@ async function confirmPlan($, servers, planId) {
     send = after.send;
     return after.wizard;
   });
-  if (result?.structuredContent?.accepted === true) await rememberConfirmed($, planId);
+  if (result?.structuredContent?.accepted === true) {
+    await rememberConfirmed($, planId);
+    await startCost($, planId, capFor.get(planId) ?? null);
+    capFor.delete(planId);
+  }
   if (send) await sendToClaude($, send);
 }
 
@@ -568,7 +645,14 @@ async function poll($, servers) {
 async function afterPoll($, servers) {
   const w = wizardOf((await $.state.get(WIZARD)).value);
   const status = (await $.state.get(STATUS)).value ?? { kind: "loading" };
-  setStatusLine($, statusLine(w, status));
+  setStatusLine($, statusLine(w, status, (await $.state.get(TICKETS)).value ?? null));
+  await endCost($, status);
+  // A check that ended may have found a ticket's problem gone: the watch reads once more.
+  const g = status.kind === "data" ? status.data?.guided : null;
+  if (g && isFinished(g) && g.planId !== endedPlan) {
+    endedPlan = g.planId;
+    ticketsAsked = true;
+  }
   const now = await $.clock.now();
   sentAt ??= now;
   // A plan being built, by a press or a queued check, holds the queue.
@@ -625,4 +709,117 @@ async function startQueued($, servers, entry) {
   else if (w.started === entry.name) toast($, BAND_WORDS.toastStarted(entry.name));
   // One that did not start is said where the person sees it with the panel closed too.
   else if (w.notice?.tone === "error") toast($, BAND_WORDS.toastNotStarted(entry.name, w.notice.text));
+}
+
+// ---- Cost before and during a check (design 2.11) ----
+
+/** `$.session.usage()`, or null on a build without it. */
+async function usageNow($) {
+  try {
+    return await $.session.usage();
+  } catch {
+    return null;
+  }
+}
+
+/** The person's own earlier checks, or none where `$.store` cannot be read. */
+async function costsKept($) {
+  try {
+    return costHistory(await $.store.get(COST_STORE_KEY));
+  } catch {
+    return [];
+  }
+}
+
+/** What the configuring screen says a check uses, and the limits it offers. */
+async function costOfferNow($, thoroughness) {
+  return costOffer(await usageNow($), await costsKept($), thoroughness, THOROUGHNESS_LABEL[thoroughness] ?? thoroughness);
+}
+
+/**
+ * Start measuring a check Claude was just handed, from the usage now, with
+ * the limit the person set for it (none for a re-check, a saved check or a
+ * queued one, which start without that screen). A re-check is measured but
+ * not kept for the estimate: it is no check of a thoroughness.
+ */
+async function startCost($, planId, cap) {
+  const w = wizardOf((await $.state.get(WIZARD)).value);
+  const plan = w.planId === planId ? w.plan : null;
+  const thoroughness = typeof plan?.choices?.thoroughness === "string" ? plan.choices.thoroughness : w.draft.thoroughness;
+  await $.state.set(COST, startCostWatch(planId, await usageNow($), cap, thoroughness, !plan?.recheck));
+}
+
+/** The guided check the last poll showed, when it is this plan's and still going; else null. */
+async function goingCheck($, planId) {
+  const status = (await $.state.get(STATUS)).value ?? { kind: "loading" };
+  const g = status.kind === "data" ? status.data?.guided : null;
+  return g && g.planId === planId && !isFinished(g) ? g : null;
+}
+
+/**
+ * A usage reading for the check being measured: a toast at 80% of the limit,
+ * and at the limit Claude is asked to stop. Only while the server shows that
+ * check going: a watch whose check is not seen never stops anything else.
+ */
+async function measureCheck($, servers, usage) {
+  const watch = (await $.state.get(COST)).value ?? null;
+  if (!watch) return;
+  const step = costStep(watch, usage);
+  const going = (await goingCheck($, watch.planId)) !== null;
+  // The reading always counts; a warning or a stop is owed until the check is seen going, and then said.
+  await $.state.set(COST, going ? step.watch : { ...step.watch, warned: watch.warned, stopped: watch.stopped });
+  if (step.watch.cap === null || !step.says || !going) return;
+  const cap = costAmount(step.watch, step.watch.cap);
+  if (step.says === "warn") toast($, COST_WORDS.toastWarn(costAmount(step.watch, costUsed(step.watch), true), cap));
+  if (step.says === "stop") {
+    toast($, COST_WORDS.toastStop(cap));
+    await sendToClaude($, ACTION_PROMPT.stop);
+  }
+}
+
+/**
+ * After each poll: once the measured check has ended, what it used is kept
+ * with the person's checks for the next estimate; a watch the server shows
+ * another check in place of ends with nothing kept.
+ */
+async function endCost($, status) {
+  const watch = (await $.state.get(COST)).value ?? null;
+  const g = status.kind === "data" ? status.data?.guided : null;
+  if (!watch || !g) return;
+  if (g.planId !== watch.planId) {
+    await $.state.set(COST, null);
+    return;
+  }
+  if (!isFinished(g)) return;
+  await $.state.set(COST, null);
+  if (!watch.record) return;
+  try {
+    const kept = await costsKept($);
+    await $.store.set(COST_STORE_KEY, costHistory([...kept, { unit: watch.unit, kind: watch.kind, thoroughness: watch.thoroughness, used: costUsed(watch) }]));
+  } catch (err) {
+    // Not kept: the next estimate is made without this check, which is the only harm.
+    $.ui.log(`SceneScout: the check's usage could not be kept for the next estimate: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+// ---- Watched tickets (design 2.6) ----
+
+/**
+ * Read the filed tickets' state through the server, and toast what changed
+ * since the last reading; a place the server could not read keeps its tickets.
+ * True when the reading was fresh.
+ */
+async function watchTickets($, servers) {
+  const w = wizardOf((await $.state.get(WIZARD)).value);
+  const address = typeof w.lastChoices?.address === "string" ? w.lastChoices.address : undefined;
+  const result = await callServer($, servers, TICKET_STATUS_TOOL, address ? { address } : {});
+  const read = readTicketStatus(result);
+  if (!read) return false;
+  const s = result.structuredContent;
+  const problems = Array.isArray(s.problems) ? s.problems.map(String) : [];
+  const before = (await $.state.get(TICKETS)).value ?? null;
+  const tickets = mergeTickets(before, read, problems);
+  await $.state.set(TICKETS, tickets);
+  for (const line of ticketToasts(before, tickets)) toast($, line);
+  return s.fresh === true;
 }
