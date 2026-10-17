@@ -1618,6 +1618,27 @@ async function configCheck(): Promise<void> {
       // The contrast to uploads "fixtures": with no config, a file from disk goes on to the engine's own fence.
       const disk = await call("scout_upload", { filePath: "sample.pdf", session: "free", task: "Uploading a file" });
       if (/SceneScout config/.test(disk.text)) fail(`with no config, scout_upload was refused by a config:\n${disk.text}`);
+      // A session's config follows the session it runs: an attach refused before the old one closes keeps the old project's,
+      // and one that fails after the old one closed has started the new project's, whose own file holds uploads to fixtures.
+      const loose = path.join(dir, "loose");
+      const tight = path.join(dir, "tight");
+      fs.mkdirSync(loose, { recursive: true });
+      fs.mkdirSync(path.join(tight, ".scenescout"), { recursive: true });
+      fs.writeFileSync(path.join(tight, ".scenescout", "config.json"), JSON.stringify({ uploads: "fixtures" }));
+      const upload = (session: string) => call("scout_upload", { filePath: "sample.pdf", session, task: "Uploading a file" });
+      for (const s of ["kept", "moved"]) {
+        const first = await attach({ session: s, projectPath: loose });
+        if (first.isError) fail(`an attach to a project with no config file was refused:\n${first.text}`);
+      }
+      const noRole = await attach({ session: "kept", projectPath: tight, role: "nobody-saved-this" });
+      if (!noRole.isError) fail(`an attach naming a role with no saved profile was not refused:\n${noRole.text}`);
+      const kept = await upload("kept");
+      if (/SceneScout config/.test(kept.text)) fail(`an attach refused before the old session closed changed the old session's config:\n${kept.text}`);
+      const gone = await attach({ session: "moved", projectPath: tight, url: "http://127.0.0.1:9/" });
+      if (!gone.isError) fail(`an attach to an address nothing answers was not refused:\n${gone.text}`);
+      const moved = await upload("moved");
+      if (!moved.isError || !/uploads "fixtures" allows only generated files/.test(moved.text))
+        fail(`an attach that failed after the old session closed left the old project's config on the session:\n${moved.text}`);
       fs.mkdirSync(path.join(projectDir, ".scenescout"), { recursive: true });
       fs.writeFileSync(path.join(projectDir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "observe" }));
       const tightened = await attach({ mode: "read-only", session: "tight" });
@@ -1659,7 +1680,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();

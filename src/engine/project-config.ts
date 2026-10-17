@@ -299,15 +299,34 @@ export const fsPolicyReader: PolicyReader = {
     }
   },
   read: (file) => fs.readFileSync(file, "utf8"),
-  realpath: (file) => {
-    try {
-      // native: it expands a Windows short name (PROGRA~1), which the JavaScript one leaves as written.
-      return fs.realpathSync.native(file);
-    } catch {
-      return path.resolve(file);
-    }
-  },
+  realpath: (file) => realOrWhereItLeads(file, 0),
 };
+
+/**
+ * A path's real path; for a link whose target is not there yet, where it
+ * would lead, so projectsRoot judges a dangling link by its target rather
+ * than by its own name. Anything else that cannot be resolved is its path as
+ * written.
+ */
+function realOrWhereItLeads(file: string, hops: number): string {
+  try {
+    // native: it expands a Windows short name (PROGRA~1), which the JavaScript one leaves as written.
+    return fs.realpathSync.native(file);
+  } catch {
+    const at = path.resolve(file);
+    let link: string | null = null;
+    try {
+      link = fs.lstatSync(at).isSymbolicLink() ? fs.readlinkSync(at) : null;
+    } catch {
+      // Not there: the real path of the folder it would be in, with its name.
+      const up = path.dirname(at);
+      return up === at ? at : path.join(realOrWhereItLeads(up, hops), path.basename(at));
+    }
+    // A relative target is read from the link's real folder, as the system reads it, so `..` cannot step back into the root.
+    // A chain of dangling links is followed for 40 links, as far as Linux follows one.
+    return link !== null && hops < 40 ? realOrWhereItLeads(path.resolve(realOrWhereItLeads(path.dirname(at), hops + 1), link), hops + 1) : at;
+  }
+}
 
 /**
  * The operator's config: the file CONFIG_ENV names (which must exist), else

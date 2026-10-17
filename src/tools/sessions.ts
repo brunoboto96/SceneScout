@@ -542,9 +542,10 @@ export function registerSessionTools(): void {
             actionTimeoutMs,
             navTimeoutMs,
             memoryStore: store,
+            // Set as the old session closes, so the session's uploads follow this attach's config (engine/project-config.ts)
+            // from then on, also when a later step of the attach fails; a refusal before that leaves the old session's.
+            onSessionBegins: () => sessionPolicy.set(eng, config.loaded),
           });
-          // Set as soon as the session is the new one, so its uploads follow this attach's config (engine/project-config.ts).
-          sessionPolicy.set(eng, config.loaded);
           // Put the session on the board now, so the live view shows it before its
           // first tool call. liveLine() needs the port, so the server is awaited
           // here rather than started in the background by writeStatus.

@@ -3060,7 +3060,8 @@ test("config: projectsRoot holds every project folder by its real path, and only
 });
 
 test("config: a command's --project outside projectsRoot stops it before the project's file is read", () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-root-"));
+  // Its real path: on macOS the temp folder is reached through a link, which would refuse every folder here for that reason alone.
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ss-root-")));
   try {
     const launch = path.join(dir, "launch");
     const root = path.join(dir, "projects");
@@ -3078,6 +3079,22 @@ test("config: a command's --project outside projectsRoot stops it before the pro
     fs.symlinkSync(path.join(dir, "elsewhere"), path.join(root, "link"), "dir");
     const linked = configureCommand({}, launch, path.join(root, "link"), [], { mode: "read-only" }, fsPolicyReader);
     assert.ok(!linked.ok && /is outside the config's projectsRoot/.test(linked.error), linked.ok ? "ran" : linked.error);
+    // A link whose target is not there yet leads out of the root too: it is judged by where it leads, not by its own name.
+    fs.symlinkSync(path.join(dir, "not-yet"), path.join(root, "dangling"), "dir");
+    for (const at of [path.join(root, "dangling"), path.join(root, "dangling", "app")]) {
+      const dangling = configureCommand({}, launch, at, [], { mode: "read-only" }, fsPolicyReader);
+      assert.ok(!dangling.ok && /is outside the config's projectsRoot/.test(dangling.error), `${at}: ${dangling.ok ? "ran" : dangling.error}`);
+    }
+    // A relative target read from the link's real folder: root/out/back leads to elsewhere/../not-there, outside the root,
+    // though read from where the link is written it would be root/not-there.
+    fs.symlinkSync(path.join(dir, "elsewhere"), path.join(root, "out"), "dir");
+    fs.symlinkSync(path.join("..", "not-there"), path.join(dir, "elsewhere", "back"), "dir");
+    const back = configureCommand({}, launch, path.join(root, "out", "back"), [], { mode: "read-only" }, fsPolicyReader);
+    assert.ok(!back.ok && /is outside the config's projectsRoot/.test(back.error), back.ok ? "ran" : back.error);
+    // The contrast: a dangling link whose target would be inside the root is inside it.
+    fs.symlinkSync(path.join(root, "later"), path.join(root, "soon"), "dir");
+    const soon = configureCommand({}, launch, path.join(root, "soon"), [], { mode: "read-only" }, fsPolicyReader);
+    assert.ok(soon.ok, soon.ok ? "" : soon.error);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
