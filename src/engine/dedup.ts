@@ -21,7 +21,18 @@
 import { createHash } from "node:crypto";
 import { archiveApp, classify, findingText, type AnswerKey, type KeyContextual, type KeyEntry, type RunArchive } from "./bench.js";
 import { MIN_FOR_A_VERDICT } from "./calibration.js";
-import { addUsage, DEDUP_ENV, dedupModeFromEnv, judgeKeyConfig, NO_USAGE, type DedupMode, type ResolvedProvider, type ToolSpec, type Usage } from "./ci.js";
+import {
+  addUsage,
+  DEDUP_BASE_URL_ENV,
+  DEDUP_ENV,
+  dedupModeFromEnv,
+  judgeKeyConfig,
+  NO_USAGE,
+  type DedupMode,
+  type ResolvedProvider,
+  type ToolSpec,
+  type Usage,
+} from "./ci.js";
 import { withWatchdog } from "./dispatch.js";
 import { findingId, isDuplicateFinding, titleSimilarity, type DuplicateJudge, type Finding, type FindingInput, type JudgeVerdict } from "./memory.js";
 import { obj, type ModelTurn, type ToolCall } from "./provider.js";
@@ -588,8 +599,9 @@ export function planDedup(choice: DedupMode | undefined, env: Record<string, str
   }
   const key = judgeKeyConfig(env);
   if (!key.ok) return { mode, via: "off", why: key.error, note: `\n⚠ DEDUP JUDGE OFF: ${key.error}. The rule decides duplicates.` };
-  const { provider, model, effort } = key.resolved;
-  const label = `${provider} ${model}, effort ${effort}`;
+  const { provider, model, effort, baseUrl } = key.resolved;
+  const custom = env[DEDUP_BASE_URL_ENV]?.trim() ? ` at ${new URL(baseUrl).host}` : "";
+  const label = `${provider} ${model}${custom}, effort ${effort}`;
   return {
     mode,
     via: "key",
@@ -598,7 +610,7 @@ export function planDedup(choice: DedupMode | undefined, env: Record<string, str
     label,
     note:
       `\nFinding dedup: the rule, then a model judge (${label}), asked about a filing the rule keeps apart from everything recorded, against the open findings on its page. ` +
-      `Each pair it is asked about (titles, categories, evidence and the page's path) is sent to ${provider}.`,
+      `Each pair it is asked about (titles, categories, evidence and the page's path) is sent to ${provider}${custom}.`,
   };
 }
 

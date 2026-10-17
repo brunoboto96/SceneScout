@@ -662,7 +662,7 @@ Two findings the model files about one defect should be one entry in the report.
 - **Where the key stays.** The judge's calls are made by the run, not by the MCP server: the server asks for each one over its MCP connection (a sampling request), so the server's process still never has the key.
 - A rule merge is never put to the model, so the judge only adds merges and never splits what the rule joined. It was measured with OpenAI's `gpt-6-luna` at effort `none` ([docs/benchmark.md](benchmark.md#judge-run-2-the-judge-beats-the-rule-on-both-apps)); with another model or provider it has not been.
 
-Outside CI the judge is off: an agent's run dedups by the rule unless `SCENESCOUT_DEDUP=judge` is in the MCP server's environment (a `scout_attach {dedup: "judge"}` alone is refused), and then it needs `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the server's environment too ([configuration reference](guide/Configuration-reference.md#environment-variables)).
+Outside CI the judge is off: an agent's run dedups by the rule unless `SCENESCOUT_DEDUP=judge` is in the MCP server's environment (a `scout_attach {dedup: "judge"}` alone is refused), and then it needs `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the server's environment too; `SCENESCOUT_DEDUP_BASE_URL` points the judge at a private compatible endpoint ([configuration reference](guide/Configuration-reference.md#environment-variables)).
 
 ### Showing one element
 
