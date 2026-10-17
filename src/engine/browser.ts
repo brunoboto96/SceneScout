@@ -147,6 +147,7 @@ import {
   closeWaitsForLeavingWrites,
   awaitsDroppedNavigationErrorPage,
   droppedNavigationErrorPage,
+  errorPageExit,
   DROPPED_NAVIGATION_WAIT_MS,
   type BrowserEngineName,
 } from "../browsers.js";
@@ -434,6 +435,14 @@ interface MainDocumentWatch {
   /** After goto threw: the response, waited for briefly when the browser reports it only after the throw. */
   afterThrow: (err: unknown) => Promise<MainDocumentAnswer | null>;
   stop: () => void;
+}
+
+/** How the engine loaded an app page again with GET instead of going back to it (BrowserEngine.returnToAppPage). */
+interface AppPageReload {
+  /** The method going back would have sent again, or null when this session did not see the page's load. */
+  method: string | null;
+  /** The status that GET was answered with, or null when it had no answer. */
+  status: number | null;
 }
 
 /** What a click's result needs to judge a page error the click raised (rankRouteCancellations). */
@@ -878,6 +887,12 @@ export class BrowserEngine {
   private actionStartedAt = 0;
   /** When the write policy last dropped a navigation of the driven page's main frame (browsers.ts awaitsDroppedNavigationErrorPage). */
   private refusedNavigationAt: number | null = null;
+  /** Per page, the method of the request that loaded its last app document: going back to it re-sends it (browsers.ts errorPageExit). */
+  private readonly documentMethods = new WeakMap<Page, string>();
+  /** Per page, the main-frame load whose response arrived and whose page has not committed yet (noteDocumentLoad). */
+  private readonly pendingDocuments = new WeakMap<Page, { url: string; method: string }>();
+  /** Per page, its main frame's last address on the app's origin: where leaving an error page or another site returns to. */
+  private readonly lastAppUrls = new WeakMap<Page, string>();
   /**
    * Resources created by this RUN (safe-write): id → collection paths.
    * Backed by the shared MemoryStore so every named session in a multi-role
@@ -1791,6 +1806,7 @@ export class BrowserEngine {
     });
     context.on("response", (res) => {
       this.noteAuthAnswer(res);
+      this.noteDocumentLoad(res.request());
       this.watchResponse(res.request(), res.status());
       this.pageRequests.answered(res.request(), res.status(), Date.now(), this.guard.refused(res.request()));
     });
@@ -2035,9 +2051,41 @@ export class BrowserEngine {
     return out;
   }
 
+  /**
+   * Note the method of a main-frame load of an app page, as its response arrives; it counts once that address commits
+   * (wireEmbedMoves). A response that loads no page, a download or a 204, never commits, so it never replaces the
+   * method of the page still shown. A redirect's response comes first and the final one last, so a form that redirects
+   * after its POST is noted as the GET it ends on. A page off the app's origin is not noted: the page to return to from
+   * it is the app page before it.
+   */
+  private noteDocumentLoad(req: Request): void {
+    if (!req.isNavigationRequest() || !this.isSameOrigin(req.url())) return;
+    try {
+      const frame = req.frame();
+      if (frame === frame.page().mainFrame()) this.pendingDocuments.set(frame.page(), { url: BrowserEngine.withoutHash(req.url()), method: req.method() });
+    } catch {
+      /* no frame: not a page's document */
+    }
+  }
+
+  private static withoutHash(url: string): string {
+    const at = url.indexOf("#");
+    return at === -1 ? url : url.slice(0, at);
+  }
+
   /** Feed the page's navigations to the embed-move tracker and the foreign-frame record. Wired on every page we drive, like the dialog handler. */
   private wireEmbedMoves(page: Page): void {
     page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame() && this.isSameOrigin(frame.url())) {
+        this.lastAppUrls.set(page, frame.url());
+        // A load whose response was noted has committed. A same-document move (pushState, a fragment) matches none
+        // and keeps the method of the document it moved within.
+        const pending = this.pendingDocuments.get(page);
+        if (pending && pending.url === BrowserEngine.withoutHash(frame.url())) {
+          this.documentMethods.set(page, pending.method);
+          this.pendingDocuments.delete(page);
+        }
+      }
       if (page !== this.page) return;
       if (frame === page.mainFrame()) {
         this.embedMoves.pageLoaded(frame.url());
@@ -2654,7 +2702,7 @@ export class BrowserEngine {
    * when the action left no error page. Every path that acts on the page calls this: a click through afterAction and a
    * run_plan step after its settle, or the session is left where no script can reach the app.
    */
-  private async returnFromDroppedNavigation(): Promise<{ errorUrl: string; returnedTo: string } | null> {
+  private async returnFromDroppedNavigation(): Promise<{ errorUrl: string; returnedTo: string; reload: AppPageReload | null } | null> {
     const page = this.requirePage();
     const errorPage = droppedNavigationErrorPage(this.engineName);
     if (errorPage === null) return null;
@@ -2670,9 +2718,55 @@ export class BrowserEngine {
     }
     const errorUrl = page.url();
     if (!errorUrl.startsWith(errorPage) || this.blockedRequests.length === 0) return null;
-    await bestEffort(page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }));
+    const reload = await this.returnToAppPage(page);
     this.snapshots.dropRefs("the browser showed an error page in place of a navigation the write policy blocked");
-    return { errorUrl, returnedTo: page.url() };
+    return { errorUrl, returnedTo: page.url(), reload };
+  }
+
+  /**
+   * Leave a page the session must not stay on for the app page before it. Going back loads that page with the request
+   * that loaded it, and a browser re-sends a POST without asking (browsers.ts errorPageExit), so a page a write loaded,
+   * or one whose load this session did not see, is loaded again from its address with a GET. That GET is the engine's
+   * own request, like a scout_request call: an error it is answered with is said in the action's result and not charged
+   * to the page. Returns how the page was loaded again, or null when the session went back.
+   */
+  private async returnToAppPage(page: Page): Promise<AppPageReload | null> {
+    const method = this.documentMethods.get(page) ?? null;
+    const appUrl = this.lastAppUrls.get(page);
+    if (errorPageExit(method) === "get" && appUrl !== undefined) {
+      this.pendingReplay = { method: "GET", key: requestKey(appUrl) };
+      this.oracles.replayStarted(appUrl);
+      try {
+        const res = await bestEffort(page.goto(appUrl, { waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }), null);
+        return { method, status: res ? res.status() : null };
+      } finally {
+        this.pendingReplay = null;
+        this.oracles.replayEnded(appUrl);
+        for (const hop of this.replayHops.splice(0)) this.oracles.replayEnded(hop);
+      }
+    }
+    await bestEffort(page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }));
+    return null;
+  }
+
+  /** Why the page was loaded again with GET and what that GET was answered with, for an action's result. */
+  private static reloadWords(reload: AppPageReload): string {
+    const why =
+      reload.method !== null
+        ? `since going back would have sent again the ${reload.method} that loaded it`
+        : "since this session did not see how it was loaded, and going back would send again whatever request loaded it";
+    const answered =
+      reload.status !== null && reload.status >= 400
+        ? `; it answered HTTP ${reload.status} to that GET${reload.method !== null ? ", so the page shown is not the one the write reached" : ""}: that answer is to the engine's own GET, not something the page did`
+        : "";
+    return `${why}${answered}`;
+  }
+
+  /** How the session left the error page, for an action's result. */
+  private static leftErrorPage(dropped: { returnedTo: string; reload: AppPageReload | null }): string {
+    return dropped.reload !== null
+      ? `loaded ${dropped.returnedTo} again with GET, ${BrowserEngine.reloadWords(dropped.reload)}`
+      : `returned to ${dropped.returnedTo}`;
   }
 
   private async afterAction(action: string, target: string, click?: ClickContext): Promise<string> {
@@ -2686,7 +2780,8 @@ export class BrowserEngine {
       this.logAction({ action, target, url: dropped.errorUrl });
       this.logAction({ action: "write-policy:navigation-blocked", target: dropped.errorUrl.slice(0, 200), url: dropped.errorUrl });
       return (
-        `OK: ${action} ${target}\nThe page tried to navigate with a request the write policy blocked, so the browser showed an error page; returned to ${dropped.returnedTo}.` +
+        `OK: ${action} ${target}\nThe page tried to navigate with a request the write policy blocked, so the browser showed an error page; ${BrowserEngine.leftErrorPage(dropped)}.` +
+        this.drainMutations() +
         this.drainBlocked() +
         this.drainRefresh() +
         this.drainDialogs() +
@@ -2698,11 +2793,12 @@ export class BrowserEngine {
       // A click carried us off the app's origin.
       this.logAction({ action, target, url });
       this.logAction({ action: "origin-fence:bounced", target: url.slice(0, 200), url });
-      await bestEffort(page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }));
+      const reload = await this.returnToAppPage(page);
       url = page.url();
       this.snapshots.dropRefs("the page left the app's origin");
       return (
-        `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}. Exploration is fenced to ${this.baseUrl}.` +
+        `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}${reload ? ` (loaded again with GET, ${BrowserEngine.reloadWords(reload)})` : ""}. Exploration is fenced to ${this.baseUrl}.` +
+        this.drainMutations() +
         this.drainBlocked() +
         this.drainRefresh() +
         this.drainDialogs() +
@@ -4576,6 +4672,10 @@ export class BrowserEngine {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
     this.leaveChoice = leave;
+    // The method noted for this page is the current page's, not the entry going back reaches: that entry can be the
+    // error page of a refused write, and the one behind it a page a POST loaded. A page the back loads over the network is
+    // noted again as it commits; one it does not (the error page, the back-forward cache) is unknown, and is left by GET.
+    this.documentMethods.delete(page);
     try {
       // A back that goes nowhere (no history, a cancelled leave) is reported by the URL the result shows.
       await page.goBack({ waitUntil: "domcontentloaded", timeout: this.limits.backNavMs }).catch((err: unknown) => {
@@ -5160,7 +5260,7 @@ export class BrowserEngine {
       const dropped = await this.returnFromDroppedNavigation();
       if (dropped) {
         this.logAction({ action: "write-policy:navigation-blocked", target: dropped.errorUrl.slice(0, 200), url: dropped.errorUrl });
-        note += `; the page tried to navigate with a request the write policy blocked, so the browser showed an error page; returned to ${dropped.returnedTo}`;
+        note += `; the page tried to navigate with a request the write policy blocked, so the browser showed an error page; ${BrowserEngine.leftErrorPage(dropped)}`;
       }
       if (form) this.noteFormSubmit(preState, form.kind, form.probe);
       // A plan is the RECOMMENDED way to run a mechanical sequence, so its
