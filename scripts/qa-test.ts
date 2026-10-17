@@ -2147,6 +2147,30 @@ test("check stage: without the run's id in the dispatch's answer, the run is fou
   );
 });
 
+test("check stage: a dispatch that answered 502 but started its run is followed; one that started nothing is reported as failed", async () => {
+  const landedRun = {
+    id: 900,
+    event: "workflow_dispatch",
+    head_sha: "a".repeat(40),
+    display_title: "scenescout-qa-check · #7 · scenescout-42-1",
+    created_at: "2026-10-07T10:00:03Z",
+  };
+  // Landed: the same 502, and the run is in the workflow's list under this stage's dispatch id.
+  await withGitHub(actionsApi({ dispatch: 502, runs: [landedRun] }), async (api, calls) => {
+    const out = await runDispatch({ env: dispatchEnv(tempDir(), api), inputs: CHECK_INPUTS, log: quiet, ...fakeClock() });
+    assert.equal(out.download, "true");
+    assert.equal(out["run-id"], "900");
+    assert.equal(calls.filter((c) => c.url.endsWith("/dispatches")).length, 1, "the dispatch is not sent a second time");
+    assert.ok(!calls.some((c) => c.url.endsWith("/comments")), "the pull request is not told the check failed");
+  });
+  // Not landed: the 502 and a list with only another dispatch's run (same commit, another dispatch id) and no run of ours.
+  const other = { ...landedRun, id: 899, display_title: "scenescout-qa-check · #7 · scenescout-41-1" };
+  await withGitHub(actionsApi({ dispatch: 502, runs: [other] }), async (api, calls) => {
+    await assert.rejects(runDispatch({ env: dispatchEnv(tempDir(), api), inputs: CHECK_INPUTS, log: quiet, ...fakeClock() }), /dispatches failed|502/);
+    assert.equal(calls.filter((c) => c.url.endsWith("/dispatches")).length, 1);
+  });
+});
+
 test("check stage: an unknown workflow, a refused dispatch, a run that cannot be found and a run that outlasts the wait each reply and stop", async () => {
   const cases: Array<[string, Parameters<typeof actionsApi>[0], RegExp]> = [
     ["an unknown workflow", { workflow: 404 }, /has no workflow `browser-tests\.yml`/],
