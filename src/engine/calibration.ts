@@ -20,6 +20,8 @@
  *
  * Pure, so every rule here is table-tested.
  */
+import { fromJs } from "./js-regex.js";
+import { SPACE, LinearRegex } from "./linear-regex.js";
 import { requestsPair, type StatedRequest, statedRequests, templatedPathsMatch } from "./lane.js";
 import { failingSignatures, isWorthALook, type Finding } from "./memory.js";
 
@@ -365,7 +367,7 @@ export function unfiledDefects(
     // written: the store reads no `*` in a path, so `GET /api/things/* 500`
     // has no signature of its own.
     if (f.evidence) for (const key of joinKeys(f.evidence)) keys.push(...statedRequests(key));
-    keys.push(...requests.filter((q) => q.status !== null && /^[45]/.test(q.status)));
+    keys.push(...requests.filter((q) => q.status !== null && isErrorStatus(q.status)));
     filed.push({
       ids: identifiers(text),
       words: words(text),
@@ -425,6 +427,21 @@ function matchesText(reported: string, f: Filed): boolean {
   return (text !== "" && f.templated === text) || restates(text, f.templated) || covers(identifiers(reported), words(reported), f);
 }
 
+/** What must stand before an id segment's slash: a letter, an underscore or a closing brace, then more path characters. */
+const PATH_HEAD = String.raw`[A-Za-z_}][\w.}-]*`;
+/**
+ * JavaScript read these two with a lookbehind of PATH_HEAD, which RE2 has not. The path head is part of the match
+ * here (group 1) and is given back: the text it covers is never an id segment's, so the match before it ends short of it.
+ * The last group is the lookahead.
+ */
+const NUMBER_LIST_RE = new LinearRegex(String.raw`(${PATH_HEAD})\/\d+(?:[${SPACE}]*,[${SPACE}]*\/?\d+)*($|[/${SPACE},;:)?#\]])`, { lookahead: true });
+// A template segment after another is judged by what stands before its slash: a `{name}` or a `:name` ends in a
+// path character, a `*` does not, so a `*` ends the chain.
+const TEMPLATE_SEGMENT = String.raw`(?:\{[^}/${SPACE}]+\}|:[A-Za-z_][A-Za-z0-9_]*)`;
+const TEMPLATE_CHAIN_RE = new LinearRegex(String.raw`(${PATH_HEAD})((?:\/${TEMPLATE_SEGMENT})+(?:\/\*)?|\/\*)($|[/${SPACE},;)?#\]])`, { lookahead: true });
+
+const isErrorStatus = (status: string) => status.startsWith("4") || status.startsWith("5");
+
 /**
  * Text with every id segment of a path written `:id`: a number, a list of
  * numbers (`/5,/1,/2`, `/5,1`), or a template (`{thingId}`, `:id`, `*`). Only
@@ -432,9 +449,9 @@ function matchesText(reported: string, f: Filed): boolean {
  * (`3/4`, `3.1:1`) or a count in the text is left alone.
  */
 export function templateIds(text: string): string {
-  return text
-    .replace(/(?<=[A-Za-z_}][\w.}-]*)\/\d+(?:\s*,\s*\/?\d+)*(?=$|[/\s,;:)?#\]])/g, "/:id")
-    .replace(/(?<=[A-Za-z_}][\w.}-]*)\/(?:\{[^}/\s]+\}|:[A-Za-z_][A-Za-z0-9_]*|\*)(?=$|[/\s,;)?#\]])/g, "/:id");
+  const numbers = NUMBER_LIST_RE.replace(text, ({ groups }) => `${groups[1]}/:id`);
+  // A chain of template segments is one match; each segment in it, a slash and a template, becomes "/:id".
+  return TEMPLATE_CHAIN_RE.replace(numbers, ({ groups }) => `${groups[1]}${"/:id".repeat((groups[2] ?? "").split("/").length - 1)}`);
 }
 
 /**
@@ -448,7 +465,7 @@ export function templateIds(text: string): string {
  */
 function restatesRequest(evidence: string, failing: readonly StatedRequest[], f: Filed): boolean {
   for (const r of statedRequests(evidence)) {
-    if (r.status !== null && /^[45]/.test(r.status)) continue;
+    if (r.status !== null && isErrorStatus(r.status)) continue;
     const paired = f.requests.find((q) => requestsPair(r, q));
     if (!paired) continue;
     if (!failing.every((sig) => sig.method === r.method && templatedPathsMatch(sig.segments, r.segments))) continue;
@@ -463,7 +480,7 @@ function restatesRequest(evidence: string, failing: readonly StatedRequest[], f:
  * should have returned: "(expected 403)", "(reject 403)", "reject 403". One
  * status, an optional verb, optional brackets, and nothing else.
  */
-const EXPECTED_STATUS_RE = /^[\s,;]*\(?\s*(?:(?:expected|expect|rejected|reject)\s*:?\s*)?([1-5]\d{2})\s*\)?[\s.,;]*$/;
+const EXPECTED_STATUS_RE = fromJs(String.raw`^[\s,;]*\(?\s*(?:(?:expected|expect|rejected|reject)\s*:?\s*)?([1-5]\d{2})\s*\)?[\s.,;]*$`);
 
 /**
  * Whether the reported evidence is the filed evidence followed by nothing but
@@ -473,7 +490,7 @@ const EXPECTED_STATUS_RE = /^[\s,;]*\(?\s*(?:(?:expected|expect|rejected|reject)
  */
 function addsOnlyExpectedStatus(reported: string, filed: string, status: string | null): boolean {
   if (filed === "" || !reported.startsWith(filed)) return false;
-  const expected = EXPECTED_STATUS_RE.exec(reported.slice(filed.length))?.[1];
+  const expected = EXPECTED_STATUS_RE.exec(reported.slice(filed.length))?.groups[1];
   return expected !== undefined && expected !== status;
 }
 
@@ -483,10 +500,13 @@ function addsOnlyExpectedStatus(reported: string, filed: string, status: string 
 const MIN_RESTATED = 24;
 
 /** A test id, captured without its attribute; and a kebab-case id of three or more parts. Lowercase text only. */
-const TESTID_RE = /testid=["']?([a-z0-9_-]+)/g;
+const TESTID_RE = fromJs(String.raw`testid=["']?([a-z0-9_-]+)`);
 // Underscores inside a part too: `row-stage-pending_review` is one id, where
 // without them it ended mid-word and yielded none.
-const KEBAB_ID_RE = /\b[a-z][a-z0-9_]*(?:-[a-z0-9_]+){2,}\b/g;
+const KEBAB_ID_RE = fromJs(String.raw`\b[a-z][a-z0-9_]*(?:-[a-z0-9_]+){2,}\b`);
+const CONTRAST_RATIO_RE = fromJs(String.raw`\b\d+(?:\.\d+)?:1\b`);
+const NON_WORD_RE = fromJs(String.raw`[^a-z0-9]+`);
+const WHITE_SPACE_RE = fromJs(String.raw`\s+`);
 
 /**
  * Whether the reported evidence appears word for word inside a finding's
@@ -500,7 +520,7 @@ const KEBAB_ID_RE = /\b[a-z][a-z0-9_]*(?:-[a-z0-9_]+){2,}\b/g;
  */
 function restates(reported: string, filed: string): boolean {
   if (reported.length < MIN_RESTATED || !filed.includes(reported)) return false;
-  const rest = reported.replace(TESTID_RE, " ").replace(KEBAB_ID_RE, " ");
+  const rest = KEBAB_ID_RE.replace(TESTID_RE.replace(reported, " "), " ");
   return words(rest).size >= 2;
 }
 
@@ -532,9 +552,9 @@ function covers(ids: Set<string>, w: Set<string>, f: Filed): boolean {
 function identifiers(text: string): Set<string> {
   const out = new Set<string>();
   const t = text.toLowerCase();
-  for (const m of t.matchAll(TESTID_RE)) out.add(m[1]);
-  for (const m of t.matchAll(KEBAB_ID_RE)) out.add(m[0]);
-  for (const m of t.matchAll(/\b\d+(?:\.\d+)?:1\b/g)) out.add(m[0]);
+  for (const m of TESTID_RE.matchAll(t)) out.add(m.groups[1] ?? "");
+  for (const m of KEBAB_ID_RE.matchAll(t)) out.add(m.text);
+  for (const m of CONTRAST_RATIO_RE.matchAll(t)) out.add(m.text);
   return out;
 }
 
@@ -561,12 +581,7 @@ const STOP = new Set([
 ]);
 
 function words(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((w) => w.length >= 3 && !STOP.has(w)),
-  );
+  return new Set(NON_WORD_RE.splitText(text.toLowerCase()).filter((w) => w.length >= 3 && !STOP.has(w)));
 }
 
 function jaccard(a: Set<string>, b: Set<string>): number {
@@ -577,5 +592,5 @@ function jaccard(a: Set<string>, b: Set<string>): number {
 }
 
 function squash(text: string): string {
-  return text.toLowerCase().replace(/\s+/g, " ").trim();
+  return WHITE_SPACE_RE.replace(text.toLowerCase(), " ").trim();
 }

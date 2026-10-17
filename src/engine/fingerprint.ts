@@ -1,16 +1,31 @@
 import { createHash } from "node:crypto";
+import { fromJs } from "./js-regex.js";
+import { isSpace, LinearRegex, runEnd } from "./linear-regex.js";
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const HEX_RE = /^[0-9a-f]{12,}$/i;
-const NUM_RE = /^\d+$/;
+const UUID_RE = fromJs(String.raw`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, "i");
+const HEX_RE = fromJs(String.raw`^[0-9a-f]{12,}$`, "i");
+const NUM_RE = fromJs(String.raw`^\d+$`);
 
 /** Query params that name a UI state (a different screen), not transient data. */
-const UI_STATE_PARAM_RE = /^(tab|view|mode|step|panel|section)$/i;
+const UI_STATE_PARAM_RE = fromJs(String.raw`^(tab|view|mode|step|panel|section)$`, "i");
 
 /** Letters, digits and single `-`/`_` separators: the alphabet a code-shaped record id is written in. */
-const CODE_ALPHABET_RE = /^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/;
+const CODE_ALPHABET_RE = fromJs(String.raw`^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$`);
 /** An upper-case prefix, then digits: `WID-2025-001`, `INV2024`, `PO_77`. */
-const CODE_PREFIX_RE = /^[A-Z]{1,6}[-_]?\d[A-Za-z0-9_-]*$/;
+const CODE_PREFIX_RE = fromJs(String.raw`^[A-Z]{1,6}[-_]?\d[A-Za-z0-9_-]*$`);
+
+const DIGIT_RE = fromJs(String.raw`\d`);
+const SEPARATOR_RE = fromJs(String.raw`[-_]`);
+const WHITE_SPACE_RE = fromJs(String.raw`\s+`);
+const API_PATH_RE = fromJs(String.raw`^\/api(\/|$)`, "i");
+const FILE_PATH_RE = fromJs(String.raw`\.(pdf|zip|csv|xlsx?|docx?|pptx?|png|jpe?g|gif|svg|ico|mp4|webm|json|xml)$`, "i");
+const EXPORT_QUERY_RE = fromJs(String.raw`\b(format=(csv|pdf|xlsx?|docx?)|download=(1|true))\b`, "i");
+const QUERY_RE = fromJs(String.raw`\?[^\s()[\]]*`);
+/** A character that ends a route in a lane's text: white space or a bracket. */
+const isRouteEnd = (c: string) => isSpace(c) || "()[]".includes(c);
+// A "#" not followed by a slash, and the fragment after it: the group is the lookahead, and the match is read on to the end of the fragment.
+const FRAGMENT_RE = new LinearRegex(String.raw`#([^/]|$)`, { lookahead: true, extend: ({ end }, text) => runEnd(text, end, (c) => !isRouteEnd(c)) });
+const CREDENTIAL_PAIR_RE = fromJs(String.raw`[\w-]*(token|signature|secret|password|session|code|key|auth|credential)[\w-]*=[^\s()[\]]*`, "i");
 
 /**
  * Whether a segment reads as a code-shaped record id (`WID-2025-001`,
@@ -23,9 +38,9 @@ const CODE_PREFIX_RE = /^[A-Z]{1,6}[-_]?\d[A-Za-z0-9_-]*$/;
  */
 function isCodeId(seg: string): boolean {
   if (!CODE_ALPHABET_RE.test(seg)) return false;
-  const digits = (seg.match(/\d/g) ?? []).length;
+  const digits = [...DIGIT_RE.matchAll(seg)].length;
   if (CODE_PREFIX_RE.test(seg) && digits >= 2) return true;
-  const chars = seg.replace(/[-_]/g, "").length;
+  const chars = SEPARATOR_RE.replace(seg, "").length;
   return digits >= 3 && digits * 2 >= chars;
 }
 
@@ -132,9 +147,9 @@ export function routeBase(route: string): string {
  */
 export function isNonPageRoute(route: string): boolean {
   const [path, query = ""] = route.split("?");
-  if (/^\/api(\/|$)/i.test(path)) return true;
-  if (/\.(pdf|zip|csv|xlsx?|docx?|pptx?|png|jpe?g|gif|svg|ico|mp4|webm|json|xml)$/i.test(path)) return true;
-  return /\b(format=(csv|pdf|xlsx?|docx?)|download=(1|true))\b/i.test(query);
+  if (API_PATH_RE.test(path)) return true;
+  if (FILE_PATH_RE.test(path)) return true;
+  return EXPORT_QUERY_RE.test(query);
 }
 
 export interface InteractableInfo {
@@ -146,7 +161,7 @@ export interface InteractableInfo {
 /** Stable key identifying an element class within a state (for coverage tracking). */
 export function elementKey(el: InteractableInfo): string {
   if (el.testid) return `tid:${el.testid}`;
-  const name = el.name.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 60);
+  const name = WHITE_SPACE_RE.replace(el.name.toLowerCase(), " ").trim().slice(0, 60);
   return `${el.role}:${name}`;
 }
 
@@ -222,17 +237,19 @@ export function shortHash(input: string): string {
  * A `name=value` pair whose name reads as a credential is removed wherever it is.
  */
 export function stripRouteQuery(route: string): string {
-  return route
-    .replace(/\?[^\s()[\]]*/g, "")
-    .replace(/#(?!\/)[^\s()[\]]*/g, "")
-    .replace(/[\w-]*(token|signature|secret|password|session|code|key|auth|credential)[\w-]*=[^\s()[\]]*/gi, "")
-    .trim();
+  return CREDENTIAL_PAIR_RE.replace(FRAGMENT_RE.replace(QUERY_RE.replace(route, ""), ""), "").trim();
 }
 
 /** Page files a lane may name without a leading slash ("orders.html"). */
-const BARE_PAGE_RE = /^[\w-]+(\/[\w.-]+)*\.(html?|php|aspx?|jsp)$/i;
+const BARE_PAGE_RE = fromJs(String.raw`^[\w-]+(\/[\w.-]+)*\.(html?|php|aspx?|jsp)$`, "i");
 /** A host with a port, or a loopback or IPv4 host, written without a scheme ("127.0.0.1:4173/orders.html"). */
-const BARE_HOST_RE = /^(?:[\w.-]+:\d+|localhost|\d{1,3}(?:\.\d{1,3}){3})(\/.*)?$/i;
+const BARE_HOST_RE = fromJs(String.raw`^(?:[\w.-]+:\d+|localhost|\d{1,3}(?:\.\d{1,3}){3})(\/.*)?$`, "i");
+const LANE_ROUTE_SPLIT_RE = fromJs(String.raw`[\s,;|+()[\]]+|→|->|=>`);
+const TOKEN_EDGE_RE = fromJs(String.raw`^[<"'\`]+|[>"'\`.:!]+$`);
+const SCHEME_URL_RE = fromJs(String.raw`^https?:\/\/[^/\s]+(\/.*)?$`, "i");
+const QUERY_OR_HASH_RE = fromJs(String.raw`[?#]`);
+const INDEX_PAGE_RE = fromJs(String.raw`\/index\.html?$`, "i");
+const TRAILING_SLASHES_RE = fromJs(String.raw`\/+$`);
 
 /**
  * Every path one route from a lane report names, in the form a benchmark key
@@ -250,18 +267,18 @@ const BARE_HOST_RE = /^(?:[\w.-]+:\d+|localhost|\d{1,3}(?:\.\d{1,3}){3})(\/.*)?$
  */
 export function laneRoutePaths(raw: string): string[] {
   const out = new Set<string>();
-  for (const word of raw.split(/[\s,;|+()[\]]+|→|->|=>/)) {
-    const token = word.replace(/^[<"'`]+|[>"'`.:!]+$/g, "");
+  for (const word of LANE_ROUTE_SPLIT_RE.splitText(raw)) {
+    const token = TOKEN_EDGE_RE.replace(word, "");
     if (!token) continue;
     let path: string | undefined;
-    const url = /^https?:\/\/[^/\s]+(\/.*)?$/i.exec(token) ?? BARE_HOST_RE.exec(token);
-    if (url) path = url[1] || "/";
+    const url = SCHEME_URL_RE.exec(token) ?? BARE_HOST_RE.exec(token);
+    if (url) path = url.groups[1] || "/";
     else if (token.startsWith("/") || token.startsWith("#/")) path = token;
-    else if (BARE_PAGE_RE.test(token.split(/[?#]/)[0])) path = `/${token}`;
+    else if (BARE_PAGE_RE.test(QUERY_OR_HASH_RE.splitText(token)[0])) path = `/${token}`;
     if (path === undefined) continue;
     let p = normalizePath(path).split("?")[0];
-    p = p.replace(/\/index\.html?$/i, "/");
-    if (p.length > 1) p = p.replace(/\/+$/, "");
+    p = INDEX_PAGE_RE.replace(p, "/");
+    if (p.length > 1) p = TRAILING_SLASHES_RE.replace(p, "");
     out.add(p || "/");
   }
   return [...out];
