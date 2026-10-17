@@ -234,9 +234,16 @@ The level is a contract that `scout_report` enforces for what the engine can see
 
 ## Reading the report
 
-`.scenescout/report.md` and `report.html` open **In plain words**, for anyone who does not read request signatures: a short summary, then each problem this run found, worst first, with its impact (blocks users, annoying or cosmetic), the steps that led to it, what was expected, what happened and, when there is one, a picture of the page. Each problem keeps its technical detail (id, category, evidence, route) folded beneath it, one click away.
+`.scenescout/report.md` and `report.html` are laid out for whoever reads them first, in this order ([why](../adr/0031-the-report-opens-with-a-summary-and-folds-the-technical-details.md)):
 
-When the run was given tickets, the plain section answers them before listing the problems: for each ticket, every acceptance criterion as passed, failed or not tested. A failed criterion names the problems that show it, with their pictures; one not tested says why (the account used could not reach it, the run was only allowed to look, or it was outside what the run could check). A verdict the agent was not sure of is marked unsure.
+1. **Summary**, in plain words, for anyone who does not read request signatures. It opens with one paragraph: which site was checked, when, for how long and with which care level, and what was found. Then the problems as a table, worst first: the impact (blocks users, annoying or cosmetic), the problem, where it was, what you would see and what was expected. Then each problem folded under its number and title: the steps that led to it, what was expected and what happened. Its id, category, severity, the evidence signature and route are folded once more inside it, under **Details for developers**.
+2. **Evidence**, only when a problem has a picture or the run was recorded: each problem's picture beside its number and title, with the frames recorded before it was filed.
+3. **Technical details**, folded: everything for the developer who fixes it ([the technical report](#the-technical-report)).
+4. **Steps**, folded, in `report.html` only: every action each session took.
+
+`report.html` opens from the file, offline, on a phone, in dark mode and in print, and loads nothing from outside the file. A Markdown viewer that does not fold `<details>` shows every part unfolded.
+
+When the run was given tickets, the Summary answers them after the problems table: for each ticket, every acceptance criterion as passed, failed or not tested. A failed criterion names the problems that show it; one not tested says why (the account used could not reach it, the run was only allowed to look, or it was outside what the run could check). A verdict the agent was not sure of is marked unsure.
 
 ### The team report
 
@@ -247,7 +254,7 @@ When the report is for other people, ask for the team report: say "make a team r
 
 Making it again replaces the last team report, and removes only the evidence files the last one listed. Nothing is sent anywhere. The layout is built in for now: a template like `scenescout check --template` uses for a recorded check is not read for it.
 
-`scout_report {report}` chooses which parts a report carries: `both` (default) the plain section and then the technical report, `qa` the plain section alone, `dev` the technical report alone. It applies to the files `scout_report` writes; the live view's report always shows both.
+`scout_report {report}` chooses which parts a report carries: `both` (default) all four, `qa` the Summary and the Evidence alone (the unchecked parts are then listed in the Summary), `dev` the technical report alone, unfolded. It applies to the files `scout_report` writes; the live view's report always shows both.
 
 ### Filing problems as tickets
 
@@ -259,11 +266,11 @@ The tracker's sign-in is set up once, where whoever installed SceneScout keeps s
 
 ### The technical report
 
-It follows the plain section, worst first:
+It is the **Technical details** part, folded under the Summary and the Evidence (and the whole report with `report: 'dev'`):
 
 | Section | What it tells you |
 |---|---|
-| **Summary** | Open findings, route coverage, design audits, oracle violations, and how many errors the write policy itself caused (these are not counted as the app's) |
+| **Run metrics** | Open findings, route coverage, design audits, oracle violations, and how many errors the write policy itself caused (these are not counted as the app's) |
 | **Acceptance criteria** | On a run given tickets, each criterion's verdict with the confidence the agent stated, the ids of the findings it linked, its reason and the sessions that judged it |
 | **Page quality scores** | 0 to 100 per audited route, for accessibility, craft, consistency and task clarity, worst first |
 | **Gap ledger** | What was not tested. Treat it as the honest limit of the run, not as noise |

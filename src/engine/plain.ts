@@ -332,10 +332,7 @@ export function plainSummary(input: PlainInput): string[] {
       lines.push(`- ${plainWording(kind).problem} (${n === 1 ? "once" : `${n} times`})`);
   }
   if (input.gaps.length > 0) {
-    lines.push(
-      ``,
-      `The run left ${count(input.gaps.length, "thing")} unchecked.${input.audience === "qa" ? "" : " The gap ledger in the technical details says which."}`,
-    );
+    lines.push(``, `The run left ${count(input.gaps.length, "thing")} unchecked.${input.audience === "qa" ? "" : " The technical details list which."}`);
     if (input.audience === "qa") {
       lines.push(``);
       for (const g of input.gaps) lines.push(`- ${g}`);
@@ -447,6 +444,8 @@ export const SUMMARY_HEADING = "Summary";
 export const EVIDENCE_HEADING = "Evidence";
 /** The heading the technical report sits under when the plain part comes first. */
 export const TECHNICAL_HEADING = "Technical details";
+/** The fold inside each problem that holds its id, category, severity, evidence and route. */
+export const TECHNICAL_DETAIL_FOLD = "Details for developers";
 
 /**
  * The problems this run found as one table, worst first: the overview a
@@ -465,7 +464,7 @@ export function plainProblemTable(current: readonly Finding[]): string[] {
 /**
  * One finding in plain words, folded under its number and title: where it
  * was, the steps to see it, what was expected and what happened, and its
- * technical detail. Its picture is under Evidence. Every word comes from its
+ * technical detail in a fold of its own. Its picture is under Evidence. Every word comes from its
  * card; only the location is the finding's whole address, as the report has
  * always printed it.
  */
@@ -484,13 +483,17 @@ export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, 
   }
   lines.push(`**What was expected:** ${card.expected}`, ``, `**What happened:** ${card.happened}`, ``);
   if (card.picture) lines.push(`**Picture:** under ${EVIDENCE_HEADING}, as problem ${index}.`, ``);
-  // "Finding id", not "Id": the HTML hangs a finding's recorded frames under
-  // the list that names its "Id" when there is no Evidence section to hold them.
+  // The id, category, severity and route are for whoever fixes it, so they
+  // fold once more under their own name: a Summary reader who opened the
+  // problem for its steps does not read them unasked. "Finding id", not "Id":
+  // the HTML hangs a finding's recorded frames under the list that names its
+  // "Id" when there is no Evidence section to hold them.
+  lines.push(`<details><summary>${TECHNICAL_DETAIL_FOLD}</summary>`, ``);
   lines.push(`- **Finding id:** \`${card.id}\` · **Category:** ${card.technical.category} · **Severity:** ${card.severity}`);
   if (card.technical.evidence) lines.push(`- **Evidence:** \`${card.technical.evidence}\``);
   lines.push(`- **Route:** \`${card.technical.route}\``);
   if (input.audience !== "qa") lines.push(`- The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.`);
-  lines.push(``, `</details>`, ``);
+  lines.push(``, `</details>`, ``, `</details>`, ``);
   return lines;
 }
 

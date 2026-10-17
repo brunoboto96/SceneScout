@@ -867,6 +867,92 @@ test("the page renders the report without building markup, since a finding's tit
   assert.match(script, /fetch\('api\/report'/);
 });
 
+/** A node of the small stand-in DOM the report renderer is run against: tags, text and children, nothing parsed. */
+interface FakeNode {
+  tag: string;
+  className: string;
+  text: string;
+  children: FakeNode[];
+  attrs: Record<string, string>;
+}
+
+/** Runs the live page's own renderMarkdown on `md` against a stand-in document, and returns the root it built. */
+function renderLiveReport(md: string): FakeNode {
+  const script = LIVE_PAGE.slice(LIVE_PAGE.indexOf("<script>") + "<script>".length);
+  const part = (from: string, to: string): string => script.slice(script.indexOf(from), script.indexOf(to));
+  const node = (tag: string): FakeNode => {
+    const n: FakeNode = { tag, className: "", text: "", children: [], attrs: {} };
+    // An accessor, as the DOM's is: setting it replaces the children, reading it joins them.
+    Object.defineProperty(n, "textContent", {
+      set(t: string) {
+        n.text = t;
+        n.children = [];
+      },
+      get(): string {
+        return n.text + n.children.map(textOf).join("");
+      },
+    });
+    return Object.assign(n, {
+      appendChild: (c: FakeNode) => n.children.push(c),
+      setAttribute: (k: string, v: string) => (n.attrs[k] = v),
+      addEventListener: () => undefined,
+      classList: { add: () => undefined },
+    });
+  };
+  const document = { createElement: node, createTextNode: (t: string) => Object.assign(node("#text"), { text: t }) };
+  const code = `${part("function el(", "function held(")}${part("function inline(", "function loadReport(")}
+    var root = document.createElement('div'); renderMarkdown(root, md); return root;`;
+  return new Function("document", "md", "reportEvidence", "reportFramePrefix", code)(document, md, [], "record/") as FakeNode;
+}
+
+const textOf = (n: FakeNode): string => (n as unknown as { textContent: string }).textContent;
+
+test("the report panel shows a folded problem's title as the app wrote it, nests folds, and keeps an escaped pipe in its cell", () => {
+  // The Summary folds each problem under <details><summary>, where report.md
+  // writes the title with &lt; &gt; &amp; (Markdown escapes do not apply
+  // inside raw HTML). The panel sets text, never markup, so it must decode
+  // them first or a reader sees "&lt;b&gt;" for "<b>".
+  const md = [
+    "## Summary",
+    "",
+    "| # | Problem | Where |",
+    "|---:|---|---|",
+    "| 1 | Save a\\|b fails | /x |",
+    "",
+    "<details><summary>1. The &lt;b&gt; tag &amp; &amp;lt; text</summary>",
+    "",
+    "Inside the problem.",
+    "",
+    "<details><summary>Technical detail</summary>",
+    "",
+    "- **Finding id:** `abc`",
+    "",
+    "</details>",
+    "",
+    "After the inner fold.",
+    "",
+    "</details>",
+    "",
+    "Outside every fold.",
+  ].join("\n");
+  const root = renderLiveReport(md);
+  const outer = root.children.find((c) => c.tag === "details");
+  assert.ok(outer, "the problem is a fold");
+  assert.equal(textOf(outer.children[0]), "1. The <b> tag & &lt; text", "entities decoded once, as text");
+  const inner = outer.children.find((c) => c.tag === "details");
+  assert.ok(inner, "the technical fold sits inside the problem's fold");
+  assert.equal(textOf(inner.children[0]), "Technical detail");
+  assert.ok(
+    outer.children.some((c) => c.tag === "p" && textOf(c) === "After the inner fold."),
+    "closing the inner fold returns to the problem's, not to the page",
+  );
+  assert.ok(root.children.some((c) => c.tag === "p" && textOf(c) === "Outside every fold."));
+  const table = root.children.find((c) => c.tag === "table");
+  assert.ok(table);
+  const cells = table.children[1].children.map(textOf);
+  assert.deepEqual(cells, ["1", "Save a|b fails", "/x"], "an escaped pipe is text in its own cell, not a new column");
+});
+
 test("the report panel shows a recorded picture through the frame route and drops any other picture line", () => {
   // The two regexes are written inside a template literal with doubled
   // backslashes; read them back from the page as the browser gets them.

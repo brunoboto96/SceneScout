@@ -585,11 +585,40 @@ export const LIVE_PAGE = `<!doctype html>
     both.appendChild(box);
     return both;
   }
+  // A folded problem's title is written with &lt; &gt; &amp; (inside raw HTML,
+  // Markdown escapes do not apply). Set as text, it is decoded once first, the
+  // same as report.html does, so the title reads as the app wrote it.
+  function decodeEntities(text) {
+    return text.replace(/&(lt|gt|quot|#39|amp);/g, function (_, e) {
+      return { lt: '<', gt: '>', quot: '"', '#39': "'", amp: '&' }[e];
+    });
+  }
+  // A table row's cells: \\| is a pipe in the text and \\\\ a backslash, as the
+  // report escapes them, so a title holding a pipe stays in its own cell.
+  function tableCells(row) {
+    var inner = row.trim().replace(/^\\|/, '').replace(/\\|$/, '');
+    var cells = [];
+    var cell = '';
+    for (var k = 0; k < inner.length; k++) {
+      var c = inner[k];
+      if (c === '\\\\' && (inner[k + 1] === '|' || inner[k + 1] === '\\\\')) {
+        cell += inner[k + 1];
+        k += 1;
+      } else if (c === '|') {
+        cells.push(cell.trim());
+        cell = '';
+      } else cell += c;
+    }
+    cells.push(cell.trim());
+    return cells;
+  }
   function renderMarkdown(root, md) {
     root.textContent = '';
     var lines = md.split('\\n');
     var i = 0;
     var container = root;
+    // The folds open around the current line, innermost last: a problem's fold holds its technical one.
+    var folds = [];
     var para = [];
     function flush() {
       if (!para.length) return;
@@ -653,13 +682,14 @@ export const LIVE_PAGE = `<!doctype html>
       } else if ((m = /^<details><summary>(.*)<\\/summary>$/.exec(line))) {
         flush();
         var details = el('details');
-        details.appendChild(el('summary', '', m[1]));
+        details.appendChild(el('summary', '', decodeEntities(m[1])));
         container.appendChild(details);
+        folds.push(container);
         container = details;
         i += 1;
       } else if (/^<\\/details>$/.test(line)) {
         flush();
-        container = root;
+        container = folds.length ? folds.pop() : root;
         i += 1;
       } else if (/^\\|/.test(line)) {
         flush();
@@ -670,9 +700,9 @@ export const LIVE_PAGE = `<!doctype html>
           i += 1;
           if (/^\\|(\\s*:?-+:?\\s*\\|)+\\s*$/.test(row)) continue;
           var tr = el('tr');
-          row.replace(/^\\||\\|\\s*$/g, '').split('|').forEach(function (cell) {
+          tableCells(row).forEach(function (cell) {
             var td = el(rowIndex === 0 ? 'th' : 'td');
-            inline(td, cell.trim());
+            inline(td, cell);
             tr.appendChild(td);
           });
           table.appendChild(tr);

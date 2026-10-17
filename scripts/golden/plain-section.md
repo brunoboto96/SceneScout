@@ -19,7 +19,7 @@ While it worked, the automatic checks noticed:
 - The server refused or failed a request (2 times)
 - The page reported an error behind the scenes (once)
 
-The run left 2 things unchecked. The gap ledger in the technical details says which.
+The run left 2 things unchecked. The technical details list which.
 
 ### Ticket THING-1: one criterion answered
 
@@ -43,10 +43,14 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **Picture:** under Evidence, as problem 1.
 
+<details><summary>Details for developers</summary>
+
 - **Finding id:** `0a1b2c3d4e` · **Category:** false_success · **Severity:** high
 - **Evidence:** `POST /api/things → HTTP 500`
 - **Route:** `/things/new#abc`
 - The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.
+
+</details>
 
 </details>
 
@@ -66,9 +70,13 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **Picture:** under Evidence, as problem 2.
 
+<details><summary>Details for developers</summary>
+
 - **Finding id:** `1b2c3d4e5f` · **Category:** ux-confusing · **Severity:** medium
 - **Route:** `/login#def`
 - The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.
+
+</details>
 
 </details>
 
@@ -80,9 +88,13 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What happened:** The label is cut off.
 
+<details><summary>Details for developers</summary>
+
 - **Finding id:** `2c3d4e5f60` · **Category:** a-category-from-an-older-file · **Severity:** low
 - **Route:** `/#ghi`
 - The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.
+
+</details>
 
 </details>
 
@@ -99,10 +111,14 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What happened:** The list stays empty. The server answered 502.
 
+<details><summary>Details for developers</summary>
+
 - **Finding id:** `3d4e5f6071` · **Category:** http-error · **Severity:** medium
 - **Evidence:** `GET /api/orders → HTTP 502`
 - **Route:** `/orders#jkl`
 - The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.
+
+</details>
 
 </details>
 
@@ -171,9 +187,13 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **Picture:** under Evidence, as problem 1.
 
+<details><summary>Details for developers</summary>
+
 - **Finding id:** `0a1b2c3d4e` · **Category:** false_success · **Severity:** high
 - **Evidence:** `POST /api/things → HTTP 500`
 - **Route:** `/things/new#abc`
+
+</details>
 
 </details>
 
@@ -193,8 +213,12 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **Picture:** under Evidence, as problem 2.
 
+<details><summary>Details for developers</summary>
+
 - **Finding id:** `1b2c3d4e5f` · **Category:** ux-confusing · **Severity:** medium
 - **Route:** `/login#def`
+
+</details>
 
 </details>
 
@@ -206,8 +230,12 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What happened:** The label is cut off.
 
+<details><summary>Details for developers</summary>
+
 - **Finding id:** `2c3d4e5f60` · **Category:** a-category-from-an-older-file · **Severity:** low
 - **Route:** `/#ghi`
+
+</details>
 
 </details>
 
@@ -224,9 +252,13 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What happened:** The list stays empty. The server answered 502.
 
+<details><summary>Details for developers</summary>
+
 - **Finding id:** `3d4e5f6071` · **Category:** http-error · **Severity:** medium
 - **Evidence:** `GET /api/orders → HTTP 502`
 - **Route:** `/orders#jkl`
+
+</details>
 
 </details>
 

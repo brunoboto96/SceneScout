@@ -1411,6 +1411,14 @@ test("the report setting: both puts the Summary first and folds the technical de
   assert.match(plainFinding(shared, 1, { audience: "both" }).join("\n"), /on http:\/\/app\.test\/things\/new, and also seen on \/other-things, \/more-things/);
   assert.match(both, /\*\*What happened:\*\* The save request fails/);
   assert.match(both, /\n- \*\*Finding id:\*\* `[0-9a-f]+` · \*\*Category:\*\* http-error · \*\*Severity:\*\* high/);
+  // A Summary reader opens a problem for its steps; its id, category, severity and route are folded once more, under their own name.
+  assert.match(
+    both,
+    /\*\*What happened:\*\* The save request fails[^\n]*\n\n<details><summary>Details for developers<\/summary>\n\n- \*\*Finding id:\*\*/,
+    "a problem's technical lines are in a fold of their own inside it",
+  );
+  assert.match(both, /The run left \d+ things? unchecked\. The technical details list which\./, "no 'gap ledger' in the Summary");
+  assert.doesNotMatch(both.slice(0, both.indexOf("## Technical details")), /gap ledger/i);
   assert.match(both, /- \*\*Evidence:\*\* `POST \/api\/things → HTTP 500`/);
   assert.equal(both.match(/^- \*\*Id:\*\* /gm)?.length, 2, "each finding's own Id line appears once, in the technical report: frames hang under it");
   // Inside the folded technical details the repro trace is a list; with nothing folded around it, it folds itself.
