@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   ATTACH_URL_QUIET_MS,
+  CRAWL_URL_HELD_MS,
   describePace,
   InFlightRequests,
   keepWatchingUrl,
@@ -384,6 +385,42 @@ test("stableUrlOf takes the quiet window it is given", async () => {
     if (late.clock - 1_000_000 === 600) late.href = "http://app.test/login";
   };
   assert.equal(await stableUrlOf(() => late, late.now), "http://app.test/private", "the run's window ends before a 600 ms guard");
+});
+
+test("a crawl's watch counts from when the route's document arrived, not from when the watch began", async () => {
+  // A route whose scripts send a signed-out visitor to sign-in 600 ms after its document arrived. How far into the
+  // document's life the watch begins depends on the machine: the load, the settle before it and the timer all run
+  // late on a loaded runner. The verdict must not.
+  for (const ageAtWatch of [50, 150, 300, 550]) {
+    const page = standInPage("http://app.test/private");
+    const arrived = page.clock - ageAtWatch;
+    page.onTick = () => {
+      if (page.clock - arrived >= 600 && page.href.endsWith("/private")) page.href = "http://app.test/login";
+    };
+    assert.equal(
+      await stableUrlOf(() => page, page.now, { quietMs: CRAWL_URL_HELD_MS, heldMs: ageAtWatch }),
+      "http://app.test/login",
+      `watch begun ${ageAtWatch} ms after the document arrived`,
+    );
+  }
+  // The contrast: the run's window counted from the watch's start ends before the same guard when the watch began
+  // early, which is what a crawl read with on a fast settle.
+  const early = standInPage("http://app.test/private");
+  const arrived = early.clock - 150;
+  early.onTick = () => {
+    if (early.clock - arrived >= 600) early.href = "http://app.test/login";
+  };
+  assert.equal(await stableUrlOf(() => early, early.now), "http://app.test/private");
+  // A route whose address holds still is read once its document has been up CRAWL_URL_HELD_MS, no later...
+  const still = standInPage("http://app.test/private");
+  const start = still.clock;
+  assert.equal(await stableUrlOf(() => still, still.now, { quietMs: CRAWL_URL_HELD_MS, heldMs: 200 }), "http://app.test/private");
+  assert.equal(still.clock - start, CRAWL_URL_HELD_MS - 200);
+  // ...and one already up that long is read at once.
+  const old = standInPage("http://app.test/private");
+  await stableUrlOf(() => old, old.now, { quietMs: CRAWL_URL_HELD_MS, heldMs: 5000 });
+  assert.equal(old.ticks, 0);
+  assert.ok(CRAWL_URL_HELD_MS < URL_CAP_MS, "within the cap");
 });
 
 test("a navigation request is on its way from its start until its frame commits it or it fails", () => {

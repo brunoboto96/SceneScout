@@ -101,8 +101,8 @@ import {
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
-import { ATTACH_URL_QUIET_MS, describePace, InFlightRequests, normalizePace, RECHECK_OPEN_MS, settlePage, stableUrlOf } from "./settle.js";
-import { FRAME_READ_MS, SnapshotCollector, withinFrameLimit, type SnapshotElement } from "./snapshot-collect.js";
+import { ATTACH_URL_QUIET_MS, CRAWL_URL_HELD_MS, describePace, InFlightRequests, normalizePace, RECHECK_OPEN_MS, settlePage, stableUrlOf } from "./settle.js";
+import { FRAME_READ_MS, PAGE_AGE_SCRIPT, SnapshotCollector, withinFrameLimit, type SnapshotElement } from "./snapshot-collect.js";
 import {
   AnsweredNavigationError,
   answeredNavigationFailure,
@@ -2228,14 +2228,31 @@ export class BrowserEngine {
 
   /**
    * The URL once it has stopped changing (settle.ts stableUrlOf), waiting too while the page's own navigation is on its
-   * way, and holding still for `quietMs` when given.
+   * way, and holding still for `quietMs` when given, counting `heldMs` it had already held (stableUrlOf).
    */
-  private async stableUrl(quietMs?: number): Promise<string> {
+  private async stableUrl(quietMs?: number, heldMs?: number): Promise<string> {
     const navigating = (): boolean => {
       const page = this.page;
       return page !== null && !page.isClosed() && this.requests.navigating(page.mainFrame());
     };
-    return stableUrlOf(() => this.page, Date.now, quietMs !== undefined ? { navigating, quietMs } : { navigating });
+    return stableUrlOf(() => this.page, Date.now, {
+      navigating,
+      ...(quietMs !== undefined ? { quietMs } : {}),
+      ...(heldMs !== undefined ? { heldMs } : {}),
+    });
+  }
+
+  /**
+   * Before a crawl reads a route: with a saved sign-in, wait until the route's address has held still for
+   * CRAWL_URL_HELD_MS since its document arrived (settle.ts), so a guard that sends a signed-out visitor to sign-in a
+   * moment after load is seen whatever the machine's timing. Without one, nothing is waited for (landedUrl). The age
+   * counts no further back than the route's load began, so a route that kept its document (a hash route) is watched
+   * in full; a page whose age cannot be read (it is navigating now) is taken as just arrived.
+   */
+  private async crawlLandedUrl(page: Page): Promise<string> {
+    if (!this.watchesForBounce) return page.url();
+    const doc = Number(await bestEffort(page.evaluate(PAGE_AGE_SCRIPT), 0));
+    return this.stableUrl(CRAWL_URL_HELD_MS, Math.min(Number.isFinite(doc) ? doc : 0, Date.now() - this.actionStartedAt));
   }
 
   /**
@@ -5027,10 +5044,10 @@ export class BrowserEngine {
       return "resource";
     }
     await this.settle();
-    // With a saved sign-in, the address is watched until it holds still before the route is read: a guard that sends
-    // a signed-out visitor to sign-in from its scripts a moment after load would otherwise pass as a healthy route.
-    // Without one, there is no sign-in to lose and nothing is waited for (landedUrl).
-    await this.landedUrl(page);
+    // With a saved sign-in, the address is watched until it has held still since the route's document arrived before
+    // the route is read: a guard that sends a signed-out visitor to sign-in from its scripts a moment after load would
+    // otherwise pass as a healthy route. Without one, there is no sign-in to lose and nothing is waited for.
+    await this.crawlLandedUrl(page);
     this.harvestPaused = opts.measureOnly === true;
     const { elements, forms, aliases } = await this.snapshots.collect().finally(() => (this.harvestPaused = false));
     const finalUrl = page.url();

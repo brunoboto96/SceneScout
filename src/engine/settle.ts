@@ -302,6 +302,14 @@ export const URL_CAP_MS = 3000;
  * signed in, for the rest of the run. Paid once per attach with credentials.
  */
 export const ATTACH_URL_QUIET_MS = 1000;
+/**
+ * How long a crawled route's address must have held still, counted from when its document arrived, before a crawl
+ * with a saved sign-in reads the route. Counted from the document rather than from the watch: how long the load and
+ * the settle before the watch took varies with the machine, and a window that began wherever they ended caught a
+ * guard 600 ms after load on one runner and missed it on the next. Paid per route with credentials, less the time the
+ * route has already been up.
+ */
+export const CRAWL_URL_HELD_MS = 1000;
 
 export interface UrlWatch {
   /** Since the URL last changed. */
@@ -382,18 +390,20 @@ export async function settlePage(page: SettlingPage, src: SettleSource, now: () 
  * is still, briefly, the page it was asked for. `now` is the clock it measures by, as for settlePage.
  * `navigating` says whether the page's own navigation is on its way (InFlightRequests.navigating): a guard that has
  * fired, whose sign-in page has not answered yet, has not changed the address, so the watch waits for it (to the
- * cap). `quietMs` replaces URL_QUIET_MS (the attach's verdict uses ATTACH_URL_QUIET_MS).
+ * cap). `quietMs` replaces URL_QUIET_MS (the attach's verdict uses ATTACH_URL_QUIET_MS). `heldMs` is how long the
+ * address had already held still when the watch began (a crawl passes its document's age, CRAWL_URL_HELD_MS); by
+ * default none, so the window runs from the watch's start.
  */
 export async function stableUrlOf(
   current: () => SettlingPage | null,
   now: () => number = Date.now,
-  opts: { navigating?: () => boolean; quietMs?: number } = {},
+  opts: { navigating?: () => boolean; quietMs?: number; heldMs?: number } = {},
 ): Promise<string> {
   const page = current();
   if (!page || page.isClosed()) return page ? page.url() : "";
   const started = now();
   let url = page.url();
-  let changedAt = started;
+  let changedAt = started - Math.max(0, opts.heldMs ?? 0);
   for (;;) {
     const watch = { sinceChangeMs: now() - changedAt, elapsedMs: now() - started, navigating: opts.navigating?.() ?? false };
     if (!keepWatchingUrl(opts.quietMs !== undefined ? { ...watch, quietMs: opts.quietMs } : watch)) return url;

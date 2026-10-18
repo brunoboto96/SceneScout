@@ -13,8 +13,8 @@
       // does that first finishes a token check. No request is in flight while it waits, so the engine's request-based
       // settle has nothing to wait on. Signed in (the "smoke-auth" flag a storage state sets), the same page stays put:
       // that is the one fact the crawl's sign-in check must turn on. The delay sits past the time a crawl takes to read a
-      // route without watching its address (a guard up to about 0.4 s after load lands while the route's controls are
-      // collected), and inside the watch (caught up to about 0.8 s), so the check fails without the watch.
+      // route without watching its address, and inside the watch (the address must have held still for a second since
+      // the document arrived, settle.ts CRAWL_URL_HELD_MS), with room for a slow runner.
       // gated-late.html is the attach's.
       addEventListener("load", function () {
         setTimeout(function () {

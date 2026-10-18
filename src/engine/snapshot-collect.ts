@@ -28,7 +28,7 @@ import {
   type Rect,
 } from "./collector.js";
 import { elementKey, keyAliasSteps, normalizePath, ordinalKeys, routeBase, type InteractableInfo } from "./fingerprint.js";
-import { FORMS_INVENTORY_SCRIPT, formIdentity, formStatus, type FormFacts } from "./forms.js";
+import { FORMS_INVENTORY_SCRIPT, formIdentity, formStatus, isNavigationTeardown, type FormFacts } from "./forms.js";
 import { NAME_RULE, type KeyAliasSteps } from "./memory.js";
 import { destructiveLabelOf } from "./policy.js";
 import { recheckBusy, recheckWait } from "./settle.js";
@@ -108,6 +108,35 @@ export const FRAME_READ_MS = 1500;
 /** The coverage key of the page's own element at this xpath (never one in a frame: its xpath names a node in another document). */
 export function keyAtXpath(elements: readonly SnapshotElement[], xpath: string): string | null {
   return elements.find((el) => !el.frame && el.xpath === xpath)?.key ?? null;
+}
+
+/** How many times a read of the page is taken again after the page's own navigation interrupted it (readPage). */
+export const NAVIGATED_READ_RETRIES = 3;
+
+/** The part of the page readPage uses. */
+export interface ReadablePage {
+  evaluate(script: string): Promise<unknown>;
+  waitForLoadState(state: "domcontentloaded"): Promise<unknown>;
+  isClosed(): boolean;
+}
+
+/**
+ * A read of the page's own document that survives the page navigating under it. A route's scripts can move the
+ * visitor on (a sign-in guard, a redirect after a check) while the read is in the page, and Playwright then rejects it
+ * ("Execution context was destroyed"). That is not a failed snapshot: the read is taken again in the document that
+ * replaced it, once that has arrived, so the collect lists the page the session is on. Only a read a navigation ended
+ * is taken again (forms.ts isNavigationTeardown): a script that throws, a closed page, or a read still interrupted after
+ * NAVIGATED_READ_RETRIES (a redirect loop) is the caller's error, at once.
+ */
+export async function readPage(page: ReadablePage, script: string): Promise<unknown> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await page.evaluate(script);
+    } catch (err) {
+      if (attempt >= NAVIGATED_READ_RETRIES || page.isClosed() || !isNavigationTeardown(err instanceof Error ? err.message : String(err))) throw err;
+      await bestEffort(page.waitForLoadState("domcontentloaded"));
+    }
+  }
 }
 
 /** A frame read that gives up after FRAME_READ_MS, answering null. */
@@ -248,13 +277,13 @@ export class SnapshotCollector {
     // How long the page has been up: since its document arrived or the latest action, whichever is later
     // (recheckWait: a page that has just loaded is read for longer, as it may still draw from a timer).
     const ageNow = async (): Promise<number> => {
-      const doc = Number(await page.evaluate(PAGE_AGE_SCRIPT));
+      const doc = Number(await readPage(page, PAGE_AGE_SCRIPT));
       return Math.min(Number.isFinite(doc) ? doc : 0, Date.now() - this.host.requests().changedAt);
     };
     const busyAt = [busyNow()];
     // The age is read before the controls, so a read is never credited with an age it had not reached.
     let ageMs = await ageNow();
-    let rawElements: RawElement[] = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
+    let rawElements: RawElement[] = (await readPage(page, COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
     const counts = [rawElements.length];
     const started = Date.now();
     for (;;) {
@@ -265,7 +294,7 @@ export class SnapshotCollector {
       await page.waitForTimeout(wait);
       busyAt.push(busyNow());
       ageMs = await ageNow();
-      rawElements = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
+      rawElements = (await readPage(page, COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
       counts.push(rawElements.length);
     }
 

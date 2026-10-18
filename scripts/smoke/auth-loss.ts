@@ -115,8 +115,9 @@ async function attachVerdictWaitsForLateSignIn(baseUrl: string, authProject: str
 
 /**
  * The crawl's per-route sign-in check on a route whose scripts send a signed-out visitor to sign-in 600 ms after load:
- * later than a crawl reads a route it does not watch (a guard up to about 0.4 s after load is caught by collecting the
- * route's controls alone), and inside the watch on the address (caught up to about 0.8 s on all three browsers).
+ * later than a crawl reads a route it does not watch, and inside the watch on the address, which holds the route until
+ * its address has held still for a second since its document arrived (settle.ts CRAWL_URL_HELD_MS), whatever the
+ * runner's timing.
  * Contrastive pair: the same route crawled with a saved sign-in that has gone stale (AUTH-REDIRECT) and one that signs
  * in (a healthy route), beside a route that never redirects.
  */
