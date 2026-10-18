@@ -101,7 +101,7 @@ import {
 import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
-import { ATTACH_URL_QUIET_MS, describePace, InFlightRequests, normalizePace, settlePage, stableUrlOf } from "./settle.js";
+import { ATTACH_URL_QUIET_MS, describePace, InFlightRequests, normalizePace, RECHECK_OPEN_MS, settlePage, stableUrlOf } from "./settle.js";
 import { FRAME_READ_MS, SnapshotCollector, withinFrameLimit, type SnapshotElement } from "./snapshot-collect.js";
 import {
   AnsweredNavigationError,
@@ -799,6 +799,8 @@ export class BrowserEngine {
     formRead: (what, work) => this.formRead(what, work),
     foreignOriginOf: (frame) => this.foreignOriginOf(frame),
     harvestRoutes: (elements) => this.harvestRoutes(elements),
+    // Only young requests: a stream the page keeps open for its whole life is not content on its way (settle.ts RECHECK_OPEN_MS).
+    requests: () => ({ inFlight: this.requests.openWithin(RECHECK_OPEN_MS), lastRequestStart: this.lastRequestStart, changedAt: this.actionStartedAt }),
   });
   private currentFingerprint = "";
   /** URL at the time of the last snapshot — refs are valid only while it matches. */
@@ -989,6 +991,12 @@ export class BrowserEngine {
   private framesKept = 0;
   /** How many frames could not be written. The first one says so in the log; the rest are counted. */
   private framesFailed = 0;
+  /**
+   * Where a frame of each step goes on a run that does not record: the live
+   * view's memory (live.ts FrameRing), so its timeline can show a past step.
+   * Set by the server while the live view runs; never the disk.
+   */
+  frameHolder: ((jpeg: Buffer) => string | null) | null = null;
 
   /**
    * The Authorization header the app itself last sent to its own origin, on
@@ -1116,10 +1124,19 @@ export class BrowserEngine {
    * caller that is not going through afterAction can still record what the
    * page looked like: `...(await this.frameFor("crawl"))`.
    */
-  private async frameFor(action: string): Promise<{ frame?: string; framePastCap?: true }> {
+  private async frameFor(action: string): Promise<{ frame?: string; framePastCap?: true; heldFrame?: string }> {
     const pastCap = this.framePastCap();
     const frame = await this.recordFrame(action);
-    return frame ? { frame } : pastCap ? { framePastCap: true } : {};
+    return frame ? { frame } : pastCap ? { framePastCap: true } : await this.holdFrame();
+  }
+
+  /** On a run that does not record, a frame of the page held in the live view's memory, as the log entry's field. */
+  private async holdFrame(): Promise<{ heldFrame?: string }> {
+    if (this.recording || !this.frameHolder) return {};
+    const jpeg = await this.liveShot(RECORD_SHOT_TIMEOUT_MS);
+    // Read again after the picture: a close while it was taken clears the holder.
+    const key = jpeg ? (this.frameHolder?.(jpeg) ?? null) : null;
+    return key ? { heldFrame: key } : {};
   }
 
   /** On a recorded session, whether the next step gets no frame because the session already keeps as many as it may. */
@@ -2193,14 +2210,20 @@ export class BrowserEngine {
     return this.page;
   }
 
-  private async settle(): Promise<void> {
+  /** Wait until the page has settled (settle.ts settlePage). `read` for a wait before a read, which sends nothing. */
+  private async settle(read = false): Promise<void> {
     const page = this.requirePage();
-    await settlePage(page, {
-      inFlight: () => this.inFlight,
-      lastRequestStart: () => this.lastRequestStart,
-      paceMs: () => this.paceMs,
-      current: () => this.page,
-    });
+    await settlePage(
+      page,
+      {
+        inFlight: () => this.inFlight,
+        lastRequestStart: () => this.lastRequestStart,
+        paceMs: () => this.paceMs,
+        current: () => this.page,
+      },
+      Date.now,
+      read,
+    );
   }
 
   /**
@@ -2374,7 +2397,7 @@ export class BrowserEngine {
   async snapshot(full = false): Promise<string> {
     const page = this.requirePage();
     const memory = this.memory!;
-    await this.settle();
+    await this.settle(true);
 
     const { elements, truncated, forms, cut, prev: prevSnap, matched, aliases } = await this.snapshots.collect();
     const url = page.url();
@@ -2858,7 +2881,7 @@ export class BrowserEngine {
       );
     }
     const frame = await this.recordFrame(action);
-    this.logAction({ action, target, url, ...(frame ? { frame } : {}) });
+    this.logAction({ action, target, url, ...(frame ? { frame } : await this.holdFrame()) });
     await this.scanForInjections();
     await this.scanForContradictions();
     if (click) await this.rankRouteCancellations(click, url);
@@ -6197,6 +6220,7 @@ export class BrowserEngine {
       mode: this.mode,
       browser: this.engineName,
       headed: this.headed,
+      recording: this.recording,
       ...(this.sessionObjective ? { objective: this.sessionObjective } : {}),
       // A journey is a whole user task being measured, so its goal is what the
       // session is doing while it runs.

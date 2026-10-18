@@ -9,6 +9,7 @@ import path from "node:path";
 import { z } from "zod";
 import { computeGaps, coverageView, formatRouteCoverage, generateReport, lastFrames, runRecordOf } from "../engine/report.js";
 import { teamReportData, teamReportText, writeTeamReport } from "../engine/team-report.js";
+import { endedCheckRecap, recapImage } from "./status.js";
 import { DEFAULT_REPORT_AUDIENCE, REPORT_AUDIENCES, type ReportAudience } from "../engine/plain.js";
 import { describeVerdict, formatWorklist, unknownIds, VERDICTS, verifyWorklist, type Verdict } from "../engine/verify.js";
 import {
@@ -186,7 +187,7 @@ export function registerResultTools(): void {
           .enum(REPORT_AUDIENCES)
           .default(DEFAULT_REPORT_AUDIENCE)
           .describe(
-            "Which parts the report carries. 'both' (default): a plain-language section first — a short summary, then each problem with numbered steps, what was expected, what happened, its picture and its impact (blocks users, annoying, cosmetic), each with its technical detail folded beneath — followed by the technical report. 'qa': the plain section alone, for a tester or anyone not technical. 'dev': the technical report alone, as before the plain section existed. It applies to the files this call writes; the live view always shows both.",
+            "Which parts the report carries. 'both' (default): the Summary first — what was checked, when, for how long and how carefully, what was found, the problems as a table with their impact (blocks users, annoying, cosmetic), then each problem folded with its numbered steps, what was expected and what happened — then the Evidence (each problem's picture and the frames recorded before it, only when there is one), then the technical details, folded. 'qa': the Summary and the Evidence alone, for a tester or anyone not technical. 'dev': the technical report alone, unfolded. report.html adds the steps every session took, folded, whichever is chosen. It applies to the files this call writes; the live view always shows both.",
           ),
         session: sessionParam,
       },
@@ -664,7 +665,12 @@ export function registerResultTools(): void {
           generatedAt: new Date().toISOString(),
         });
         const report = writeTeamReport(memory.dir, data);
-        return { content: [{ type: "text" as const, text: teamReportText(report) }], structuredContent: { ...report } };
+        // In the chat, the end-of-check card comes with the report (design 2.9): only for the guided check this report's cover describes, once it has ended.
+        const ended = carried ? endedCheckRecap() : null;
+        return {
+          content: [{ type: "text" as const, text: teamReportText(report) }, ...(ended ? [recapImage(ended.figures)] : [])],
+          structuredContent: { ...report },
+        };
       } catch (err) {
         return errorText(err);
       }

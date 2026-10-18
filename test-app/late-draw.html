@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Late draw</title>
+  </head>
+  <body>
+    <!--
+      A single-page app's empty shell that draws its controls from a timer a
+      second after it loads, with no request for the engine to wait on. Its
+      twin, late-draw-none.html, is identical except that its timer draws
+      nothing: that one is a dead end, this one is not.
+    -->
+    <div id="root"></div>
+    <script>
+      setTimeout(() => {
+        const root = document.getElementById("root");
+        for (const name of ["Open record", "Archive record"]) {
+          const button = document.createElement("button");
+          button.textContent = name;
+          button.dataset.testid = `late-draw-${name.split(" ")[0].toLowerCase()}-button`;
+          root.appendChild(button);
+        }
+      }, 1000);
+    </script>
+  </body>
+</html>

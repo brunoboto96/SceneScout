@@ -11,6 +11,8 @@ export type ScenescoutModDraft = {
   signIn: string;
   care: "look-only" | "may-submit-forms" | "may-create-test-data";
   thoroughness: string;
+  /** The limit the person set for a check (a share of the 5-hour window, or dollars with no subscription windows), or null for none. */
+  cap: number | null;
 };
 
 export type ScenescoutModWizard = {
@@ -57,6 +59,43 @@ export type ScenescoutModStatus = {
   error?: string;
 };
 
+/** A ticket SceneScout filed, as scout_ticket_status last read it. */
+export type ScenescoutModTicket = {
+  id: string;
+  title: string;
+  where: string;
+  ref: string;
+  url: string;
+  open: boolean;
+  finding: "open" | "resolved" | "unknown";
+};
+
+/** A check being measured against the person's limit (hooks/run.js's CostWatch). */
+export type ScenescoutModCost = {
+  planId: string;
+  unit: "percent" | "usd";
+  kind: string;
+  thoroughness: string;
+  start: number;
+  last: number;
+  carried: number;
+  cap: number | null;
+  warned: boolean;
+  stopped: boolean;
+  record: boolean;
+} | null;
+
+/** The end-of-check card as scout_recap sent it (hooks/guided.js's readRecap). */
+export type ScenescoutModRecap = {
+  planId: string;
+  title: string;
+  address: string;
+  date: string;
+  rows: Array<[string, string]>;
+  svg: string | null;
+  file: string | null;
+} | null;
+
 export type ScenescoutModPicture = { id: string; svg?: string; width?: number; height?: number; why?: string } | null;
 
 declare module "claude-code" {
@@ -66,6 +105,9 @@ declare module "claude-code" {
       status: ScenescoutModStatus;
       picture: ScenescoutModPicture;
       confirmed: string[];
+      tickets: ScenescoutModTicket[] | null;
+      cost: ScenescoutModCost;
+      recap: ScenescoutModRecap;
     };
   }
 }

@@ -1,26 +1,35 @@
 <!-- audience: both -->
-## In plain words
+## Summary
 
-This run found 4 problems: 1 blocks users, 2 are annoying and 1 is cosmetic. It went to 3 of the 5 pages it knew about.
+SceneScout checked http://app.test on 2026-01-01 09:00 UTC, for 13 minutes, with the care level "Look only". This run found 4 problems: 1 blocks users, 2 are annoying and 1 is cosmetic. It went to 3 of the 5 pages it knew about.
 
-2 problems found by earlier runs were not checked again this time. They are listed in the technical detail below.
+| # | Impact | Problem | Where | What you'd see | What was expected |
+|---:|---|---|---|---|---|
+| 1 | Blocks users | Saving a thing says it worked when it did not | /things/new | The page said something worked when the server had refused it | The page reports only what really happened. |
+| 2 | Annoying | The error hides behind the banner | /login | Something is confusing to use | It is clear what to do and what happened. |
+| 3 | Cosmetic | A label is clipped | / | Something else is wrong | The app behaves the way a person using it would expect. |
+| 4 | Annoying | The orders page fails to load its list | /orders?page=2#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
 
-1 observation is a problem only if your project follows a particular convention, so it is not counted here. They are listed in the technical detail below.
+2 problems found by earlier runs were not checked again this time. They are listed in the technical details below.
+
+1 observation is a problem only if your project follows a particular convention, so it is not counted here. They are listed in the technical details below.
 
 While it worked, the automatic checks noticed:
 
 - The server refused or failed a request (2 times)
 - The page reported an error behind the scenes (once)
 
-The run left 2 things unchecked. The gap ledger below says which.
+The run left 2 things unchecked. The technical details list which.
 
 ### Ticket THING-1: one criterion answered
 
-### 1. Saving a thing says it worked when it did not
+### Each problem
+
+Open a problem for the steps to see it, what was expected and what happened.
+
+<details><summary>1. Saving a thing says it worked when it did not</summary>
 
 **Blocks users** · The page said something worked when the server had refused it · on http://app.test/things/new, and also seen on /other-things, /more-things
-
-![What the page showed](recordings/s1/finding-0a1b2c3d4e.png)
 
 **What was done:**
 
@@ -32,20 +41,22 @@ The run left 2 things unchecked. The gap ledger below says which.
 
 **What happened:** The page shows "Saved". The server answered with an error.
 
-<details><summary>Technical detail</summary>
+**Picture:** under Evidence, as problem 1.
+
+<details><summary>Details for developers</summary>
 
 - **Finding id:** `0a1b2c3d4e` · **Category:** false_success · **Severity:** high
 - **Evidence:** `POST /api/things → HTTP 500`
 - **Route:** `/things/new#abc`
-- The full entry, with the repro trace and a test skeleton, is under the same id in the technical detail below.
+- The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.
 
 </details>
 
-### 2. The error hides behind the banner
+</details>
+
+<details><summary>2. The error hides behind the banner</summary>
 
 **Annoying** · Something is confusing to use · on http://app.test/login
-
-![What the page showed](recordings/s1/0004-click.jpg)
 
 **What was done:**
 
@@ -57,15 +68,19 @@ The run left 2 things unchecked. The gap ledger below says which.
 
 **What happened:** The error message is under the cookie banner.
 
-<details><summary>Technical detail</summary>
+**Picture:** under Evidence, as problem 2.
+
+<details><summary>Details for developers</summary>
 
 - **Finding id:** `1b2c3d4e5f` · **Category:** ux-confusing · **Severity:** medium
 - **Route:** `/login#def`
-- The full entry, with the repro trace and a test skeleton, is under the same id in the technical detail below.
+- The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.
 
 </details>
 
-### 3. A label is clipped
+</details>
+
+<details><summary>3. A label is clipped</summary>
 
 **Cosmetic** · Something else is wrong · on http://app.test/
 
@@ -73,15 +88,17 @@ The run left 2 things unchecked. The gap ledger below says which.
 
 **What happened:** The label is cut off.
 
-<details><summary>Technical detail</summary>
+<details><summary>Details for developers</summary>
 
 - **Finding id:** `2c3d4e5f60` · **Category:** a-category-from-an-older-file · **Severity:** low
 - **Route:** `/#ghi`
-- The full entry, with the repro trace and a test skeleton, is under the same id in the technical detail below.
+- The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.
 
 </details>
 
-### 4. The orders page fails to load its list
+</details>
+
+<details><summary>4. The orders page fails to load its list</summary>
 
 **Annoying** · The server refused or failed a request · on http://app.test/orders?page=2#top, and also seen on /orders/archive
 
@@ -94,20 +111,49 @@ The run left 2 things unchecked. The gap ledger below says which.
 
 **What happened:** The list stays empty. The server answered 502.
 
-<details><summary>Technical detail</summary>
+<details><summary>Details for developers</summary>
 
 - **Finding id:** `3d4e5f6071` · **Category:** http-error · **Severity:** medium
 - **Evidence:** `GET /api/orders → HTTP 502`
 - **Route:** `/orders#jkl`
-- The full entry, with the repro trace and a test skeleton, is under the same id in the technical detail below.
+- The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.
 
 </details>
 
+</details>
+
+## Evidence
+
+What the page showed for each problem, numbered as in the summary.
+
+### 1. Saving a thing says it worked when it did not
+
+**Blocks users** · on /things/new
+
+<!-- finding 0a1b2c3d4e -->
+
+![What the page showed](recordings/s1/finding-0a1b2c3d4e.png)
+
+### 2. The error hides behind the banner
+
+**Annoying** · on /login
+
+<!-- finding 1b2c3d4e5f -->
+
+![What the page showed](recordings/s1/0004-click.jpg)
+
 
 <!-- audience: qa -->
-## In plain words
+## Summary
 
-This run found 4 problems: 1 blocks users, 2 are annoying and 1 is cosmetic. It went to 3 of the 5 pages it knew about.
+SceneScout checked http://app.test on 2026-01-01 09:00 UTC, for 13 minutes, with the care level "Look only". This run found 4 problems: 1 blocks users, 2 are annoying and 1 is cosmetic. It went to 3 of the 5 pages it knew about.
+
+| # | Impact | Problem | Where | What you'd see | What was expected |
+|---:|---|---|---|---|---|
+| 1 | Blocks users | Saving a thing says it worked when it did not | /things/new | The page said something worked when the server had refused it | The page reports only what really happened. |
+| 2 | Annoying | The error hides behind the banner | /login | Something is confusing to use | It is clear what to do and what happened. |
+| 3 | Cosmetic | A label is clipped | / | Something else is wrong | The app behaves the way a person using it would expect. |
+| 4 | Annoying | The orders page fails to load its list | /orders?page=2#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
 
 2 problems found by earlier runs were not checked again this time.
 
@@ -125,11 +171,13 @@ The run left 2 things unchecked.
 
 ### Ticket THING-1: one criterion answered
 
-### 1. Saving a thing says it worked when it did not
+### Each problem
+
+Open a problem for the steps to see it, what was expected and what happened.
+
+<details><summary>1. Saving a thing says it worked when it did not</summary>
 
 **Blocks users** · The page said something worked when the server had refused it · on http://app.test/things/new, and also seen on /other-things, /more-things
-
-![What the page showed](recordings/s1/finding-0a1b2c3d4e.png)
 
 **What was done:**
 
@@ -141,7 +189,9 @@ The run left 2 things unchecked.
 
 **What happened:** The page shows "Saved". The server answered with an error.
 
-<details><summary>Technical detail</summary>
+**Picture:** under Evidence, as problem 1.
+
+<details><summary>Details for developers</summary>
 
 - **Finding id:** `0a1b2c3d4e` · **Category:** false_success · **Severity:** high
 - **Evidence:** `POST /api/things → HTTP 500`
@@ -149,11 +199,11 @@ The run left 2 things unchecked.
 
 </details>
 
-### 2. The error hides behind the banner
+</details>
+
+<details><summary>2. The error hides behind the banner</summary>
 
 **Annoying** · Something is confusing to use · on http://app.test/login
-
-![What the page showed](recordings/s1/0004-click.jpg)
 
 **What was done:**
 
@@ -165,14 +215,18 @@ The run left 2 things unchecked.
 
 **What happened:** The error message is under the cookie banner.
 
-<details><summary>Technical detail</summary>
+**Picture:** under Evidence, as problem 2.
+
+<details><summary>Details for developers</summary>
 
 - **Finding id:** `1b2c3d4e5f` · **Category:** ux-confusing · **Severity:** medium
 - **Route:** `/login#def`
 
 </details>
 
-### 3. A label is clipped
+</details>
+
+<details><summary>3. A label is clipped</summary>
 
 **Cosmetic** · Something else is wrong · on http://app.test/
 
@@ -180,14 +234,16 @@ The run left 2 things unchecked.
 
 **What happened:** The label is cut off.
 
-<details><summary>Technical detail</summary>
+<details><summary>Details for developers</summary>
 
 - **Finding id:** `2c3d4e5f60` · **Category:** a-category-from-an-older-file · **Severity:** low
 - **Route:** `/#ghi`
 
 </details>
 
-### 4. The orders page fails to load its list
+</details>
+
+<details><summary>4. The orders page fails to load its list</summary>
 
 **Annoying** · The server refused or failed a request · on http://app.test/orders?page=2#top, and also seen on /orders/archive
 
@@ -200,11 +256,33 @@ The run left 2 things unchecked.
 
 **What happened:** The list stays empty. The server answered 502.
 
-<details><summary>Technical detail</summary>
+<details><summary>Details for developers</summary>
 
 - **Finding id:** `3d4e5f6071` · **Category:** http-error · **Severity:** medium
 - **Evidence:** `GET /api/orders → HTTP 502`
 - **Route:** `/orders#jkl`
 
 </details>
+
+</details>
+
+## Evidence
+
+What the page showed for each problem, numbered as in the summary.
+
+### 1. Saving a thing says it worked when it did not
+
+**Blocks users** · on /things/new
+
+<!-- finding 0a1b2c3d4e -->
+
+![What the page showed](recordings/s1/finding-0a1b2c3d4e.png)
+
+### 2. The error hides behind the banner
+
+**Annoying** · on /login
+
+<!-- finding 1b2c3d4e5f -->
+
+![What the page showed](recordings/s1/0004-click.jpg)
 

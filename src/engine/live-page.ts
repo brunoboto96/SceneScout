@@ -10,6 +10,35 @@
  * page is one, a backtick inside it is written \` and a backslash \\ (the
  * regexes in renderMarkdown), and live-test checks that the script still parses.
  */
+/** How many recent frames of each session the live view keeps in memory, for its timeline (live.ts FrameRing). */
+export const HELD_FRAMES = 100;
+
+/**
+ * What the live view says when it has no picture to show. Each is for one
+ * case only: the live failure is for a live page that does not answer, never
+ * for a past step, which a healthy run may simply have no frame for.
+ */
+export const LIVE_WORDS = {
+  /** The session's live page gave no picture. */
+  liveFailure: "No frame available. The session's page may be closed, or not answering.",
+  /** A past step whose frame was held in memory and has since been pushed out by newer ones, by count or by size. */
+  agedOut:
+    `No frame for this step: it is older than the frames kept in memory, which are the last ${HELD_FRAMES} steps, or fewer when the pictures are large. ` +
+    "Turn on recording to keep every frame (scout_attach {record: true} or SCENESCOUT_RECORD=on).",
+  /** A past step whose frame was held in memory and dropped when its session closed. */
+  droppedOnClose:
+    "Its frame was dropped when the session closed: frames are held in memory only while a session is open. " +
+    "Turn on recording to keep every frame (scout_attach {record: true} or SCENESCOUT_RECORD=on).",
+  /** A past step with no frame, on a run that does not record. */
+  notKept: "No frame was kept for this step.",
+  /** A past step with no frame, on a run that records. */
+  notKeptRecording: "This run kept no frame for this step: the recording is full, or the picture could not be taken.",
+  /** A recorded frame that the feed named and the disk no longer has. */
+  recordingGone: "Its frame could not be loaded; the recording may have been removed.",
+  /** The task panel, for the steps a session took before any task was set. */
+  noTask: "No task was set for these steps.",
+} as const;
+
 export const LIVE_PAGE = `<!doctype html>
 <html lang="en">
 <head>
@@ -238,7 +267,7 @@ export const LIVE_PAGE = `<!doctype html>
   </div>
   <div class="stage" id="focus-stage">
     <img id="focus-img" alt="">
-    <span class="none">No frame available. The session's page may be closed, or not answering.</span>
+    <span class="none" id="focus-none" data-testid="live-focus-none"></span>
   </div>
   <div class="scrub"><span id="scrub-where" data-testid="live-scrub-where">Live</span><span class="spacer"></span>
     <button type="button" id="scrub-live" data-testid="live-scrub-live" hidden>Back to live</button></div>
@@ -282,6 +311,11 @@ export const LIVE_PAGE = `<!doctype html>
   // A step the viewer picked from the timeline: the stage shows its frame
   // instead of the live page, so a run can be watched back while it runs.
   var scrubbed = null;
+  // The fixed sentences, from live-page.ts LIVE_WORDS.
+  var WORDS = ${JSON.stringify(LIVE_WORDS)};
+  // What the close-up's empty stage says: the live failure while it shows the live page, a step's own reason while it shows a past step.
+  function stageNote(text) { document.getElementById('focus-none').textContent = text; }
+  stageNote(WORDS.liveFailure);
   var timelineLines = [];
   var reportOpen = false;
   var reportTimer = null;
@@ -551,11 +585,40 @@ export const LIVE_PAGE = `<!doctype html>
     both.appendChild(box);
     return both;
   }
+  // A folded problem's title is written with &lt; &gt; &amp; (inside raw HTML,
+  // Markdown escapes do not apply). Set as text, it is decoded once first, the
+  // same as report.html does, so the title reads as the app wrote it.
+  function decodeEntities(text) {
+    return text.replace(/&(lt|gt|quot|#39|amp);/g, function (_, e) {
+      return { lt: '<', gt: '>', quot: '"', '#39': "'", amp: '&' }[e];
+    });
+  }
+  // A table row's cells: \\| is a pipe in the text and \\\\ a backslash, as the
+  // report escapes them, so a title holding a pipe stays in its own cell.
+  function tableCells(row) {
+    var inner = row.trim().replace(/^\\|/, '').replace(/\\|$/, '');
+    var cells = [];
+    var cell = '';
+    for (var k = 0; k < inner.length; k++) {
+      var c = inner[k];
+      if (c === '\\\\' && (inner[k + 1] === '|' || inner[k + 1] === '\\\\')) {
+        cell += inner[k + 1];
+        k += 1;
+      } else if (c === '|') {
+        cells.push(cell.trim());
+        cell = '';
+      } else cell += c;
+    }
+    cells.push(cell.trim());
+    return cells;
+  }
   function renderMarkdown(root, md) {
     root.textContent = '';
     var lines = md.split('\\n');
     var i = 0;
     var container = root;
+    // The folds open around the current line, innermost last: a problem's fold holds its technical one.
+    var folds = [];
     var para = [];
     function flush() {
       if (!para.length) return;
@@ -599,7 +662,9 @@ export const LIVE_PAGE = `<!doctype html>
       } else if ((m = /^(#{1,6}) (.*)$/.exec(line))) {
         flush();
         var h = el('h' + Math.min(6, m[1].length + 1));
-        inline(h, m[2]);
+        // Inside a fold report.md writes a finding's title with &lt; &gt; &amp;, so a
+        // </details> in it cannot close the fold; the panel sets text, so it decodes them.
+        inline(h, folds.length ? decodeEntities(m[2]) : m[2]);
         container.appendChild(h);
         i += 1;
       } else if ((m = /^!\\[([^\\]]*)\\]\\((recordings\\/[A-Za-z0-9._\\/-]+)\\)$/.exec(line)) && m[2].indexOf('..') < 0) {
@@ -619,13 +684,18 @@ export const LIVE_PAGE = `<!doctype html>
       } else if ((m = /^<details><summary>(.*)<\\/summary>$/.exec(line))) {
         flush();
         var details = el('details');
-        details.appendChild(el('summary', '', m[1]));
+        details.appendChild(el('summary', '', decodeEntities(m[1])));
         container.appendChild(details);
+        folds.push(container);
         container = details;
+        i += 1;
+      } else if (/^<!-- finding [0-9a-f]+ -->$/.test(line)) {
+        // The id the HTML report hangs an Evidence item's frames from; it is not text.
+        flush();
         i += 1;
       } else if (/^<\\/details>$/.test(line)) {
         flush();
-        container = root;
+        container = folds.length ? folds.pop() : root;
         i += 1;
       } else if (/^\\|/.test(line)) {
         flush();
@@ -636,9 +706,9 @@ export const LIVE_PAGE = `<!doctype html>
           i += 1;
           if (/^\\|(\\s*:?-+:?\\s*\\|)+\\s*$/.test(row)) continue;
           var tr = el('tr');
-          row.replace(/^\\||\\|\\s*$/g, '').split('|').forEach(function (cell) {
+          tableCells(row).forEach(function (cell) {
             var td = el(rowIndex === 0 ? 'th' : 'td');
-            inline(td, cell.trim());
+            inline(td, cell);
             tr.appendChild(td);
           });
           table.appendChild(tr);
@@ -785,7 +855,10 @@ export const LIVE_PAGE = `<!doctype html>
     scrubbed = line;
     back.hidden = false;
     if (!line.frame) {
-      where.textContent = clock(line.at) + ' ' + line.action + ' — this run kept no frame for that step';
+      // The server says why (live.ts annotateFrames): held in memory and pushed out by newer steps, or never kept.
+      var why = line.noFrame || WORDS.notKept;
+      where.textContent = clock(line.at) + ' ' + line.action + ' — ' + why;
+      stageNote(why);
       // Leaving the live frame up under that caption is the most misleading
       // state this page can reach: it reads as the page at that moment.
       document.getElementById('focus-img').removeAttribute('src');
@@ -794,6 +867,7 @@ export const LIVE_PAGE = `<!doctype html>
       return;
     }
     document.getElementById('focus-stage').classList.remove('empty');
+    stageNote(WORDS.liveFailure);
     document.getElementById('focus-img').src = 'record/' + line.frame;
     where.textContent = clock(line.at) + ' ' + line.action + (line.task ? ' · ' + line.task : '');
     renderTimeline(null);
@@ -801,6 +875,7 @@ export const LIVE_PAGE = `<!doctype html>
 
   function backToLive() {
     scrubbed = null;
+    stageNote(WORDS.liveFailure);
     document.getElementById('scrub-where').textContent = 'Live';
     document.getElementById('scrub-live').hidden = true;
     if (focused) document.getElementById('focus-img').src = (cards[focused] && cards[focused].live && frames[focused]) || shotUrl(focused);
@@ -896,6 +971,7 @@ export const LIVE_PAGE = `<!doctype html>
     focusStill = null;
     focusStillFailures = 0;
     scrubbed = null;
+    stageNote(WORDS.liveFailure);
     // The ticks belong to the session just left; showing them under this one's
     // name, and playing its frames when one is clicked, is worse than none.
     timelineLines = [];
@@ -968,7 +1044,8 @@ export const LIVE_PAGE = `<!doctype html>
     var head = document.getElementById('focus-task-head');
     if (hoverTask !== null) {
       head.textContent = 'Doing, for these actions';
-      setBrief('focus-task', hoverTask, 'Nothing was stated for these.');
+      // A group with no task is the steps taken before any was set (a crawl right after attaching).
+      setBrief('focus-task', hoverTask, WORDS.noTask);
       document.getElementById('focus-task-since').textContent = '';
     } else {
       head.textContent = 'Doing now';
@@ -1102,8 +1179,10 @@ export const LIVE_PAGE = `<!doctype html>
     // A live session with nothing to show and a recorded frame that has since
     // been deleted look identical here; only the second is worth explaining.
     if (scrubbed) {
-      document.getElementById('scrub-where').textContent =
-        clock(scrubbed.at) + ' ' + scrubbed.action + ' — its frame could not be loaded; the recording may have been removed';
+      // A frame held in memory that newer steps pushed out since the feed was read, or a recorded one since deleted.
+      var gone = (scrubbed.frame || '').indexOf('memory/') === 0 ? WORDS.agedOut : WORDS.recordingGone;
+      stageNote(gone);
+      document.getElementById('scrub-where').textContent = clock(scrubbed.at) + ' ' + scrubbed.action + ' — ' + gone;
     }
   });
   document.getElementById('focus-img').addEventListener('load', function () { document.getElementById('focus-stage').classList.remove('empty'); });

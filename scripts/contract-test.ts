@@ -20,7 +20,8 @@ import { crawledRoute, crawlLine, mainStateFlag } from "../src/engine/crawl.ts";
 import { MemoryStore, reachedRoutes, type ActionLogEntry } from "../src/engine/memory.ts";
 import { COLLECT_INTERACTABLES_SCRIPT, MASKED_NAME } from "../src/engine/collector.ts";
 import { FORMS_INVENTORY_SCRIPT } from "../src/engine/forms.ts";
-import { keyAtXpath, SnapshotCollector, SNAPSHOTS_KEPT, type SnapshotElement } from "../src/engine/snapshot-collect.ts";
+import { RECHECK_EMPTY_AGE_MS } from "../src/engine/settle.ts";
+import { keyAtXpath, PAGE_AGE_SCRIPT, SnapshotCollector, SNAPSHOTS_KEPT, type SnapshotElement } from "../src/engine/snapshot-collect.ts";
 import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
   classifyFilledStates,
@@ -42,6 +43,8 @@ import {
   isSafeRelativePath,
   PLAIN_WORDING,
   pictureOf,
+  plainCheckedLine,
+  plainDuration,
   plainFinding,
   plainStep,
   plainSteps,
@@ -61,6 +64,7 @@ import {
   projectKey,
   RECORD_MAX_FRAMES,
   renderMarkdown,
+  tableCells,
   resolveFrame,
   splitProjectFrame,
   taskBlocks,
@@ -639,15 +643,15 @@ test("replay: frames hang under the finding they belong to, at the prefix the re
   ];
   const md = "### A finding\n\n- **Id:** `e3aad70ee8` · **Category:** http-error\n- **Where:** `/orders.html`\n";
   const file = renderMarkdown(md, evidence);
-  assert.match(file, /<details class="evidence">/);
+  assert.match(file, /<div class="filmstrip" data-testid="report-evidence-frames">/);
   assert.match(file, /src="recordings\/clerk\/0002\.jpg"/, "beside the file, the stored path is the path");
   const served = renderMarkdown(md, evidence, "record/");
   assert.match(served, /src="record\/recordings\/clerk\/0002\.jpg"/, "over HTTP, the live view's own route");
   // The accordion follows the finding's own list, not the next one's.
-  assert.ok(served.indexOf("e3aad70ee8") < served.indexOf('<details class="evidence">'));
+  assert.ok(served.indexOf("e3aad70ee8") < served.indexOf('<div class="filmstrip"'));
   // A finding with no frames reads exactly as it did before recording existed.
-  assert.ok(!renderMarkdown(md, [{ id: "e3aad70ee8", frames: [] }]).includes('class="evidence"'));
-  assert.ok(!renderMarkdown(md).includes('class="evidence"'));
+  assert.ok(!renderMarkdown(md, [{ id: "e3aad70ee8", frames: [] }]).includes('class="filmstrip"'));
+  assert.ok(!renderMarkdown(md).includes('class="filmstrip"'));
 });
 
 test("replay: a finding's picture shows open under it, with or without recorded frames, and links to itself", () => {
@@ -658,14 +662,14 @@ test("replay: a finding's picture shows open under it, with or without recorded 
   assert.match(alone, /data-testid="finding-picture-open" data-finding="e3aad70ee8"/);
   assert.match(alone, /<img loading="lazy" [^>]*src="recordings\/clerk\/finding-e3aad70ee8\.png" width="320" height="120"/);
   assert.match(alone, /320×120, &quot;Save&quot; and around it/, "the caption is escaped");
-  assert.ok(!alone.includes('class="evidence"'), "no frames: no accordion");
+  assert.ok(!alone.includes('class="filmstrip"'), "no frames: no strip");
   assert.ok(alone.indexOf("e3aad70ee8") < alone.indexOf('<figure class="picture">'), "under the finding's own list");
   const served = renderMarkdown(md, [{ id: "e3aad70ee8", frames: [], picture }], "record/");
   assert.match(served, /src="record\/recordings\/clerk\/finding-e3aad70ee8\.png"/, "over HTTP, the live view's route");
   const both = renderMarkdown(md, [
     { id: "e3aad70ee8", frames: [{ at: "2026-09-20T14:00:01.000Z", action: "click", detail: "Save", frame: "recordings/clerk/0002.jpg" }], picture },
   ]);
-  assert.ok(both.indexOf('<figure class="picture">') < both.indexOf('<details class="evidence">'), "the picture first, then the frames");
+  assert.ok(both.indexOf('<figure class="picture">') < both.indexOf('<div class="filmstrip"'), "the picture first, then the frames");
   // The contrast: the same finding with no picture shows none.
   assert.ok(!renderMarkdown(md, [{ id: "e3aad70ee8", frames: [] }]).includes("picture"));
 });
@@ -713,7 +717,7 @@ test("replay: the header says when, on a clock it names, and says nothing about 
   assert.match(named, /written 2026-09-20 15:19 UTC · v3\.1\.0/);
   // The live view renders the same document without one; "· v" alone is noise.
   const bare = buildReplayHtml({ ...base, version: "" });
-  assert.match(bare, /written 2026-09-20 15:19 UTC<\/span>/);
+  assert.match(bare, /written 2026-09-20 15:19 UTC<\/p>/);
   assert.ok(!bare.includes("· v<"));
 });
 
@@ -1299,6 +1303,16 @@ test("plain steps: each repro action as a person would do it, and the tester's o
     ['select combobox "Status" = archived @ http://app.test/x', 'Choose "archived" in the "Status" list'],
     ['upload the "Attachment" input (accepts .pdf) ← report.pdf (1200 bytes, application/pdf; generated) @ http://app.test/x', 'Attach the file "report.pdf"'],
     ['hover button "Help" @ http://app.test/x', 'Point at the "Help" button'],
+    // A plan names its target by locator; none of that shows in the words.
+    ["plan:select testid=orders-status-filter @ http://app.test/x", 'Choose an option in the "orders status filter" list'],
+    ["plan:click testid=create_order @ http://app.test/x", 'Click the "create order" control'],
+    ["plan:click text=Create order @ http://app.test/x", 'Click "Create order"'],
+    ['plan:click role=button[name="Save"] @ http://app.test/x', 'Click the "Save" button'],
+    ["plan:click role=link[name=Help] @ http://app.test/x", 'Click the "Help" link'],
+    ["plan:type label=Email @ http://app.test/x", 'Type into the "Email" field'],
+    ["plan:hover testid=help-icon @ http://app.test/x", 'Point at the "help icon" control'],
+    ["plan:scroll testid=orders-list @ http://app.test/x", 'Scroll the "orders list" control'],
+    ["plan:scroll down @ http://app.test/x", "Scroll down"],
     ["press Escape @ http://app.test/x", "Press Escape"],
     ["scroll down @ http://app.test/x", "Scroll down"],
     ["back @ http://app.test/x", "Go back to the previous page"],
@@ -1311,6 +1325,17 @@ test("plain steps: each repro action as a person would do it, and the tester's o
     ["write-policy:blocked POST /api/things @ http://app.test/x", null],
   ];
   for (const [line, want] of cases) assert.equal(plainStep(line), want, line);
+  for (const [line] of cases) assert.doesNotMatch(plainStep(line) ?? "", /testid=|text=|label=|role=/, line);
+  // A target the plan's own parser refuses is quoted as it is, never half-read
+  // into words; a role is read in any case, as the plan reads it.
+  const raw: Array<[string, string]> = [
+    ['plan:click role=button[name="Save"][exact] @ http://app.test/x', 'Click role=button[name="Save"][exact]'],
+    ['plan:click role=button[name="Save"] >> nth=1 @ http://app.test/x', 'Click role=button[name="Save"] >> nth=1'],
+    ["plan:click css=.toolbar > button @ http://app.test/x", "Click css=.toolbar > button"],
+    ["plan:click testid= @ http://app.test/x", "Click testid="],
+    ["plan:click role=BUTTON @ http://app.test/x", "Click the unnamed button"],
+  ];
+  for (const [line, want] of raw) assert.equal(plainStep(line), want, line);
 });
 
 test("plain steps: start at the last page the run went to, or at the page the trace began on", () => {
@@ -1347,8 +1372,9 @@ test("a finding's picture: its own first, a recorded frame next, and never a pat
   }
 });
 
-test("the report setting: both puts the plain section first, qa prints it alone, dev prints the technical report alone", () => {
+test("the report setting: both puts the Summary first and folds the technical details, qa prints the plain part alone, dev the technical report alone", () => {
   const store = freshStore();
+  store.logAction({ action: "click", target: 'button "Save"', url: "http://app.test/things/new" });
   store.addFinding({
     severity: "high",
     category: "http-error",
@@ -1376,13 +1402,16 @@ test("the report setting: both puts the plain section first, qa prints it alone,
     write: false,
   }).markdown;
 
-  assert.equal(unset, both.replace(/Generated: .*/, unset.match(/Generated: .*/)![0]), "both is the default");
+  const untimed = (md: string): string => md.replace(/Generated: .*/, "Generated: x").replace(/ on \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC, for [^,]+,/, "");
+  assert.equal(untimed(unset), untimed(both), "both is the default");
   const order = [
     "# SceneScout Report",
-    "## In plain words",
-    "### 1. Saving a thing fails",
-    "## Technical detail",
     "## Summary",
+    "| 1 | Blocks users | Saving a thing fails | /things/new |",
+    "<details><summary>1. Saving a thing fails</summary>",
+    "## Technical details",
+    "<details><summary>For developers:",
+    "## Run metrics",
     "## Findings — seen this session",
   ];
   const at = order.map((h) => both.indexOf(h));
@@ -1390,7 +1419,12 @@ test("the report setting: both puts the plain section first, qa prints it alone,
     at.every((i, k) => i >= 0 && (k === 0 || i > at[k - 1])),
     `sections in order: ${order.map((h, k) => `${h}@${at[k]}`).join(", ")}`,
   );
-  assert.match(both, /This run found 2 problems: 1 blocks users and 1 is cosmetic\. It went to 2 of the 3 pages it knew about\./);
+  assert.match(both, /\n<\/details>\n*$/, "the technical details close at the end of the document");
+  assert.ok(!both.includes("## Evidence"), "no picture and no recorded frame: no Evidence section");
+  assert.match(
+    both,
+    /SceneScout checked http:\/\/app\.test on \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC, for under a minute\. This run found 2 problems: 1 blocks users and 1 is cosmetic\. It went to 2 of the 3 pages it knew about\./,
+  );
   assert.match(both, /- The server refused or failed a request \(once\)/);
   assert.match(both, /\*\*Blocks users\*\* · The server refused or failed a request · on http:\/\/app\.test\/things\/new/);
   assert.match(both, /\*\*What was expected:\*\* The action completes/);
@@ -1398,25 +1432,128 @@ test("the report setting: both puts the plain section first, qa prints it alone,
   const shared = { ...store.findings[0], seenOn: ["/other-things", "/more-things"] };
   assert.match(plainFinding(shared, 1, { audience: "both" }).join("\n"), /on http:\/\/app\.test\/things\/new, and also seen on \/other-things, \/more-things/);
   assert.match(both, /\*\*What happened:\*\* The save request fails/);
+  assert.match(both, /\n- \*\*Finding id:\*\* `[0-9a-f]+` · \*\*Category:\*\* http-error · \*\*Severity:\*\* high/);
+  // A Summary reader opens a problem for its steps; its id, category, severity and route are folded once more, under their own name.
   assert.match(
     both,
-    /<details><summary>Technical detail<\/summary>\n\n- \*\*Finding id:\*\* `[0-9a-f]+` · \*\*Category:\*\* http-error · \*\*Severity:\*\* high/,
+    /\*\*What happened:\*\* The save request fails[^\n]*\n\n<details><summary>Details for developers<\/summary>\n\n- \*\*Finding id:\*\*/,
+    "a problem's technical lines are in a fold of their own inside it",
   );
+  assert.match(both, /The run left \d+ things? unchecked\. The technical details list which\./, "no 'gap ledger' in the Summary");
+  assert.doesNotMatch(both.slice(0, both.indexOf("## Technical details")), /gap ledger/i);
   assert.match(both, /- \*\*Evidence:\*\* `POST \/api\/things → HTTP 500`/);
   assert.equal(both.match(/^- \*\*Id:\*\* /gm)?.length, 2, "each finding's own Id line appears once, in the technical report: frames hang under it");
+  // Inside the folded technical details the repro trace is a list; with nothing folded around it, it folds itself.
+  assert.match(both, /\*\*Repro trace \(last actions before finding\):\*\*\n\n1\. click button "Save"/);
+  assert.ok(!both.includes("<details><summary>Repro trace"));
+  assert.match(dev, /<details><summary>Repro trace \(last actions before finding\)<\/summary>\n\n1\. click button "Save"/);
 
-  assert.ok(qa.includes("## In plain words") && qa.includes("### 2. A label is clipped"));
-  for (const technical of ["## Summary", "## Gap ledger", "```ts", "## Technical detail", "the technical detail below"]) {
+  assert.ok(qa.includes("## Summary") && qa.includes("<details><summary>2. A label is clipped</summary>"));
+  for (const technical of ["## Run metrics", "## Gap ledger", "```ts", "## Technical details", "the technical details below", "For developers"]) {
     assert.ok(!qa.includes(technical), `qa leaves out ${technical}`);
   }
   assert.match(qa, /The run left \d+ things unchecked\.\n\n- /, "with no gap ledger to point at, qa lists what was not checked");
 
-  assert.ok(!dev.includes("In plain words") && !dev.includes("## Technical detail"));
-  assert.match(dev, /^# SceneScout Report\n\nGenerated: .*\n\n## Summary\n/, "dev is the technical report as it was");
+  assert.ok(!dev.includes("## Summary") && !dev.includes("## Technical details") && !dev.includes("For developers"));
+  assert.match(dev, /^# SceneScout Report\n\nGenerated: .*\n\n## Run metrics\n/, "dev is the technical report, unfolded");
   assert.equal(
     dev,
     withAudience(dev.split("\n"), "dev", () => ["never built"]),
   );
+});
+
+test("the summary's first sentence: what was checked, when, for how long and how carefully, each part only when known", () => {
+  assert.equal(plainCheckedLine(undefined), null);
+  assert.equal(plainCheckedLine({}), null, "nothing known: no sentence");
+  assert.equal(plainCheckedLine({ site: "https://shop.test" }), "SceneScout checked https://shop.test.");
+  assert.equal(plainCheckedLine({ mode: "observe" }), 'SceneScout checked the app, with the care level "Look only".');
+  assert.equal(
+    plainCheckedLine({ site: "https://shop.test", mode: "safe-write", startedAt: "2026-10-17T12:04:45.742Z", endedAt: "2026-10-17T13:10:02.000Z" }),
+    'SceneScout checked https://shop.test on 2026-10-17 12:04 UTC, for 1 hour 5 minutes, with the care level "May create test data".',
+  );
+  assert.equal(
+    plainCheckedLine({ site: "https://shop.test", startedAt: "2026-10-17T12:04:45.742Z" }),
+    "SceneScout checked https://shop.test on 2026-10-17 12:04 UTC.",
+  );
+  for (const [ms, words] of [
+    [0, "under a minute"],
+    [29_000, "under a minute"],
+    [61_000, "1 minute"],
+    [4 * 60_000 + 40_000, "5 minutes"],
+    [60 * 60_000, "1 hour"],
+    [125 * 60_000, "2 hours 5 minutes"],
+  ] as const) {
+    assert.equal(plainDuration(ms), words, String(ms));
+  }
+  assert.equal(plainDuration(-1), "", "a clock that went backwards says nothing");
+});
+
+test("the Evidence section: there with a picture or a recorded frame, absent with neither", () => {
+  const withPictures = formatPlainSection(plainGoldenInput("both")).join("\n");
+  assert.match(withPictures, /\n## Evidence\n/);
+  assert.match(
+    withPictures,
+    /### 1\. Saving a thing says it worked when it did not\n\n\*\*Blocks users\*\* · on \/things\/new\n\n<!-- finding 0a1b2c3d4e -->\n\n!\[What the page showed\]\(recordings\/s1\/finding-0a1b2c3d4e\.png\)/,
+  );
+  assert.match(
+    withPictures,
+    /### 2\. The error hides behind the banner\n[\s\S]*!\[What the page showed\]\(recordings\/s1\/0004-click\.jpg\)/,
+    "a recorded frame stands in",
+  );
+  assert.ok(!/### [34]\. /.test(withPictures.slice(withPictures.indexOf("## Evidence"))), "a problem with no safe picture is not listed under Evidence");
+  assert.ok(withPictures.indexOf("## Summary") < withPictures.indexOf("## Evidence"));
+  // The contrast: the same problems with no picture and no recorded frame.
+  const bare = plainGoldenInput("both");
+  const without = formatPlainSection({
+    ...bare,
+    current: bare.current.map((f) => ({ ...f, picture: undefined })),
+    lastFrames: new Map(),
+  }).join("\n");
+  assert.ok(!without.includes("## Evidence") && !without.includes("**Picture:**"), "no pictures: no Evidence heading and no pointer to one");
+  assert.ok(without.includes("## Summary") && without.includes("<details><summary>1. Saving a thing"));
+});
+
+test("a Markdown table row splits on its live pipes only", () => {
+  assert.deepEqual(tableCells("| a | b |"), ["a", "b"]);
+  assert.deepEqual(tableCells(`| ${escapeTableCell("x | y")} | z |`), ["x | y", "z"]);
+  assert.deepEqual(tableCells(`| ${escapeTableCell("ends in \\")} | z |`), ["ends in \\", "z"], "an escaped backslash before a live pipe is a backslash");
+  assert.deepEqual(tableCells(`| ${escapeTableCell("\\|")} |`), ["\\|"]);
+});
+
+test("report.html: a heading named like an object's own key gets no anchor, and a close with nothing open writes nothing", () => {
+  assert.ok(!renderMarkdown("## constructor\n\n## __proto__").includes(" id="));
+  assert.equal(renderMarkdown("</details>\n\ntext"), "<p>text</p>");
+});
+
+test("a problem's title in its fold is escaped once for Markdown and once for the page", () => {
+  const f: Finding = {
+    id: "0a1b2c3d4e",
+    severity: "high",
+    category: "visual",
+    title: 'A <b>bold</b> </summary> & "quoted" | piped',
+    detail: "d",
+    url: "http://app.test/",
+    state: "/#a",
+    repro: [],
+    foundAt: "2026-01-01T00:00:00.000Z",
+    runs: 1,
+  };
+  const md = formatPlainSection({ current: [f], historical: 0, worthALook: 0, violations: [], gaps: [], audience: "both" }).join("\n");
+  assert.ok(
+    md.includes('<details><summary>1. A &lt;b&gt;bold&lt;/b&gt; &lt;/summary&gt; &amp; "quoted" | piped</summary>'),
+    "the raw <summary> cannot be closed early",
+  );
+  assert.ok(md.includes('| A <b>bold</b> </summary> & "quoted" \\| piped |'), "the table cell's pipe is escaped");
+  const table = renderMarkdown(md.slice(md.indexOf("| #")));
+  assert.equal((table.match(/<tr><td /g) ?? []).length, 1);
+  assert.equal(table.split("</tr>")[1].match(/<td /g)?.length, 6, "the escaped pipe stays inside the Problem cell: six cells, no forged column");
+  assert.ok(table.includes('<td data-label="Problem">A &lt;b&gt;bold&lt;/b&gt; &lt;/summary&gt; &amp; &quot;quoted&quot; | piped</td>'));
+  const html = renderMarkdown(`## Summary\n\n${md.slice(md.indexOf("<details>"))}`);
+  assert.ok(
+    html.includes('<summary data-testid="report-problem-toggle">1. A &lt;b&gt;bold&lt;/b&gt; &lt;/summary&gt; &amp; &quot;quoted&quot; | piped</summary>'),
+  );
+  assert.ok(!html.includes("&amp;lt;"), "not escaped twice");
+  assert.ok(!/<b>bold/.test(html));
 });
 
 /** Findings that reach every branch of the plain section's wording, with fixed ids so the page is the same on every run. */
@@ -1494,10 +1631,11 @@ function plainGoldenInput(audience: PlainInput["audience"]): PlainInput {
     lastFrames: new Map([["1b2c3d4e5f", "recordings/s1/0004-click.jpg"]]),
     audience,
     tickets: ["### Ticket THING-1: one criterion answered", ""],
+    run: { site: "http://app.test", mode: "observe", startedAt: "2026-01-01T09:00:00.000Z", endedAt: "2026-01-01T09:12:30.000Z" },
   };
 }
 
-test("the plain section is the same page, word for word, before and after it is built from cards", () => {
+test("the plain part (Summary and Evidence) is the same page, word for word", () => {
   const golden = path.join(path.dirname(fileURLToPath(import.meta.url)), "golden", "plain-section.md");
   const page = (["both", "qa"] as const).map((a) => [`<!-- audience: ${a} -->`, ...formatPlainSection(plainGoldenInput(a))].join("\n")).join("\n\n");
   if (process.env.UPDATE_GOLDEN === "1") fs.writeFileSync(golden, `${page}\n`);
@@ -1508,51 +1646,165 @@ test("the plain section is the same page, word for word, before and after it is 
   );
 });
 
-test("report.html: the plain view first, a picture shown, the technical detail one click away", () => {
+test("a finding's title with a closing fold tag is text in the folded technical details, and the HTML reads it back as the title", () => {
+  const store = freshStore();
+  const trap = "Save </details> closes early";
+  store.addFinding({ severity: "high", category: "http-error", title: trap, detail: "d", url: "http://app.test/a", state: "/a#1" });
+  store.addFinding({ severity: "low", category: "visual", title: "Save closes nothing early", detail: "d", url: "http://app.test/b", state: "/b#2" });
+  // A "worth a look" entry has its own heading in the same fold.
+  const look = "Spacing </details> off the grid";
+  store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: look,
+    detail: "d",
+    url: "http://app.test/c",
+    state: "/c#3",
+    tier: "worth_a_look",
+    convention: "a 4px scale",
+  });
+  const extras = { routesVisited: 1, routesTotal: 1, designAudits: 0 };
+  const both = generateReport(store, [], extras, { write: false }).markdown;
+  const folded = both.slice(both.indexOf("## Technical details"));
+  assert.ok(!folded.split("\n").some((l) => l.startsWith("#") && l.includes("</details>")), "no raw fold tag from a title in a heading inside the fold");
+  assert.match(folded, /### .* Save &lt;\/details&gt; closes early\n/);
+  assert.match(folded, /### Spacing &lt;\/details&gt; off the grid\n/);
+  // The contrast: the other title, and the document's balance of folds.
+  assert.match(folded, /### .* Save closes nothing early\n/);
+  const opens = (both.match(/<details>/g) ?? []).length;
+  const closes = (both.match(/^\s*<\/details>$/gm) ?? []).length;
+  assert.equal(opens, closes, "every fold the document opens is closed once");
+  const html = buildReplayHtml({ project: "p", at: "2026-01-01T00:00:00.000Z", version: "", sessions: [], markdown: both, evidence: [] });
+  assert.ok(html.includes("<h4>🔴 [HIGH] Save &lt;/details&gt; closes early</h4>"), "report.html shows the title once-escaped");
+  assert.ok(!html.includes("&amp;lt;"), "and never double-escaped");
+  // Unfolded (dev), nothing is escaped: the document has no fold to close.
+  const dev = generateReport(store, [], { ...extras, report: "dev" }, { write: false }).markdown;
+  assert.ok(dev.includes(trap) && dev.includes(`### ${look}`));
+});
+
+test("the Evidence caption names no finding id, and the HTML still hangs the recorded frames under the item", () => {
+  const withPictures = formatPlainSection(plainGoldenInput("both")).join("\n");
+  const evidence = withPictures
+    .slice(withPictures.indexOf("## Evidence"))
+    .split("\n")
+    .filter((l) => !l.startsWith("!["))
+    .join("\n");
+  assert.doesNotMatch(evidence.replace(/<!-- finding [0-9a-f]+ -->/g, ""), /finding|0a1b2c3d4e/, "the visible Evidence text carries no id");
+  assert.match(evidence, /<!-- finding 0a1b2c3d4e -->/);
+  const md = [
+    "## Evidence",
+    "",
+    "### 1. A thing",
+    "",
+    "**Blocks users** · on /things",
+    "",
+    "<!-- finding abc0123456 -->",
+    "",
+    "![What the page showed](recordings/s/0001-click.jpg)",
+    "",
+  ].join("\n");
+  const frame = { id: "abc0123456", frames: [{ at: "2026-01-01T00:00:01.000Z", action: "click", detail: "Save", frame: "recordings/s/0002-click.jpg" }] };
+  const html = renderMarkdown(md, [frame], "");
+  assert.ok(!html.includes("abc0123456") && !html.includes("&lt;!--"), "the comment is not shown");
+  assert.match(html, /0002-click\.jpg/, "the frames recorded before the finding sit under the item");
+  const bare = renderMarkdown(md.replace("<!-- finding abc0123456 -->", ""), [frame], "");
+  assert.doesNotMatch(bare, /0002-click\.jpg/, "without the anchor there is nothing to hang them from");
+});
+
+test("report.html: Summary, Evidence, then Technical details and Steps folded, a picture shown, nothing from the app unescaped", () => {
   const md = [
     "# SceneScout Report",
     "",
-    "## In plain words",
+    "Generated: 2026-01-01T00:00:00.000Z",
+    "",
+    "## Summary",
+    "",
+    "SceneScout checked the app.",
+    "",
+    "| # | Impact | Problem | Where | What you'd see | What was expected |",
+    "|---:|---|---|---|---|---|",
+    "| 1 | Blocks users | A <b>thing</b> fails | /things | x | y |",
+    "",
+    "<details><summary>1. A &lt;b&gt;thing&lt;/b&gt; fails</summary>",
+    "",
+    "**Blocks users** · on /things",
+    "",
+    "</details>",
+    "",
+    "## Evidence",
     "",
     "### 1. A <b>thing</b> fails",
+    "",
+    "**Blocks users** · on /things",
+    "",
+    "<!-- finding abc0123456 -->",
     "",
     "![What the page showed](recordings/s/0001-click.jpg)",
     "",
     "![x](../../secret.png)",
     "",
-    "<details><summary>Technical detail</summary>",
+    "## Technical details",
     "",
-    "- **Finding id:** `abc`",
+    "<details><summary>For developers: the rest.</summary>",
+    "",
+    "## Run metrics",
+    "",
+    "- **Id:** `abc0123456` · **Category:** visual",
     "",
     "</details>",
-    "",
-    "## Technical detail",
-    "",
-    "## Summary",
   ].join("\n");
-  const file = renderMarkdown(md);
-  assert.match(file, /<h3 id="plain">In plain words<\/h3>/);
-  assert.match(file, /<h3 id="technical">Technical detail<\/h3>/);
+  const evidence = [{ id: "abc0123456", frames: [{ at: "2026-01-01T00:00:01.000Z", action: "click", detail: "Save", frame: "recordings/s/0001-click.jpg" }] }];
+  const file = renderMarkdown(md, evidence);
+  assert.match(file, /<h2 id="summary">Summary<\/h2>/);
+  assert.match(file, /<h2 id="evidence">Evidence<\/h2>/);
+  assert.match(
+    file,
+    /<details class="part" id="technical" data-testid="report-technical-section"><summary data-testid="report-technical-toggle"><h2>Technical details<\/h2><span class="hint">For developers: the rest\.<\/span><\/summary>/,
+    "the technical details start folded, the heading in the summary",
+  );
+  assert.match(file, /<h3>Run metrics<\/h3>/, "a heading inside a folded part goes one level down");
+  assert.match(file, /<table class="problems" data-testid="report-problems-table">/);
+  assert.match(file, /<td data-label="Impact"><span class="impact high">Blocks users<\/span><\/td>/);
+  assert.match(file, /<details class="problem"><summary data-testid="report-problem-toggle">1\. A &lt;b&gt;thing&lt;\/b&gt; fails<\/summary>/);
+  assert.match(file, /<article class="ev" data-testid="report-evidence-item"><div class="ev-head">\n<h3>1\. A &lt;b&gt;thing&lt;\/b&gt; fails<\/h3>/);
   assert.match(
     file,
     /<figure class="picture"><a href="recordings\/s\/0001-click\.jpg"[^>]*data-testid="report-picture-open"><img [^>]*src="recordings\/s\/0001-click\.jpg" alt="What the page showed">/,
   );
+  assert.equal(file.match(/class="filmstrip"/g)?.length, 1, "the frames show under the Evidence item, and not again under the technical Id");
+  assert.ok(file.indexOf('class="filmstrip"') < file.indexOf('id="technical"'));
   assert.ok(!file.includes("secret.png"), "a picture path leaving the run's folder is dropped");
-  assert.ok(file.includes("A &lt;b&gt;thing&lt;/b&gt; fails"));
-  assert.match(file, /<details><summary data-testid="report-technical-toggle">Technical detail<\/summary>/);
+  assert.ok(!/<b>thing/.test(file), "the app's markup is text");
   assert.match(renderMarkdown(md, [], "record/"), /src="record\/recordings\/s\/0001-click\.jpg"/, "the served view reaches a recorded frame through its route");
   assert.match(renderMarkdown("![p](findings/a.png)", [], "record/"), /src="findings\/a\.png"/, "only recordings go through the frame route");
 
-  const base = { sessions: [], project: "p", at: "2026-01-01T00:00:00.000Z", version: "" };
-  const html = buildReplayHtml({ ...base, markdown: md });
+  const base = { project: "p", at: "2026-01-01T00:00:00.000Z", version: "" };
+  const sessions = [{ session: "clerk", role: "", steps: [step({ frame: "recordings/s/0001-click.jpg" })] }];
+  const html = buildReplayHtml({ ...base, sessions, markdown: md, evidence });
+  assert.ok(!html.includes("SceneScout Report</h") && !html.includes("Generated:"), "the header says the title and the date once");
+  const order = ['id="summary"', 'id="evidence"', 'id="technical"', 'id="steps"'].map((x) => html.indexOf(x));
+  assert.ok(
+    order.every((i, k) => i >= 0 && (k === 0 || i > order[k - 1])),
+    `Summary, Evidence, Technical details, Steps: ${order.join(", ")}`,
+  );
+  for (const part of html.match(/<details class="part"[^>]*>/g) ?? []) assert.ok(!/\sopen\b/.test(part), `${part} starts folded`);
+  assert.equal(html.match(/<details class="part"/g)?.length, 2, "two folded parts: the technical details and the steps");
+  assert.match(html, /<summary data-testid="report-steps-toggle"><h2>Steps<\/h2><span class="hint">[^<]*1 session, 1 step\.<\/span>/);
   assert.match(
     html,
-    /<nav><a href="#plain" data-testid="report-plain-link">In plain words<\/a><a href="#technical" data-testid="report-technical-link">Technical detail<\/a><a href="#steps"/,
+    /<nav aria-label="Report sections"><a href="#summary" data-testid="report-summary-link">Summary<\/a><a href="#evidence" data-testid="report-evidence-link">Evidence<\/a><a href="#technical" data-testid="report-technical-link">Technical details<\/a><a href="#steps" data-testid="report-steps-link">Steps<\/a><\/nav>/,
   );
+  // The contrast: the same report with nothing to show has no Evidence, in the page or its header.
+  const plain = md.slice(0, md.indexOf("## Evidence")) + md.slice(md.indexOf("## Technical details"));
+  const none = buildReplayHtml({ ...base, sessions, markdown: plain });
+  assert.ok(!none.includes('id="evidence"') && !none.includes("report-evidence-link") && !none.includes("report-evidence-item"));
   assert.match(
-    buildReplayHtml({ ...base, markdown: "# SceneScout Report\n\n## Summary" }),
-    /<nav><a href="#report" data-testid="report-top-link">Report<\/a><a href="#steps"/,
+    buildReplayHtml({ ...base, sessions: [], markdown: "# SceneScout Report\n\n## Run metrics" }),
+    /<nav aria-label="Report sections"><a href="#report" data-testid="report-top-link">Report<\/a><a href="#steps"/,
   );
+  assert.ok(!/<link |<script src=|@import|https?:\/\/fonts/.test(html), "no external request: no font, stylesheet or script from anywhere else");
+  assert.match(html, /@media \(prefers-color-scheme: dark\)/);
+  assert.match(html, /@media print/);
 });
 
 test("saved-page policy check: a script or handler it cannot see would pass a page that runs code its policy does not name", () => {
@@ -1594,9 +1846,10 @@ const raw = (name: string, over: Partial<RawStandIn> = {}): RawStandIn => ({
  * A page that answers the collector's element read with the next of `reads`
  * (repeating the last), its form read with `forms`, and has no frames.
  */
-function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknown[] } = {}) {
+function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknown[]; busyReads?: number; ageMs?: number } = {}) {
   const top = { name: "top" };
-  const state = { url: opts.url ?? "http://app.test/things", reads: [...reads], elementReads: 0, harvested: 0 };
+  // The page's age starts at `ageMs` (by default long since loaded) and grows by every wait the collector asks for.
+  const state = { url: opts.url ?? "http://app.test/things", reads: [...reads], elementReads: 0, harvested: 0, ageMs: opts.ageMs ?? 60_000 };
   const page = {
     evaluate: async (script: string) => {
       if (script === COLLECT_INTERACTABLES_SCRIPT) {
@@ -1604,9 +1857,12 @@ function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknow
         return state.reads.length > 1 ? state.reads.shift() : state.reads[0];
       }
       if (script === FORMS_INVENTORY_SCRIPT) return opts.forms ?? [];
+      if (script === PAGE_AGE_SCRIPT) return state.ageMs;
       throw new Error("unexpected page read");
     },
-    waitForTimeout: async () => {},
+    waitForTimeout: async (ms: number) => {
+      state.ageMs += ms;
+    },
     url: () => state.url,
     mainFrame: () => top,
     frames: () => [top],
@@ -1618,6 +1874,8 @@ function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknow
     harvestRoutes: () => {
       state.harvested += 1;
     },
+    // A request stays out until the page has been read `busyReads` times: content on its way.
+    requests: () => ({ inFlight: state.elementReads < (opts.busyReads ?? 0) ? 1 : 0, lastRequestStart: 0, changedAt: 0 }),
   });
   return { collector, state };
 }
@@ -1641,12 +1899,58 @@ test("a collect reads the page again until two reads agree, so a hydrating page 
   assert.equal(state.harvested, 1);
 });
 
-test("an empty page is read again rather than taken at its first answer", async () => {
+test("an empty page is read again rather than taken at its first answer, and twice is enough when nothing is coming", async () => {
   const { collector, state } = collectorOn([[]]);
   const { elements } = await collector.collect();
   assert.equal(elements.length, 0);
-  // Two empty reads never count as agreeing: the read gives up after its retries.
-  assert.equal(state.elementReads, 9);
+  // Quiet and empty twice: nothing is on its way (settle.ts recheckWait). The old rule read it nine times.
+  assert.equal(state.elementReads, 2);
+});
+
+test("an empty page whose content is still on its way is read until it has drawn", async () => {
+  // The same empty first reads, with a request out until the fourth: what it drew then is what is listed.
+  const { collector, state } = collectorOn([[], [], [], [raw("Menu"), raw("Save")]], { busyReads: 4 });
+  const { elements } = await collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.name),
+    ["Menu", "Save"],
+  );
+  // The fourth read drew it while the request was still out; two more, both quiet, agree.
+  assert.equal(state.elementReads, 6, "two equal reads, both taken once quiet");
+});
+
+test("an empty page that has only just loaded is read until it has been up long enough to call it a dead end", async () => {
+  // The same page as above, empty and quiet throughout, but read 150 ms after it loaded: an empty shell that draws
+  // from a timer looks exactly like this at first.
+  const young = collectorOn([[]], { ageMs: 150 });
+  await young.collector.collect();
+  assert.ok(young.state.ageMs >= RECHECK_EMPTY_AGE_MS, `read until the page had been up ${RECHECK_EMPTY_AGE_MS} ms (got ${young.state.ageMs})`);
+  assert.ok(young.state.elementReads > 2);
+  // ...and when it draws in that time, what it drew is listed.
+  const late = collectorOn([[], [], [], [], [raw("Menu"), raw("Save")]], { ageMs: 150 });
+  const { elements } = await late.collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.name),
+    ["Menu", "Save"],
+  );
+});
+
+test("a drawn page that has only just loaded is read until it has been up long enough for a timer to draw the rest", async () => {
+  // A shell with its navigation drawn and the route's controls added from a timer, with no request: the first two
+  // reads agree on the shell. Read long after the load, two reads are enough.
+  const young = collectorOn([[raw("Menu")], [raw("Menu")], [raw("Menu")], [raw("Menu"), raw("Save")]], { ageMs: 150 });
+  const { elements } = await young.collector.collect();
+  assert.deepEqual(
+    elements.map((el) => el.name),
+    ["Menu", "Save"],
+  );
+  const old = collectorOn([[raw("Menu")], [raw("Menu")], [raw("Menu")], [raw("Menu"), raw("Save")]]);
+  assert.deepEqual(
+    (await old.collector.collect()).elements.map((el) => el.name),
+    ["Menu"],
+    "a page up for a while is not slowed",
+  );
+  assert.equal(old.state.elementReads, 2);
 });
 
 test("a re-snapshot of a kept route gives an unchanged element its old ref, and a new one a new ref", async () => {
@@ -1776,6 +2080,7 @@ test("a frame's controls are listed in the page's coordinates, masked when anoth
     formRead: (_what, work) => work,
     foreignOriginOf: (f) => (f === (frame as unknown) ? "https://embed.example" : null),
     harvestRoutes: () => {},
+    requests: () => ({ inFlight: 0, lastRequestStart: 0, changedAt: 0 }),
   });
   const { elements } = await collector.collect();
   const inFrame = elements.find((el) => el.frame);

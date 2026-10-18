@@ -4,9 +4,9 @@
  * count as controls, the state of toggles and tabs, what the main area holds,
  * and controls held out of view inside a sideways-scrolling container.
  *
- * Every behaviour has its contrast on the same or a twin page: an empty
- * announcement before the one that matters, an unnamed button beside a
- * decorative dot, a main area with text beside one with nothing, a wide table
+ * Every behaviour has its contrast on the same or a twin page: a shell that
+ * draws late beside one that never draws, an empty announcement before the
+ * one that matters, an unnamed button beside a decorative dot, a main area with text beside one with nothing, a wide table
  * beside one that fits.
  */
 import fs from "node:fs";
@@ -26,6 +26,20 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
 
   try {
     await engine.attach({ url: baseUrl, projectDir, mode: "read-only" });
+
+    // ── a page that draws late from a timer ────────────────────────────────
+    // Read straight after the load, with no request out: the empty shell is read until it has had time to draw, and
+    // its twin, whose timer draws nothing, is a dead end.
+    await engine.navigate("/late-draw.html");
+    const late = await engine.snapshot(true);
+    check(
+      "an empty shell that draws its controls a second after it loads is read once they are drawn, not called a dead end",
+      /button "Open record"/.test(late) && /button "Archive record"/.test(late) && !late.includes("DEAD END"),
+      late,
+    );
+    await engine.navigate("/late-draw-none.html");
+    const none = await engine.snapshot(true);
+    check("...while its twin, whose timer draws nothing, is a dead end", none.includes("DEAD END"), none);
 
     // ── what the page announces ────────────────────────────────────────────
     await engine.navigate("/snapshot-alert.html");

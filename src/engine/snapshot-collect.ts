@@ -31,6 +31,13 @@ import { elementKey, keyAliasSteps, normalizePath, ordinalKeys, routeBase, type 
 import { FORMS_INVENTORY_SCRIPT, formIdentity, formStatus, type FormFacts } from "./forms.js";
 import { NAME_RULE, type KeyAliasSteps } from "./memory.js";
 import { destructiveLabelOf } from "./policy.js";
+import { recheckBusy, recheckWait } from "./settle.js";
+
+/**
+ * How long the page's document has been up, in ms: since its response arrived (the navigation entry's responseEnd),
+ * or since the document's start where the browser has no such entry. Read in the page, so it is the page's own clock.
+ */
+export const PAGE_AGE_SCRIPT = `(() => { const n = performance.getEntriesByType("navigation")[0]; return performance.now() - (n && n.responseEnd > 0 ? n.responseEnd : 0); })()`;
 
 export interface SnapshotElement extends InteractableInfo {
   /** The frame it was collected from; absent for the page itself. */
@@ -122,6 +129,11 @@ export interface SnapshotHost {
   foreignOriginOf(frame: Frame): string | null;
   /** Feed a collect's elements to the route list (browser.ts harvestRoutes). */
   harvestRoutes(elements: SnapshotElement[]): void;
+  /**
+   * The page's requests now: how many young ones are out (settle.ts RECHECK_OPEN_MS), and when the latest started; and
+   * when the latest action started (`changedAt`), all on Date.now's clock.
+   */
+  requests(): { inFlight: number; lastRequestStart: number; changedAt: number };
 }
 
 /** The interactables of the page the host drives, their refs, and the snapshots kept for diffs. */
@@ -226,15 +238,35 @@ export class SnapshotCollector {
     // SPAs (and dev servers mid-recompile) can present an empty shell for a
     // few seconds — and a shell that already renders its chrome (sidebar,
     // nav) passes a zero-check while the route content is still loading.
-    // Retry until two consecutive probes agree on the element count, so we
-    // snapshot the hydrated page, not the loading state.
+    // Read again until two reads agree on the element count once the page is
+    // quiet (settle.ts recheckWait), so we snapshot the hydrated page, not the
+    // loading state.
+    const busyNow = (): boolean => {
+      const { inFlight, lastRequestStart } = this.host.requests();
+      return recheckBusy(inFlight, Date.now() - lastRequestStart);
+    };
+    // How long the page has been up: since its document arrived or the latest action, whichever is later
+    // (recheckWait: a page that has just loaded is read for longer, as it may still draw from a timer).
+    const ageNow = async (): Promise<number> => {
+      const doc = Number(await page.evaluate(PAGE_AGE_SCRIPT));
+      return Math.min(Number.isFinite(doc) ? doc : 0, Date.now() - this.host.requests().changedAt);
+    };
+    const busyAt = [busyNow()];
+    // The age is read before the controls, so a read is never credited with an age it had not reached.
+    let ageMs = await ageNow();
     let rawElements: RawElement[] = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
-    for (let attempt = 0; attempt < 8; attempt++) {
-      await page.waitForTimeout(rawElements.length === 0 ? 500 : 300);
-      const probe = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
-      const stable = probe.length === rawElements.length && probe.length > 0;
-      rawElements = probe;
-      if (stable) break;
+    const counts = [rawElements.length];
+    const started = Date.now();
+    for (;;) {
+      const { inFlight, lastRequestStart } = this.host.requests();
+      const now = Date.now();
+      const wait = recheckWait({ counts, busyAt, elapsedMs: now - started, inFlight, sinceLastStartMs: now - lastRequestStart, ageMs });
+      if (wait === null) break;
+      await page.waitForTimeout(wait);
+      busyAt.push(busyNow());
+      ageMs = await ageNow();
+      rawElements = (await page.evaluate(COLLECT_INTERACTABLES_SCRIPT)) as RawElement[];
+      counts.push(rawElements.length);
     }
 
     const cut = rawElements.filter((r) => r.cut) as CutElement[];

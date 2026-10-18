@@ -91,7 +91,19 @@ import {
   type TicketPreview,
 } from "../src/engine/ticket-preview.ts";
 import { shellQuote } from "../src/engine/profiles.ts";
-import { fileTickets, previewTickets, type TicketDeps } from "../src/ticket-run.ts";
+import { tryAcquireLock } from "../src/engine/refresh.ts";
+import { fileTickets, previewTickets, ticketStatus, type TicketDeps } from "../src/ticket-run.ts";
+import {
+  placeTickets,
+  recordPlaces,
+  TICKET_STATUS_EVERY_MS,
+  TICKET_STATUS_FILE,
+  TICKET_STATUS_LOCK_FILE,
+  TICKET_STATUS_MAX,
+  TICKET_STATUS_PLACES,
+  TicketStatusReads,
+  ticketStatusText,
+} from "../src/engine/ticket-status.ts";
 
 const REPO = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const GH_TOKEN = "test-gh-token-0123456789";
@@ -3301,5 +3313,202 @@ test("tickets: where the app cannot show the form, nothing is filed and the resu
   } finally {
     await gh.close();
     await jira.close();
+  }
+});
+
+// ---- Watched tickets: scout_ticket_status (design 2.6) ----
+
+test("ticket status: the places a record names, its tickets newest first, and at most one tracker read every five minutes", () => {
+  const places = recordPlaces({
+    "github https://api.github.com owner/app": {},
+    "jira https://site.example QA": {},
+    "something else": {},
+  });
+  assert.deepEqual(
+    places.map((p) => [p.to, p.api, p.target]),
+    [
+      ["github", "https://api.github.com", "owner/app"],
+      ["jira", "https://site.example", "QA"],
+    ],
+  );
+  const many = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`github https://api.github.com o/r${i}`, {}]));
+  assert.equal(recordPlaces(many).length, TICKET_STATUS_PLACES);
+
+  const recorded = {
+    aaa0000001: { ref: "#1", number: 1, url: "https://github.example/owner/app/issues/1", at: "2026-10-01T10:00:00.000Z" },
+    bbb0000002: { ref: "#2", number: 2, url: "https://github.example/owner/app/issues/2", at: "2026-10-02T10:00:00.000Z" },
+    ccc0000003: { uncertain: true as const, at: "2026-10-03T10:00:00.000Z" },
+    ddd0000004: { ref: "#4", number: 4, url: "https://github.example/owner/app/issues/4", at: "2026-09-01T10:00:00.000Z" },
+  };
+  const read = new Map([
+    ["aaa0000001", { ref: "#1", url: "https://github.example/owner/app/issues/1", open: false }],
+    ["bbb0000002", { ref: "#2", url: "https://github.example/owner/app/issues/2", open: true }],
+  ]);
+  const findings = new Map([
+    ["aaa0000001", { title: "Saving answers 500", severity: "high", status: "resolved" }],
+    ["bbb0000002", { title: "A deleted row stays", severity: "medium" }],
+  ]);
+  const tickets = placeTickets("GitHub owner/app", recorded, read, findings);
+  assert.deepEqual(
+    tickets.map((t) => [t.id, t.ref, t.open, t.finding, t.severity]),
+    [
+      ["bbb0000002", "#2", true, "open", "medium"],
+      ["aaa0000001", "#1", false, "resolved", "high"],
+      // Not shown by the tracker any more, and not kept by the project: listed by its id, as not open, and never as fixed.
+      ["ddd0000004", "#4", false, "unknown", ""],
+    ],
+    "newest filed first; a create whose result is not known is not a ticket",
+  );
+  assert.equal(tickets[2].title, "finding ddd0000004");
+
+  // The rate limit: a second call inside five minutes answers the first read's tickets, not fresh; at five minutes it reads again.
+  const reads = new TicketStatusReads();
+  const t0 = Date.parse("2026-10-17T10:00:00.000Z");
+  assert.equal(reads.cached("/p", t0), null, "nothing read yet");
+  const first = reads.remember("/p", t0, tickets, []);
+  assert.deepEqual([first.fresh, first.nextReadAt], [true, new Date(t0 + TICKET_STATUS_EVERY_MS).toISOString()]);
+  const soon = reads.cached("/p", t0 + TICKET_STATUS_EVERY_MS - 1);
+  assert.deepEqual([soon?.fresh, soon?.tickets, soon?.readAt], [false, tickets, first.readAt]);
+  assert.equal(reads.cached("/p", t0 + TICKET_STATUS_EVERY_MS), null, "due again");
+  assert.equal(reads.cached("/other", t0 + 1), null, "each project has its own");
+  assert.equal(reads.cached("/p", t0 - 1), null, "a clock that went back reads again rather than waiting");
+  const lots = Array.from({ length: TICKET_STATUS_MAX + 5 }, () => tickets[0]);
+  assert.equal(reads.remember("/q", t0, lots, []).tickets.length, TICKET_STATUS_MAX);
+  assert.match(ticketStatusText(first), /GitHub owner\/app #2 open: A deleted row stays \[finding bbb0000002, still open here\]/);
+  assert.match(ticketStatusText(soon!), /next read is due at/);
+});
+
+test("ticket status: GitHub and Jira: the filed tickets read back open or closed, once per five minutes, with the token never shown", async () => {
+  const gh = await standInGitHub();
+  const jira = await standInJira();
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url, JIRA_EMAIL, JIRA_API_TOKEN: JIRA_TOKEN, JIRA_BASE_URL: jira.url };
+    const dir = projectWith(THREE);
+    let now = Date.parse("2026-10-17T10:00:00.000Z");
+    const deps = ticketDeps(env, () => now);
+    const store = new TicketPreviews();
+    const reads = new TicketStatusReads();
+    // Nothing filed yet: no tickets, and no tracker asked.
+    const none = await ticketStatus(dir, reads, deps);
+    assert.deepEqual([none.tickets, none.problems, gh.seen.length, jira.seen.length], [[], [], 0, 0]);
+
+    const ghPreview = await previewTickets({ ids: ["aaa0000001", "bbb0000002"], to: "github", target: "owner/app" }, dir, store, deps);
+    assert.ok(ghPreview.ok);
+    assert.ok((await fileTickets(ghPreview.preview.previewId, store, confirmWith(FILE_IT).confirm, deps)).filed);
+    const jiraPreview = await previewTickets({ ids: ["ccc0000003"], to: "jira", target: "QA" }, dir, store, deps);
+    assert.ok(jiraPreview.ok);
+    assert.ok((await fileTickets(jiraPreview.preview.previewId, store, confirmWith(FILE_IT).confirm, deps)).filed);
+
+    // The team closes #1 and finishes QA-1; the project re-checked the first problem and found it gone.
+    gh.issues[0].state = "closed";
+    jira.issues[0].done = true;
+    const memoryPath = path.join(dir, ".scenescout", "memory.json");
+    const memory = JSON.parse(fs.readFileSync(memoryPath, "utf8")) as { findings: Finding[] };
+    memory.findings[0].status = "resolved";
+    fs.writeFileSync(memoryPath, JSON.stringify(memory));
+
+    const fresh = new TicketStatusReads();
+    now += 60_000;
+    const ghBefore = gh.seen.length;
+    const jiraBefore = jira.seen.length;
+    const got = await ticketStatus(dir, fresh, deps);
+    assert.deepEqual(got.problems, []);
+    assert.deepEqual(got.tickets.map((t) => [t.where, t.ref, t.open, t.finding]).sort(), [
+      ["GitHub owner/app", "#1", false, "resolved"],
+      ["GitHub owner/app", "#2", true, "open"],
+      ["Jira QA", "QA-1", false, "open"],
+    ]);
+    assert.ok(
+      gh.seen.slice(ghBefore).every((x) => x.method === "GET"),
+      "reads only",
+    );
+    assert.ok(
+      jira.seen.slice(jiraBefore).every((x) => x.method === "GET" || x.url === "/rest/api/3/search/jql"),
+      "reads only",
+    );
+    assert.ok(!JSON.stringify(got).includes(GH_TOKEN) && !JSON.stringify(got).includes(JIRA_TOKEN));
+
+    // Called again inside five minutes: the same answer, and neither tracker is asked.
+    const seenNow = gh.seen.length + jira.seen.length;
+    now += TICKET_STATUS_EVERY_MS - 1;
+    const again = await ticketStatus(dir, fresh, deps);
+    assert.equal(again.fresh, false);
+    assert.equal(gh.seen.length + jira.seen.length, seenNow);
+    now += 1;
+    gh.issues[1].state = "closed";
+    const later = await ticketStatus(dir, fresh, deps);
+    assert.equal(later.fresh, true);
+    assert.equal(later.tickets.find((t) => t.ref === "#2")?.open, false);
+    assert.ok(gh.seen.length + jira.seen.length > seenNow, "read again once due");
+
+    // The server's settings now point at another Jira site, and the GitHub token is gone: neither is read, and each is said.
+    now += TICKET_STATUS_EVERY_MS;
+    const elsewhere = await ticketStatus(
+      dir,
+      new TicketStatusReads(),
+      ticketDeps({ JIRA_EMAIL, JIRA_API_TOKEN: JIRA_TOKEN, JIRA_BASE_URL: "https://other.example", GITHUB_API_URL: gh.url }, () => now),
+    );
+    assert.equal(elsewhere.tickets.length, 0);
+    assert.equal(elsewhere.problems.length, 2);
+    assert.match(elsewhere.problems.join("\n"), /Jira QA: not read, as the server's settings point at another Jira site/);
+    assert.match(elsewhere.problems.join("\n"), /GitHub owner\/app: could not be read/);
+    assert.ok(!elsewhere.problems.join("\n").includes(JIRA_TOKEN));
+  } finally {
+    await gh.close();
+    await jira.close();
+  }
+});
+
+test("ticket status: the five-minute limit holds across processes, a filing makes a read due, and a read another process holds is not repeated", async () => {
+  const gh = await standInGitHub();
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = projectWith(THREE);
+    let now = Date.parse("2026-10-17T10:00:00.000Z");
+    const deps = ticketDeps(env, () => now);
+    // Nothing filed: answered, and the answer kept.
+    assert.deepEqual((await ticketStatus(dir, new TicketStatusReads(), deps)).tickets, []);
+    const store = new TicketPreviews();
+    const preview = await previewTickets({ ids: ["aaa0000001"], to: "github", target: "owner/app" }, dir, store, deps);
+    assert.ok(preview.ok);
+    assert.ok((await fileTickets(preview.preview.previewId, store, confirmWith(FILE_IT).confirm, deps)).filed);
+    // A filing changed the record, so the next call reads at once rather than answering "none" for five minutes.
+    now += 1_000;
+    const first = await ticketStatus(dir, new TicketStatusReads(), deps);
+    assert.deepEqual([first.fresh, first.tickets.map((t) => t.ref)], [true, ["#1"]]);
+    // Another server process (its own TicketStatusReads) inside five minutes: the kept answer, and GitHub is not asked.
+    const seen = gh.seen.length;
+    now += TICKET_STATUS_EVERY_MS - 2_000;
+    const other = await ticketStatus(dir, new TicketStatusReads(), deps);
+    assert.deepEqual([other.fresh, other.tickets.map((t) => t.ref), gh.seen.length], [false, ["#1"], seen]);
+    // While another process holds the read, a due call answers what was kept rather than reading too.
+    now += 2_000;
+    const lock = tryAcquireLock(path.join(dir, ".scenescout", TICKET_STATUS_LOCK_FILE));
+    assert.ok(lock);
+    try {
+      const held = await ticketStatus(dir, new TicketStatusReads(), deps);
+      assert.deepEqual([held.fresh, held.tickets.map((t) => t.ref), gh.seen.length], [false, ["#1"], seen]);
+    } finally {
+      lock.release();
+    }
+    // A filing while another process holds the read: the kept answer is for the record before it, so it is not given as this one's.
+    const record = path.join(dir, ".scenescout", "exported.json");
+    const recordText = fs.readFileSync(record, "utf8");
+    fs.writeFileSync(record, recordText.replace(/\n$/, "\n\n"));
+    const lock2 = tryAcquireLock(path.join(dir, ".scenescout", TICKET_STATUS_LOCK_FILE));
+    assert.ok(lock2);
+    try {
+      const busy = await ticketStatus(dir, new TicketStatusReads(), deps);
+      assert.deepEqual([busy.fresh, busy.tickets, gh.seen.length], [false, [], seen]);
+      assert.match(busy.problems.join("\n"), /another SceneScout process is reading/);
+    } finally {
+      lock2.release();
+    }
+    const due = await ticketStatus(dir, new TicketStatusReads(), deps);
+    assert.equal(due.fresh, true);
+    assert.ok(gh.seen.length > seen, "read once due and free");
+    assert.ok(!fs.readFileSync(path.join(dir, ".scenescout", TICKET_STATUS_FILE), "utf8").includes(GH_TOKEN));
+  } finally {
+    await gh.close();
   }
 });

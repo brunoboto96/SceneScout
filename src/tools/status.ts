@@ -4,6 +4,8 @@
  * Registered by mcp-server.ts, in the order the tools have always been listed.
  */
 import { type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
+import { recapFigures, recapLines, recapSvg, writeRecap, type RecapFigures } from "../engine/recap.js";
 import { MCP_APP_MIME, paneData, paneText, STATUS_PANE_URI, STATUS_POLL_TOOL, STATUS_TOOL, type PaneCoverage, type PaneData } from "../engine/status-pane.js";
 import { statusPanePage } from "../engine/status-pane-page.js";
 
@@ -11,6 +13,26 @@ import { classify, LIVE_ENV, type SessionStatus } from "../engine/live.js";
 import type { Finding } from "../engine/memory.js";
 import { guidedProgress, type GuidedProgress, type ProgressSession } from "../engine/progress.js";
 import { PKG_VERSION, server, errorText, board, liveAddress, liveError, guidedPlans, guidedRuns, guidedSessions, projectEngine } from "../server-context.js";
+
+/** The end-of-check card (design 2.9). */
+export const RECAP_TOOL = "scout_recap";
+
+/** The guided check on show, with its recap figures, once it has ended; else null. Also read by scout_team_report, which returns the same picture. */
+export function endedCheckRecap(): { plan: NonNullable<ReturnType<typeof guidedPlans.get>>; figures: RecapFigures } | null {
+  const planId = guidedRuns.focused;
+  const plan = planId ? guidedPlans.get(planId) : undefined;
+  const run = planId ? guidedRuns.get(planId) : undefined;
+  if (!plan || !run) return null;
+  const progress = statusPaneData().guided;
+  const memory = projectEngine()?.memory ?? null;
+  const figures = progress ? recapFigures(progress, plan.choices.address, memory ? memory.findings : [], run.startedMs, run.lastActiveMs) : null;
+  return figures ? { plan, figures } : null;
+}
+
+/** The recap picture as an MCP image block. */
+export function recapImage(figures: RecapFigures): { type: "image"; data: string; mimeType: string } {
+  return { type: "image", data: Buffer.from(recapSvg(figures), "utf8").toString("base64"), mimeType: "image/svg+xml" };
+}
 
 // ---- The run-status pane: an MCP App (SEP-1865, `io.modelcontextprotocol/ui`, spec 2026-01-26). ----
 // scout_status links the pane through _meta.ui.resourceUri; the pane polls the
@@ -124,5 +146,51 @@ export function registerStatusTools(): void {
       _meta: { ui: { visibility: ["app"] } },
     },
     async () => statusResult(),
+  );
+  server.registerTool(
+    RECAP_TOOL,
+    {
+      title: "End-of-check card",
+      description:
+        "The recap of the guided check that has just ended, for the person to share with their team: the address, pages checked, problems found by impact, problems a re-check confirmed fixed, and the time it took. " +
+        "Returns it as an SVG picture and as lines of text; with save: true it is also written to the project's .scenescout/recap.svg. Built from the check's figures only. Refuses while no guided check has ended. Touches no browser.",
+      inputSchema: { save: z.boolean().optional().describe("Also write the picture to .scenescout/recap.svg") },
+      outputSchema: {
+        planId: z.string(),
+        title: z.string(),
+        address: z.string(),
+        date: z.string(),
+        rows: z.array(z.tuple([z.string(), z.string()])),
+        svg: z.string(),
+        file: z.string().nullable(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ save }: { save?: boolean }) => {
+      try {
+        const ended = endedCheckRecap();
+        if (!ended) throw new Error("No guided check has ended yet: the recap is made once a guided check is done or stopped.");
+        const { plan, figures } = ended;
+        const memory = projectEngine()?.memory ?? null;
+        const svg = recapSvg(figures);
+        let file: string | null = null;
+        if (save) {
+          if (!memory) throw new Error("No project is open, so there is no .scenescout folder to save the recap in.");
+          file = writeRecap(memory.dir, svg);
+        }
+        const lines = recapLines(figures);
+        const text = [
+          `${lines.title}: ${lines.address}${lines.date ? ` (${lines.date})` : ""}`,
+          ...lines.rows.map(([k, v]) => `  ${k}: ${v}`),
+          ...(file ? [`Saved as ${file}`] : []),
+        ];
+        return {
+          content: [{ type: "text" as const, text: text.join("\n") }, recapImage(figures)],
+          structuredContent: { planId: plan.planId, ...lines, svg, file },
+        };
+      } catch (err) {
+        return errorText(err);
+      }
+    },
   );
 }
