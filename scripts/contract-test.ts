@@ -1846,12 +1846,43 @@ const raw = (name: string, over: Partial<RawStandIn> = {}): RawStandIn => ({
  * A page that answers the collector's element read with the next of `reads`
  * (repeating the last), its form read with `forms`, and has no frames.
  */
-function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknown[]; busyReads?: number; ageMs?: number } = {}) {
+function collectorOn(
+  reads: RawStandIn[][],
+  opts: {
+    url?: string;
+    forms?: unknown[];
+    busyReads?: number;
+    ageMs?: number;
+    navigateOnRead?: { at: number; to: string; reads: RawStandIn[][] };
+    closed?: boolean;
+    scriptError?: boolean;
+  } = {},
+) {
   const top = { name: "top" };
   // The page's age starts at `ageMs` (by default long since loaded) and grows by every wait the collector asks for.
-  const state = { url: opts.url ?? "http://app.test/things", reads: [...reads], elementReads: 0, harvested: 0, ageMs: opts.ageMs ?? 60_000 };
+  const state = {
+    url: opts.url ?? "http://app.test/things",
+    reads: [...reads],
+    elementReads: 0,
+    harvested: 0,
+    ageMs: opts.ageMs ?? 60_000,
+    pageReads: 0,
+    loadWaits: 0,
+  };
   const page = {
     evaluate: async (script: string) => {
+      state.pageReads += 1;
+      if (opts.closed) throw new Error("page.evaluate: Target page, context or browser has been closed");
+      if (opts.scriptError) throw new Error("page.evaluate: TypeError: x.y is not a function");
+      // The page's own scripts navigate while this read is in the page: Playwright rejects it, and the next read runs in
+      // the document that replaced it, which has just arrived.
+      const nav = opts.navigateOnRead;
+      if (nav && state.pageReads === nav.at) {
+        state.url = nav.to;
+        state.reads = [...nav.reads];
+        state.ageMs = 0;
+        throw new Error("page.evaluate: Execution context was destroyed, most likely because of a navigation");
+      }
       if (script === COLLECT_INTERACTABLES_SCRIPT) {
         state.elementReads += 1;
         return state.reads.length > 1 ? state.reads.shift() : state.reads[0];
@@ -1863,6 +1894,10 @@ function collectorOn(reads: RawStandIn[][], opts: { url?: string; forms?: unknow
     waitForTimeout: async (ms: number) => {
       state.ageMs += ms;
     },
+    waitForLoadState: async () => {
+      state.loadWaits += 1;
+    },
+    isClosed: () => opts.closed === true,
     url: () => state.url,
     mainFrame: () => top,
     frames: () => [top],
@@ -1951,6 +1986,33 @@ test("a drawn page that has only just loaded is read until it has been up long e
     "a page up for a while is not slowed",
   );
   assert.equal(old.state.elementReads, 2);
+});
+
+test("a collect whose page navigates under a read lists the page it landed on rather than failing", async () => {
+  // A route's scripts send the visitor to sign-in while its controls are read. Each read (the page's age and its
+  // controls) is a place the navigation can land: whichever it interrupts, the collect reads the new page.
+  for (let at = 1; at <= 4; at++) {
+    const { collector, state } = collectorOn([[raw("Save")]], {
+      url: "http://app.test/private",
+      navigateOnRead: { at, to: "http://app.test/login?next=%2Fprivate", reads: [[raw("Email"), raw("Sign in")]] },
+    });
+    const { elements } = await collector.collect();
+    assert.deepEqual(
+      elements.map((el) => el.name),
+      ["Email", "Sign in"],
+      `navigated on page read ${at}`,
+    );
+    assert.ok(state.loadWaits >= 1, "it waited for the new document before reading it again");
+  }
+  // The contrast: a read that fails because the page has closed, or because the read itself throws, is not taken
+  // again; it is the error it was.
+  const closed = collectorOn([[raw("Save")]], { closed: true });
+  await assert.rejects(closed.collector.collect(), /has been closed/);
+  assert.equal(closed.state.loadWaits, 0);
+  const throwing = collectorOn([[raw("Save")]], { scriptError: true });
+  await assert.rejects(throwing.collector.collect(), /is not a function/);
+  assert.equal(throwing.state.pageReads, 1, "read once");
+  assert.equal(throwing.state.loadWaits, 0);
 });
 
 test("a re-snapshot of a kept route gives an unchanged element its old ref, and a new one a new ref", async () => {

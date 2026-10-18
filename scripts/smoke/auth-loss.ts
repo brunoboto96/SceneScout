@@ -110,4 +110,40 @@ async function attachVerdictWaitsForLateSignIn(baseUrl: string, authProject: str
   );
   const slowSignedIn = await attachAt("gated-slow-login.html", liveState);
   check("...and the same page signed in attaches cleanly", !slowSignedIn.out.includes("AUTH FAILED"), slowSignedIn.out);
+  await crawlWaitsForLateSignIn(baseUrl, authProject, deadState, liveState);
+}
+
+/**
+ * The crawl's per-route sign-in check on a route whose scripts send a signed-out visitor to sign-in 600 ms after load:
+ * later than a crawl reads a route it does not watch, and inside the watch on the address, which holds the route until
+ * its address has held still for a second since its document arrived (settle.ts CRAWL_URL_HELD_MS), whatever the
+ * runner's timing.
+ * Contrastive pair: the same route crawled with a saved sign-in that has gone stale (AUTH-REDIRECT) and one that signs
+ * in (a healthy route), beside a route that never redirects.
+ */
+async function crawlWaitsForLateSignIn(baseUrl: string, authProject: string, deadState: string, liveState: string): Promise<void> {
+  console.log("auth loss: the crawl's sign-in check waits for a redirect the app's scripts make after load");
+  const crawlWith = async (state: string): Promise<string> => {
+    const engine = new BrowserEngine();
+    try {
+      await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: state });
+      return await engine.crawl(["/gated-soon.html", "/covered.html"]);
+    } finally {
+      await engine.close().catch(() => {});
+    }
+  };
+  const line = (out: string, page: string): string => out.split("\n").find((l) => l.startsWith(`/${page} — `)) ?? "";
+  const stale = await crawlWith(deadState);
+  check(
+    "a crawled route that redirects to sign-in 600 ms after load is AUTH-REDIRECT with a stale sign-in",
+    /AUTH-REDIRECT/.test(line(stale, "gated-soon.html")),
+    stale,
+  );
+  check("...while a route that stays put is not", line(stale, "covered.html") !== "" && !/AUTH-REDIRECT/.test(line(stale, "covered.html")), stale);
+  const fresh = await crawlWith(liveState);
+  check(
+    "the same route crawled with a sign-in that works is a healthy page",
+    line(fresh, "gated-soon.html") !== "" && !/AUTH-REDIRECT|REDIRECTED/.test(line(fresh, "gated-soon.html")),
+    fresh,
+  );
 }

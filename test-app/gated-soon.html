@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area (guard a moment after load)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="gated-late-heading">Gated area</h1>
+    </main>
+    <script>
+      // A client-side auth guard that sends a signed-out visitor to sign-in 600 ms after the page has loaded, as an app
+      // does that first finishes a token check. No request is in flight while it waits, so the engine's request-based
+      // settle has nothing to wait on. Signed in (the "smoke-auth" flag a storage state sets), the same page stays put:
+      // that is the one fact the crawl's sign-in check must turn on. The delay sits past the time a crawl takes to read a
+      // route without watching its address, and inside the watch (the address must have held still for a second since
+      // the document arrived, settle.ts CRAWL_URL_HELD_MS), with room for a slow runner.
+      // gated-late.html is the attach's.
+      addEventListener("load", function () {
+        setTimeout(function () {
+          try {
+            if (localStorage.getItem("smoke-auth") === "yes") return;
+          } catch (e) {
+            /* storage unavailable — treat as signed out */
+          }
+          location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
+        }, 600);
+      });
+    </script>
+  </body>
+</html>
