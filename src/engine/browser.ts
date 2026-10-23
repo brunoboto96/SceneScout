@@ -3146,6 +3146,9 @@ export class BrowserEngine {
    * Whether a document request is the top window leaving the app, with no
    * Referer, while a frame that held another site's document now sits on a
    * data: or blob: URL — where WebKit no longer applies its sandbox.
+   * Frames are read through Playwright, and in Firefox its protocol can leave
+   * out a frame's move to data:, so this can miss one there; Firefox keeps
+   * the sandbox on a data: frame, so what it misses is not an escape.
    */
   private embedEscapeNavigation(req: Request): boolean {
     const page = this.page;
