@@ -145,10 +145,13 @@ jobs:
       # A normal install takes under a minute; twice an apt download hung until the
       # job's own limit. Each attempt gets five minutes and a hung one is tried once more.
       # timeout runs as root so it can stop the apt that Playwright starts as root.
+      # The hangs were in apt's package download, so a stalled download is also retried.
       - name: Install the browser's system libraries
         if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
         timeout-minutes: 12
         run: |
+          # A download that stalls is dropped after 20 s and fetched again, rather than waited on.
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/80-scenescout-retries >/dev/null
           for attempt in 1 2; do
             sudo env "PATH=$PATH" timeout --kill-after=15 300 npx playwright install-deps chromium && exit 0
             echo "::warning title=System libraries::attempt $attempt to install them failed or ran out of time"
@@ -223,10 +226,13 @@ jobs:
       # A normal install takes under a minute; twice an apt download hung until the
       # job's own limit. Each attempt gets five minutes and a hung one is tried once more.
       # timeout runs as root so it can stop the apt that Playwright starts as root.
+      # The hangs were in apt's package download, so a stalled download is also retried.
       - name: Install the browser's system libraries
         if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
         timeout-minutes: 12
         run: |
+          # A download that stalls is dropped after 20 s and fetched again, rather than waited on.
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/80-scenescout-retries >/dev/null
           for attempt in 1 2; do
             sudo env "PATH=$PATH" timeout --kill-after=15 300 npx playwright install-deps chromium && exit 0
             echo "::warning title=System libraries::attempt $attempt to install them failed or ran out of time"
@@ -309,12 +315,15 @@ jobs:
       # A normal install takes under a minute; twice an apt download hung until the
       # job's own limit. Each attempt gets five minutes and a hung one is tried once more.
       # timeout runs as root so it can stop the apt that Playwright starts as root.
+      # The hangs were in apt's package download, so a stalled download is also retried.
       - name: Install the browser's system libraries
         if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
         timeout-minutes: 12
         env:
           BROWSER: ${{ matrix.browser }}
         run: |
+          # A download that stalls is dropped after 20 s and fetched again, rather than waited on.
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\n' | sudo tee /etc/apt/apt.conf.d/80-scenescout-retries >/dev/null
           for attempt in 1 2; do
             sudo env "PATH=$PATH" timeout --kill-after=15 300 npx playwright install-deps "$BROWSER" && exit 0
             echo "::warning title=System libraries::attempt $attempt to install them failed or ran out of time"

@@ -2337,6 +2337,8 @@ test("test.yml: a browser build is restored only from a cache of the same image,
       `${name}: both attempts fit inside the step's own time limit`,
     );
     assert.match(depsRun, /sudo dpkg --configure -a/, `${name}: an install cut off part-way is finished before the retry`);
+    assert.match(depsRun, /Acquire::Retries "\d+";/, `${name}: apt fetches a failed download again`);
+    assert.match(depsRun, /Acquire::https?::Timeout "\d+";/, `${name}: apt drops a stalled download`);
     assert.match(depsRun, /for attempt in 1 2; do/, `${name}: a failed or hung attempt is tried once more`);
     assert.match(depsRun, /\nexit 1\s*$/, `${name}: two failed attempts fail the step`);
     assert.ok(Number(steps[deps]["timeout-minutes"]) > 0, `${name}: the step has its own time limit`);
