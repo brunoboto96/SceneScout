@@ -941,16 +941,17 @@ test("calibration: the clean page stays high, each defect lands below it, and a 
   assert.ok(o("touching") < o("heights") && o("touching") < o("grays"), JSON.stringify(scores));
   assert.ok(o("defective") < 80, `the page with every defect scored ${o("defective")}`);
   assert.ok(o("defective") < o("touching"), "and below any single defect");
-  // The subscore that holds the cause shows it.
-  assert.ok(scores.heights.consistency <= 80, `six button heights left consistency at ${scores.heights.consistency}`);
-  assert.ok(scores.grays.craft <= 80, `twelve grays left craft at ${scores.grays.craft}`);
+  // The subscore that holds the cause shows it: it is the lowest of the four and out of the 90s.
+  const lowest = (s: (typeof scores)["clean"]) => Math.min(s.a11y, s.craft, s.consistency, s.clarity);
+  assert.ok(scores.heights.consistency < 90 && scores.heights.consistency === lowest(scores.heights), JSON.stringify(scores.heights));
+  assert.ok(scores.grays.craft < 90 && scores.grays.craft === lowest(scores.grays), JSON.stringify(scores.grays));
   assert.ok(scores.touching.craft <= 80, `two touching pairs left craft at ${scores.touching.craft}`);
 });
 
 test("the report lists the top deductions beside the score", () => {
   const { report } = analyzeDesign(calibrationPage("defective"), VIEWPORT);
   const why = report.match(/PAGE SCORE: [^\n]*\n  why: ([^\n]*)/)?.[1];
-  assert.equal(why, "-16 touching containers ×2 · -12 12 grays · -12 6 button heights", report);
+  assert.equal(why, "-16 touching containers ×2 · -6 12 grays · -6 6 button heights", report);
   assert.ok(/  why: no deductions/.test(analyzeDesign(calibrationPage("clean"), VIEWPORT).report));
 });
 
@@ -960,7 +961,8 @@ test("button radii past two and shadow styles past three are flagged, as they no
   const three = analyzeDesign(payload([rec({ text: "x" }), primary, ...[2, 4, 6].map(btn)]), VIEWPORT);
   const two = analyzeDesign(payload([rec({ text: "x" }), primary, ...[4, 6].map(btn)]), VIEWPORT);
   assert.ok(three.report.includes("3 different corner radii"), three.report);
-  assert.equal(three.score?.deductions.map(formatDeduction).join(), "-3 3 button radii");
+  // A suggestion costs half its listed points (3 for one radius too many), rounded.
+  assert.equal(three.score?.deductions.map(formatDeduction).join(), "-2 3 button radii");
   assert.ok(!two.report.includes("corner radii"), two.report);
   assert.equal(two.score?.overall, 100);
 });

@@ -1081,6 +1081,20 @@ export const TOP_DEDUCTIONS = 3;
 const SUBSCORE_FACTOR = 2;
 
 /**
+ * Whether a rule measures a defect (its audit line is ⚠: the page fails a
+ * stated threshold) or makes a suggestion (→, or a heuristic a deliberate
+ * design can trip). A suggestion costs SUGGESTION_WEIGHT of its listed points.
+ */
+type RuleTier = "defect" | "suggestion";
+
+/**
+ * Half: at full weight the suggestions alone took well-made public pages
+ * (component docs, product home pages) from the 80s into the 60s, while the
+ * calibration page's defects kept their order at half.
+ */
+const SUGGESTION_WEIGHT = 0.5;
+
+/**
  * The page's score from its deductions. Overall is 100 less every deduction;
  * each subscore is 100 less SUBSCORE_FACTOR times its own. Both floor at 0.
  */
@@ -1168,39 +1182,52 @@ export function analyzeDesign(
 
   // ---- Multi-indicator PAGE SCORE, from named deductions (scoreFrom). Each
   //      rule costs points per occurrence up to a cap, so no one rule can sink
-  //      a page alone, and craft and consistency cost enough to move the
-  //      overall. Calibrated on the synthetic pages in design-test and the
-  //      design-scores smoke suite: a clean page stays at 100, each defect
-  //      class lands below it, and a page with several lands below 80.
+  //      a page alone. A measured defect (a ⚠ line: contrast, focus, target
+  //      size, names, touching containers, clipped text, distorted images,
+  //      sideways scroll) costs its full weight; a suggestion (a → line, or a
+  //      heuristic such as the 4px grid or near-miss alignments, which a
+  //      well-made page often trips on purpose) costs SUGGESTION_WEIGHT of it.
+  //      Calibrated on the synthetic pages in design-test and the
+  //      design-scores smoke suite (a clean page stays at 100, each defect
+  //      class lands below it, and a page with several lands below 80) and on
+  //      well-made public pages, which land around 80 or above.
   const ded: ScoreDeduction[] = [];
-  const add = (dimension: ScoreDimension, label: string, count: number, each: number, cap: number): void => {
-    if (count > 0) ded.push({ dimension, label, count, points: Math.min(cap, count * each) });
+  const add = (tier: RuleTier, dimension: ScoreDimension, label: string, count: number, each: number, cap: number): void => {
+    const points = Math.round(Math.min(cap, count * each) * (tier === "defect" ? 1 : SUGGESTION_WEIGHT));
+    if (count > 0 && points > 0) ded.push({ dimension, label, count, points });
   };
   const beyond = (n: number, healthy: number): number => Math.max(0, n - healthy);
-  add("a11y", "contrast failures", contrastFails.length, 3, 15);
-  add("a11y", "no visible focus", focusless.length, 4, 12);
-  add("a11y", "small targets", tiny.length, 2, 10);
-  add("a11y", "unnamed controls", names.unnamed.length, 5, 15);
-  add("a11y", "placeholder-only labels", names.placeholder.length, 3, 9);
-  add("craft", "touching containers", touchingPairs, 8, 24);
-  add("craft", "readability", readability.length, 2, 8);
-  add("craft", `${grays.length} grays`, beyond(grays.length, 6) > 0 ? 1 : 0, 2 * beyond(grays.length, 6), 12);
-  add("craft", `${hueFamilies.size} accent hues`, beyond(hueFamilies.size, 5) > 0 ? 1 : 0, 2 * beyond(hueFamilies.size, 5), 6);
-  add("craft", "pure black body text", pureBlackCount > 0 ? 1 : 0, 2, 2);
-  add("craft", "template tells", slopTells.length, 3, 9);
-  add("craft", "clipped text", clipped.length, 3, 9);
-  add("craft", "distorted images", distorted.length, 4, 8);
-  add("consistency", `${buttonHeights.length} button heights`, beyond(buttonHeights.length, 3) > 0 ? 1 : 0, 4 * beyond(buttonHeights.length, 3), 12);
-  add("consistency", `${buttonRadii.length} button radii`, beyond(buttonRadii.length, 2) > 0 ? 1 : 0, 3 * beyond(buttonRadii.length, 2), 9);
-  add("consistency", `${shadows.size} shadow styles`, beyond(shadows.size, 3) > 0 ? 1 : 0, 2 * beyond(shadows.size, 3), 8);
-  add("consistency", "paddings off the 4px grid", pad.n > 10 && pad.pct > 20 ? 1 : 0, 6, 6);
-  add("consistency", "margins off the 4px grid", mar.n > 10 && mar.pct > 20 ? 1 : 0, 4, 4);
-  add("consistency", "near-miss alignments", nearMiss.length, 2, 6);
-  add("consistency", `${sizes.length} font sizes`, beyond(sizes.length, 7) > 0 ? 1 : 0, 2 * beyond(sizes.length, 7), 8);
-  add("consistency", "font sizes under 1px apart", nearDupSizes.length > 0 ? 1 : 0, 3, 3);
-  add("clarity", "task-effort issues", effort.length, 6, 18);
-  add("clarity", "sideways scroll", page.scrollW > viewport.width + 8 ? 1 : 0, 12, 12);
-  add("clarity", "heading structure", structure.length, 3, 9);
+  add("defect", "a11y", "contrast failures", contrastFails.length, 3, 15);
+  add("defect", "a11y", "no visible focus", focusless.length, 4, 12);
+  add("defect", "a11y", "small targets", tiny.length, 2, 10);
+  add("defect", "a11y", "unnamed controls", names.unnamed.length, 5, 15);
+  add("defect", "a11y", "placeholder-only labels", names.placeholder.length, 3, 9);
+  add("defect", "craft", "touching containers", touchingPairs, 8, 24);
+  add("defect", "craft", "clipped text", clipped.length, 3, 9);
+  add("defect", "craft", "distorted images", distorted.length, 4, 8);
+  add("suggestion", "craft", "readability", readability.length, 2, 8);
+  add("suggestion", "craft", `${grays.length} grays`, beyond(grays.length, 6) > 0 ? 1 : 0, 2 * beyond(grays.length, 6), 12);
+  add("suggestion", "craft", `${hueFamilies.size} accent hues`, beyond(hueFamilies.size, 5) > 0 ? 1 : 0, 2 * beyond(hueFamilies.size, 5), 6);
+  add("suggestion", "craft", "pure black body text", pureBlackCount > 0 ? 1 : 0, 2, 2);
+  add("suggestion", "craft", "template tells", slopTells.length, 3, 9);
+  add(
+    "suggestion",
+    "consistency",
+    `${buttonHeights.length} button heights`,
+    beyond(buttonHeights.length, 3) > 0 ? 1 : 0,
+    4 * beyond(buttonHeights.length, 3),
+    12,
+  );
+  add("suggestion", "consistency", `${buttonRadii.length} button radii`, beyond(buttonRadii.length, 2) > 0 ? 1 : 0, 3 * beyond(buttonRadii.length, 2), 9);
+  add("suggestion", "consistency", `${shadows.size} shadow styles`, beyond(shadows.size, 3) > 0 ? 1 : 0, 2 * beyond(shadows.size, 3), 8);
+  add("suggestion", "consistency", "paddings off the 4px grid", pad.n > 10 && pad.pct > 20 ? 1 : 0, 6, 6);
+  add("suggestion", "consistency", "margins off the 4px grid", mar.n > 10 && mar.pct > 20 ? 1 : 0, 4, 4);
+  add("suggestion", "consistency", "near-miss alignments", nearMiss.length, 2, 6);
+  add("suggestion", "consistency", `${sizes.length} font sizes`, beyond(sizes.length, 7) > 0 ? 1 : 0, 2 * beyond(sizes.length, 7), 8);
+  add("suggestion", "consistency", "font sizes under 1px apart", nearDupSizes.length > 0 ? 1 : 0, 3, 3);
+  add("defect", "clarity", "sideways scroll", page.scrollW > viewport.width + 8 ? 1 : 0, 12, 12);
+  add("suggestion", "clarity", "task-effort issues", effort.length, 6, 18);
+  add("suggestion", "clarity", "heading structure", structure.length, 3, 9);
   const score = scoreFrom(ded);
   const { overall, a11y: a11yScore, craft: craftScore, consistency: consistencyScore, clarity: clarityScore } = score;
   const grade = overall >= 90 ? "A" : overall >= 80 ? "B" : overall >= 70 ? "C" : overall >= 60 ? "D" : "E";
@@ -1422,7 +1449,7 @@ function alignmentSection(records: StyleRecord[], viewport: { width: number; hei
     }
   }
   if (nearMiss.length > 0) {
-    sections.push(`ALIGNMENT near-misses:\n` + nearMiss.map((s) => `  ⚠ ${s}`).join("\n"));
+    sections.push(`ALIGNMENT near-misses:\n` + nearMiss.map((s) => `  → ${s}`).join("\n"));
   }
   return nearMiss;
 }

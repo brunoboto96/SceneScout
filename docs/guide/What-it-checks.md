@@ -65,19 +65,19 @@ A few do more than their name suggests:
 A design audit ends with a page score and the reasons for it:
 
 ```
-PAGE SCORE: 62/100 (D) — a11y 100 · craft 48 · consistency 76 · task-clarity 100
-  why: -16 touching containers ×2 · -12 6 button heights · -10 11 grays
+PAGE SCORE: 73/100 (C) — a11y 100 · craft 58 · consistency 88 · task-clarity 100
+  why: -16 touching containers ×2 · -6 6 button heights · -5 11 grays
 ```
 
-Each rule the audit measures costs points for each time it is seen, up to a cap, so one rule cannot sink a page on its own. The overall score is 100 less every deduction. Each of the four subscores is 100 less twice its own deductions, so the part of the page that holds the cause is the one that drops. The `why:` line lists the three largest deductions.
+Each rule the audit measures costs points for each time it is seen, up to a cap, so one rule cannot sink a page on its own. A measured defect (a ⚠ line in the audit: the page fails a stated threshold) costs the points listed below. A suggestion (a → line, or a heuristic such as the 4px grid that a deliberate design can trip) costs half of them, rounded to the nearest point. The overall score is 100 less every deduction. Each of the four subscores is 100 less twice its own deductions, so the part of the page that holds the cause is the one that drops. The `why:` line lists the three largest deductions.
 
-| Dimension | What costs points |
-|---|---|
-| a11y | contrast failures (3 each, up to 15), no visible focus (4 each, up to 12), small targets (2 each, up to 10), unnamed controls (5 each, up to 15), fields labelled only by a placeholder (3 each, up to 9) |
-| craft | touching containers (8 a pair, up to 24), readability (2 each, up to 8), grays beyond 6 (2 each, up to 12), accent hues beyond 5 (2 each, up to 6), pure black body text (2), template tells (3 each, up to 9), clipped text (3 each, up to 9), distorted images (4 each, up to 8) |
-| consistency | button heights beyond 3 (4 each, up to 12), button radii beyond 2 (3 each, up to 9), shadow styles beyond 3 (2 each, up to 8), paddings off a 4px grid (6), margins off it (4), near-miss alignments (2 each, up to 6), font sizes beyond 7 (2 each, up to 8), sizes under 1px apart (3) |
-| task clarity | task-effort issues (6 each, up to 18), sideways scroll (12), heading structure (3 each, up to 9) |
+| Dimension | Measured defects (full points) | Suggestions (half the points listed) |
+|---|---|---|
+| a11y | contrast failures (3 each, up to 15), no visible focus (4 each, up to 12), small targets (2 each, up to 10), unnamed controls (5 each, up to 15), fields labelled only by a placeholder (3 each, up to 9) | |
+| craft | touching containers (8 a pair, up to 24), clipped text (3 each, up to 9), distorted images (4 each, up to 8) | readability (2 each, up to 8), grays beyond 6 (2 each, up to 12), accent hues beyond 5 (2 each, up to 6), pure black body text (2), template tells (3 each, up to 9) |
+| consistency | | button heights beyond 3 (4 each, up to 12), button radii beyond 2 (3 each, up to 9), shadow styles beyond 3 (2 each, up to 8), paddings off a 4px grid (6), margins off it (4), near-miss alignments (2 each, up to 6), font sizes beyond 7 (2 each, up to 8), sizes under 1px apart (3) |
+| task clarity | sideways scroll (12) | task-effort issues (6 each, up to 18), heading structure (3 each, up to 9) |
 
 **Touching containers** are sibling boxes drawn as separate cards (a border, a background unlike what they sit on, or a shadow) with 0 to 2px between them on the axis they are stacked on. They count when a corner where they meet is rounded as much as the box's other corners. A list group, an accordion, table rows, tabs over their panel, a segmented control or full-width bands meet with square corners on purpose, shadowed or not, and grouped chat bubbles tighten the corners where they meet; none of these is counted, and nor are the app's navigation, header or footer, or a carousel's slides that the carousel hides. Two cards with square corners meeting are not counted either, since nothing tells them apart from a joined group, and cards that each sit inside their own wrapper element (a grid cell, a component's root) are not compared with each other. The finding names the parent, since a missing gap on the shared wrapper is the usual cause.
 
-The weights were set on a small set of pages that differ from a clean one in a single fact: two pairs of touching cards, six button heights, twelve grays, and all three together. The clean page scores 100 and the page with all three scores below 80. A test holds that order, so a later change to the weights cannot flatten the scale without failing it. Scores from before this scale are not comparable with scores after it: re-audit a page before comparing it with an older run.
+The weights were set on a small set of pages that differ from a clean one in a single fact: two pairs of touching cards, six button heights, twelve grays, and all three together. The clean page scores 100, each single defect scores below it, two pairs of touching cards cost the most of the three, and the page with all three scores below 80. They were checked against well-made public pages (component documentation and product home pages), which land around 80 or above unless the audit measures real defects on them. A test holds that order, so a later change to the weights cannot flatten the scale without failing it. Scores from before this scale are not comparable with scores after it: re-audit a page before comparing it with an older run.

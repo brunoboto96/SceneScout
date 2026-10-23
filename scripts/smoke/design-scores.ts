@@ -77,7 +77,7 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     check("the clean page says it lost nothing", whyOf(clean) === "no deductions", clean);
     check(
       "the defective page lists its top deductions beside the score",
-      /^-16 touching containers ×2 · (-12 6 button heights · -\d+ \d+ grays|-\d+ \d+ grays · -12 6 button heights)$/.test(whyOf(all)),
+      /^-16 touching containers ×2 · (-6 6 button heights · -\d+ \d+ grays|-\d+ \d+ grays · -6 6 button heights)$/.test(whyOf(all)),
       whyOf(all) || all,
     );
   } finally {

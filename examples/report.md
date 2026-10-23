@@ -370,9 +370,9 @@ Read from HAR-12.md.
 
 | Route | Overall | A11y | Craft | Consistency | Task clarity | Audited |
 |---|---|---|---|---|---|---|
-| `/orders-new.html` | **88** | 88 | 100 | 88 | 100 | (run date) |
-| `/` | **94** | 100 | 100 | 88 | 100 | (run date) |
-| `/order.html` | **94** | 100 | 100 | 88 | 100 | (run date) |
+| `/orders-new.html` | **91** | 88 | 100 | 94 | 100 | (run date) |
+| `/` | **97** | 100 | 100 | 94 | 100 | (run date) |
+| `/order.html` | **97** | 100 | 100 | 94 | 100 | (run date) |
 
 ## Gap ledger — what was NOT tested
 
