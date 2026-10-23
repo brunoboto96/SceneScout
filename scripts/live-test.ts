@@ -100,6 +100,7 @@ import { register as registerMod } from "../mods/scenescout-mod/hooks/register.j
 import {
   COULD_NOT_OPEN,
   decideOpen,
+  notOpenedLine,
   OPEN_CHOICES,
   OPEN_ENV,
   openableTarget,
@@ -1817,7 +1818,7 @@ test("open: the default opens both on a local desktop session and nothing in CI,
     ["Linux desktop over SSH with X forwarding", undefined, ctx({ platform: "linux", env: { DISPLAY: "localhost:10.0", SSH_CONNECTION: "a" } }), false, false],
     ["set to live", "live", ctx(), true, false],
     ["set to report", "report", ctx(), false, true],
-    ["set to both, in CI", "both", ctx({ env: { CI: "true" } }), true, true],
+    ["set to both, in CI: the environment's CI outranks the argument", "both", ctx({ env: { CI: "true" } }), false, false],
     ["set to none on a desktop", "none", ctx(), false, false],
   ];
   for (const [name, choice, c, live, report] of cases) {
@@ -1825,6 +1826,69 @@ test("open: the default opens both on a local desktop session and nothing in CI,
     assert.deepEqual([d.live, d.report], [live, report], name);
     assert.ok(d.why.length > 0, `${name}: says why`);
   }
+});
+
+test("open: the operator and the environment outrank scout_attach {open}; the argument asks for opening only where they allow it", () => {
+  const ctx = (env: Record<string, string>, platform: NodeJS.Platform = "darwin"): OpenContext => ({ env, platform });
+  const cases: Array<[string, OpenChoice | undefined, OpenContext, boolean, boolean, boolean]> = [
+    // name, argument, context, live, report, refused
+    ["env none + arg live: not opened", "live", ctx({ [OPEN_ENV]: "none" }), false, false, true],
+    ["env unset + arg live: opened", "live", ctx({}), true, false, false],
+    ["CI + arg live: not opened", "live", ctx({ CI: "true" }), false, false, true],
+    ["SSH + arg both: not opened", "both", ctx({ SSH_CONNECTION: "a" }), false, false, true],
+    ["no display + arg live: not opened", "live", ctx({}, "linux"), false, false, true],
+    ["display + arg live: opened", "live", ctx({ DISPLAY: ":0" }, "linux"), true, false, false],
+    ["env none + arg none: not opened, nothing refused", "none", ctx({ [OPEN_ENV]: "none" }), false, false, false],
+    ["env report + arg live: the live view stays shut", "live", ctx({ [OPEN_ENV]: "report" }), false, false, true],
+    ["env report + arg both: only the report", "both", ctx({ [OPEN_ENV]: "report" }), false, true, true],
+    ["env live + arg none: the argument may tighten", "none", ctx({ [OPEN_ENV]: "live" }), false, false, false],
+    ["env live in CI + arg live: the operator's explicit setting stands", "live", ctx({ [OPEN_ENV]: "live", CI: "true" }), true, false, false],
+    ["env none + no argument: not opened", undefined, ctx({ [OPEN_ENV]: "none" }), false, false, false],
+    ["env both in CI + no argument: opened as set", undefined, ctx({ [OPEN_ENV]: "both", CI: "true" }), true, true, false],
+  ];
+  for (const [name, asked, c, live, report, refused] of cases) {
+    const d = decideOpen(asked, c);
+    assert.deepEqual([d.live, d.report, d.refused !== undefined], [live, report, refused], name);
+    if (refused) assert.match(d.refused ?? "", /does not override/, `${name}: says why`);
+  }
+});
+
+test("open: a refusal names what it kept shut, the report included, and the one setting that changes it", () => {
+  const ctx = (env: Record<string, string>, platform: NodeJS.Platform = "darwin"): OpenContext => ({ env, platform });
+  const cases: Array<[string, OpenChoice, OpenContext, boolean, boolean, string]> = [
+    // name, argument, context, live, report, the line
+    [
+      "CI + arg report: the report is refused, not left unsaid",
+      "report",
+      ctx({ CI: "true" }),
+      false,
+      false,
+      `Not opened in a browser: report.html (a CI run; scout_attach {open: "report"} does not override that, ${OPEN_ENV} in the server's environment does)`,
+    ],
+    [
+      "env live + arg both: the live view opens and the report's refusal is named",
+      "both",
+      ctx({ [OPEN_ENV]: "live" }),
+      true,
+      false,
+      `Not opened in a browser: report.html (${OPEN_ENV} is live; scout_attach {open: "both"} does not override that, ${OPEN_ENV} in the server's environment does)`,
+    ],
+    [
+      "no display + arg both: both named",
+      "both",
+      ctx({}, "linux"),
+      false,
+      false,
+      `Not opened in a browser: the live view and report.html (no display to show a window on; scout_attach {open: "both"} does not override that, ${OPEN_ENV} in the server's environment does)`,
+    ],
+  ];
+  for (const [name, asked, c, live, report, line] of cases) {
+    const d = decideOpen(asked, c);
+    assert.deepEqual([d.live, d.report, d.refused], [live, report, line], name);
+  }
+  // The once-per-server line for an attach that asked for nothing: the argument cannot widen it, so it is not offered.
+  assert.equal(notOpenedLine("a CI run"), `Not opened in a browser (a CI run); ${OPEN_ENV} in the server's environment changes that.`);
+  assert.doesNotMatch(notOpenedLine("a CI run"), /scout_attach/);
 });
 
 test("open: SCENESCOUT_OPEN is read, and a value outside the choices is refused", () => {

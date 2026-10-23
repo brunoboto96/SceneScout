@@ -316,7 +316,7 @@ A client that lists the server's prompts has `live`. It takes no arguments and n
 
 ### When it opens by itself
 
-On a desktop, the engine also opens the live view in your default browser as a session attaches, and the report when `scout_report` writes it, whether or not the browser window is shown. In CI, over SSH, or on Linux with no display, nothing opens. To choose yourself, set `SCENESCOUT_OPEN` to `live`, `report`, `both` or `none` in the server's environment (`none` if you want no tabs), or ask the agent (`scout_attach {open: "none"}`). Set that way, the live view opens once per server, so a run of many sessions opens one tab; an attach that asks for it itself (`scout_attach {open: "live"}`) opens it every time, or says why it could not. Opening the page changes nothing about who can reach it.
+On a desktop, the engine also opens the live view in your default browser as a session attaches, and the report when `scout_report` writes it, whether or not the browser window is shown. In CI, over SSH, or on Linux with no display, nothing opens. To choose yourself, set `SCENESCOUT_OPEN` to `live`, `report`, `both` or `none` in the server's environment (`none` if you want no tabs), or ask the agent (`scout_attach {open: "none"}`). Set that way, the live view opens once per server, so a run of many sessions opens one tab; an attach that asks for it itself (`scout_attach {open: "live"}`) opens it every time, or says why it could not. The agent can ask for less than the server's setting, never more: with `SCENESCOUT_OPEN=none`, or in CI, over SSH or with no display while it is unset, its `open` is refused and the attach says so. Opening the page changes nothing about who can reach it.
 
 ### Recording a run
 

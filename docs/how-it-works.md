@@ -50,7 +50,10 @@ On a local desktop session, headed or headless, attach also opens the live
 view in the default browser, and `scout_report` opens `report.html` when it
 writes it. Nothing opens in CI, over SSH, or on Linux with no display.
 `SCENESCOUT_OPEN` (`live`, `report`, `both` or `none`) chooses, and a
-`scout_attach` `open` wins over it. `scenescout ci` sets `none` unless the
+`scout_attach` `open` can only ask for less: what `SCENESCOUT_OPEN` leaves out stays
+shut, and with it unset a detected CI run, SSH session or missing display
+refuses an `open` argument; the attach says what was not opened and why.
+`scenescout ci` sets `none` unless the
 environment already has a value. Opening the page does not change who can
 reach it: the live view stays on loopback, behind its token.
 

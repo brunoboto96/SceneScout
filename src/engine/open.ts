@@ -18,7 +18,7 @@
 import path from "node:path";
 import { isCiEnv } from "./capture.js";
 
-/** The environment variable that sets `open` for every session of the server. A `scout_attach` `open` wins over it. */
+/** The environment variable that sets `open` for every session of the server. A `scout_attach` `open` may only ask for less than it allows (ADR 25). */
 export const OPEN_ENV = "SCENESCOUT_OPEN";
 
 export const OPEN_CHOICES = ["live", "report", "both", "none"] as const;
@@ -35,6 +35,8 @@ export interface OpenDecision {
   report: boolean;
   /** Why, in a phrase, for the attach reply. */
   why: string;
+  /** Set when an attach's `open` asked for more than the environment allows: the plain line the attach result carries, naming what was not opened and why. */
+  refused?: string;
 }
 
 /** `SCENESCOUT_OPEN`, or undefined when unset. A value outside the choices is refused rather than ignored. */
@@ -63,19 +65,44 @@ const both = (choice: OpenChoice, why: string): OpenDecision => ({
 });
 
 /**
- * What opens. A setting, from the attach or the environment, is followed as
- * given. With none, both open on a local desktop session, whether the
+ * What opens. The operator outranks the agent (ADR 25), so a `scout_attach`
+ * `open` (`asked`) can ask for opening only where the environment allows it:
+ * `SCENESCOUT_OPEN=none` refuses it, and so does a detected CI run, an SSH
+ * session or a machine with no display, unless `SCENESCOUT_OPEN` itself is set
+ * to something else. `SCENESCOUT_OPEN=report` is not widened to the live view
+ * by an argument. With no argument, the environment's setting is followed as
+ * given; with neither, both open on a local desktop session, whether the
  * session's browser is headed or headless and whatever the MCP client
- * declares: what a client declares is outside this project's control, and a
- * person in a chat client is the one who most needs the page opened. Nothing
- * opens in CI or where no display would show it. A developer who wants no
- * tabs sets SCENESCOUT_OPEN=none.
+ * declares: a person in a chat client most needs the page opened. A developer
+ * who wants no tabs sets SCENESCOUT_OPEN=none.
  */
-export function decideOpen(choice: OpenChoice | undefined, ctx: OpenContext): OpenDecision {
-  if (choice) return both(choice, `open is set to ${choice}`);
-  if (isCiEnv(ctx.env)) return both("none", "a CI run");
-  if (noDisplay(ctx.env, ctx.platform)) return both("none", "no display to show a window on");
-  return both("both", "a local desktop session");
+export function decideOpen(asked: OpenChoice | undefined, ctx: OpenContext): OpenDecision {
+  const fromEnv = openChoiceFromEnv(ctx.env);
+  const detected = fromEnv ? undefined : isCiEnv(ctx.env) ? "a CI run" : noDisplay(ctx.env, ctx.platform) ? "no display to show a window on" : undefined;
+  if (!asked) {
+    if (fromEnv) return both(fromEnv, `${OPEN_ENV} is ${fromEnv}`);
+    if (detected) return both("none", detected);
+    return both("both", "a local desktop session");
+  }
+  const wants = both(asked, `open is set to ${asked}`);
+  const limit = fromEnv ? both(fromEnv, `${OPEN_ENV} is ${fromEnv}`) : detected ? both("none", detected) : undefined;
+  if (!limit) return wants;
+  const live = wants.live && limit.live;
+  const report = wants.report && limit.report;
+  const held = [wants.live && !live ? "the live view" : "", wants.report && !report ? "report.html" : ""].filter(Boolean);
+  const refused = held.length
+    ? `Not opened in a browser: ${held.join(" and ")} (${limit.why}; scout_attach {open: "${asked}"} does not override that, ${OPEN_ENV} in the server's environment does)`
+    : undefined;
+  return { live, report, why: refused ? limit.why : wants.why, ...(refused ? { refused } : {}) };
+}
+
+/**
+ * The line an attach that asked for nothing carries, once per server, when the
+ * live view stays shut. Only the server's environment can change it: an
+ * attach's `open` asks for less, never more, than the environment allows.
+ */
+export function notOpenedLine(why: string): string {
+  return `Not opened in a browser (${why}); ${OPEN_ENV} in the server's environment changes that.`;
 }
 
 /**
@@ -162,7 +189,8 @@ export function openOrSay(
   deps: { env: Record<string, string | undefined>; platform: NodeJS.Platform; spawn: Spawner; say: (line: string) => void },
 ): void {
   const say = (why: string) => deps.say(`${COULD_NOT_OPEN} (${why})`);
-  const where = decideOpen(undefined, { env: deps.env, platform: deps.platform });
+  const { [OPEN_ENV]: _setting, ...env } = deps.env;
+  const where = decideOpen(undefined, { env, platform: deps.platform });
   if (!where.live) return say(where.why);
   const outcome = openInBrowser(target, { platform: deps.platform, spawn: deps.spawn, onError: say });
   if (!outcome.ok) say(outcome.why);
