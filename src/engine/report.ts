@@ -24,8 +24,10 @@ import { formatLoadRetries } from "./limits.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
 import {
   DEFAULT_REPORT_AUDIENCE,
-  escapeSummaryText,
+  codeSpan,
+  escapeFoldText,
   escapeTableCell,
+  foldUrl,
   formatPlainSection,
   pictureOf,
   TECHNICAL_HEADING,
@@ -157,13 +159,14 @@ function formatWorthALook(items: readonly Finding[], sessionStart: string, folde
   ];
   for (const f of items) {
     // Inside the fold a title is text, as a finding's is (findingRenderer).
-    lines.push(`### ${folded ? escapeSummaryText(f.title) : f.title}`, ``);
+    lines.push(`### ${folded ? escapeFoldText(f.title) : f.title}`, ``);
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}${f.foundAt >= sessionStart ? "" : " · seen in an earlier run"}`);
-    lines.push(`- **A defect only if** your project uses ${f.convention ?? "a convention the finding does not name"}`);
-    if (f.evidence) lines.push(`- **Seen:** \`${f.evidence}\``);
-    lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
+    const convention = f.convention ?? "a convention the finding does not name";
+    lines.push(`- **A defect only if** your project uses ${folded ? escapeFoldText(convention) : convention}`);
+    if (f.evidence) lines.push(`- **Seen:** ${codeSpan(f.evidence)}`);
+    lines.push(`- **Where:** ${codeSpan(f.state)} (${folded ? foldUrl(f.url) : f.url})${alsoSeenOn(f)}`);
     lines.push(...pictureLine(f));
-    lines.push(``, f.detail, ``);
+    lines.push(``, folded ? escapeFoldText(f.detail, true) : f.detail, ``);
   }
   return lines;
 }
@@ -177,7 +180,7 @@ function pictureLine(f: Finding): string[] {
 /** The other routes a merged finding was filed on, as the end of its Where line, or "". */
 function alsoSeenOn(f: Finding): string {
   const routes = seenOnOf(f);
-  return routes.length > 0 ? `; also seen on ${routes.map((r) => `\`${r}\``).join(", ")}` : "";
+  return routes.length > 0 ? `; also seen on ${routes.map(codeSpan).join(", ")}` : "";
 }
 
 /**
@@ -844,7 +847,7 @@ export function generateReport(
   // ---- The tickets the run was given, criterion by criterion. ----
   const ticketRun = memory.ticketsThisRun();
   const ticketInput: TicketReportInput = { tickets: ticketRun.tickets, verdicts: ticketRun.verdicts, findings: memory.findings };
-  lines.push(...formatTicketsTechnical(ticketInput));
+  lines.push(...formatTicketsTechnical(ticketInput, foldsTechnical(extras)));
 
   // The sections in the report's order; each writes its own lines.
   const scores = pageScoreSection(lines, memory);
@@ -1026,37 +1029,40 @@ function gapLedgerSection(lines: string[], memory: MemoryStore, extras: ReportEx
 function findingRenderer(lines: string[], folded = false): (f: Finding, complete?: boolean) => void {
   const renderFinding = (f: Finding, complete = false): void => {
     // Inside the fold a title is text: a `</details>` in it would close the fold.
-    const title = folded ? escapeSummaryText(f.title) : f.title;
+    const title = folded ? escapeFoldText(f.title) : f.title;
     lines.push(complete ? `### 🟢 [COMPLETE] ${title}` : `### ${SEVERITY_ICON[f.severity]} [${f.severity.toUpperCase()}] ${title}`);
     lines.push(``);
     if (complete) lines.push(`- **Resolved** (was ${f.severity})`);
     if (!complete && f.regressedAt) lines.push(`- **⟳ REGRESSED:** previously marked resolved, re-found ${f.regressedAt} — the fix did not hold`);
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}`);
-    if (f.evidence) lines.push(`- **Evidence:** \`${f.evidence}\``);
-    lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
+    // App text in a code span keeps its own fence, and outside one it is escaped in the fold, so neither can close it.
+    if (f.evidence) lines.push(`- **Evidence:** ${codeSpan(f.evidence)}`);
+    lines.push(`- **Where:** ${codeSpan(f.state)} (${folded ? foldUrl(f.url) : f.url})${alsoSeenOn(f)}`);
     lines.push(...pictureLine(f));
     lines.push(`- **Seen in runs:** ${f.runs}`);
     // A merge the model made is shown with what was filed, so a wrong one can be seen, and refiled as its own defect (ADR 4).
     for (const m of judgedMergesOf(f)) {
       lines.push(
-        `- **Merged by the dedup judge** (p_same ${m.pSame.toFixed(2)}, ${m.at.slice(0, 10)}): [${m.severity}] ${m.title}, filed as ${m.category}${m.evidence ? ` with evidence \`${m.evidence}\`` : ""}`,
+        `- **Merged by the dedup judge** (p_same ${m.pSame.toFixed(2)}, ${m.at.slice(0, 10)}): [${m.severity}] ${folded ? escapeFoldText(m.title) : m.title}, filed as ${m.category}${m.evidence ? ` with evidence ${codeSpan(m.evidence)}` : ""}`,
       );
     }
     // Only printed once somebody has re-tested it. A finding nobody has looked
     // at again says nothing here, which is the honest thing for it to say.
     if (f.verdict && f.verifiedAt) {
-      lines.push(`- **Re-tested:**${sayVerification(f).replace(/^ · /, " ")}${f.verifyNote ? ` — ${f.verifyNote}` : ""}`);
+      lines.push(
+        `- **Re-tested:**${sayVerification(f).replace(/^ · /, " ")}${f.verifyNote ? ` — ${folded ? escapeFoldText(f.verifyNote) : f.verifyNote}` : ""}`,
+      );
     }
     lines.push(``);
     // Inside the fold, a detail line that is itself a fold's tag would open or close one; it is written as text.
-    lines.push(folded ? f.detail.replace(/^(\s*)<(\/?(?:details|summary)\b)/gim, "$1&lt;$2") : f.detail);
+    lines.push(folded ? escapeFoldText(f.detail, true) : f.detail);
     lines.push(``);
     if (f.repro.length > 0) {
       // Inside the folded technical part the trace is a plain list: a fold in
       // a fold is one more click, and not every Markdown viewer nests them.
       lines.push(folded ? `**Repro trace (last actions before finding):**` : `<details><summary>Repro trace (last actions before finding)</summary>`);
       lines.push(``);
-      f.repro.forEach((step, i) => lines.push(`${i + 1}. ${step}`));
+      f.repro.forEach((step, i) => lines.push(`${i + 1}. ${escapeFoldText(step)}`));
       lines.push(``);
       if (!folded) lines.push(`</details>`, ``);
     }

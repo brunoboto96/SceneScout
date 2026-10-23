@@ -20,6 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Finding } from "./memory.js";
+import { escapeFoldText } from "./plain.js";
 import { fromJs } from "./js-regex.js";
 import { type LinearMatch, LinearRegex } from "./linear-regex.js";
 
@@ -900,7 +901,8 @@ export function formatTicketsPlain(input: TicketReportInput): string[] {
  * with its confidence, the finding ids, the reason as recorded and the
  * sessions that judged it. Empty when no ticket was read.
  */
-export function formatTicketsTechnical(input: TicketReportInput): string[] {
+export function formatTicketsTechnical(input: TicketReportInput, folded = false): string[] {
+  const text = (t: string): string => (folded ? escapeFoldText(t) : t);
   if (input.tickets.length === 0) return [];
   const lines: string[] = [
     `## Acceptance criteria`,
@@ -909,9 +911,9 @@ export function formatTicketsTechnical(input: TicketReportInput): string[] {
     ``,
   ];
   for (const t of input.tickets) {
-    lines.push(`### ${t.id}: ${t.title}`, ``, `Read from ${t.source}.`, ``);
+    lines.push(`### ${text(t.id)}: ${text(t.title)}`, ``, `Read from ${text(t.source)}.`, ``);
     if (t.criteria.length === 0) {
-      lines.push(t.note ?? "No acceptance criteria were recognised.", ``);
+      lines.push(text(t.note ?? "No acceptance criteria were recognised."), ``);
       continue;
     }
     lines.push(`| Id | Criterion | Verdict | Confidence | Findings | Why | Judged by |`, `|---|---|---|---:|---|---|---|`);

@@ -990,6 +990,56 @@ test("the report panel hides an Evidence item's finding comment and shows a fold
   );
 });
 
+test("the report panel decodes escaped text in a fold's paragraphs and lists once, and leaves the same text outside a fold as written", () => {
+  const md = [
+    "## Summary",
+    "",
+    "Outside &lt;b&gt; paragraph.",
+    "",
+    "- Outside &lt;b&gt; item",
+    "",
+    "<details><summary>1. A problem</summary>",
+    "",
+    "It says &lt;/details&gt; &amp;lt; end.",
+    "",
+    "1. Click the &quot;Go &lt;b&gt;&quot; button",
+    "- **Merged by the dedup judge:** a &lt;/details&gt; title",
+    "",
+    "</details>",
+  ].join("\n");
+  const root = renderLiveReport(md);
+  const outside = root.children.filter((c) => c.tag === "p" || c.tag === "ul").map(textOf);
+  assert.deepEqual(outside, ["Outside &lt;b&gt; paragraph.", "Outside &lt;b&gt; item"], "outside a fold nothing is decoded");
+  const fold = root.children.find((c) => c.tag === "details");
+  assert.ok(fold);
+  const para = fold.children.find((c) => c.tag === "p");
+  assert.equal(textOf(para!), "It says </details> &lt; end.", "decoded once, shown as text");
+  const items = fold.children.filter((c) => c.tag === "ol" || c.tag === "ul").map(textOf);
+  assert.deepEqual(items, ['Click the "Go <b>" button', "Merged by the dedup judge: a </details> title"]);
+  // Text, never markup: no element was made from it.
+  assert.ok(!fold.children.some((c) => c.tag === "b"));
+});
+
+test("the report panel leaves a fold's code span as written, its fence as long as report.md made it, and decodes the text around it", () => {
+  const md = [
+    "<details><summary>Technical</summary>",
+    "",
+    "- **Evidence:** `` x` </details> `y &lt;b&gt; `` and &lt;i&gt; after",
+    "- **Seen:** `plain &amp; code` &amp; more",
+    "",
+    "</details>",
+  ].join("\n");
+  const fold = renderLiveReport(md).children.find((c) => c.tag === "details");
+  assert.ok(fold);
+  const list = fold.children.find((c) => c.tag === "ul")!;
+  const [first, second] = list.children;
+  const code = (li: FakeNode): string[] => li.children.filter((c) => c.tag === "code").map(textOf);
+  assert.deepEqual(code(first), ["x` </details> `y &lt;b&gt;"], "one code span, its entity as written");
+  assert.equal(textOf(first), "Evidence: x` </details> `y &lt;b&gt; and <i> after");
+  assert.deepEqual(code(second), ["plain &amp; code"]);
+  assert.equal(textOf(second), "Seen: plain &amp; code & more");
+});
+
 test("the report panel shows a recorded picture through the frame route and drops any other picture line", () => {
   // The two regexes are written inside a template literal with doubled
   // backslashes; read them back from the page as the browser gets them.
