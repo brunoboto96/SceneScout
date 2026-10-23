@@ -520,16 +520,21 @@ export const LIVE_PAGE = `<!doctype html>
   // titles, element names, URLs). It is turned into elements here, node by
   // node with textContent, so none of it is ever parsed as markup.
   function inline(node, text) {
-    var re = /(\`[^\`]+\`|\\*\\*[^*]+\\*\\*)/g;
+    var re = new RegExp(CODE_SPAN + '|' + /\\*\\*([^*]+)\\*\\*/.source, 'g');
     var last = 0;
     var m;
     while ((m = re.exec(text))) {
       if (m.index > last) node.appendChild(document.createTextNode(text.slice(last, m.index)));
       var tok = m[0];
-      node.appendChild(tok.charAt(0) === '\`' ? el('code', '', tok.slice(1, -1)) : el('strong', '', tok.slice(2, -2)));
+      node.appendChild(m[1] ? el('code', '', codeText(m[2])) : el('strong', '', m[3]));
       last = m.index + tok.length;
     }
     if (last < text.length) node.appendChild(document.createTextNode(text.slice(last)));
+  }
+  // A code span's fence is as long as report.md made it (longer when the text holds a backtick).
+  var CODE_SPAN = /(\`+)(?!\`)([\\s\\S]*?[^\`])\\1(?!\`)/.source;
+  function codeText(c) {
+    return /^ [\\s\\S]* $/.test(c) && c.trim() !== '' ? c.slice(1, -1) : c;
   }
   /**
    * The frames recorded around one finding, as a closed accordion. Nothing is
@@ -593,6 +598,19 @@ export const LIVE_PAGE = `<!doctype html>
       return { lt: '<', gt: '>', quot: '"', '#39': "'", amp: '&' }[e];
     });
   }
+  // A line inside a fold, decoded once outside its code spans: report.md
+  // writes a code span as it came, since GitHub shows one verbatim.
+  function decodeFoldLine(text) {
+    var re = new RegExp(CODE_SPAN, 'g');
+    var out = '';
+    var last = 0;
+    var m;
+    while ((m = re.exec(text))) {
+      out += decodeEntities(text.slice(last, m.index)) + m[0];
+      last = m.index + m[0].length;
+    }
+    return out + decodeEntities(text.slice(last));
+  }
   // A table row's cells: \\| is a pipe in the text and \\\\ a backslash, as the
   // report escapes them, so a title holding a pipe stays in its own cell.
   function tableCells(row) {
@@ -624,7 +642,7 @@ export const LIVE_PAGE = `<!doctype html>
       if (!para.length) return;
       var p = el('p');
       var paraText = para.join(' ');
-      inline(p, folds.length ? decodeEntities(paraText) : paraText);
+      inline(p, folds.length ? decodeFoldLine(paraText) : paraText);
       container.appendChild(p);
       para = [];
     }
@@ -634,7 +652,7 @@ export const LIVE_PAGE = `<!doctype html>
       var m;
       while (i < lines.length && (m = re.exec(lines[i]))) {
         var li = el('li');
-        inline(li, folds.length ? decodeEntities(m[1]) : m[1]);
+        inline(li, folds.length ? decodeFoldLine(m[1]) : m[1]);
         box.appendChild(li);
         // A finding names its id on its first bullet; the frames recorded
         // around it hang under that list, so the proof sits with the claim.
@@ -665,7 +683,7 @@ export const LIVE_PAGE = `<!doctype html>
         var h = el('h' + Math.min(6, m[1].length + 1));
         // Inside a fold report.md writes a finding's title with &lt; &gt; &amp;, so a
         // </details> in it cannot close the fold; the panel sets text, so it decodes them.
-        inline(h, folds.length ? decodeEntities(m[2]) : m[2]);
+        inline(h, folds.length ? decodeFoldLine(m[2]) : m[2]);
         container.appendChild(h);
         i += 1;
       } else if ((m = /^!\\[([^\\]]*)\\]\\((recordings\\/[A-Za-z0-9._\\/-]+)\\)$/.exec(line)) && m[2].indexOf('..') < 0) {

@@ -1763,17 +1763,83 @@ test("a Summary problem's fold escapes the page, the steps and what happened, an
     runs: 1,
   });
   const hostile = mk("0a1b2c3d4e", "It says </details> & more", ['click button "Go </details>" @ http://app.test/a'], "http://app.test/a?q=</details>");
-  const quiet = mk("1b2c3d4e5f", "It says nothing odd", ['click button "Go" @ http://app.test/a'], "http://app.test/b");
+  const quiet = mk("1b2c3d4e5f", "It says nothing odd", ['click button "Go" @ http://app.test/a'], "http://app.test/b?x=1&y=2");
   const md = formatPlainSection({ current: [hostile, quiet], historical: 0, worthALook: 0, violations: [], gaps: [], audience: "both" }).join("\n");
   const prose = md.replace(/```[\s\S]*?```/g, "");
   const tags = foldTags(prose);
   assert.equal(tags.opens, tags.closes);
   assert.ok(!/[^\n]<\/details>/.test(prose), "no closing fold tag mid-line");
-  assert.ok(md.includes('Click the "Go &lt;/details&gt;" button') && md.includes("It says &lt;/details&gt; &amp; more") && md.includes("?q=&lt;/details&gt;"));
+  assert.ok(
+    md.includes('Click the "Go &lt;/details&gt;" button') &&
+      md.includes("It says &lt;/details&gt; &amp; more") &&
+      md.includes("on http://app.test/a?q=%3C/details%3E"),
+  );
+  // An address keeps its &, which GitHub would show as "&amp;" in a link it made from an escaped one.
+  assert.ok(md.includes("on http://app.test/b?x=1&y=2") && !md.includes("y=2&amp;") && !md.includes("x=1&amp;y"));
   assert.ok(md.includes('Click the "Go" button') && md.includes("It says nothing odd"), "the plain problem is unchanged");
   const html = renderMarkdown(`## Summary\n\n${md.slice(md.indexOf("<details>"))}`);
   assert.ok(html.includes("Click the &quot;Go &lt;/details&gt;&quot; button") && html.includes("It says &lt;/details&gt; &amp; more"));
   assert.ok(!html.includes("&amp;lt;") && !html.includes("&amp;amp;"), "decoded once");
+});
+
+test("inside the folds, a backtick in app text cannot end its code span, and notes, conventions and addresses are escaped", () => {
+  const hostile = "x` </details> `y &lt;b&gt;";
+  const store = freshStore();
+  store.addFinding({
+    severity: "high",
+    category: "http-error",
+    title: "Hostile",
+    detail: "d",
+    url: "http://app.test/a?x=1&y=</details>",
+    state: "/a#1",
+    evidence: hostile,
+  });
+  store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: "Look",
+    detail: "d",
+    url: "http://app.test/b",
+    state: "/b#2",
+    tier: "worth_a_look",
+    convention: "a rule </details> here",
+    evidence: hostile,
+  });
+  store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: "Quiet",
+    detail: "d",
+    url: "http://app.test/c?p=1&q=2",
+    state: "/c#3",
+    evidence: "plain `code` & more",
+  });
+  const [bad] = store.findings;
+  bad.seenOn = ["/z` </details> `"];
+  bad.verdict = "present";
+  bad.verifiedAt = "2026-01-02T00:00:00.000Z";
+  bad.verifyNote = "still </details> there";
+  bad.judgedMerges = [{ title: "m", category: "http-error", severity: "high", pSame: 0.9, at: "2026-01-01T00:00:00.000Z", evidence: hostile }];
+  const md = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 0 }, { write: false }).markdown;
+  const prose = md.replace(/```[\s\S]*?```/g, "");
+  // A fold tag can only be markup outside a code span; drop the spans, as GitHub does, and count what is left.
+  const outsideCode = prose.replace(/(`+)[\s\S]*?\1/g, "");
+  const tags = foldTags(outsideCode);
+  assert.equal(tags.opens, tags.closes, "the folds balance once code spans are set aside");
+  assert.ok(!/[^\n]<\/details>/.test(outsideCode), "no closing fold tag mid-line outside a code span");
+  assert.ok(md.includes("`` x` </details> `y &lt;b&gt; ``"), "the evidence keeps every character inside a longer fence");
+  assert.ok(md.includes("still &lt;/details&gt; there") && md.includes("a rule &lt;/details&gt; here"));
+  assert.ok(md.includes("http://app.test/a?x=1&y=%3C/details%3E"), "an address is percent-encoded, not entity-escaped");
+  // The contrast: plain text keeps its single-backtick span and its address its &, so GitHub links it.
+  assert.ok(md.includes("`` plain `code` & more ``") && md.includes("`/c#3`"));
+  assert.ok(md.includes("http://app.test/c?p=1&q=2") && !md.includes("http://app.test/c?p=1&amp;q=2"));
+
+  // report.html decodes the escaped text once and leaves a code span as it was written.
+  const html = buildReplayHtml({ project: "p", at: "2026-01-01T00:00:00.000Z", version: "", sessions: [], markdown: md, evidence: [] });
+  assert.ok(html.includes("still &lt;/details&gt; there"));
+  assert.ok(html.includes("<code>x` &lt;/details&gt; `y &amp;lt;b&amp;gt;</code>"), "the evidence is one code span, its entity shown as written");
+  assert.ok(html.includes("<code>plain `code` &amp; more</code>"));
+  assert.equal((html.match(/<details/g) ?? []).length, (html.match(/<\/details>/g) ?? []).length);
 });
 
 test("a plan's scroll step is worded as the page scrolling, not a control", () => {
@@ -1781,6 +1847,9 @@ test("a plan's scroll step is worded as the page scrolling, not a control", () =
   assert.equal(plainStep("plan:scroll 300 @ http://app.test/x"), "Scroll the page down 300 pixels");
   assert.equal(plainStep("plan:scroll bottom @ http://app.test/x"), "Scroll to the bottom of the page");
   assert.equal(plainStep("plan:scroll top @ http://app.test/x"), "Scroll to the top of the page");
+  // As the engine reads it: no target is the bottom, a negative number scrolls up.
+  assert.equal(plainStep("plan:scroll @ http://app.test/x"), "Scroll to the bottom of the page");
+  assert.equal(plainStep("plan:scroll -300 @ http://app.test/x"), "Scroll the page up 300 pixels");
   // The contrast: a scroll the person asked for by name keeps its target.
   assert.equal(plainStep("scroll down @ http://app.test/x"), "Scroll down");
 });

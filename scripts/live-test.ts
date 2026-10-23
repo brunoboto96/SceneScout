@@ -1020,6 +1020,26 @@ test("the report panel decodes escaped text in a fold's paragraphs and lists onc
   assert.ok(!fold.children.some((c) => c.tag === "b"));
 });
 
+test("the report panel leaves a fold's code span as written, its fence as long as report.md made it, and decodes the text around it", () => {
+  const md = [
+    "<details><summary>Technical</summary>",
+    "",
+    "- **Evidence:** `` x` </details> `y &lt;b&gt; `` and &lt;i&gt; after",
+    "- **Seen:** `plain &amp; code` &amp; more",
+    "",
+    "</details>",
+  ].join("\n");
+  const fold = renderLiveReport(md).children.find((c) => c.tag === "details");
+  assert.ok(fold);
+  const list = fold.children.find((c) => c.tag === "ul")!;
+  const [first, second] = list.children;
+  const code = (li: FakeNode): string[] => li.children.filter((c) => c.tag === "code").map(textOf);
+  assert.deepEqual(code(first), ["x` </details> `y &lt;b&gt;"], "one code span, its entity as written");
+  assert.equal(textOf(first), "Evidence: x` </details> `y &lt;b&gt; and <i> after");
+  assert.deepEqual(code(second), ["plain &amp; code"]);
+  assert.equal(textOf(second), "Seen: plain &amp; code & more");
+});
+
 test("the report panel shows a recorded picture through the frame route and drops any other picture line", () => {
   // The two regexes are written inside a template literal with doubled
   // backslashes; read them back from the page as the browser gets them.

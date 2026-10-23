@@ -364,6 +364,29 @@ function decodeEntities(text: string): string {
   return text.replace(/&(lt|gt|quot|#39|amp);/g, (_, e: string) => ({ lt: "<", gt: ">", quot: '"', "#39": "'", amp: "&" })[e] as string);
 }
 
+/** A Markdown code span: a run of backticks, the text, and a run of the same length (report.md lengthens it when the text holds a backtick). */
+const CODE_SPAN = /(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g;
+
+/** A code span's text: one space each side is padding when both are there. */
+function codeText(text: string): string {
+  return /^ .* $/s.test(text) && text.trim() !== "" ? text.slice(1, -1) : text;
+}
+
+/**
+ * A line inside a fold back to its characters, once. report.md escapes app
+ * text there, except inside a code span, which GitHub shows verbatim and so
+ * is written as it came: a code span is left as it is.
+ */
+function decodeFoldLine(text: string): string {
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(CODE_SPAN)) {
+    out += decodeEntities(text.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + decodeEntities(text.slice(last));
+}
+
 /**
  * The report's markdown as elements. A deliberately small subset — headings,
  * tables, lists, code fences, the report's own <details> blocks — built by
@@ -390,13 +413,13 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
   const shown = new Set<string>();
   const inline = (text: string): string =>
     escapeHtml(text)
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(CODE_SPAN, (_, _fence: string, code: string) => `<code>${codeText(code)}</code>`)
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/<strong>([^<]+)<\/strong>/g, (whole, w: string) => (impactClass(w) ? impactChip(w) : whole));
   const flush = (): void => {
     if (!para.length) return;
     const text = para.join(" ");
-    out.push(`<p>${inline(open.length > 0 ? decodeEntities(text) : text)}</p>`);
+    out.push(`<p>${inline(open.length > 0 ? decodeFoldLine(text) : text)}</p>`);
     para = [];
   };
   const closeItem = (): void => {
@@ -444,7 +467,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
         out.push(`<article class="ev" data-testid="report-evidence-item"><div class="ev-head">`);
         item = "head";
       }
-      out.push(`<h${h}${anchor && !open.includes("part") ? ` id="${anchor}"` : ""}>${inline(open.includes("part") ? decodeEntities(m[2]) : m[2])}</h${h}>`);
+      out.push(`<h${h}${anchor && !open.includes("part") ? ` id="${anchor}"` : ""}>${inline(open.includes("part") ? decodeFoldLine(m[2]) : m[2])}</h${h}>`);
       i += 1;
     } else if ((m = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(line))) {
       // A finding's picture. The path is the report's own, relative to the run's
@@ -522,7 +545,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
       while (i < lines.length && (m = /^\s*[-*] (.*)$/.exec(lines[i]))) {
         const id = /\*\*Id:\*\* `([0-9a-f]+)`/.exec(m[1])?.[1];
         if (id && !shown.has(id)) found = evidence.find((e) => e.id === id);
-        items.push(`<li>${inline(open.length > 0 ? decodeEntities(m[1]) : m[1])}</li>`);
+        items.push(`<li>${inline(open.length > 0 ? decodeFoldLine(m[1]) : m[1])}</li>`);
         i += 1;
       }
       out.push(`<ul>${items.join("")}</ul>`);
@@ -534,7 +557,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
       flush();
       const items: string[] = [];
       while (i < lines.length && (m = /^\d+\. (.*)$/.exec(lines[i]))) {
-        items.push(`<li>${inline(open.length > 0 ? decodeEntities(m[1]) : m[1])}</li>`);
+        items.push(`<li>${inline(open.length > 0 ? decodeFoldLine(m[1]) : m[1])}</li>`);
         i += 1;
       }
       out.push(`<ol>${items.join("")}</ol>`);
