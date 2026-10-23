@@ -17,7 +17,7 @@ import { httpJudgeAsk } from "../ci-run.js";
 import { laneCloseGuard } from "../engine/lane.js";
 import { liveViewUrl } from "../engine/status-pane.js";
 import { LIVE_ENV } from "../engine/live.js";
-import { decideOpen, OPEN_CHOICES, OPEN_ENV, openChoiceFromEnv, opensLiveView, type OpenChoice } from "../engine/open.js";
+import { decideOpen, OPEN_CHOICES, OPEN_ENV, opensLiveView, type OpenChoice } from "../engine/open.js";
 import { parseLoginArgs } from "../engine/profiles.js";
 import type { BrowserEngineName } from "../browsers.js";
 import { LOGIN_WINDOW_MAX_MS, savedLine, startLoginWindow } from "../login-run.js";
@@ -504,7 +504,7 @@ export function registerSessionTools(): void {
           // the last session there, that run is over. Re-attaching to the SAME
           // project is the same run, and keeps what the run has learned.
           // Before anything changes: a SCENESCOUT_OPEN the server cannot use refuses the attach.
-          const opening = decideOpen(open ?? openChoiceFromEnv(process.env), {
+          const opening = decideOpen(open, {
             env: process.env,
             platform: process.platform,
           });
@@ -576,6 +576,9 @@ export function registerSessionTools(): void {
           if (liveAddress && opensLiveView(opening, open !== undefined, liveOpened)) {
             setLiveOpened(true);
             openNote = openForUser("the live view", liveViewUrl(liveAddress.port, liveAddress.token));
+          } else if (opening.refused && open !== undefined && (open === "live" || open === "both")) {
+            // The operator's setting or the environment outranks the argument: say so every time it is asked.
+            openNote = `\nThe live view was not opened: ${opening.refused}.`;
           } else if (opening.live && open !== undefined && !liveAddress) {
             // Asked for by this attach and not there to open: say why rather than nothing.
             openNote = `\nThe live view was not opened: ${process.env[LIVE_ENV] === "off" ? `${LIVE_ENV}=off keeps it from running` : "it is not running"}.`;
