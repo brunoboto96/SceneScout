@@ -23,6 +23,8 @@
  * Pure, so the split and the wording are table-tested.
  */
 import { normalizePath } from "./fingerprint.js";
+import { isPattern } from "./from-run.js";
+import { fromJs } from "./js-regex.js";
 
 /** Most lanes worth running at once. Past this the planner spends longer reading reports than the lanes spend testing. */
 export const MAX_LANES = 8;
@@ -104,10 +106,14 @@ export function splitRoutes(routes: readonly string[], laneCount: number, order?
   return out.filter((lane) => lane.routes.length > 0);
 }
 
+const NOT_NAME_RE = fromJs(String.raw`[^a-zA-Z0-9-]+`);
+const EDGE_HYPHEN_RE = fromJs(String.raw`^-|-$`);
+
 /** A lane's name, derived from what it owns so the live view reads as the app rather than as "lane-3". */
 export function laneName(modules: readonly string[], index: number): string {
-  const first = modules[0]?.replace(/^\//, "") ?? "";
-  const base = first ? first.replace(/[^a-zA-Z0-9-]+/g, "-").replace(/^-|-$/g, "") : `lane-${index + 1}`;
+  const head = modules[0];
+  const first = head === undefined ? "" : head.startsWith("/") ? head.slice(1) : head;
+  const base = first ? EDGE_HYPHEN_RE.replace(NOT_NAME_RE.replace(first, "-"), "") : `lane-${index + 1}`;
   const name = modules.length > 1 ? `${base}+${modules.length - 1}` : base || `lane-${index + 1}`;
   return name.slice(0, LANE_NAME_MAX);
 }
@@ -175,7 +181,7 @@ export function replayBriefs(lanes: ReadonlyArray<{ routes: readonly string[] }>
  * nothing else lands on the app's root and navigates from there.
  */
 export function landingOf(routes: readonly string[]): string {
-  return routes.find((r) => !/(^|\/)[:*]|\[[^\]]+\]/.test(r)) ?? "/";
+  return routes.find((r) => !isPattern(r)) ?? "/";
 }
 
 function laneObjective(modules: readonly string[], goal?: string): string {

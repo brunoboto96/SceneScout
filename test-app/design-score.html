@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Design score calibration</title>
+  <style>
+    body { margin: 0; padding: 32px; font: 16px/1.5 sans-serif; background: rgb(249, 250, 251); color: rgb(23, 23, 23); }
+    h1 { margin: 0 0 16px; font-size: 28px; line-height: 36px; }
+    h2 { margin: 0 0 8px; font-size: 20px; line-height: 28px; }
+    p { margin: 0 0 8px; }
+    .stack { display: flex; flex-direction: column; gap: 8px; max-width: 640px; margin-bottom: 24px; }
+    .card { padding: 16px; background: rgb(255, 255, 255); border: 1px solid rgb(209, 213, 219); border-radius: 8px; }
+    .actions { display: flex; gap: 12px; margin-bottom: 24px; }
+    .actions button { height: 36px; padding: 0 16px; border-radius: 6px; font: inherit; border: 1px solid rgb(30, 64, 175); background: rgb(255, 255, 255); color: rgb(30, 64, 175); }
+    .actions button.primary { background: rgb(30, 64, 175); color: rgb(255, 255, 255); }
+    .notes p { color: rgb(64, 64, 64); }
+    .notes p.quiet { color: rgb(82, 82, 82); }
+    /* A joined list group: items share their borders, square where they meet, rounded only at the group's outer corners. */
+    .group { list-style: none; margin: 0 0 24px; padding: 0; max-width: 640px; }
+    .group li { padding: 12px 16px; background: rgb(255, 255, 255); border: 1px solid rgb(209, 213, 219); }
+    .group li + li { border-top: 0; }
+    .group li:first-child { border-radius: 8px 8px 0 0; }
+    .group li:last-child { border-radius: 0 0 8px 8px; }
+    /* Grouped chat bubbles 2px apart: the corners where they meet are tightened, so they are one group, never touching. */
+    .chat { display: flex; flex-direction: column; gap: 2px; max-width: 360px; margin-bottom: 24px; }
+    .bubble { align-self: flex-end; padding: 8px 12px; background: rgb(30, 64, 175); color: rgb(255, 255, 255); border-radius: 18px 4px 4px 18px; }
+    .bubble:first-child { border-radius: 18px 18px 4px 18px; }
+    .bubble:last-child { border-radius: 18px 4px 18px 18px; }
+    /* A carousel shows one slide; the others sit edge to edge beside it, cut away by the frame, and are never touching. */
+    .carousel { overflow: hidden; max-width: 640px; margin-bottom: 24px; }
+    .track { display: flex; }
+    .slide { flex: 0 0 100%; box-sizing: border-box; }
+    /* The one fact each variant changes. */
+    /* A scroll pane inside a frame that clips: what is below the pane's fold can still be scrolled to. */
+    .frame { height: 160px; overflow: hidden; max-width: 640px; margin-bottom: 24px; }
+    .pane { height: 100%; overflow: auto; }
+    .pane .spacer { height: 400px; }
+    .pstack { display: flex; flex-direction: column; gap: 8px; }
+    .touching .stack { gap: 0; }
+    .scrolled .pstack { gap: 0; }
+  </style>
+</head>
+<body>
+  <!-- One page, and each defect the design score is calibrated on is one class
+       away: ?with=touching drops the gap between the stacked cards,
+       ?with=heights gives the six buttons six heights, ?with=grays writes the
+       notes in twelve grays. ?with=touching,heights,grays is all three.
+       ?with=scrolled drops the gap in a stack below a scroll pane's fold.
+       The list group, the chat bubbles and the carousel's slides are joined on
+       purpose in every variant and are never touching. -->
+  <main>
+    <h1>Account settings</h1>
+    <div class="actions" data-testid="score-actions">
+      <button class="primary">Save changes</button>
+      <button>Preview</button>
+      <button>Export</button>
+      <button>Duplicate</button>
+      <button>Archive</button>
+      <button>Share</button>
+    </div>
+    <div class="stack" data-testid="score-profile-stack">
+      <section class="card"><h2>Profile</h2><p>Your name and photo.</p></section>
+      <section class="card"><h2>Password</h2><p>Change how you sign in.</p></section>
+    </div>
+    <div class="stack" data-testid="score-billing-stack">
+      <section class="card"><h2>Billing</h2><p>Your plan and invoices.</p></section>
+      <section class="card"><h2>Notifications</h2><p>What we tell you about.</p></section>
+    </div>
+    <div class="chat" data-testid="score-chat">
+      <div class="bubble">Is the invoice ready?</div>
+      <div class="bubble">It was due on Friday.</div>
+      <div class="bubble">Thanks!</div>
+    </div>
+    <div class="carousel">
+      <div class="track" data-testid="score-carousel">
+        <section class="card slide"><h2>Plan</h2><p>Your current plan.</p></section>
+        <section class="card slide"><h2>Usage</h2><p>This month so far.</p></section>
+        <section class="card slide"><h2>Limits</h2><p>What the plan allows.</p></section>
+      </div>
+    </div>
+    <div class="frame">
+      <div class="pane">
+        <p class="spacer">Recent activity</p>
+        <div class="pstack" data-testid="score-pane-stack">
+          <section class="card"><h2>Exports</h2><p>Files you asked for.</p></section>
+          <section class="card"><h2>Imports</h2><p>Files you sent us.</p></section>
+        </div>
+      </div>
+    </div>
+    <ul class="group" data-testid="score-list-group">
+      <li>Sessions</li>
+      <li>Devices</li>
+      <li>Connected apps</li>
+    </ul>
+    <div class="notes" data-testid="score-notes">
+      <p>Changes apply to every workspace you belong to.</p>
+      <p class="quiet">Last saved a moment ago.</p>
+    </div>
+  </main>
+  <script>
+    const wanted = (new URLSearchParams(location.search).get("with") || "").split(",");
+    if (wanted.includes("touching")) document.body.classList.add("touching");
+    if (wanted.includes("scrolled")) document.body.classList.add("scrolled");
+    if (wanted.includes("heights")) {
+      document.querySelectorAll(".actions button").forEach((b, i) => { b.style.height = 28 + i * 4 + "px"; });
+    }
+    if (wanted.includes("grays")) {
+      const notes = document.querySelector(".notes");
+      for (let i = 0; i < 12; i++) {
+        const p = document.createElement("p");
+        const v = 30 + i * 5;
+        p.style.color = "rgb(" + v + ", " + v + ", " + v + ")";
+        p.textContent = "Note " + (i + 1) + " about this account.";
+        notes.appendChild(p);
+      }
+    }
+  </script>
+</body>
+</html>

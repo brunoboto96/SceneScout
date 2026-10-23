@@ -28,6 +28,7 @@ import { readFlagValue } from "./args.js";
 import { isNonPageResource } from "./crawl.js";
 import type { DesignDefect } from "./design.js";
 import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
+import { fromJs } from "./js-regex.js";
 import { parseLimitFlag } from "./limits.js";
 import { redactRoute, redactSecrets } from "./memory.js";
 import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifFileFor, sarifLocation, type SarifFiles } from "./sarif.js";
@@ -172,6 +173,11 @@ export const CHECK_RULES = {
   },
   "clipped-text": { severity: "low", title: "Text clipped", help: "Text is wider than its box and cut off without an ellipsis." },
   "image-aspect": { severity: "low", title: "Image distorted", help: "The rendered box does not match the image's proportions." },
+  "touching-containers": {
+    severity: "low",
+    title: "Containers touching",
+    help: "Two sibling boxes drawn as separate cards (a border, a background or a shadow, with a rounded corner where they meet) sit 0–2px apart. The evidence names their parent, whose gap is usually the fix. Joins whose corners are square or tightened where they meet, such as list groups, accordions, table rows and grouped chat bubbles, are not reported.",
+  },
   "flow-step-failed": {
     severity: "high",
     title: "Saved flow broke",
@@ -547,6 +553,9 @@ export function unauditedRoutes(routes: readonly RouteHealth[]): RouteHealth[] {
   return routes.filter((r) => r.loadError === undefined && r.auditError !== undefined);
 }
 
+/** A fragment: `#` to the end of the line. */
+const FRAGMENT_RE = fromJs(String.raw`#.*$`);
+
 /**
  * The document's own error status is already the route's issue, so the
  * oracle's record of that same response is not a second one. Run on the raw
@@ -556,7 +565,7 @@ export function unauditedRoutes(routes: readonly RouteHealth[]): RouteHealth[] {
  */
 export function withoutOwnResponse(r: RouteHealth): RouteHealth {
   if (r.status === null || r.status < 400) return r;
-  const own = httpErrorDetail("GET", r.url.replace(/#.*$/, ""), r.status);
+  const own = httpErrorDetail("GET", FRAGMENT_RE.replaceFirst(r.url, ""), r.status);
   return { ...r, violations: r.violations.filter((v) => !(v.kind === "http_error" && v.detail === own)) };
 }
 
@@ -1149,16 +1158,16 @@ export function toSarif(result: CheckResult, toolVersion: string, files: SarifFi
   };
 }
 
+/** A line break with the white space around it. */
+const LINE_BREAK_RE = fromJs(String.raw`\s*[\r\n]\s*`);
+
 /**
  * Markdown cells: a pipe or a newline in evidence would break the table it
  * sits in. Backslashes are escaped first, or evidence ending in `\` would
  * turn the pipe's escape into a literal backslash and the pipe back into a column.
  */
 function cell(text: string): string {
-  return text
-    .replace(/\\/g, "\\\\")
-    .replace(/\|/g, "\\|")
-    .replace(/\s*[\r\n]\s*/g, " ");
+  return LINE_BREAK_RE.replace(text.replaceAll("\\", "\\\\").replaceAll("|", "\\|"), " ");
 }
 /** The same escaping, for other markdown tables: the CI run's summary. */
 export const markdownCell = cell;

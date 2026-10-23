@@ -1311,8 +1311,8 @@ test("plain steps: each repro action as a person would do it, and the tester's o
     ["plan:click role=link[name=Help] @ http://app.test/x", 'Click the "Help" link'],
     ["plan:type label=Email @ http://app.test/x", 'Type into the "Email" field'],
     ["plan:hover testid=help-icon @ http://app.test/x", 'Point at the "help icon" control'],
-    ["plan:scroll testid=orders-list @ http://app.test/x", 'Scroll the "orders list" control'],
-    ["plan:scroll down @ http://app.test/x", "Scroll down"],
+    ["plan:scroll testid=orders-list @ http://app.test/x", "Scroll the page down 600 pixels"],
+    ["plan:scroll down @ http://app.test/x", "Scroll the page down 600 pixels"],
     ["press Escape @ http://app.test/x", "Press Escape"],
     ["scroll down @ http://app.test/x", "Scroll down"],
     ["back @ http://app.test/x", "Go back to the previous page"],
@@ -1680,6 +1680,178 @@ test("a finding's title with a closing fold tag is text in the folded technical 
   // Unfolded (dev), nothing is escaped: the document has no fold to close.
   const dev = generateReport(store, [], { ...extras, report: "dev" }, { write: false }).markdown;
   assert.ok(dev.includes(trap) && dev.includes(`### ${look}`));
+});
+
+/** Folds a document opens and closes, counting a raw fold tag anywhere in a line. */
+const foldTags = (md: string): { opens: number; closes: number } => ({
+  opens: (md.match(/<details>/g) ?? []).length,
+  closes: (md.match(/<\/details>/g) ?? []).length,
+});
+
+test("app text inside the folds (details, merged titles, repro steps, plan steps, tickets) cannot close a fold, and report.html reads it once-decoded", () => {
+  const hostile = "a </details> b <summary>c</summary> &lt;i&gt; `tick`";
+  const store = freshStore();
+  store.addFinding({
+    severity: "high",
+    category: "http-error",
+    title: "Hostile",
+    detail: `first ${hostile}\nsecond </details> line`,
+    url: "http://app.test/a",
+    state: "/a#1",
+  });
+  store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: "Plain",
+    detail: "A plain detail with `code` & more",
+    url: "http://app.test/b",
+    state: "/b#2",
+  });
+  const [bad, plain] = store.findings;
+  bad.repro = [`click button "Go </details>" @ http://app.test/a`, `plan:click text=Save </details> @ http://app.test/a`];
+  bad.judgedMerges = [{ title: "Merged </details> title", category: "http-error", severity: "high", pSame: 0.9, at: "2026-01-01T00:00:00.000Z" }];
+  plain.judgedMerges = [{ title: "Merged plain title", category: "visual", severity: "low", pSame: 0.9, at: "2026-01-01T00:00:00.000Z" }];
+  store.addTickets([{ id: "T-1 </details>", title: "Ticket </details> title", criteria: [], source: "pasted </details> text", note: "Found </details> only" }]);
+  const extras = { routesVisited: 1, routesTotal: 1, designAudits: 0 };
+
+  const both = generateReport(store, [], extras, { write: false }).markdown;
+  // The document opens and closes the same number of folds: nothing app-supplied added or removed one.
+  // Fold tags outside code fences, and outside the Summary's own tickets block (plain Markdown, not inside a fold).
+  const prose = both.replace(/```[\s\S]*?```/g, "").replace(/### The tickets[\s\S]*?(?=\n<details>|\n## )/, "");
+  const clean = foldTags(prose);
+  assert.equal(clean.opens, clean.closes, "every fold opens and closes once");
+  assert.ok(!/[^\n]<\/details>/.test(prose) && !/<\/details>[^\n]/.test(prose), "a closing fold tag only ever stands on a line of its own");
+  assert.ok(
+    both.includes("first a &lt;/details&gt; b &lt;summary&gt;c&lt;/summary&gt; &amp;lt;i&amp;gt; tick\nsecond &lt;/details&gt; line"),
+    "a detail line is escaped wherever the tag sits",
+  );
+  assert.ok(both.includes("Merged &lt;/details&gt; title"), "a merged title is escaped");
+  assert.ok(both.includes('1. click button "Go &lt;/details&gt;"'), "a repro step is escaped");
+  assert.ok(both.includes("### T-1 &lt;/details&gt;: Ticket &lt;/details&gt; title"), "a ticket heading is escaped");
+  assert.ok(both.includes("Read from pasted &lt;/details&gt; text.") && both.includes("Found &lt;/details&gt; only"));
+  // The contrast: plain text is written as it came, backticks aside, and its merge line is the same shape.
+  assert.ok(both.includes("A plain detail with code &amp; more"));
+  assert.ok(both.includes("Merged plain title"));
+
+  // report.html: shown once-decoded as text, never as markup, never double-escaped.
+  const html = buildReplayHtml({ project: "p", at: "2026-01-01T00:00:00.000Z", version: "", sessions: [], markdown: both, evidence: [] });
+  assert.ok(
+    html.includes("first a &lt;/details&gt; b &lt;summary&gt;c&lt;/summary&gt; &amp;lt;i&amp;gt; tick second &lt;/details&gt; line"),
+    "the detail reads as written, once",
+  );
+  assert.ok(html.includes("Merged &lt;/details&gt; title") && html.includes("Go &lt;/details&gt;"));
+  assert.ok(!html.includes("&amp;lt;/details"), "never escaped twice");
+  assert.ok(html.includes("A plain detail with code &amp; more"));
+  assert.equal((html.match(/<details/g) ?? []).length, (html.match(/<\/details>/g) ?? []).length, "the page's folds balance");
+
+  // Unfolded (dev): no fold surrounds the entry, so the text is as the app wrote it.
+  const dev = generateReport(store, [], { ...extras, report: "dev" }, { write: false }).markdown;
+  assert.ok(dev.includes("A plain detail with `code` & more"));
+});
+
+test("a Summary problem's fold escapes the page, the steps and what happened, and a plain one is written as it came", () => {
+  const mk = (id: string, detail: string, repro: string[], url: string): Finding => ({
+    id,
+    severity: "high",
+    category: "visual",
+    title: "Title",
+    detail,
+    url,
+    state: "/#a",
+    repro,
+    foundAt: "2026-01-01T00:00:00.000Z",
+    runs: 1,
+  });
+  const hostile = mk("0a1b2c3d4e", "It says </details> & more", ['click button "Go </details>" @ http://app.test/a'], "http://app.test/a?q=</details>");
+  const quiet = mk("1b2c3d4e5f", "It says nothing odd", ['click button "Go" @ http://app.test/a'], "http://app.test/b?x=1&y=2");
+  const md = formatPlainSection({ current: [hostile, quiet], historical: 0, worthALook: 0, violations: [], gaps: [], audience: "both" }).join("\n");
+  const prose = md.replace(/```[\s\S]*?```/g, "");
+  const tags = foldTags(prose);
+  assert.equal(tags.opens, tags.closes);
+  assert.ok(!/[^\n]<\/details>/.test(prose), "no closing fold tag mid-line");
+  assert.ok(
+    md.includes('Click the "Go &lt;/details&gt;" button') &&
+      md.includes("It says &lt;/details&gt; &amp; more") &&
+      md.includes("on http://app.test/a?q=%3C/details%3E"),
+  );
+  // An address keeps its &, which GitHub would show as "&amp;" in a link it made from an escaped one.
+  assert.ok(md.includes("on http://app.test/b?x=1&y=2") && !md.includes("y=2&amp;") && !md.includes("x=1&amp;y"));
+  assert.ok(md.includes('Click the "Go" button') && md.includes("It says nothing odd"), "the plain problem is unchanged");
+  const html = renderMarkdown(`## Summary\n\n${md.slice(md.indexOf("<details>"))}`);
+  assert.ok(html.includes("Click the &quot;Go &lt;/details&gt;&quot; button") && html.includes("It says &lt;/details&gt; &amp; more"));
+  assert.ok(!html.includes("&amp;lt;") && !html.includes("&amp;amp;"), "decoded once");
+});
+
+test("inside the folds, a backtick in app text cannot end its code span, and notes, conventions and addresses are escaped", () => {
+  const hostile = "x` </details> `y &lt;b&gt;";
+  const store = freshStore();
+  store.addFinding({
+    severity: "high",
+    category: "http-error",
+    title: "Hostile",
+    detail: "d",
+    url: "http://app.test/a?x=1&y=</details>",
+    state: "/a#1",
+    evidence: hostile,
+  });
+  store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: "Look",
+    detail: "d",
+    url: "http://app.test/b",
+    state: "/b#2",
+    tier: "worth_a_look",
+    convention: "a rule </details> here",
+    evidence: hostile,
+  });
+  store.addFinding({
+    severity: "low",
+    category: "visual",
+    title: "Quiet",
+    detail: "d",
+    url: "http://app.test/c?p=1&q=2",
+    state: "/c#3",
+    evidence: "plain `code` & more",
+  });
+  const [bad] = store.findings;
+  bad.seenOn = ["/z` </details> `"];
+  bad.verdict = "present";
+  bad.verifiedAt = "2026-01-02T00:00:00.000Z";
+  bad.verifyNote = "still </details> there";
+  bad.judgedMerges = [{ title: "m", category: "http-error", severity: "high", pSame: 0.9, at: "2026-01-01T00:00:00.000Z", evidence: hostile }];
+  const md = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 0 }, { write: false }).markdown;
+  const prose = md.replace(/```[\s\S]*?```/g, "");
+  // A fold tag can only be markup outside a code span; drop the spans, as GitHub does, and count what is left.
+  const outsideCode = prose.replace(/(`+)[\s\S]*?\1/g, "");
+  const tags = foldTags(outsideCode);
+  assert.equal(tags.opens, tags.closes, "the folds balance once code spans are set aside");
+  assert.ok(!/[^\n]<\/details>/.test(outsideCode), "no closing fold tag mid-line outside a code span");
+  assert.ok(md.includes("`` x` </details> `y &lt;b&gt; ``"), "the evidence keeps every character inside a longer fence");
+  assert.ok(md.includes("still &lt;/details&gt; there") && md.includes("a rule &lt;/details&gt; here"));
+  assert.ok(md.includes("http://app.test/a?x=1&y=%3C/details%3E"), "an address is percent-encoded, not entity-escaped");
+  // The contrast: plain text keeps its single-backtick span and its address its &, so GitHub links it.
+  assert.ok(md.includes("`` plain `code` & more ``") && md.includes("`/c#3`"));
+  assert.ok(md.includes("http://app.test/c?p=1&q=2") && !md.includes("http://app.test/c?p=1&amp;q=2"));
+
+  // report.html decodes the escaped text once and leaves a code span as it was written.
+  const html = buildReplayHtml({ project: "p", at: "2026-01-01T00:00:00.000Z", version: "", sessions: [], markdown: md, evidence: [] });
+  assert.ok(html.includes("still &lt;/details&gt; there"));
+  assert.ok(html.includes("<code>x` &lt;/details&gt; `y &amp;lt;b&amp;gt;</code>"), "the evidence is one code span, its entity shown as written");
+  assert.ok(html.includes("<code>plain `code` &amp; more</code>"));
+  assert.equal((html.match(/<details/g) ?? []).length, (html.match(/<\/details>/g) ?? []).length);
+});
+
+test("a plan's scroll step is worded as the page scrolling, not a control", () => {
+  assert.equal(plainStep("plan:scroll testid=orders-list @ http://app.test/x"), "Scroll the page down 600 pixels");
+  assert.equal(plainStep("plan:scroll 300 @ http://app.test/x"), "Scroll the page down 300 pixels");
+  assert.equal(plainStep("plan:scroll bottom @ http://app.test/x"), "Scroll to the bottom of the page");
+  assert.equal(plainStep("plan:scroll top @ http://app.test/x"), "Scroll to the top of the page");
+  // As the engine reads it: no target is the bottom, a negative number scrolls up.
+  assert.equal(plainStep("plan:scroll @ http://app.test/x"), "Scroll to the bottom of the page");
+  assert.equal(plainStep("plan:scroll -300 @ http://app.test/x"), "Scroll the page up 300 pixels");
+  // The contrast: a scroll the person asked for by name keeps its target.
+  assert.equal(plainStep("scroll down @ http://app.test/x"), "Scroll down");
 });
 
 test("the Evidence caption names no finding id, and the HTML still hangs the recorded frames under the item", () => {

@@ -12,7 +12,19 @@
  */
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { landingOf } from "../src/engine/brief.ts";
 import { templateIds } from "../src/engine/calibration.ts";
+import { markdownCell, withoutOwnResponse, type RouteHealth } from "../src/engine/check.ts";
+import { crawlFoundNothing, crawlNotes } from "../src/engine/ci-lanes.ts";
+import { downloadIsNavigations } from "../src/engine/crawl.ts";
+import { readLifetime } from "../src/engine/expiry.ts";
+import { endpointSignatures, sameFinding } from "../src/engine/finding-dedup.ts";
+import { requestPathMatches } from "../src/engine/flow.ts";
+import { isPattern } from "../src/engine/from-run.ts";
+import { parseLaneReport, statedRequests } from "../src/engine/lane.ts";
+import { tokenShapeOf } from "../src/engine/postmessage.ts";
+import { chooseSubmit, type FieldInfo } from "../src/engine/scripted-login.ts";
+import { identifierIsDestructive, strictBodyIsDestructive } from "../src/engine/strict-writes.ts";
 import { elementKey, isNonPageRoute, laneRoutePaths, stripRouteQuery } from "../src/engine/fingerprint.ts";
 import { holdsCredential } from "../src/engine/guided.ts";
 import {
@@ -33,6 +45,41 @@ import { maskFillCalls, redactPersonal, secretWordKind } from "../src/engine/sen
 function megabyte(unit: string, prefix = "", suffix = ""): string {
   const room = 1_000_000 - prefix.length - suffix.length;
   return prefix + unit.repeat(Math.max(1, Math.floor(room / unit.length))) + suffix;
+}
+
+/** A submit button with this text, as the scripted login reads it from a page. */
+function button(text: string): FieldInfo {
+  return {
+    index: 0,
+    tag: "button",
+    type: "submit",
+    name: "",
+    id: "",
+    autocomplete: "",
+    label: "",
+    text,
+    inputmode: "",
+    maxLength: -1,
+    filled: false,
+    disabled: false,
+  };
+}
+
+/** A route that answered 500 at this address. */
+function failedRoute(url: string): RouteHealth {
+  return {
+    path: "/",
+    url,
+    status: 500,
+    loginRedirect: false,
+    elements: 0,
+    unnamed: [],
+    placeholderOnly: [],
+    violations: [],
+    geometry: [],
+    brokenImages: [],
+    design: [],
+  };
 }
 
 const CASES: Record<string, Array<[string, () => unknown]>> = {
@@ -103,6 +150,32 @@ const CASES: Record<string, Array<[string, () => unknown]>> = {
     ["a typed value of angle brackets (markup)", () => hostileForEmbed(megabyte("< "))],
     ["a setting of entries (read posts)", () => readPostsSetting(undefined, megabyte("POST /a,"))],
     ["a read post entry of spaces (post entry)", () => readPostEntries([megabyte(" ", "POST /a", "x y")])],
+    // #618, the second round. On JavaScript's engine all but three of these took over 30 s at 1 MB (0.1 to 1 s at 10 KB);
+    // the JWT's value is read to 64 KB, where it took 2.3 s, and a quoted literal and a fenced block were already linear.
+    ["a download's url of hash marks (crawl's fragment)", () => downloadIsNavigations(megabyte("#", "", "\n#"), "x", [])],
+    [
+      "a cookie of JWT starts (profile expiry's JWT)",
+      () => readLifetime({ cookies: [{ name: "a", value: megabyte("eyJJJ").slice(0, 64 * 1024), domain: "h", path: "/", expires: -1 }], origins: [] }),
+    ],
+    ["a route of open brackets (a route pattern)", () => landingOf([megabyte("[")])],
+    ["a route of open brackets (from-run's route pattern)", () => isPattern(megabyte("["))],
+    ["lines of an open session mark (crawl found nothing)", () => crawlFoundNothing(megabyte("[session \n"))],
+    ["a crawl of route lines (crawl notes)", () => crawlNotes(megabyte("/a — 200 · 1 el\n", "", "PROBLEM ROUTES (1):\n/a: x\n"))],
+    ["a stated path of full stops (stated requests)", () => statedRequests(megabyte(".", "GET /", "a"))],
+    ["a stated path of slashes (stated requests)", () => statedRequests(megabyte("/", "GET ", "a"))],
+    ["stated requests over and over (stated requests)", () => statedRequests(megabyte("GET /a -> 404 "))],
+    ["a fenced reply that never closes (lane report)", () => parseLaneReport(megabyte("```\n", "x"))],
+    ["an endpoint of slashes (finding dedup)", () => endpointSignatures(megabyte("/", "GET ", "a"))],
+    ["evidence of brackets and quotes (finding dedup's literals)", () => sameFinding({ title: "a", evidence: megabyte("(“(") }, { title: "b", evidence: "x" })],
+    ["a message key path of open brackets (postMessage's last key)", () => tokenShapeOf(megabyte("["), "abcdefghij0123456789abc")],
+    ["an identifier of capitals (strict writes' words)", () => identifierIsDestructive(megabyte("A"))],
+    ["a form body of capitals (strict writes)", () => strictBodyIsDestructive(megabyte("A", "action=", "0"))],
+    ["a page url of hash marks (check's own response)", () => withoutOwnResponse(failedRoute(megabyte("#", "", "\n#")))],
+    ["a table cell of tabs (check's markdown cell)", () => markdownCell(megabyte("\t", "", "x"))],
+    ["a request path of slashes (flow's request path)", () => requestPathMatches("/a", megabyte("/", "", "a"))],
+    ["a button of 'try' over and over (scripted login's away words)", () => chooseSubmit([button(megabyte("A-TRY\u0000"))])],
+    ["a button of 'continue with' over and over (scripted login's lookahead)", () => chooseSubmit([button(megabyte("continue with a code "))])],
+    ["a button of 'continue with' and 'send' over and over (scripted login's lookahead)", () => chooseSubmit([button(megabyte("continue with a code send "))])],
   ],
   credential: [
     ["one long word (#578: the address remover)", () => holdsCredential(megabyte("a"))],

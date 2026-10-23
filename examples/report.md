@@ -106,7 +106,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 1. Go to http://127.0.0.1:4173/
 2. Click the "New order" link
 3. Click the "Create order" button
-4. Type "Alder & Pine Outfitters" into the "Customer" field
+4. Type "Alder &amp; Pine Outfitters" into the "Customer" field
 5. Double-click the "Create order" button
 
 **What was expected:** The same information agrees everywhere it is shown.
@@ -370,9 +370,9 @@ Read from HAR-12.md.
 
 | Route | Overall | A11y | Craft | Consistency | Task clarity | Audited |
 |---|---|---|---|---|---|---|
-| `/orders-new.html` | **96** | 92 | 100 | 90 | 100 | (run date) |
-| `/` | **98** | 100 | 100 | 90 | 100 | (run date) |
-| `/order.html` | **98** | 100 | 100 | 90 | 100 | (run date) |
+| `/orders-new.html` | **91** | 88 | 100 | 94 | 100 | (run date) |
+| `/` | **97** | 100 | 100 | 94 | 100 | (run date) |
+| `/order.html` | **97** | 100 | 100 | 94 | 100 | (run date) |
 
 ## Gap ledger — what was NOT tested
 
@@ -456,7 +456,7 @@ The submit button stays enabled while the request is in flight, and the endpoint
 3. snapshot @ http://127.0.0.1:4173/orders-new.html
 4. click button "Create order" @ http://127.0.0.1:4173/orders-new.html
 5. snapshot @ http://127.0.0.1:4173/orders-new.html
-6. type textbox "Customer" ← "Alder & Pine Outfitters" @ http://127.0.0.1:4173/orders-new.html
+6. type textbox "Customer" ← "Alder &amp; Pine Outfitters" @ http://127.0.0.1:4173/orders-new.html
 7. snapshot @ http://127.0.0.1:4173/orders-new.html
 8. click×2 button "Create order" @ http://127.0.0.1:4173/orders-new.html
 9. screenshot @ http://127.0.0.1:4173/orders-new.html
@@ -682,7 +682,7 @@ The hint below the Customer field fails WCAG contrast by a wide margin. The same
 3. snapshot @ http://127.0.0.1:4173/orders-new.html
 4. click button "Create order" @ http://127.0.0.1:4173/orders-new.html
 5. snapshot @ http://127.0.0.1:4173/orders-new.html
-6. type textbox "Customer" ← "Alder & Pine Outfitters" @ http://127.0.0.1:4173/orders-new.html
+6. type textbox "Customer" ← "Alder &amp; Pine Outfitters" @ http://127.0.0.1:4173/orders-new.html
 7. snapshot @ http://127.0.0.1:4173/orders-new.html
 8. click×2 button "Create order" @ http://127.0.0.1:4173/orders-new.html
 9. screenshot @ http://127.0.0.1:4173/orders-new.html
@@ -726,7 +726,7 @@ The field is announced to assistive technology without a name, and the placehold
 3. snapshot @ http://127.0.0.1:4173/orders-new.html
 4. click button "Create order" @ http://127.0.0.1:4173/orders-new.html
 5. snapshot @ http://127.0.0.1:4173/orders-new.html
-6. type textbox "Customer" ← "Alder & Pine Outfitters" @ http://127.0.0.1:4173/orders-new.html
+6. type textbox "Customer" ← "Alder &amp; Pine Outfitters" @ http://127.0.0.1:4173/orders-new.html
 7. snapshot @ http://127.0.0.1:4173/orders-new.html
 8. click×2 button "Create order" @ http://127.0.0.1:4173/orders-new.html
 9. screenshot @ http://127.0.0.1:4173/orders-new.html

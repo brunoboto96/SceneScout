@@ -52,6 +52,13 @@ export function isSpace(c: string): boolean {
 /** The characters JavaScript's `.` does not match without the `s` flag, for use inside an RE2 character class. */
 export const LINE_END = String.raw`\n\r\x{2028}\x{2029}`;
 
+/**
+ * Every character but JavaScript's line ends, for `notAfter`: the character
+ * before the match is then a line end or there is none, which is JavaScript's
+ * `^` with the `m` flag (RE2's `(?m)` counts only `\n` as a line end).
+ */
+export const NOT_LINE_END = String.raw`\x{0}-\x{9}\x{b}\x{c}\x{e}-\x{2027}\x{202a}-\x{10ffff}`;
+
 /** One match: its text, its groups (index 1 on; `undefined` for a group that took no part), where it starts and ends. */
 export interface LinearMatch {
   readonly text: string;
@@ -80,6 +87,33 @@ export interface LinearOptions {
   extend?: (match: LinearMatch, text: string) => number;
   /** Whether a candidate is a match, for a lookaround RE2 cannot express. Refused, the search goes on from the next character. */
   accept?: (match: LinearMatch, text: string) => boolean;
+  /**
+   * Read the text a UTF-16 code unit at a time, as JavaScript does without the `u` flag: a surrogate pair is two
+   * characters, so `[^"]{8}` takes four emoji where RE2 alone would take eight. Each surrogate is handed to RE2 as the
+   * private-use character `SURROGATE_STAND_IN` past it, one code unit as well, so every index stays as it is. A
+   * pattern read this way treats the surrogates and their stand-ins (U+E000 to U+E7FF) alike; fromJs refuses one that
+   * would not.
+   */
+  codeUnits?: boolean;
+}
+
+/** How far past a surrogate (U+D800 to U+DFFF) its stand-in is, with `codeUnits`: U+E000 to U+E7FF. */
+export const SURROGATE_STAND_IN = 0x800;
+
+/** The text with each surrogate as its stand-in; the text itself when it holds none. */
+function codeUnitView(text: string): string {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdfff) {
+      let out = text.slice(0, i);
+      for (let j = i; j < text.length; j++) {
+        const c = text.charCodeAt(j);
+        out += c >= 0xd800 && c <= 0xdfff ? String.fromCharCode(c + SURROGATE_STAND_IN) : text[j];
+      }
+      return out;
+    }
+  }
+  return text;
 }
 
 /** Whether a character's lower case stands for every character RE2 folds it with: ASCII, Latin-1 letters (not µ), and characters without case. */
@@ -164,26 +198,46 @@ export class LinearRegex {
 
   /** The first match at or after `from`, or null. */
   exec(text: string, from = 0): LinearMatch | null {
-    return this.mayMatch(text) ? this.find(text, from) : null;
+    if (!this.mayMatch(text)) return null;
+    return this.find(text, from > 0 ? this.inputAgain(text) : this.input(text), from);
   }
 
-  private find(text: string, from: number): LinearMatch | null {
+  /** What RE2 is given for `text`: with `codeUnits`, the text with its surrogates' stand-ins, the same length. */
+  private input(text: string): string {
+    return this.options.codeUnits ? codeUnitView(text) : text;
+  }
+
+  /** The last text `exec` was given a start in, and its input. */
+  private kept: { text: string; input: string } | null = null;
+
+  /**
+   * The input for a text read again from further in, as a caller's loop over `exec` reads it: kept, so the loop
+   * does not read the whole text for surrogates once a step, which would take time quadratic in its length.
+   */
+  private inputAgain(text: string): string {
+    if (!this.options.codeUnits) return text;
+    if (this.kept?.text !== text) this.kept = { text, input: codeUnitView(text) };
+    return this.kept.input;
+  }
+
+  private find(text: string, input: string, from: number): LinearMatch | null {
     let at = from;
     while (at <= text.length) {
       // A lookbehind reads the character before `at`, so the search starts there, and the match after it.
       const re = this.inner && at > 0 ? this.inner : this.re;
-      const matcher = re.matcher(text);
-      if (!matcher.find(this.inner ? at - charLengthBefore(text, at) : at)) return null;
+      const matcher = re.matcher(input);
+      if (!matcher.find(this.inner ? at - charLengthBefore(input, at) : at)) return null;
       const index = this.skip ? matcher.end(1) : matcher.start();
       const ahead = this.options.lookahead ? matcher.start(this.last + 1) : -1;
       let end = ahead >= 0 ? ahead : matcher.end();
       const groups: Array<string | undefined> = [undefined];
-      for (let g = this.skip + 1; g <= this.last; g++) groups.push(matcher.group(g) ?? undefined);
+      // Each group from the text as given, by where RE2 found it (-1 for one that took no part).
+      for (let g = this.skip + 1; g <= this.last; g++) groups.push(matcher.start(g) < 0 ? undefined : text.slice(matcher.start(g), matcher.end(g)));
       if (this.options.extend) end = Math.max(end, this.options.extend({ text: text.slice(index, end), groups, index, end }, text));
       const match: LinearMatch = { text: text.slice(index, end), groups, index, end };
       if (!this.options.accept || this.options.accept(match, text)) return match;
       if (index >= text.length) return null;
-      at = index + charLength(text, index);
+      at = index + charLength(input, index);
     }
     return null;
   }
@@ -191,12 +245,13 @@ export class LinearRegex {
   /** Every match, left to right and not overlapping, as String.prototype.matchAll gives them. */
   *matchAll(text: string): Generator<LinearMatch> {
     if (!this.mayMatch(text)) return;
+    const input = this.input(text);
     let at = 0;
     while (at <= text.length) {
-      const match = this.find(text, at);
+      const match = this.find(text, input, at);
       if (!match) return;
       yield match;
-      at = match.end > match.index ? match.end : match.end + charLength(text, match.end);
+      at = match.end > match.index ? match.end : match.end + charLength(input, match.end);
     }
   }
 

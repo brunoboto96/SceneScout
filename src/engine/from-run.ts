@@ -22,6 +22,7 @@
  * reading a record from disk is memory.ts's loadRunRecord.
  */
 import { normalizePath } from "./fingerprint.js";
+import { fromJs } from "./js-regex.js";
 
 /** The earlier run to start from, for every run that does not name one itself: a ci.json, or a project directory. */
 export const FROM_RUN_ENV = "SCENESCOUT_FROM_RUN";
@@ -613,8 +614,9 @@ export interface PlanStep {
 /** The most steps one scout_run_plan call runs, and so the longest path replayed. */
 export const MAX_PREFIX_STEPS = 20;
 
+const ROUTE_PATTERN_RE = fromJs(String.raw`(^|\/)[:*]|\[[^\]]+\]`);
 /** A route that is a pattern (`/orders/:id`) names no page a browser can open. */
-export const isPattern = (route: string): boolean => /(^|\/)[:*]|\[[^\]]+\]/.test(route);
+export const isPattern = (route: string): boolean => ROUTE_PATTERN_RE.test(route);
 
 /** A control as the log names it (`button "Save"`) as a plan target: by role and name, quoted so the name survives. */
 function roleTarget(role: string, name: string): string | null {

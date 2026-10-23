@@ -10,6 +10,8 @@
  */
 import { LANE_RULES, planLanes, replayBriefs, type LaneBrief } from "./brief.js";
 import { CI_TOOLS, type Caps, type CiLevel, type CiMode, type StopReason } from "./ci.js";
+import { fromJs, jsToRe2, registerJsPattern } from "./js-regex.js";
+import { isSpace, LinearRegex, NOT_LINE_END } from "./linear-regex.js";
 
 /** The session the run attaches first. It plans, holds no lane, and writes the report once every lane is done. */
 export const PLANNER_SESSION = "default";
@@ -34,13 +36,14 @@ export const LANE_TOOLS: readonly string[] = CI_TOOLS.filter((t) => t !== "scout
  * `<path> — LOAD FAILED`. The path is what the crawl visited, as the browser
  * opened it.
  */
-const CRAWL_LINE = /^(\/\S*) — (.+)$/;
+const CRAWL_LINE = fromJs(String.raw`^(\/\S*) — (.+)$`);
 
 /** The heading of the crawl's problem list, whose entries name a route and say what is wrong on it. */
-const PROBLEMS_HEADING = /^PROBLEM ROUTES \(\d+\):$/;
+const PROBLEMS_HEADING = fromJs(String.raw`^PROBLEM ROUTES \(\d+\):$`);
 
 /** A problem entry's first line: the route, then ` → …`, `: <why it did not load>`, or nothing (its detail lines follow, indented). */
-const PROBLEM_LINE = /^(\/\S*?)(?: →.*|: .*)?$/;
+const PROBLEM_LINE = fromJs(String.raw`^(\/\S*?)(?: →.*|: .*)?$`);
+const LINE_BREAK = fromJs(String.raw`\r?\n`);
 
 /**
  * What a scout_crawl result says about each route it visited: the route's own
@@ -56,7 +59,7 @@ export function crawlNotes(text: string): Map<string, string[]> {
   };
   let inProblems = false;
   let current: string | null = null;
-  for (const raw of text.split(/\r?\n/)) {
+  for (const raw of LINE_BREAK.splitText(text)) {
     const line = raw.trimEnd();
     if (PROBLEMS_HEADING.test(line)) {
       inProblems = true;
@@ -64,7 +67,7 @@ export function crawlNotes(text: string): Map<string, string[]> {
     }
     if (!inProblems) {
       const m = CRAWL_LINE.exec(line);
-      if (m && !/^SKIPPED/.test(m[2])) add(m[1], line);
+      if (m && !(m.groups[2] ?? "").startsWith("SKIPPED")) add(m.groups[1] ?? "", line);
       continue;
     }
     if (line === "") {
@@ -72,18 +75,19 @@ export function crawlNotes(text: string): Map<string, string[]> {
       current = null;
       continue;
     }
-    if (!/^(\/|\s)/.test(line)) {
+    if (!(line.startsWith("/") || isSpace(line[0]))) {
       // A line that is neither a route nor a detail (the coverage line) ends the list.
       inProblems = false;
       current = null;
       continue;
     }
-    if (/^\s/.test(line)) {
+    if (isSpace(line[0])) {
       if (current) add(current, line);
       continue;
     }
     const p = PROBLEM_LINE.exec(line);
-    current = p && notes.has(p[1]) ? p[1] : null;
+    const route = p?.groups[1];
+    current = route !== undefined && notes.has(route) ? route : null;
     if (current) add(current, line);
   }
   return notes;
@@ -91,8 +95,19 @@ export function crawlNotes(text: string): Map<string, string[]> {
 
 /** Whether a crawl had nothing left to visit, so another round would find nothing either. */
 export function crawlFoundNothing(text: string): boolean {
-  return /^(?:\[session [^\]]*\]\s*)?(Nothing to crawl|Nothing new to crawl|No routes to crawl yet)/m.test(text);
+  return NOTHING_TO_CRAWL.test(text);
 }
+
+/** At the start of a line (JavaScript's `^` with the `m` flag, as `notAfter`), the crawl's word that it had nothing to visit. */
+const NOTHING_TO_CRAWL = registerJsPattern(
+  String.raw`^(?:\[session [^\]]*\]\s*)?(Nothing to crawl|Nothing new to crawl|No routes to crawl yet)`,
+  "m",
+  new LinearRegex(jsToRe2(String.raw`(?:\[session [^\]]*\]\s*)?(Nothing to crawl|Nothing new to crawl|No routes to crawl yet)`), {
+    notAfter: NOT_LINE_END,
+    needs: ["crawl"],
+    codeUnits: true,
+  }),
+);
 
 // ── the split ───────────────────────────────────────────────────────────────
 
