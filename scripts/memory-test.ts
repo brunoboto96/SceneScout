@@ -1924,7 +1924,19 @@ test('leadsAway reads what its JavaScript pattern read, "continue with" and its 
 });
 
 test("withoutFragment drops what its JavaScript pattern dropped: from the first # after the last line end (#618)", () => {
-  for (const text of [...identityCorpus(), "http://h/a#b", "http://h/a#b#c", "a#b\nc", "a#b\nc#d", "a#b\u2028c#d", "a#\r", "#", ""])
+  for (const text of [
+    ...identityCorpus(),
+    "http://h/a#b",
+    "http://h/a#b#c",
+    "a#b\nc",
+    "a#b\nc#d",
+    "a#b\u2028c#d",
+    "a#b\u2029c#d",
+    "a\u2028#b\u2029",
+    "a#\r",
+    "#",
+    "",
+  ])
     assert.equal(withoutFragment(text), text.replace(/#.*$/, ""), JSON.stringify(text));
 });
 

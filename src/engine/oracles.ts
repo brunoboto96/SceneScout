@@ -45,7 +45,7 @@ export function withoutFragment(url: string): string {
   let from = 0;
   for (let i = url.length - 1; i >= 0; i--) {
     const c = url[i];
-    if (c === "\n" || c === "\r" || c === " " || c === " ") {
+    if (c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029") {
       from = i + 1;
       break;
     }
