@@ -32,7 +32,7 @@ import { fromJs } from "./js-regex.js";
 import { parseLimitFlag } from "./limits.js";
 import { redactRoute, redactSecrets } from "./memory.js";
 import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifFileFor, sarifLocation, type SarifFiles } from "./sarif.js";
-import { httpErrorDetail, httpStatusOf, type OracleViolation } from "./oracles.js";
+import { httpErrorDetail, httpStatusOf, withoutFragment, type OracleViolation } from "./oracles.js";
 import type { CheckRetest } from "./verify.js";
 import type { CheckReplay } from "./check-replay.js";
 
@@ -553,9 +553,6 @@ export function unauditedRoutes(routes: readonly RouteHealth[]): RouteHealth[] {
   return routes.filter((r) => r.loadError === undefined && r.auditError !== undefined);
 }
 
-/** A fragment: `#` to the end of the line. */
-const FRAGMENT_RE = fromJs(String.raw`#.*$`);
-
 /**
  * The document's own error status is already the route's issue, so the
  * oracle's record of that same response is not a second one. Run on the raw
@@ -565,7 +562,7 @@ const FRAGMENT_RE = fromJs(String.raw`#.*$`);
  */
 export function withoutOwnResponse(r: RouteHealth): RouteHealth {
   if (r.status === null || r.status < 400) return r;
-  const own = httpErrorDetail("GET", FRAGMENT_RE.replaceFirst(r.url, ""), r.status);
+  const own = httpErrorDetail("GET", withoutFragment(r.url), r.status);
   return { ...r, violations: r.violations.filter((v) => !(v.kind === "http_error" && v.detail === own)) };
 }
 

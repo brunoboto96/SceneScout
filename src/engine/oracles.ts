@@ -36,6 +36,24 @@ export function httpErrorDetail(method: string, url: string, status: number): st
   return `${method} ${url.slice(0, 200)} → HTTP ${status}`;
 }
 
+/**
+ * A page address without its fragment, for comparing it with a request, which never carries one: what
+ * `url.replace(/#.*$/, "")` gave, from the first `#` after the text's last line end. Read in two passes rather than by
+ * that pattern, which takes time quadratic in a run of `#` the app can put in its own address (#618).
+ */
+export function withoutFragment(url: string): string {
+  let from = 0;
+  for (let i = url.length - 1; i >= 0; i--) {
+    const c = url[i];
+    if (c === "\n" || c === "\r" || c === "\u2028" || c === "\u2029") {
+      from = i + 1;
+      break;
+    }
+  }
+  const at = url.indexOf("#", from);
+  return at < 0 ? url : url.slice(0, at);
+}
+
 /** The status an http_error detail names, or null when the detail is not one. */
 export function httpStatusOf(detail: string): number | null {
   const m = /→ HTTP (\d{3})$/.exec(detail.replace(/ \[\d+ secrets? redacted\]$/, ""));

@@ -14,6 +14,7 @@ import { isWorthALook, knownFeedback, seenOnOf, type Finding, type FindingCatego
 import type { OracleKind, OracleViolation } from "./oracles.js";
 import type { WriteMode } from "./policy.js";
 import { MODE_CARE_LABEL } from "./guided-words.js";
+import { fromJs } from "./js-regex.js";
 
 /** Which parts a report carries: the plain view and the technical one ("both"), or one of them. */
 export const REPORT_AUDIENCES = ["both", "qa", "dev"] as const;
@@ -131,6 +132,15 @@ function control(target: string, kind = "control"): string {
   return words ? `the "${words}" ${kind}` : `the ${kind}`;
 }
 
+/**
+ * Step text and a finding's title hold what the app named (a control, an option, a file), so these run on the
+ * linear-time engine (ADR 29): on JavaScript's, a long run of `" = `, of ` ← ` or of tabs took time quadratic in its
+ * length (#618).
+ */
+const SELECTED_RE = fromJs(String.raw`^(\w+ ".*") = (.*)$`, "", { needs: [" = "] });
+const UPLOADED_RE = fromJs(String.raw` ← (.+?) \(`, "", { needs: [" ← "] });
+const TITLE_LINE_BREAK_RE = fromJs(String.raw`\s*\r?\n\s*`, "", { needs: ["\n"] });
+
 /** One action-log step, split into what was done, to what, and on which page. */
 function splitStep(line: string): { action: string; target: string; url: string } {
   const at = line.lastIndexOf(" @ ");
@@ -164,12 +174,12 @@ export function plainStep(line: string): string | null {
     return `Type ${t[2]} into ${control(t[1])}${t[3] ? " and press Enter" : ""}`;
   }
   if (action === "select") {
-    const s = /^(\w+ ".*") = (.*)$/.exec(target);
-    return s ? `Choose "${s[2]}" in ${control(s[1])}` : `Choose an option in ${control(target, "list")}`;
+    const s = SELECTED_RE.exec(target);
+    return s ? `Choose "${s.groups[2]}" in ${control(s.groups[1] as string)}` : `Choose an option in ${control(target, "list")}`;
   }
   if (action === "upload") {
-    const u = / ← (.+?) \(/.exec(target);
-    return u ? `Attach the file "${u[1]}"` : "Attach a file";
+    const u = UPLOADED_RE.exec(target);
+    return u ? `Attach the file "${u.groups[1]}"` : "Attach a file";
   }
   if (action === "hover") return `Point at ${control(target)}`;
   if (action === "press") return `Press ${target}`;
@@ -591,7 +601,7 @@ export function formatEvidenceSection(input: Pick<PlainInput, "current" | "lastF
     const card = plainCard(f, { lastFrame: input.lastFrames?.get(f.id) });
     if (!card.picture) return;
     lines.push(
-      `### ${i + 1}. ${card.title.replace(/\s*\r?\n\s*/g, " ")}`,
+      `### ${i + 1}. ${TITLE_LINE_BREAK_RE.replace(card.title, " ")}`,
       ``,
       `**${card.impact}** · on ${card.page}`,
       ``,

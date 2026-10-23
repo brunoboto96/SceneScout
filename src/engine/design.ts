@@ -731,6 +731,44 @@ function typedField(r: StyleRecord): boolean {
 }
 
 /**
+ * A shadow layer's lengths, as `layer.match(/-?[0-9.]+px/g)` gave them. The page's own box-shadow is read here, and
+ * that pattern took time quadratic in a long run of digits and full stops with no `px` after it (#618, ADR 29), so it
+ * is read in code: a run that does not end in `px` is passed over whole, as no start inside it can end otherwise.
+ */
+export function shadowLengths(layer: string): string[] {
+  const out: string[] = [];
+  const inRun = (c: string) => (c >= "0" && c <= "9") || c === ".";
+  let i = 0;
+  while (i < layer.length) {
+    const from = layer[i] === "-" ? i + 1 : i;
+    let end = from;
+    while (end < layer.length && inRun(layer[end])) end += 1;
+    if (end > from && layer.startsWith("px", end)) {
+      out.push(layer.slice(i, end + 2));
+      i = end + 2;
+    } else i = Math.max(i + 1, end);
+  }
+  return out;
+}
+
+/**
+ * A shadow layer's first colour, as `layer.match(/rgba?\([^)]*\)/)?.[0]` gave it, read in code for the same reason
+ * as `shadowLengths`: past the first `rgb(` or `rgba(` with no `)` after it, no later one has one either.
+ */
+export function shadowColour(layer: string): string | null {
+  let at = layer.indexOf("rgb");
+  while (at >= 0) {
+    const open = layer[at + 3] === "a" ? at + 4 : at + 3;
+    if (layer[open] === "(") {
+      const close = layer.indexOf(")", open + 1);
+      return close < 0 ? null : layer.slice(at, close + 1);
+    }
+    at = layer.indexOf("rgb", at + 1);
+  }
+  return null;
+}
+
+/**
  * The layers of a computed box-shadow that draw something: a layer with no
  * offset, blur or spread, or a transparent colour, paints nothing. Utility CSS
  * stacks such placeholder layers (empty rings) in front of the real shadow on
@@ -754,11 +792,11 @@ export function shadowLayers(shadow: string): string[] {
     .map((l) => l.replace(/\s+/g, " ").trim())
     .filter((l) => {
       if (!l || l === "none") return false;
-      const lengths = (l.match(/-?[0-9.]+px/g) ?? []).map(parseFloat);
+      const lengths = shadowLengths(l).map(parseFloat);
       if (lengths.every((n) => n === 0)) return false;
       if (/\btransparent\b/.test(l)) return false;
-      const colour = l.match(/rgba?\([^)]*\)/);
-      return !(colour && parseRgb(colour[0])?.[3] === 0);
+      const colour = shadowColour(l);
+      return !(colour && parseRgb(colour)?.[3] === 0);
     });
 }
 
