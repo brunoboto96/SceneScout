@@ -38,7 +38,7 @@ import {
 } from "./claims.js";
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
-import { AuthLossTracker } from "./authloss.js";
+import { AuthLossTracker, lateSignInBounce } from "./authloss.js";
 import { captureClip, cutByViewport, type Box } from "./capture.js";
 import { maskedScreenshot } from "./secret-pixels.js";
 import { NEXT_FRAME_SCRIPT, NEXT_FRAME_WAIT_MS, STOP_ANIMATIONS_SCRIPT, steadyPicture, unsteadyNote, type PictureSettings } from "./baseline.js";
@@ -1977,6 +1977,8 @@ export class BrowserEngine {
             this.wireDialogHandler(newPage);
             this.wireEmbedMoves(newPage);
             this.page = newPage;
+            // Another page: its address is never compared with the opener's (lateSignIn).
+            this.seenUrl = "";
             this.snapshots.refs.clear();
             this.snapshotUrl = "";
             this.snapshots.forgetSnapshots();
@@ -2033,6 +2035,7 @@ export class BrowserEngine {
     // With a saved sign-in, the address is watched for longer: an app that sends a signed-out visitor to sign-in from its
     // scripts some time after load would otherwise pass a stale profile as signed in (settle.ts ATTACH_URL_QUIET_MS).
     const landed = await this.stableUrl(storageStatePath ? ATTACH_URL_QUIET_MS : undefined);
+    this.seenUrl = landed;
     const authFailed = Boolean(storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
     this.attachSignInFailed = authFailed;
     // An earlier run may have written down how this app's login state is
@@ -2268,6 +2271,104 @@ export class BrowserEngine {
   /** Set at attach: this session was given credentials, so a bounce to a login page is a verdict worth waiting for. */
   private watchesForBounce = false;
 
+  /** With a sign-in held: the address the last watched call ended on (watchSignIn), or the one the attach landed on. */
+  private seenUrl = "";
+  /** Watched calls in progress: a call another one makes (a plan's navigate, a capture's) is not watched again. */
+  private signInDepth = 0;
+  /** A bounce found before a call whose result carries no text (a capture, a replay): said by the next call's result. */
+  private heldSignInNotice = "";
+
+  /**
+   * A tool call, watched for a sign-in page the page went to on its own (authloss.ts lateSignInBounce): before it runs,
+   * against the address the last call ended on, and, when `atEnd`, again as it ends, for a redirect that landed while it
+   * ran. A navigation, a crawl and a plan judge their own landings, so they only note where they ended. A bounce found
+   * either way leads the result, or the error when the call throws. Without a sign-in, the call runs as it is.
+   */
+  private async watchSignIn(run: () => Promise<string>, atEnd: boolean): Promise<string> {
+    return this.watchedCall(run, atEnd, (notice, out) => notice + out);
+  }
+
+  /** watchSignIn for a call whose result is not text: what it finds is held for the next call's result. */
+  private async watchSignInAround<T>(run: () => Promise<T>): Promise<T> {
+    return this.watchedCall(run, false, (notice, out) => {
+      this.heldSignInNotice += notice;
+      return out;
+    });
+  }
+
+  private async watchedCall<T>(run: () => Promise<T>, atEnd: boolean, say: (notice: string, out: T) => T): Promise<T> {
+    if (!this.watchesForBounce || this.signInDepth > 0) return run();
+    this.signInDepth += 1;
+    try {
+      const before = this.heldSignInNotice + (await this.lateSignIn(true));
+      this.heldSignInNotice = "";
+      let out: T;
+      try {
+        out = await run();
+      } catch (err) {
+        // A call that judged its own landing has recorded it: the next call must not judge the same move again.
+        if (!atEnd) this.noteSeen();
+        if (!before) throw err;
+        if (!(err instanceof Error)) {
+          this.heldSignInNotice = before;
+          throw err;
+        }
+        const wrapped = new Error(`${before}${err.message}`);
+        wrapped.name = err.name;
+        throw wrapped;
+      }
+      if (!atEnd) {
+        this.noteSeen();
+        return say(before, out);
+      }
+      let after: string;
+      try {
+        after = await this.lateSignIn(false);
+      } catch (err) {
+        // The re-attach that answered the bounce failed; the call itself had finished, so its result still stands.
+        after = `${err instanceof Error ? err.message : String(err)}\n`;
+      }
+      return say(before + after, out);
+    } finally {
+      this.signInDepth -= 1;
+    }
+  }
+
+  /** The address a call ended on, as the one the next call is compared with. */
+  private noteSeen(): void {
+    if (this.page && !this.page.isClosed()) this.seenUrl = this.page.url();
+  }
+
+  /**
+   * Whether the page is on a sign-in page it was not on when the session last saw it (authloss.ts lateSignInBounce).
+   * `between`: seen before a call runs, so the page went there on its own after the last call (an app whose scripts
+   * send a signed-out visitor to sign-in later than a navigation watches its address), and the navigation that seemed
+   * to reach that page is taken back (AuthLossTracker.recordLate). Otherwise seen as a call ends: the call's own move,
+   * or a redirect while it ran, counted as a bounce like any other. Either way the page it was on is not covered, the
+   * streak and its SESSION AUTH LOST verdict count it, and a role session may re-attach once. One read of the address;
+   * "" when nothing moved there.
+   */
+  private async lateSignIn(between: boolean): Promise<string> {
+    const page = this.page;
+    if (!page || page.isClosed()) return "";
+    const now = page.url();
+    const seen = this.seenUrl;
+    this.seenUrl = now;
+    const bounced = lateSignInBounce({ watching: this.watchesForBounce, seen, now, baseUrl: this.baseUrl });
+    if (bounced === null) return "";
+    this.logAction({ action: "sign-in:late-redirect", target: bounced, url: now });
+    this.authLoss.clear();
+    this.recordNavigationOutcome(bounced, now, between);
+    const lead = between
+      ? `⚠ SIGNED OUT AFTER LOAD: the page at ${normalizePath(bounced)} went to the sign-in page ${new URL(now).pathname} on its own since it was last read.\n`
+      : `⚠ SIGNED OUT: the page went from ${normalizePath(bounced)} to the sign-in page ${new URL(now).pathname} during this call.\n`;
+    try {
+      return lead + (await this.answerLoss(page, ""));
+    } finally {
+      this.noteSeen();
+    }
+  }
+
   /** Requests started and not yet finished, failed, or left behind by their frame. */
   private requests = new InFlightRequests<Request, Frame>();
   /** How many are in flight. */
@@ -2412,6 +2513,11 @@ export class BrowserEngine {
   }
 
   async snapshot(full = false): Promise<string> {
+    return this.watchSignIn(() => this.snapshotUnwatched(full), true);
+  }
+
+  /** snapshot, unwatched: watchSignIn runs it. */
+  private async snapshotUnwatched(full = false): Promise<string> {
     const page = this.requirePage();
     const memory = this.memory!;
     await this.settle(true);
@@ -3309,6 +3415,11 @@ export class BrowserEngine {
 
   /** `leave` answers a leave confirmation the click raises (policy.ts dialogResponse); undefined lets the mode decide. */
   async click(ref: string, clicks = 1, leave?: boolean): Promise<string> {
+    return this.watchSignIn(() => this.clickUnwatched(ref, clicks, leave), true);
+  }
+
+  /** click, unwatched: watchSignIn runs it. */
+  private async clickUnwatched(ref: string, clicks = 1, leave?: boolean): Promise<string> {
     this.leaveChoice = leave;
     try {
       return await this.withinLimit("action", () => this.clickNow(ref, clicks));
@@ -3536,6 +3647,11 @@ export class BrowserEngine {
   }
 
   async type(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {
+    return this.watchSignIn(() => this.typeUnwatched(ref, text, pressEnter, replace), true);
+  }
+
+  /** type, unwatched: watchSignIn runs it. */
+  private async typeUnwatched(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {
     return this.withinLimit("action", () => this.typeNow(ref, text, pressEnter, replace));
   }
 
@@ -3609,6 +3725,11 @@ export class BrowserEngine {
    * fixture unless `filePath` names one inside the attached project.
    */
   async upload(opts: UploadOptions): Promise<string> {
+    return this.watchSignIn(() => this.uploadUnwatched(opts), true);
+  }
+
+  /** upload, unwatched: watchSignIn runs it. */
+  private async uploadUnwatched(opts: UploadOptions): Promise<string> {
     return this.withinLimit("action", () => this.uploadNow(opts));
   }
 
@@ -3856,6 +3977,11 @@ export class BrowserEngine {
    * look, not an interaction, and the element still deserves a click.
    */
   async hover(ref: string): Promise<string> {
+    return this.watchSignIn(() => this.hoverUnwatched(ref), true);
+  }
+
+  /** hover, unwatched: watchSignIn runs it. */
+  private async hoverUnwatched(ref: string): Promise<string> {
     return this.withinLimit("action", () => this.hoverNow(ref));
   }
 
@@ -3946,6 +4072,11 @@ export class BrowserEngine {
   }
 
   async select(ref: string, value: string): Promise<string> {
+    return this.watchSignIn(() => this.selectUnwatched(ref, value), true);
+  }
+
+  /** select, unwatched: watchSignIn runs it. */
+  private async selectUnwatched(ref: string, value: string): Promise<string> {
     return this.withinLimit("action", () => this.selectNow(ref, value));
   }
 
@@ -4041,6 +4172,11 @@ export class BrowserEngine {
   private static readonly ACTIVATION_KEY_RE = /^(Enter|NumpadEnter|Space| )$/i;
 
   async press(key: string): Promise<string> {
+    return this.watchSignIn(() => this.pressUnwatched(key), true);
+  }
+
+  /** press, unwatched: watchSignIn runs it. */
+  private async pressUnwatched(key: string): Promise<string> {
     return this.withinLimit("action", () => this.pressNow(key));
   }
 
@@ -4113,6 +4249,11 @@ export class BrowserEngine {
 
   /** `leave` answers a leave confirmation the page raises (policy.ts dialogResponse); undefined lets the mode decide. */
   async navigate(target: string, leave?: boolean): Promise<string> {
+    return this.watchSignIn(() => this.navigateUnwatched(target, leave), false);
+  }
+
+  /** navigate, unwatched: watchSignIn runs it. */
+  private async navigateUnwatched(target: string, leave?: boolean): Promise<string> {
     this.leaveChoice = leave;
     try {
       return await this.navigateNow(target);
@@ -4203,6 +4344,15 @@ export class BrowserEngine {
     }
     this.recordNavigationOutcome(url, await this.landedUrl(page));
     // Only after a navigation that finished: one that threw leaves its verdict standing.
+    return this.answerLoss(page, settled);
+  }
+
+  /**
+   * The notice for the bounce just recorded, before `settled` (what the call that recorded it says). When that bounce
+   * earned the session's one re-attach, it is answered here: from the role's latest saved profile, and the session goes
+   * back to the page the bounce took it from.
+   */
+  private async answerLoss(page: Page, settled: string): Promise<string> {
     const plan = this.authLoss.takeReattach();
     if (!plan) return this.authLoss.take() + settled;
     // The loss this navigation declared is answered once, from the role's latest
@@ -4756,8 +4906,11 @@ export class BrowserEngine {
     return this.authLoss.reattachSummary();
   }
 
-  /** Where did we ASK to go, where did we END UP, and does that count as coverage? */
-  private recordNavigationOutcome(requestedUrl: string, landedUrl: string): void {
+  /**
+   * Where did we ASK to go, where did we END UP, and does that count as coverage? `late`: the page went to `landedUrl`
+   * on its own after the navigation to `requestedUrl` was recorded (lateSignIn), so that record is taken back.
+   */
+  private recordNavigationOutcome(requestedUrl: string, landedUrl: string, late = false): void {
     const requestedRoute = normalizePath(requestedUrl);
     const landedRoute = normalizePath(landedUrl);
     const bounced = this.authLoss.isLoginRedirect(requestedRoute, landedUrl, this.baseUrl);
@@ -4766,11 +4919,17 @@ export class BrowserEngine {
       this.memory?.markAttempted(requestedRoute, outcome, this.role);
       this.memory?.recordRoleAccess(this.role, requestedRoute, outcome);
     }
-    this.authLoss.record({ requestedRoute, landedRoute, bounced, role: this.role, target: requestedUrl });
+    if (late && bounced) this.authLoss.recordLate({ requestedRoute, landedRoute, role: this.role, target: requestedUrl });
+    else this.authLoss.record({ requestedRoute, landedRoute, bounced, role: this.role, target: requestedUrl });
   }
 
   /** `leave` answers a leave confirmation the page raises (policy.ts dialogResponse); undefined lets the mode decide. */
   async goBack(leave?: boolean): Promise<string> {
+    return this.watchSignIn(() => this.goBackUnwatched(leave), true);
+  }
+
+  /** goBack, unwatched: watchSignIn runs it. */
+  private async goBackUnwatched(leave?: boolean): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
     this.leaveChoice = leave;
@@ -4890,6 +5049,11 @@ export class BrowserEngine {
    * stay unvisited. The first run's time budget is the only caller.
    */
   async crawl(paths?: string[], opts: { inspect?: boolean; limit?: number; measureOnly?: boolean; deadline?: number } = {}): Promise<string> {
+    return this.watchSignIn(() => this.crawlUnwatched(paths, opts), false);
+  }
+
+  /** crawl, unwatched: watchSignIn runs it. */
+  private async crawlUnwatched(paths?: string[], opts: { inspect?: boolean; limit?: number; measureOnly?: boolean; deadline?: number } = {}): Promise<string> {
     const page = this.requirePage();
     const memory = this.memory!;
     this.crawlHealth = [];
@@ -5192,6 +5356,11 @@ export class BrowserEngine {
    * an earlier one. A failed step or a policy refusal still stops it.
    */
   async runPlan(steps: PlanStep[], onViolation: PlanViolationRule = "stop"): Promise<string> {
+    return this.watchSignIn(() => this.runPlanUnwatched(steps, onViolation), false);
+  }
+
+  /** runPlan, unwatched: watchSignIn runs it. */
+  private async runPlanUnwatched(steps: PlanStep[], onViolation: PlanViolationRule = "stop"): Promise<string> {
     const page = this.requirePage();
     const transcript: string[] = [];
     const planStartedAt = Date.now();
@@ -5564,6 +5733,14 @@ export class BrowserEngine {
    * step does not count as done until the page has settled.
    */
   async replayFlow(steps: readonly FlowStep[], mode: "observe" | "read-only" = this.mode === "observe" ? "observe" : "read-only"): Promise<FlowReplay> {
+    return this.watchSignInAround(() => this.replayFlowUnwatched(steps, mode));
+  }
+
+  /** replayFlow, unwatched: watchSignInAround runs it. */
+  private async replayFlowUnwatched(
+    steps: readonly FlowStep[],
+    mode: "observe" | "read-only" = this.mode === "observe" ? "observe" : "read-only",
+  ): Promise<FlowReplay> {
     const page = this.requirePage();
     // The write policy judges by writeRule, so the flow's rule holds from here until the flow has handed back (finally).
     const crawlMode = this.mode;
@@ -5845,6 +6022,11 @@ export class BrowserEngine {
 
   /** Computed-style design audit of the current page — visual judgment material without pixels. */
   async designAudit(): Promise<string> {
+    return this.watchSignIn(() => this.designAuditUnwatched(), false);
+  }
+
+  /** designAudit, unwatched: watchSignIn runs it. */
+  private async designAuditUnwatched(): Promise<string> {
     const { url, report } = await this.auditPage();
     return `URL: ${url}\n` + report;
   }
@@ -5891,6 +6073,11 @@ export class BrowserEngine {
    * silently cut off from everything below the fold).
    */
   async scroll(to?: "top" | "bottom", by?: number, target?: string): Promise<string> {
+    return this.watchSignIn(() => this.scrollUnwatched(to, by, target), true);
+  }
+
+  /** scroll, unwatched: watchSignIn runs it. */
+  private async scrollUnwatched(to?: "top" | "bottom", by?: number, target?: string): Promise<string> {
     this.actionStartedAt = Date.now();
     const { refused, note } = target
       ? await scrollContainer(this.requirePage(), target, to, by, this.limits.actionMs)
@@ -5918,6 +6105,15 @@ export class BrowserEngine {
    * capture.ts.
    */
   async captureElement(target: { ref?: string; key?: string }, margin: number, log = true): Promise<{ png: Buffer; key: string; label: string; url: string }> {
+    return this.watchSignInAround(() => this.captureElementUnwatched(target, margin, log));
+  }
+
+  /** captureElement, unwatched: watchSignInAround runs it. */
+  private async captureElementUnwatched(
+    target: { ref?: string; key?: string },
+    margin: number,
+    log = true,
+  ): Promise<{ png: Buffer; key: string; label: string; url: string }> {
     const page = this.requirePage();
     let el: SnapshotElement | undefined;
     if (target.ref) {
@@ -6148,6 +6344,15 @@ export class BrowserEngine {
    * settings; the rectangle is capture.ts. Call endBaselineCaptures when done.
    */
   async captureForBaseline(
+    pathOnApp: string,
+    target: FlowTarget | null,
+    how: PictureSettings,
+  ): Promise<{ png: Buffer; viewport: { width: number; height: number }; deviceScaleFactor: number; cut: string | null; unsteady: string | null }> {
+    return this.watchSignInAround(() => this.captureForBaselineUnwatched(pathOnApp, target, how));
+  }
+
+  /** captureForBaseline, unwatched: watchSignInAround runs it. */
+  private async captureForBaselineUnwatched(
     pathOnApp: string,
     target: FlowTarget | null,
     how: PictureSettings,

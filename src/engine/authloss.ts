@@ -34,6 +34,41 @@ export function shouldReattach(opts: { streak: number; signIn: SignInKind; alrea
 }
 
 /**
+ * Did the page go to a sign-in page on its own since the session last saw it?
+ *
+ * A navigation, a back and a crawl judge where they land, but an app's scripts
+ * can send a signed-out visitor to sign-in later than any of them watches (a
+ * token check that answers after a second or two). The session then reads the
+ * sign-in page as if it were still on the route it asked for. So, while a
+ * session holds a sign-in (`watching`), every call compares the address it last
+ * saw (`seen`) with the address now (`now`): on a sign-in page now, on a page
+ * that was not one before, on the app's own origin both times, is a bounce of
+ * the page it was on. Returns that page's address, or null.
+ *
+ * Without a sign-in there is nothing to lose and nothing is judged. A session
+ * that was already on a sign-in page (it asked for one, or a bounce was
+ * recorded) is not judged again, and neither is a page outside the app (the
+ * origin fence answers that) or about:blank.
+ */
+export function lateSignInBounce(opts: { watching: boolean; seen: string; now: string; baseUrl: string }): string | null {
+  const { watching, seen, now, baseUrl } = opts;
+  if (!watching || !seen || !now || seen === now) return null;
+  let origin: string;
+  let seenUrl: URL;
+  let nowUrl: URL;
+  try {
+    origin = new URL(baseUrl).origin;
+    seenUrl = new URL(seen);
+    nowUrl = new URL(now);
+  } catch {
+    return null;
+  }
+  if (seenUrl.origin !== origin || nowUrl.origin !== origin) return null;
+  if (!LOGIN_ROUTE_RE.test(nowUrl.pathname) || LOGIN_ROUTE_RE.test(seenUrl.pathname)) return null;
+  return seen;
+}
+
+/**
  * Where a recovered session goes next: back to what the navigation that
  * declared the loss asked for (not the login page it landed on), then to the
  * streak's other targets, which bounced too and are not covered. Each is a
@@ -66,6 +101,8 @@ export class AuthLossTracker {
   private outcome: { kind: "recovered"; route: string } | { kind: "failed"; why: string } | null = null;
   /** Notices a batch (crawl) must still say at its end, since it discards the per-route ones. */
   private batchNotes: string[] = [];
+  /** The last navigation recorded, when it did not bounce, with the streak as it stood before it ended it. */
+  private lastClear: { route: string; streak: number; targets: string[] } | null = null;
 
   /**
    * Start tracking a newly attached session. An explicit attach is new
@@ -83,6 +120,7 @@ export class AuthLossTracker {
     this.awaiting = null;
     this.outcome = null;
     this.batchNotes = [];
+    this.lastClear = null;
   }
 
   /**
@@ -118,6 +156,7 @@ export class AuthLossTracker {
     const { requestedRoute, landedRoute, bounced, role } = opts;
     const target = opts.target ?? requestedRoute;
     this.due = null;
+    this.lastClear = bounced || this.awaiting ? null : { route: requestedRoute, streak: this.streak, targets: [...this.streakTargets] };
     const divergence =
       landedRoute === requestedRoute
         ? ""
@@ -144,6 +183,21 @@ export class AuthLossTracker {
       this.due = { returnTo: target, retry: [...new Set(this.streakTargets)].filter((t) => t !== target) };
     }
     this.pending = this.banner() + divergence;
+  }
+
+  /**
+   * A page the session was on went to a login page on its own, after its navigation was recorded as landing where it
+   * asked (lateSignInBounce). That navigation was a bounce after all: when it is the last one recorded, the streak it
+   * ended is put back before this bounce is counted, so a dead session whose app redirects late still reaches the
+   * verdict. Otherwise it counts as any other bounce.
+   */
+  recordLate(opts: { requestedRoute: string; landedRoute: string; role: string; target?: string }): void {
+    const clear = this.lastClear;
+    if (clear && clear.route === opts.requestedRoute) {
+      this.streak = clear.streak;
+      this.streakTargets = clear.targets;
+    }
+    this.record({ ...opts, bounced: true });
   }
 
   /**
