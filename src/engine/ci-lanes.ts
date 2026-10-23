@@ -105,6 +105,7 @@ const NOTHING_TO_CRAWL = registerJsPattern(
   new LinearRegex(jsToRe2(String.raw`(?:\[session [^\]]*\]\s*)?(Nothing to crawl|Nothing new to crawl|No routes to crawl yet)`), {
     notAfter: NOT_LINE_END,
     needs: ["crawl"],
+    codeUnits: true,
   }),
 );
 

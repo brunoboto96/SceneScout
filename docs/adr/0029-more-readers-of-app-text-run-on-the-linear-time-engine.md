@@ -105,6 +105,20 @@ Three ways of writing a pattern were added to those above:
   read in code. A test then holds the function to the old JavaScript one,
   written out in memory-test, on the same inputs as the patterns.
 
+Two corrections came with the second round:
+
+- JavaScript without the `u` flag reads UTF-16 code units and RE2 reads code
+  points, so a count such as `[^"]{8,80}` took four emoji as four characters
+  where JavaScript took them as eight. A pattern built by `fromJs` is now read a
+  code unit at a time (`codeUnits`): each surrogate is handed to RE2 as a
+  private-use character U+E000 to U+E7FF, one code unit as well, so every index
+  stays as it is. `fromJs` refuses a pattern that names a surrogate or one of
+  those characters, or a range over some of them, as it would read them apart.
+- Finding dedup compares every stored finding with every other when the store
+  loads, and on RE2 a pair took about four times as long (300 findings: 2.5 s on
+  JavaScript's engine, 10 s on RE2). Each title and piece of evidence is now read
+  once and kept (the last 4,096 of each), and the same 300 take about 0.4 s.
+
 Patterns stay JavaScript where they read only SceneScout's own input (command-line
 arguments, the configuration file, environment variables, `ps` output, the source
 tree a scan reads, Playwright's error messages), where their input is capped short
