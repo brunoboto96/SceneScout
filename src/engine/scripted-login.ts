@@ -19,6 +19,8 @@
  * was typed).
  */
 import { createHmac } from "node:crypto";
+import { fromJs } from "./js-regex.js";
+import { runEnd } from "./linear-regex.js";
 
 // ── configuration ───────────────────────────────────────────────────────────
 
@@ -524,8 +526,50 @@ const SEND_WORDS = /\b(send|(get|request)( me)?( a| the| my)?( [\w-]+)? code|(e-
  * another address, or a new code in place of the one being typed. "Continue
  * with" leads to another provider, except with an email, a phone or a code.
  */
-const AWAY_WORDS =
-  /\b(forgot|reset|sign[\s-]?up|register|create|continue with(?! (your |my |a |an |work |personal )?(e-?mail|phone|([\w-]+ )?code))|provider|google|microsoft|github|apple|facebook|sso|single sign|passkey|magic link|cancel|back|re-?send|remember|new code|another|(send|try)\b.*\bagain|different|change|edit|instead|didn['’]?t|did not|not you)\b/i;
+const AWAY_OTHER_WORDS = fromJs(
+  String.raw`\b(forgot|reset|sign[\s-]?up|register|create|provider|google|microsoft|github|apple|facebook|sso|single sign|passkey|magic link|cancel|back|re-?send|remember|new code|another|(send|try)\b.*\bagain|different|change|edit|instead|didn['’]?t|did not|not you)\b`,
+  "i",
+);
+const CONTINUE_WITH = fromJs(String.raw`\bcontinue with\b`, "i");
+
+/**
+ * Whether a button's text leads away from this sign-in: the JavaScript pattern
+ * `\b(forgot|…|continue with(?! (your |my |a |an |work |personal )?(e-?mail|phone|([\w-]+ )?code))|…)\b`
+ * with the `i` flag, on the linear-time engine (ADR 28). Only whether it
+ * matches is asked, so "continue with" is its own search and its lookahead
+ * `staysOnSignIn`: inside the one pattern, each "continue with" it refused
+ * would search on from the next character and read again to the line's end
+ * for `(send|try)…again`.
+ */
+export function leadsAway(text: string): boolean {
+  if (AWAY_OTHER_WORDS.test(text)) return true;
+  for (const m of CONTINUE_WITH.matchAll(text)) if (!staysOnSignIn(text, m.end)) return true;
+  return false;
+}
+
+/** Whether `word`, in lower-case ASCII, is at `at` with any of its letters a capital: JavaScript's `i` flag without `u` folds nothing else onto them. */
+function asciiStartsWith(text: string, at: number, word: string): boolean {
+  if (at + word.length > text.length) return false;
+  for (let k = 0; k < word.length; k++) {
+    const c = text[at + k];
+    if (c !== word[k] && !(c >= "A" && c <= "Z" && c.toLowerCase() === word[k])) return false;
+  }
+  return true;
+}
+
+const isWordOrHyphen = (c: string): boolean => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_" || c === "-";
+
+/** Whether ` (your |my |a |an |work |personal )?(e-?mail|phone|([\w-]+ )?code)`, case aside, reads at `at`: a "continue with" that stays on this sign-in. */
+function staysOnSignIn(text: string, at: number): boolean {
+  if (text[at] !== " ") return false;
+  const from = at + 1;
+  const starts = [from, ...["your ", "my ", "a ", "an ", "work ", "personal "].filter((w) => asciiStartsWith(text, from, w)).map((w) => from + w.length)];
+  return starts.some((i) => {
+    if (["email", "e-mail", "phone", "code"].some((w) => asciiStartsWith(text, i, w))) return true;
+    const end = runEnd(text, i, isWordOrHyphen);
+    return end > i && text[end] === " " && asciiStartsWith(text, end + 1, "code");
+  });
+}
 
 /** What changes which button moves the form on. */
 export interface SubmitOptions {
@@ -552,7 +596,7 @@ export function chooseSubmit(fields: readonly FieldInfo[], opts: SubmitOptions =
   if (forced) return forced;
   const isSubmit = (f: FieldInfo): boolean => f.type === "submit" || (f.tag === "button" && f.type === "");
   const rank = (f: FieldInfo): number | null => {
-    if (AWAY_WORDS.test(f.text) || (opts.passwordless && /\bpassword\b/i.test(f.text))) return null;
+    if (leadsAway(f.text) || (opts.passwordless && /\bpassword\b/i.test(f.text))) return null;
     const submit = isSubmit(f);
     if (SEND_WORDS.test(f.text)) return submit ? 2 : 3;
     if (GO_WORDS.test(f.text)) return submit ? 0 : 1;

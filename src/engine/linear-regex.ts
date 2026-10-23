@@ -52,6 +52,13 @@ export function isSpace(c: string): boolean {
 /** The characters JavaScript's `.` does not match without the `s` flag, for use inside an RE2 character class. */
 export const LINE_END = String.raw`\n\r\x{2028}\x{2029}`;
 
+/**
+ * Every character but JavaScript's line ends, for `notAfter`: the character
+ * before the match is then a line end or there is none, which is JavaScript's
+ * `^` with the `m` flag (RE2's `(?m)` counts only `\n` as a line end).
+ */
+export const NOT_LINE_END = String.raw`\x{0}-\x{9}\x{b}\x{c}\x{e}-\x{2027}\x{202a}-\x{10ffff}`;
+
 /** One match: its text, its groups (index 1 on; `undefined` for a group that took no part), where it starts and ends. */
 export interface LinearMatch {
   readonly text: string;

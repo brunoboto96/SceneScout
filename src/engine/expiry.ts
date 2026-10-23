@@ -22,6 +22,7 @@
  * Playwright-free and table-tested in profiles-test.
  */
 import fs from "node:fs";
+import { fromJs } from "./js-regex.js";
 import { sayDuration } from "./pace.js";
 import { secretWordKind } from "./sensitive.js";
 
@@ -54,7 +55,7 @@ export const DEFAULT_RUN_MINUTES = 60;
 export const DEFAULT_EXPIRY_MARGIN_MINUTES = 10;
 
 /** A JWT: three base64url parts, the first two starting with `{"` (eyJ). */
-const JWT_RE = /eyJ[A-Za-z0-9_-]{2,}\.eyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]*/g;
+const JWT_RE = fromJs(String.raw`eyJ[A-Za-z0-9_-]{2,}\.eyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]*`);
 /** Longest value scanned for tokens; a larger one is skipped rather than searched. */
 const MAX_SCAN_CHARS = 64 * 1024;
 /** Most tokens read out of one value. */
@@ -87,7 +88,11 @@ function tokenExpiries(raw: string): { expiries: number[]; unreadable: number } 
       // Not valid percent-encoding: scan it as it is.
     }
   }
-  const found = (value.match(JWT_RE) ?? []).slice(0, MAX_TOKENS_PER_VALUE);
+  const found: string[] = [];
+  for (const m of JWT_RE.matchAll(value)) {
+    if (found.length === MAX_TOKENS_PER_VALUE) break;
+    found.push(m.text);
+  }
   const expiries: number[] = [];
   let unreadable = 0;
   for (const token of found) {
@@ -100,7 +105,7 @@ function tokenExpiries(raw: string): { expiries: number[]; unreadable: number } 
 
 /** Whether a cookie set for `domain` is sent to `host`, per the cookie domain-match rule. */
 export function cookieMatchesHost(domain: string, host: string): boolean {
-  const d = domain.replace(/^\./, "").toLowerCase();
+  const d = (domain.startsWith(".") ? domain.slice(1) : domain).toLowerCase();
   const h = host.toLowerCase();
   return h === d || h.endsWith(`.${d}`);
 }

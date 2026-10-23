@@ -72,11 +72,51 @@ pattern.
   as `Sign-offſ` is therefore refused as destructive where it was not. That errs
   towards refusing, the direction the write policy takes when it cannot tell.
 
+## The second round (#618)
+
+Every regular expression in `src/` was listed and checked for super-linear
+matching with a static checker, and each one it flagged was timed on JavaScript's
+engine at 10 KB, 100 KB and 1 MB. The ones that read text the app controls or a
+lane writes were converted:
+
+- whole files, now held by the guard in memory-test: the crawl's download and
+  interruption rules (`crawl.ts`), the JWTs a saved profile holds (`expiry.ts`),
+  a lane's landing route and name (`brief.ts`), the planning crawl a split run
+  reads (`ci-lanes.ts`), the lane report and the requests its evidence states
+  (`lane.ts`), finding dedup (`finding-dedup.ts`), the tokens a page posts
+  (`postmessage.ts`) and the strict write classifier (`strict-writes.ts`);
+- single patterns in files that also hold patterns on SceneScout's own input:
+  a page URL's fragment and a markdown cell (`check.ts`), a request path's
+  trailing slashes (`flow.ts`), a route pattern (`from-run.ts`) and the words
+  on a button that leads away from a scripted sign-in (`scripted-login.ts`).
+
+Three ways of writing a pattern were added to those above:
+
+- JavaScript's `^` with the `m` flag is `notAfter: NOT_LINE_END` (RE2's `(?m)`
+  counts only `\n` as a line end); the pattern is registered with its `m` flag.
+- A lookahead inside one alternative of a pattern that is only tested ("continue
+  with" not before an email, a phone or a code) is its own search, checked in code
+  at each match, beside the pattern without that alternative. Refused by `accept`
+  inside the one pattern, each candidate would search on from the next character
+  and read again to the line's end for an earlier alternative's `.*`, which is
+  quadratic again. A test holds the function to the old pattern.
+- Where RE2's captures make a pattern slow on a long match (`statedRequests`
+  took 6 s on a 1 MB path), RE2 reads the head and the greedy runs after it are
+  read in code. A test then holds the function to the old JavaScript one,
+  written out in memory-test, on the same inputs as the patterns.
+
+Patterns stay JavaScript where they read only SceneScout's own input (command-line
+arguments, the configuration file, environment variables, `ps` output, the source
+tree a scan reads, Playwright's error messages), where their input is capped short
+of harm, or where they run inside the page under test (the page could stall itself
+anyway, and RE2JS is not there).
+
 ## Not converted yet
 
-Regular expressions remain in other files that read text the app controls or a
-person pasted, such as the request replay, the oracles, the claims checks, the
-export of findings, the signed-in check, the form, injection and postMessage
-readers, the scripted login, the plain report, and the lane report. They are
-converted the same way, one family at a time, with `fromJs` and the identity and
-timing checks above; the guard in memory-test lists the files already held.
+Files another change was editing at the time hold flagged patterns that read app
+text: `browser.ts` (a URL's fragment), `design.ts` (pixel and colour values from
+computed styles), `plain.ts` (step text of the plain report) and `report.ts` (the
+report's own folds). The other readers of app text (the request replay, the
+oracles, the claims checks, the export of findings, the signed-in check, the form
+and injection readers) hold patterns the checker found linear; they are converted
+the same way when they change.

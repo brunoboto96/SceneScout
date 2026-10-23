@@ -24,6 +24,7 @@ import { z } from "zod";
 import { beaconResourceType, BROWSER_ENGINES } from "../browsers.js";
 import type { RouteHealth } from "./check.js";
 import { FIXTURE_KINDS } from "./fixtures.js";
+import { fromJs } from "./js-regex.js";
 import { MEMORY_DIRNAME, SELF_IGNORE_KEEP } from "./memory.js";
 import { secretWordKind } from "./sensitive.js";
 import { validateRoleName } from "./profiles.js";
@@ -515,9 +516,11 @@ export function urlMatches(pattern: string, url: string): boolean {
   return new RegExp(pattern).test(tail);
 }
 
+const TRAILING_SLASHES_RE = fromJs(String.raw`\/+$`);
+
 /** A path pattern against a request's path: equal segment for segment, where `*` stands for any one segment. A trailing slash is ignored. */
 export function requestPathMatches(pattern: string, pathname: string): boolean {
-  const split = (p: string) => p.replace(/\/+$/, "").split("/");
+  const split = (p: string) => TRAILING_SLASHES_RE.replaceFirst(p, "").split("/");
   const want = split(pattern);
   const got = split(pathname);
   return want.length === got.length && want.every((seg, i) => seg === "*" || seg === got[i]);

@@ -24,6 +24,8 @@
  */
 import { z } from "zod";
 import { isIdSegment } from "./fingerprint.js";
+import { fromJs } from "./js-regex.js";
+import { isSpace, runEnd } from "./linear-regex.js";
 import { FINDING_CATEGORIES } from "./memory.js";
 
 /** Upper bound on the decisions and routes arrays, so a report is always small enough to hold whole. */
@@ -149,10 +151,14 @@ export type LaneParse =
   | { ok: true; report: LaneReport; aroundIgnored: boolean; entitiesDecoded: number; conventionsIgnored: LaneDecision["verdict"][] }
   | { ok: false; reason: string };
 
-const FENCE_OPEN = /^```[a-z]*\s*\r?\n/i;
-const FENCE_CLOSE = /\r?\n?```\s*$/;
+/** Three backticks, which a template literal cannot hold as they are. */
+const FENCE = "```";
+const FENCE_OPEN = fromJs(String.raw`^${FENCE}[a-z]*\s*\r?\n`, "i");
+const FENCE_CLOSE = fromJs(String.raw`\r?\n?${FENCE}\s*$`);
 /** Every fenced block in a reply, with its contents. */
-const FENCED_BLOCK = /```[a-z]*[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi;
+const FENCED_BLOCK = fromJs(String.raw`${FENCE}[a-z]*[ \t]*\r?\n([\s\S]*?)\r?\n?${FENCE}`, "i");
+/** JSON.parse's words for text after the object. */
+const TRAILING_TEXT = fromJs(String.raw`after JSON|Unexpected non-whitespace`, "i");
 
 /**
  * The reply is one JSON object and nothing else. A fenced block around it is
@@ -174,10 +180,10 @@ const FENCED_BLOCK = /```[a-z]*[ \t]*\r?\n([\s\S]*?)\r?\n?```/gi;
 export function parseLaneReport(text: string, expectedLane?: string): LaneParse {
   let body = text.trim();
   let aroundIgnored = false;
-  if (FENCE_OPEN.test(body) && FENCE_CLOSE.test(body) && [...body.matchAll(FENCED_BLOCK)].length === 1) {
-    body = body.replace(FENCE_OPEN, "").replace(FENCE_CLOSE, "").trim();
+  if (FENCE_OPEN.test(body) && FENCE_CLOSE.test(body) && [...FENCED_BLOCK.matchAll(body)].length === 1) {
+    body = FENCE_CLOSE.replaceFirst(FENCE_OPEN.replaceFirst(body, ""), "").trim();
   } else if (!body.startsWith("{")) {
-    const objects = [...body.matchAll(FENCED_BLOCK)].map((m) => m[1].trim()).filter((b) => b.startsWith("{"));
+    const objects = [...FENCED_BLOCK.matchAll(body)].map((m) => (m.groups[1] ?? "").trim()).filter((b) => b.startsWith("{"));
     if (objects.length > 1) return { ok: false, reason: `the reply holds ${objects.length} fenced JSON blocks; hand back exactly one object` };
     if (objects.length === 0) return { ok: false, reason: "the reply must be one JSON object, with no text before it" };
     body = objects[0];
@@ -188,14 +194,14 @@ export function parseLaneReport(text: string, expectedLane?: string): LaneParse 
     raw = JSON.parse(body);
   } catch (e) {
     const message = (e as Error).message;
-    const trailing = /after JSON|Unexpected non-whitespace/i.test(message);
+    const trailing = TRAILING_TEXT.test(message);
     return { ok: false, reason: trailing ? "the reply must be one JSON object, with no text after it" : `not valid JSON: ${message}` };
   }
   // Decoded before the schema, so every cap measures the text the lane wrote.
   // Only a reply that looks relay-escaped is decoded: one holding a literal
   // `<` or `>` was not escaped on the way, and its `&amp;` is what the lane
   // meant (a page that double-escapes its text is a defect a lane can report).
-  const decoded = /[<>]/.test(text) ? { value: raw, count: 0 } : decodeStringValues(raw);
+  const decoded = text.includes("<") || text.includes(">") ? { value: raw, count: 0 } : decodeStringValues(raw);
   const result = LaneReport.safeParse(decoded.value);
   if (!result.success) {
     const issue = result.error.issues[0];
@@ -216,12 +222,16 @@ export function parseLaneReport(text: string, expectedLane?: string): LaneParse 
   return { ok: true, report: { ...result.data, decisions }, aroundIgnored, entitiesDecoded: decoded.count, conventionsIgnored };
 }
 
+const STARTS_WITH_VOWEL = fromJs(String.raw`^[aeiou]`);
+
 /** The line the fold adds for each verdict whose convention was dropped: "convention ignored on a defect verdict"; empty when none was. */
 export function ignoredConventionsNote(verdicts: readonly LaneDecision["verdict"][]): string {
   if (verdicts.length === 0) return "";
   const counts = new Map<string, number>();
   for (const v of verdicts) counts.set(v, (counts.get(v) ?? 0) + 1);
-  const parts = [...counts].map(([v, n]) => `convention ignored on ${n === 1 ? `${/^[aeiou]/.test(v) ? "an" : "a"} ${v} verdict` : `${n} ${v} verdicts`}`);
+  const parts = [...counts].map(
+    ([v, n]) => `convention ignored on ${n === 1 ? `${STARTS_WITH_VOWEL.test(v) ? "an" : "a"} ${v} verdict` : `${n} ${v} verdicts`}`,
+  );
   return `\n(${parts.join("; ")}: only a worth_a_look names a convention.)`;
 }
 
@@ -230,7 +240,7 @@ export function ignoredConventionsNote(verdicts: readonly LaneDecision["verdict"
  * named ones an escaper emits, and decimal or hex numeric ones. Anything else
  * that looks like a reference (`&nbsp;`, `&#0;`, a bare `&`) is left as it is.
  */
-const CHAR_REFERENCE = /&(?:(lt|gt|amp|quot|apos)|#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6}));/g;
+const CHAR_REFERENCE = fromJs(String.raw`&(?:(lt|gt|amp|quot|apos)|#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6}));`);
 const NAMED_REFERENCES: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
 
 /**
@@ -240,7 +250,7 @@ const NAMED_REFERENCES: Record<string, string> = { lt: "<", gt: ">", amp: "&", q
  */
 function decodeReferences(text: string): { text: string; count: number } {
   let count = 0;
-  const out = text.replace(CHAR_REFERENCE, (whole, name: string | undefined, dec: string | undefined, hex: string | undefined) => {
+  const out = CHAR_REFERENCE.replace(text, ({ text: whole, groups: [, name, dec, hex] }) => {
     if (name) {
       count += 1;
       return NAMED_REFERENCES[name];
@@ -375,27 +385,69 @@ export interface StatedRequest {
  * ("... (expected 403)") is a different claim about the request and is not
  * read as its status.
  *
- * The separator is two alternatives rather than `\s*(?:->|:)?\s*`: with the
- * arrow optional, two adjacent `\s*` can split a run of spaces every way
- * there is, and evidence ending in a long run of whitespace took quadratic
- * time to reject.
+ * As one JavaScript pattern:
+ * `\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$*~%-]*)(?:\?[^\s#]*)?(?:#\S*)?(?:(?:\s*(?:->|→|=>|:)\s*|\s+)([1-5]\d{2})\b)?`
+ * with the `i` flag. The linear-time engine reads its head, up to the path's
+ * first slash, and the rest is read in code: each part after the head is a
+ * greedy run or optional, so nothing after it is ever given back, and the
+ * engine's captures cost several microseconds a character on a long path.
+ * memory-test holds this to that pattern.
  */
-const STATED_REQUEST_RE =
-  /\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$*~%-]*)(?:\?[^\s#]*)?(?:#\S*)?(?:(?:\s*(?:->|→|=>|:)\s*|\s+)([1-5]\d{2})\b)?/gi;
+const STATED_HEAD_RE = fromJs(String.raw`\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?\/`, "i");
+const PATH_END_MARKS = fromJs(String.raw`[.:,]+$`);
+const TRAILING_SLASHES = fromJs(String.raw`\/+$`);
+const BRACED_TEMPLATE = fromJs(String.raw`^\{[^/{}]+\}$`);
+const COLON_TEMPLATE = fromJs(String.raw`^:[a-z_][a-z0-9_-]*$`, "i");
+
+const PATH_CHARS = new Set("/_.:{}$*~%-");
+const isDigit = (c: string | undefined): boolean => c !== undefined && c >= "0" && c <= "9";
+const isAsciiLetter = (c: string): boolean => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+const isPathChar = (c: string): boolean => isAsciiLetter(c) || isDigit(c) || PATH_CHARS.has(c);
+const isWordChar = (c: string): boolean => isAsciiLetter(c) || isDigit(c) || c === "_";
+
+/** A status at `at`: `[1-5]\d{2}`, then no letter, digit or underscore. */
+function statusAt(text: string, at: number): string | null {
+  const first = text[at];
+  if (first === undefined || first < "1" || first > "5" || !isDigit(text[at + 1]) || !isDigit(text[at + 2])) return null;
+  const after = text[at + 3];
+  return after !== undefined && isWordChar(after) ? null : text.slice(at, at + 3);
+}
+
+/** What follows a stated request's path: its status, after an arrow or a colon or after spaces, and where the request ends. */
+function statedTail(text: string, from: number): { status: string | undefined; end: number } {
+  let at = from;
+  if (text[at] === "?") at = runEnd(text, at + 1, (c) => c !== "#" && !isSpace(c));
+  if (text[at] === "#") at = runEnd(text, at + 1, (c) => !isSpace(c));
+  const spaced = runEnd(text, at, isSpace);
+  const arrow = ["->", "→", "=>", ":"].find((a) => text.startsWith(a, spaced));
+  if (arrow !== undefined) {
+    const statusFrom = runEnd(text, spaced + arrow.length, isSpace);
+    const status = statusAt(text, statusFrom);
+    if (status !== null) return { status, end: statusFrom + 3 };
+  }
+  const status = spaced > at ? statusAt(text, spaced) : null;
+  return status !== null ? { status, end: spaced + 3 } : { status: undefined, end: at };
+}
 
 /** The requests a piece of evidence names, in order. */
 export function statedRequests(text: string): StatedRequest[] {
   const out: StatedRequest[] = [];
-  for (const m of text.matchAll(STATED_REQUEST_RE)) {
-    const raw = m[2].replace(/[.:,]+$/, "");
-    const start = (m.index ?? 0) + m[0].indexOf(m[2]);
-    out.push({ method: m[1].toUpperCase(), segments: pathSegments(raw), status: m[3] ?? null, start, end: start + raw.length });
+  let from = 0;
+  for (let head = STATED_HEAD_RE.exec(text); head !== null; head = STATED_HEAD_RE.exec(text, from)) {
+    const pathAt = head.end - 1;
+    const pathEnd = runEnd(text, head.end, isPathChar);
+    const path = text.slice(pathAt, pathEnd);
+    const { status, end } = statedTail(text, pathEnd);
+    const raw = PATH_END_MARKS.replaceFirst(path, "");
+    const start = head.index + text.slice(head.index, end).indexOf(path);
+    out.push({ method: (head.groups[1] ?? "").toUpperCase(), segments: pathSegments(raw), status: status ?? null, start, end: start + raw.length });
+    from = end;
   }
   return out;
 }
 
 function pathSegments(path: string): string[] {
-  const trimmed = path.replace(/\/+$/, "");
+  const trimmed = TRAILING_SLASHES.replaceFirst(path, "");
   if (trimmed === "") return [];
   return trimmed
     .slice(1)
@@ -415,7 +467,7 @@ function pathSegments(path: string): string[] {
  * number of segments": a template here stands for exactly one.
  */
 function isTemplateSegment(seg: string): boolean {
-  return seg === "*" || /^\{[^/{}]+\}$/.test(seg) || /^:[a-z_][a-z0-9_-]*$/i.test(seg);
+  return seg === "*" || BRACED_TEMPLATE.test(seg) || COLON_TEMPLATE.test(seg);
 }
 
 /**

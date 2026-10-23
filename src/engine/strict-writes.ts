@@ -32,6 +32,16 @@
  * the browser engine taking it from the attach.
  * Everything here is pure and table-tested in policy-test.
  */
+import { fromJs } from "./js-regex.js";
+import type { LinearRegex } from "./linear-regex.js";
+
+const LOWER_THEN_UPPER_RE = fromJs(String.raw`([a-z0-9])([A-Z])`);
+const CAPITALS_THEN_WORD_RE = fromJs(String.raw`([A-Z]+)([A-Z][a-z])`);
+const NOT_LETTER_OR_DIGIT_RE = fromJs(String.raw`[^A-Za-z0-9]+`);
+const MUTATION_WORD_RE = fromJs(String.raw`\bmutation\b`);
+const isLetter = (c: string): boolean => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
+const isWordChar = (c: string): boolean => isLetter(c) || (c >= "0" && c <= "9") || c === "_";
+const OPERATION_KEYWORDS = new Set(["query", "mutation", "subscription", "fragment"]);
 
 /** Which classifier judges whether a write is destructive. */
 export type WriteClassifier = "standard" | "strict";
@@ -92,10 +102,8 @@ const COMMAND_KEYS = new Set(["action", "operation", "op", "method", "_method", 
 
 /** An identifier split into lower-case words: on anything not a letter or digit, and on camelCase boundaries. */
 export function identifierWords(text: string): string[] {
-  return text
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .split(/[^A-Za-z0-9]+/)
+  const spaced = (re: LinearRegex, t: string): string => re.replace(t, ({ groups: [, a, b] }) => `${a} ${b}`);
+  return NOT_LETTER_OR_DIGIT_RE.splitText(spaced(CAPITALS_THEN_WORD_RE, spaced(LOWER_THEN_UPPER_RE, text)))
     .filter(Boolean)
     .map((w) => w.toLowerCase());
 }
@@ -155,11 +163,11 @@ export function mutationRootFields(doc: string): string[] {
     } else if (c === "}" && parens === 0) {
       depth = Math.max(0, depth - 1);
       if (depth === 0) lastKeyword = "";
-    } else if (/[A-Za-z_]/.test(c)) {
+    } else if (isLetter(c) || c === "_") {
       let j = i + 1;
-      while (j < doc.length && /\w/.test(doc[j])) j++;
+      while (j < doc.length && isWordChar(doc[j])) j++;
       const word = doc.slice(i, j);
-      if (depth === 0 && parens === 0 && /^(query|mutation|subscription|fragment)$/.test(word)) lastKeyword = word;
+      if (depth === 0 && parens === 0 && OPERATION_KEYWORDS.has(word)) lastKeyword = word;
       else if (depth === 1 && parens === 0 && inMutation) fields.push(word);
       i = j - 1;
     }
@@ -169,7 +177,7 @@ export function mutationRootFields(doc: string): string[] {
 
 /** Whether a GraphQL document's mutations name a destructive root field. */
 function graphqlCommand(doc: string): boolean {
-  return /\bmutation\b/.test(doc) && mutationRootFields(doc).some(identifierIsDestructive);
+  return MUTATION_WORD_RE.test(doc) && mutationRootFields(doc).some(identifierIsDestructive);
 }
 
 /** The deepest a JSON body is walked; deeper values are not commands an API reads. */
@@ -190,16 +198,17 @@ function jsonCommand(value: unknown, depth = 0): boolean {
 }
 
 /** A command key written as text: at the start, or after a brace, bracket, comma, `&` or `?`, then its value. */
-const TEXT_COMMAND_RE = /(?:^|[{,[&?])\s*["']?([A-Za-z_]+)["']?\s*[:=]\s*["']?([A-Za-z0-9_.\-/]+)/g;
+const TEXT_COMMAND_RE = fromJs(String.raw`(?:^|[{,[&?])\s*["']?([A-Za-z_]+)["']?\s*[:=]\s*["']?([A-Za-z0-9_.\-/]+)`);
 
 /** A body that is neither JSON nor a form: a command key written as text, or a GraphQL document. */
 function textCommand(body: string): boolean {
-  for (const m of body.matchAll(TEXT_COMMAND_RE)) if (COMMAND_KEYS.has(m[1].toLowerCase()) && identifierIsDestructive(m[2])) return true;
+  for (const { groups } of TEXT_COMMAND_RE.matchAll(body))
+    if (COMMAND_KEYS.has((groups[1] ?? "").toLowerCase()) && identifierIsDestructive(groups[2] ?? "")) return true;
   return graphqlCommand(body);
 }
 
 /** Whether a body reads as a form (`a=1&b=2`): no braces or quotes at its start, and a key=value first. */
-const FORM_BODY_RE = /^[\w.%[\]-]+=[^&]*(?:&|$)/;
+const FORM_BODY_RE = fromJs(String.raw`^[\w.%[\]-]+=[^&]*(?:&|$)`);
 
 /** The whole body, judged by what it is: JSON parsed and walked, a form read field by field, anything else as text. */
 export function strictBodyIsDestructive(body: string): boolean {
@@ -280,7 +289,15 @@ const GET_VERBS = new Set([
 const GET_NOUN_VERBS = new Set(["archive", "trash"]);
 
 /** A path segment that reads as a record's id: digits, a UUID, or a long hex or mixed token. */
-const ID_SEGMENT_RE = /^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{12,})$/i;
+const ALL_DIGITS_RE = fromJs(String.raw`^\d+$`);
+const ID_SEGMENT_RE = fromJs(
+  String.raw`^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|[A-Za-z0-9_-]*\d[A-Za-z0-9_-]*)$`,
+  "i",
+  // The lookahead `(?=[A-Za-z0-9_-]*\d)` of the last kind is its digit, written in the pattern; its 12 characters at least are
+  // the length checked here. A UUID or a hex id is longer than 12, so only a run of digits may be shorter.
+  { accept: ({ text }) => text.length >= 12 || ALL_DIGITS_RE.test(text) },
+  String.raw`^(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,}|(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{12,})$`,
+);
 
 /**
  * Whether a page load's address is a destructive command: a GET a link sends

@@ -6,17 +6,32 @@
  */
 import type { Finding } from "./memory.js";
 import { normalizePath, shortHash } from "./fingerprint.js";
+import { fromJs } from "./js-regex.js";
+
+const NOT_TOKEN_RE = fromJs(String.raw`[^a-z0-9/ ]+`);
+const WHITE_SPACE_RE = fromJs(String.raw`\s+`);
+const IES_END_RE = fromJs(String.raw`ies$`);
+const isWordChar = (c: string): boolean => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_";
+/** `(?<=\w{3})e?s$`: a plural's ending after three letters of a word, the lookbehind a check of the three before. */
+const PLURAL_END_RE = fromJs(
+  String.raw`e?s$`,
+  "",
+  { accept: ({ index }, text) => [1, 2, 3].every((k) => index >= k && isWordChar(text[index - k])) },
+  String.raw`(?<=\w{3})e?s$`,
+);
+const LITERAL_RE = fromJs(String.raw`"([^"]{8,80})"|'([^']{8,80})'|\(([^)]{8,80})\)|“([^”]{8,80})”`);
+const FAILING_SIGNATURE_RE = fromJs(String.raw`\s[45]\d{2}$`);
+const ENDPOINT_RE = fromJs(String.raw`\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$-]*)`, "i");
+const TRAILING_SLASHES_RE = fromJs(String.raw`\/+$`);
+const STATUS_RE = fromJs(String.raw`\b([45]\d{2})\b`);
 
 /** Shared finding-similarity helpers (used by live dedup and retro-merge). */
 function findingTokens(s: string): Set<string> {
   return new Set(
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9/ ]+/g, " ")
-      .split(/\s+/)
+    WHITE_SPACE_RE.splitText(NOT_TOKEN_RE.replace(s.toLowerCase(), " "))
       .filter((t) => t.length > 2)
       // crude stemming so entries/entry, displays/display collide
-      .map((t) => t.replace(/ies$/, "y").replace(/(?<=\w{3})e?s$/, "")),
+      .map((t) => PLURAL_END_RE.replaceFirst(IES_END_RE.replaceFirst(t, "y"), "")),
   );
 }
 
@@ -40,8 +55,8 @@ function findingLiterals(...texts: Array<string | undefined>): Set<string> {
   const out = new Set<string>();
   for (const text of texts) {
     if (!text) continue;
-    for (const m of text.matchAll(/"([^"]{8,80})"|'([^']{8,80})'|\(([^)]{8,80})\)|“([^”]{8,80})”/g)) {
-      const literal = (m[1] ?? m[2] ?? m[3] ?? m[4] ?? "").toLowerCase().trim();
+    for (const m of LITERAL_RE.matchAll(text)) {
+      const literal = (m.groups[1] ?? m.groups[2] ?? m.groups[3] ?? m.groups[4] ?? "").toLowerCase().trim();
       if (literal) out.add(literal);
     }
   }
@@ -66,7 +81,7 @@ function findingLiterals(...texts: Array<string | undefined>): Set<string> {
  * of a second copy of this regex, which is what it had.
  */
 export function failingSignatures(evidence: string | undefined): Set<string> {
-  return new Set([...endpointSignatures(evidence)].filter((sig) => /\s[45]\d{2}$/.test(sig)));
+  return new Set([...endpointSignatures(evidence)].filter((sig) => FAILING_SIGNATURE_RE.test(sig)));
 }
 
 /**
@@ -76,10 +91,10 @@ export function failingSignatures(evidence: string | undefined): Set<string> {
 export function endpointSignatures(evidence: string | undefined): Set<string> {
   const out = new Set<string>();
   if (!evidence) return out;
-  const endpoints = [...evidence.matchAll(/\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$-]*)/gi)];
+  const endpoints = [...ENDPOINT_RE.matchAll(evidence)];
   for (const [i, m] of endpoints.entries()) {
-    const method = m[1].toUpperCase();
-    const path = normalizePath(m[2].replace(/\/+$/, "") || "/").toLowerCase();
+    const method = (m.groups[1] ?? "").toUpperCase();
+    const path = normalizePath(TRAILING_SLASHES_RE.replaceFirst(m.groups[2] ?? "", "") || "/").toLowerCase();
     // Each endpoint takes the status from its OWN window — the text between it
     // and the next endpoint mentioned. Pairing every endpoint with every status
     // in the string invented signatures that were never claimed: evidence
@@ -94,9 +109,9 @@ export function endpointSignatures(evidence: string | undefined): Set<string> {
     // `GET /api/x` and will not merge with the same bug written the other way
     // round: a visible duplicate, which is the safe direction to fail, since
     // the alternative discards a finding.
-    const from = (m.index ?? 0) + m[0].length;
-    const to = i + 1 < endpoints.length ? (endpoints[i + 1].index ?? evidence.length) : evidence.length;
-    const status = /\b([45]\d{2})\b/.exec(evidence.slice(from, to))?.[1];
+    const from = m.end;
+    const to = i + 1 < endpoints.length ? endpoints[i + 1].index : evidence.length;
+    const status = STATUS_RE.exec(evidence.slice(from, to))?.groups[1];
     out.add(status ? `${method} ${path} ${status}` : `${method} ${path}`);
   }
   return out;
@@ -217,6 +232,11 @@ export function sameKind(a: string | undefined, b: string | undefined): boolean 
   return (!!a && a === b) || sameFamily(a, b);
 }
 
+/** Evidence in lower case with each run of white space one space, to compare two as written. */
+function squashed(evidence: string | undefined): string | undefined {
+  return typeof evidence === "string" ? WHITE_SPACE_RE.replace(evidence.toLowerCase(), " ").trim() : undefined;
+}
+
 export function sameFinding(
   a: { title: string; detail?: string; evidence?: string; category?: string },
   b: { title: string; detail?: string; evidence?: string; category?: string },
@@ -224,8 +244,8 @@ export function sameFinding(
   // What is wrong before where: two kinds of defect are two findings, however
   // alike their evidence, quoted text or titles.
   if (!sameKind(a.category, b.category)) return false;
-  const aEv = a.evidence?.toLowerCase().replace(/\s+/g, " ").trim();
-  const bEv = b.evidence?.toLowerCase().replace(/\s+/g, " ").trim();
+  const aEv = squashed(a.evidence);
+  const bEv = squashed(b.evidence);
   if (aEv && bEv && aEv === bEv) return true;
   // A shared distinctive literal (e.g. "Document not found anymore") marks the
   // same bug even when two sessions wrote DIFFERENT evidence strings. The
