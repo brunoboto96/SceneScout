@@ -2325,7 +2325,21 @@ test("test.yml: a browser build is restored only from a cache of the same image,
     assert.equal(steps[save].with?.key, "${{ steps.browser-cache.outputs.cache-primary-key }}", name);
     assert.equal(steps[save].with?.path, steps[restore].with?.path, `${name}: saved from where it is restored to`);
     assert.equal(steps[deps].if, "steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'", name);
-    assert.equal(steps[deps].run?.trim(), `npx playwright install-deps ${browser}`, `${name}: the system libraries of the browser it restored`);
+    // The system libraries of the browser it restored, each attempt bounded and a hung one tried once more.
+    const depsRun = steps[deps].run ?? "";
+    // timeout runs as root: the apt that Playwright starts runs as root, and a timeout of the runner's own user cannot stop it.
+    const attempt = /^\s*sudo env "PATH=\$PATH" timeout --kill-after=(\d+) (\d+) npx playwright install-deps (\S+) && exit 0$/m.exec(depsRun);
+    assert.ok(attempt, `${name}: each attempt runs under a timeout of root's`);
+    const named = attempt[3] === '"$BROWSER"' ? steps[deps].env?.BROWSER : attempt[3];
+    assert.equal(named, browser, `${name}: the system libraries of the browser it restored`);
+    assert.ok(
+      2 * (Number(attempt[1]) + Number(attempt[2])) < Number(steps[deps]["timeout-minutes"]) * 60,
+      `${name}: both attempts fit inside the step's own time limit`,
+    );
+    assert.match(depsRun, /sudo dpkg --configure -a/, `${name}: an install cut off part-way is finished before the retry`);
+    assert.match(depsRun, /for attempt in 1 2; do/, `${name}: a failed or hung attempt is tried once more`);
+    assert.match(depsRun, /\nexit 1\s*$/, `${name}: two failed attempts fail the step`);
+    assert.ok(Number(steps[deps]["timeout-minutes"]) > 0, `${name}: the step has its own time limit`);
   }
   assert.equal(cached, 3, "the docs, suite and cross-browser jobs each install a browser");
 });
@@ -2359,7 +2373,15 @@ test("the same place matches with either separator and, on Windows, either case"
   assert.equal(samePlace("posix", "/work/app", "/work/other"), false);
 });
 
-type WorkflowStep = { id?: string; uses?: string; run?: string; if?: string; env?: Record<string, string>; with?: Record<string, string> };
+type WorkflowStep = {
+  id?: string;
+  uses?: string;
+  run?: string;
+  if?: string;
+  env?: Record<string, string>;
+  with?: Record<string, string>;
+  "timeout-minutes"?: number;
+};
 type WorkflowJob = {
   permissions?: Record<string, string>;
   needs?: string | string[];

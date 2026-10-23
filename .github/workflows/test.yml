@@ -142,9 +142,19 @@ jobs:
         with:
           path: ${{ steps.browser.outputs.path }}
           key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+      # A normal install takes under a minute; twice an apt download hung until the
+      # job's own limit. Each attempt gets five minutes and a hung one is tried once more.
+      # timeout runs as root so it can stop the apt that Playwright starts as root.
       - name: Install the browser's system libraries
         if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
-        run: npx playwright install-deps chromium
+        timeout-minutes: 12
+        run: |
+          for attempt in 1 2; do
+            sudo env "PATH=$PATH" timeout --kill-after=15 300 npx playwright install-deps chromium && exit 0
+            echo "::warning title=System libraries::attempt $attempt to install them failed or ran out of time"
+            sudo dpkg --configure -a || echo "::warning title=System libraries::dpkg could not finish an interrupted install"
+          done
+          exit 1
       - run: npm run build
       - name: Unit suites
         run: npm run test:unit
@@ -210,9 +220,19 @@ jobs:
         with:
           path: ${{ steps.browser.outputs.path }}
           key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+      # A normal install takes under a minute; twice an apt download hung until the
+      # job's own limit. Each attempt gets five minutes and a hung one is tried once more.
+      # timeout runs as root so it can stop the apt that Playwright starts as root.
       - name: Install the browser's system libraries
         if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
-        run: npx playwright install-deps chromium
+        timeout-minutes: 12
+        run: |
+          for attempt in 1 2; do
+            sudo env "PATH=$PATH" timeout --kill-after=15 300 npx playwright install-deps chromium && exit 0
+            echo "::warning title=System libraries::attempt $attempt to install them failed or ran out of time"
+            sudo dpkg --configure -a || echo "::warning title=System libraries::dpkg could not finish an interrupted install"
+          done
+          exit 1
       - run: npm run build
       # The test scripts are run by tsx, which strips types without checking them; this checks them against the built engine.
       - name: Type check of the test scripts
@@ -286,9 +306,21 @@ jobs:
         with:
           path: ${{ steps.browser.outputs.path }}
           key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+      # A normal install takes under a minute; twice an apt download hung until the
+      # job's own limit. Each attempt gets five minutes and a hung one is tried once more.
+      # timeout runs as root so it can stop the apt that Playwright starts as root.
       - name: Install the browser's system libraries
         if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
-        run: npx playwright install-deps ${{ matrix.browser }}
+        timeout-minutes: 12
+        env:
+          BROWSER: ${{ matrix.browser }}
+        run: |
+          for attempt in 1 2; do
+            sudo env "PATH=$PATH" timeout --kill-after=15 300 npx playwright install-deps "$BROWSER" && exit 0
+            echo "::warning title=System libraries::attempt $attempt to install them failed or ran out of time"
+            sudo dpkg --configure -a || echo "::warning title=System libraries::dpkg could not finish an interrupted install"
+          done
+          exit 1
       - run: npm run build
       - name: Browser suite, shard ${{ matrix.shard }} of 3
         env:
