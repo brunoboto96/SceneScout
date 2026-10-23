@@ -21,16 +21,33 @@
     .group li + li { border-top: 0; }
     .group li:first-child { border-radius: 8px 8px 0 0; }
     .group li:last-child { border-radius: 0 0 8px 8px; }
+    /* Grouped chat bubbles 2px apart: the corners where they meet are tightened, so they are one group, never touching. */
+    .chat { display: flex; flex-direction: column; gap: 2px; max-width: 360px; margin-bottom: 24px; }
+    .bubble { align-self: flex-end; padding: 8px 12px; background: rgb(30, 64, 175); color: rgb(255, 255, 255); border-radius: 18px 4px 4px 18px; }
+    .bubble:first-child { border-radius: 18px 18px 4px 18px; }
+    .bubble:last-child { border-radius: 18px 4px 18px 18px; }
+    /* A carousel shows one slide; the others sit edge to edge beside it, cut away by the frame, and are never touching. */
+    .carousel { overflow: hidden; max-width: 640px; margin-bottom: 24px; }
+    .track { display: flex; }
+    .slide { flex: 0 0 100%; box-sizing: border-box; }
     /* The one fact each variant changes. */
+    /* A scroll pane inside a frame that clips: what is below the pane's fold can still be scrolled to. */
+    .frame { height: 160px; overflow: hidden; max-width: 640px; margin-bottom: 24px; }
+    .pane { height: 100%; overflow: auto; }
+    .pane .spacer { height: 400px; }
+    .pstack { display: flex; flex-direction: column; gap: 8px; }
     .touching .stack { gap: 0; }
+    .scrolled .pstack { gap: 0; }
   </style>
 </head>
 <body>
   <!-- One page, and each defect the design score is calibrated on is one class
        away: ?with=touching drops the gap between the stacked cards,
        ?with=heights gives the six buttons six heights, ?with=grays writes the
-       notes in twelve grays. ?with=touching,heights,grays is all three. The
-       list group is joined on purpose in every variant and is never touching. -->
+       notes in twelve grays. ?with=touching,heights,grays is all three.
+       ?with=scrolled drops the gap in a stack below a scroll pane's fold.
+       The list group, the chat bubbles and the carousel's slides are joined on
+       purpose in every variant and are never touching. -->
   <main>
     <h1>Account settings</h1>
     <div class="actions" data-testid="score-actions">
@@ -49,6 +66,27 @@
       <section class="card"><h2>Billing</h2><p>Your plan and invoices.</p></section>
       <section class="card"><h2>Notifications</h2><p>What we tell you about.</p></section>
     </div>
+    <div class="chat" data-testid="score-chat">
+      <div class="bubble">Is the invoice ready?</div>
+      <div class="bubble">It was due on Friday.</div>
+      <div class="bubble">Thanks!</div>
+    </div>
+    <div class="carousel">
+      <div class="track" data-testid="score-carousel">
+        <section class="card slide"><h2>Plan</h2><p>Your current plan.</p></section>
+        <section class="card slide"><h2>Usage</h2><p>This month so far.</p></section>
+        <section class="card slide"><h2>Limits</h2><p>What the plan allows.</p></section>
+      </div>
+    </div>
+    <div class="frame">
+      <div class="pane">
+        <p class="spacer">Recent activity</p>
+        <div class="pstack" data-testid="score-pane-stack">
+          <section class="card"><h2>Exports</h2><p>Files you asked for.</p></section>
+          <section class="card"><h2>Imports</h2><p>Files you sent us.</p></section>
+        </div>
+      </div>
+    </div>
     <ul class="group" data-testid="score-list-group">
       <li>Sessions</li>
       <li>Devices</li>
@@ -62,6 +100,7 @@
   <script>
     const wanted = (new URLSearchParams(location.search).get("with") || "").split(",");
     if (wanted.includes("touching")) document.body.classList.add("touching");
+    if (wanted.includes("scrolled")) document.body.classList.add("scrolled");
     if (wanted.includes("heights")) {
       document.querySelectorAll(".actions button").forEach((b, i) => { b.style.height = 28 + i * 4 + "px"; });
     }

@@ -808,6 +808,33 @@ test("a group joined with square corners is an intended join, shadowed or not", 
   assert.deepEqual(touchingContainers([outer]), [], "a group rounded only at its outer corners is one shape");
 });
 
+test("boxes that tighten the corners where they meet are one group; cards rounded alike on every corner are two", () => {
+  // Grouped chat bubbles: 2px apart, 18px outside, 4px where they meet. The contrastive twin is the same two boxes
+  // with every corner 18px, which is two cards with a missing gap.
+  const bubble = (label: string, y: number, radii: Box["radii"]): Box =>
+    box(label, y, { rect: { x: 300, y, w: 300, h: 40 }, border: 0, bg: "rgba(30, 64, 175, 1)", radii });
+  const bubbles = (first: Box["radii"], second: Box["radii"]): BoxGroup => ({
+    parent: "<div.chat>",
+    shell: false,
+    boxes: [bubble('<div> "Is it ready?"', 100, first), bubble('<div> "It was due."', 142, second)],
+  });
+  assert.deepEqual(touchingContainers([bubbles([18, 18, 4, 18], [18, 4, 18, 18])]), [], "tightened where they meet");
+  assert.equal(touchingContainers([bubbles([18, 18, 18, 18], [18, 18, 18, 18])]).length, 1, "rounded alike on every corner");
+  // One side tightened is enough: the upper bubble alone squares its joining corner.
+  assert.deepEqual(touchingContainers([bubbles([18, 18, 4, 18], [18, 18, 18, 18])]), []);
+  // Side by side: the left box tightens its right-hand corners.
+  const row = (left: Box["radii"]): BoxGroup => ({
+    parent: "<div.row>",
+    shell: false,
+    boxes: [
+      box("[left]", 100, { rect: { x: 40, y: 100, w: 200, h: 100 }, radii: left }),
+      box("[right]", 100, { rect: { x: 240, y: 100, w: 200, h: 100 }, radii: [8, 8, 8, 8] }),
+    ],
+  });
+  assert.deepEqual(touchingContainers([row([8, 2, 2, 8])]), []);
+  assert.equal(touchingContainers([row([8, 8, 8, 8])]).length, 1);
+});
+
 test("a box shows an edge only by a border, a shadow or a fill unlike what it sits on", () => {
   const bare = { border: 0 };
   assert.equal(paintsEdge(box("a", 0, bare)), false, "a white box on a white page with no border is invisible");
@@ -875,8 +902,8 @@ test("the score is 100 less its deductions; a subscore falls twice as fast and t
 
 /**
  * The calibration set: synthetic pages the design-scores smoke suite renders
- * as test-app/design-score-*.html. Each defect page differs from the clean one
- * in the one fact it is named for.
+ * as test-app/design-score.html, one `?with=` variant each. Each defect page
+ * differs from the clean one in the one fact it is named for.
  */
 function calibrationPage(kind: "clean" | "touching" | "spaced" | "heights" | "grays" | "defective"): Payload {
   const text = (t: string, color = "rgb(23, 23, 23)") => rec({ text: t, color });

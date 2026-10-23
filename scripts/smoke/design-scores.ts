@@ -6,7 +6,9 @@
  *
  * The contrastive pair is the touching variant against the clean page, which
  * keeps an 8px gap between the same cards; the joined list group present in
- * every variant is the intended join that must never be reported. The checks
+ * every variant is the intended join that must never be reported, as are the
+ * grouped chat bubbles and the carousel's hidden slides. `?with=scrolled` is
+ * a missing gap below a scroll pane's fold, which is reported. The checks
  * are on the ORDER of the scores and on the clean page staying high, so a
  * later change to the weights cannot flatten the scale without failing here.
  */
@@ -49,6 +51,17 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       touching,
     );
     check("the joined list group is never reported", !/score-list-group/.test(touching) && !/score-list-group/.test(all), touching);
+    check(
+      "grouped chat bubbles and a carousel's hidden slides are never reported",
+      !/score-chat|score-carousel/.test(touching) && !/score-chat|score-carousel/.test(all),
+      touching,
+    );
+    const scrolled = await audit("scrolled");
+    check(
+      "cards below a scroll pane's fold are still measured, whatever clips the pane",
+      /TOUCHING CONTAINERS \(1 pair\)/.test(scrolled) && scrolled.includes("in [score-pane-stack]"),
+      scrolled,
+    );
 
     console.log("design scores: the calibration order");
     check("the clean page scores at least 95", scores.clean >= 95, `${shown}\n${clean}`);

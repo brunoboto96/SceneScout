@@ -500,12 +500,43 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     }
     return w;
   };
+  const paintsAny = (s) => {
+    const own = parseColor(s.backgroundColor);
+    return visibleBorder(s) > 0 || (!!s.boxShadow && s.boxShadow !== "none") || !!(own && own[3] > 0);
+  };
+  // The area an element's children can show in: what no overflow:hidden or
+  // clip ancestor (the element included) cuts away. A carousel's slides sit
+  // edge to edge in a track, and only one is ever seen. A scrolling ancestor
+  // does not count: its content can be scrolled into view. Memoized, since
+  // siblings and nested groups share their ancestors' clip.
+  const clips = new Map();
+  const clipOf = (n) => {
+    if (!n || n === document.documentElement) return { l: -Infinity, t: -Infinity, r: Infinity, b: Infinity };
+    const known = clips.get(n);
+    if (known) return known;
+    let c = clipOf(n.parentElement);
+    const s = window.getComputedStyle(n);
+    // Content of a scrolling element can be scrolled into view, whatever clips the element itself.
+    if (s.overflowX === "auto" || s.overflowX === "scroll") c = { ...c, l: -Infinity, r: Infinity };
+    if (s.overflowY === "auto" || s.overflowY === "scroll") c = { ...c, t: -Infinity, b: Infinity };
+    const cx = s.overflowX === "hidden" || s.overflowX === "clip";
+    const cy = s.overflowY === "hidden" || s.overflowY === "clip";
+    if (cx || cy) {
+      const r = n.getBoundingClientRect();
+      if (cx) c = { ...c, l: Math.max(c.l, r.left), r: Math.min(c.r, r.right) };
+      if (cy) c = { ...c, t: Math.max(c.t, r.top), b: Math.min(c.b, r.bottom) };
+    }
+    clips.set(n, c);
+    return c;
+  };
   let parentsSeen = 0;
   for (const parent of all) {
     if (boxGroups.length >= 150 || parentsSeen >= 3000) break;
     if (parent.children.length < 2) continue;
     parentsSeen += 1;
     const boxes = [];
+    let clip = null;
+    let under = null;
     for (const child of parent.children) {
       if (boxes.length >= 40) break;
       if (child.matches(nonContainer) || child.matches(shellSel)) continue;
@@ -513,16 +544,18 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
       if (r.width < 48 || r.height < 24) continue;
       const s = window.getComputedStyle(child);
       if (s.visibility === "hidden" || s.display === "none" || s.display === "contents" || s.position === "absolute" || s.position === "fixed") continue;
-      const border = visibleBorder(s);
-      const own = parseColor(s.backgroundColor);
+      if (!paintsAny(s)) continue;
+      clip = clip || clipOf(parent);
+      // Cut away entirely: nothing of it can be seen beside anything.
+      if (r.right <= clip.l + 1 || r.left >= clip.r - 1 || r.bottom <= clip.t + 1 || r.top >= clip.b - 1) continue;
+      under = under || effBg(parent);
       const shadow = s.boxShadow && s.boxShadow !== "none" ? s.boxShadow.replace(/\\s+/g, " ").slice(0, 400) : "";
-      if (border === 0 && !shadow && !(own && own[3] > 0)) continue;
       boxes.push({
         label: nameBox(child),
         rect: { x: Math.round(r.x * 10) / 10, y: Math.round(r.y * 10) / 10, w: Math.round(r.width * 10) / 10, h: Math.round(r.height * 10) / 10 },
-        border,
+        border: visibleBorder(s),
         bg: normColor(s.backgroundColor),
-        parentBg: effBg(parent),
+        parentBg: under,
         shadow,
         radii: [px(s.borderTopLeftRadius), px(s.borderTopRightRadius), px(s.borderBottomRightRadius), px(s.borderBottomLeftRadius)],
       });
@@ -940,15 +973,19 @@ export interface TouchingPair {
  * Sibling containers drawn as separate boxes with no space between them: both
  * paint an edge (paintsEdge), they are stacked on one axis with 0–2px between
  * them and overlap on the other by at least half the smaller one, and they read
- * as separate cards: a corner where they meet is rounded.
+ * as separate cards: a corner where they meet is rounded, and neither box
+ * has tightened its corners on that side below its own roundest one.
  *
  * The last condition is what keeps intended joins out. A list group, an
  * accordion, a table's rows, tabs over their panel, a segmented control and
  * full-bleed page bands abut on purpose, and they square the corners where
- * they meet, shadowed or not; two rounded cards meeting edge to edge are a
- * missing gap. Shell groups, and shell landmarks among the children (an app
- * bar over the content), are left to the shared-chrome pass. One entry per parent, since the
- * fix is usually one gap on the shared wrapper.
+ * they meet, shadowed or not; grouped chat bubbles tighten them (4px inside,
+ * 18px outside). Two cards rounded alike on every corner meeting edge to edge
+ * are a missing gap. Square cards meeting are not reported: nothing in the
+ * markup tells them from a joined group's items. Shell groups, and shell
+ * landmarks among the children (an app bar over the content), are left to the
+ * shared-chrome pass. One entry per parent, since the fix is usually one gap
+ * on the shared wrapper.
  */
 export function touchingContainers(groups: readonly BoxGroup[]): Array<{ parent: string; pairs: TouchingPair[] }> {
   const out: Array<{ parent: string; pairs: TouchingPair[] }> = [];
@@ -974,6 +1011,9 @@ function touching(p: PaintedBox, q: PaintedBox): TouchingPair | null {
   // A folder tab's square foot on a wider panel whose far corner is rounded is a join, not two cards.
   const roundIn = ([from, to]: [number, number], corners: Array<[number, number]>): boolean =>
     corners.some(([at, r]) => r >= ROUND_CORNER && at >= from - 1 && at <= to + 1);
+  // A box whose corners on the side it meets the other are tighter than its own roundest corner was shaped to join it:
+  // grouped chat bubbles 2px apart with 4px inner corners and 18px outer ones, a list item rounded only on its outer side.
+  const tightened = (b: PaintedBox, meeting: [number, number]): boolean => Math.min(b.radii[meeting[0]], b.radii[meeting[1]]) < Math.max(...b.radii) - 0.5;
   // Vertical stack: `top` above `bottom`, sharing at least half the narrower one's width.
   const [top, bottom] = p.rect.y <= q.rect.y ? [p, q] : [q, p];
   const vGap = bottom.rect.y - (top.rect.y + top.rect.h);
@@ -987,7 +1027,8 @@ function touching(p: PaintedBox, q: PaintedBox): TouchingPair | null {
       [br.x, bottom.radii[0]],
       [br.x + br.w, bottom.radii[1]],
     ]);
-    return facing ? { a: top.label, b: bottom.label, axis: "vertical", gap: Math.max(0, Math.round(vGap)) } : null;
+    const joined = tightened(top, [2, 3]) || tightened(bottom, [0, 1]);
+    return facing && !joined ? { a: top.label, b: bottom.label, axis: "vertical", gap: Math.max(0, Math.round(vGap)) } : null;
   }
   const [left, right] = p.rect.x <= q.rect.x ? [p, q] : [q, p];
   const hGap = right.rect.x - (left.rect.x + left.rect.w);
@@ -1001,7 +1042,8 @@ function touching(p: PaintedBox, q: PaintedBox): TouchingPair | null {
       [rr.y, right.radii[0]],
       [rr.y + rr.h, right.radii[3]],
     ]);
-    if (facing) return { a: left.label, b: right.label, axis: "horizontal", gap: Math.max(0, Math.round(hGap)) };
+    const joined = tightened(left, [1, 2]) || tightened(right, [0, 3]);
+    if (facing && !joined) return { a: left.label, b: right.label, axis: "horizontal", gap: Math.max(0, Math.round(hGap)) };
   }
   return null;
 }
