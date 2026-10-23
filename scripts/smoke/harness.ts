@@ -362,6 +362,21 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end("boom");
       return;
     }
+    // A session check that answers "signed out" after a quarter of a second, then holds its body open for half a
+    // second more (gated-on-scroll.html): a page that acts on the answer starts its next request while this one is
+    // still open, and after the call that started the check has finished its own reads of the page.
+    if (urlPath === "/api/session-check") {
+      const timers: NodeJS.Timeout[] = [];
+      res.on("close", () => timers.forEach(clearTimeout));
+      timers.push(
+        setTimeout(() => {
+          res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
+          res.write("{");
+          timers.push(setTimeout(() => res.end('"signedIn":false}'), 500));
+        }, 250),
+      );
+      return;
+    }
     // A page the server holds back before answering: slower than a lowered page-load limit, faster than the default.
     if (urlPath === "/slow-page") {
       setTimeout(() => {

@@ -146,4 +146,123 @@ async function crawlWaitsForLateSignIn(baseUrl: string, authProject: string, dea
     line(fresh, "gated-soon.html") !== "" && !/AUTH-REDIRECT|REDIRECTED/.test(line(fresh, "gated-soon.html")),
     fresh,
   );
+  await laterCallsSeeLateSignIn(baseUrl, authProject, deadState, liveState);
+}
+
+/**
+ * A redirect to sign-in that the app's scripts make 1.5 s after load: later than a navigation watches its address, so
+ * the navigation reports the route as reached, and only a later call can see the page has gone. With a saved sign-in,
+ * each call compares the address with the one the last call ended on (authloss.ts lateSignInBounce).
+ * Contrastive pair: the same page visited with a stale saved sign-in (each later call reports the bounce, the route is
+ * not covered, and the third raises SESSION AUTH LOST) and with one that signs in (the page stays, nothing is said).
+ */
+async function laterCallsSeeLateSignIn(baseUrl: string, authProject: string, deadState: string, liveState: string): Promise<void> {
+  console.log("auth loss: a redirect to sign-in after the navigation has returned is reported by the next call");
+  const visit = async (state: string, rounds: number): Promise<{ navs: string[]; laters: string[]; unvisited: string[] }> => {
+    const engine = new BrowserEngine();
+    try {
+      await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: state });
+      engine.knownRoutes = ["/gated-later.html"];
+      const navs: string[] = [];
+      const laters: string[] = [];
+      for (let i = 0; i < rounds; i++) {
+        navs.push(await engine.navigate(`${baseUrl}/gated-later.html`));
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        // An action and a snapshot both look: the second round scrolls, the others read the page.
+        laters.push(i === 1 ? await engine.scroll("bottom") : await engine.snapshot(true));
+      }
+      return { navs, laters, unvisited: engine.unvisitedKnownRoutes() };
+    } finally {
+      await engine.close().catch(() => {});
+    }
+  };
+  const stale = await visit(deadState, 3);
+  check(
+    "the navigation returns before the page's late redirect (so only a later call can see it)",
+    stale.navs.every((n) => !n.includes("REDIRECTED")),
+    stale.navs.join("\n---\n"),
+  );
+  check(
+    "a snapshot after the page went to sign-in on its own reports the bounce and the route as not covered",
+    stale.laters[0].includes("SIGNED OUT AFTER LOAD") && stale.laters[0].includes("NOT counted as covered"),
+    stale.laters[0],
+  );
+  check("...and so does an action (a scroll)", stale.laters[1].includes("SIGNED OUT AFTER LOAD"), stale.laters[1]);
+  check("...the third such bounce in a row raises SESSION AUTH LOST", stale.laters[2].includes("SESSION AUTH LOST"), stale.laters[2]);
+  check("...and the route stays in the completion contract", stale.unvisited.includes("/gated-later.html"), JSON.stringify(stale.unvisited));
+  const fresh = await visit(liveState, 1);
+  check(
+    "the same page with a sign-in that works stays put, and the snapshot says nothing of sign-in",
+    !/SIGNED OUT AFTER LOAD|REDIRECTED|AUTH LOST/.test(fresh.laters[0]),
+    fresh.laters[0],
+  );
+  check("...and the route counts as covered", !fresh.unvisited.includes("/gated-later.html"), JSON.stringify(fresh.unvisited));
+  await readWhileSignInLands(baseUrl, authProject, deadState, liveState);
+  await signOutOnPurpose(baseUrl, authProject, liveState);
+}
+
+/**
+ * A redirect to sign-in that lands while a call that only reads the page runs (gated-on-scroll.html sends a signed-out
+ * visitor to sign-in on the first scroll). The scroll did not send the page there, so it is the page going on its own:
+ * counted in place of the navigation that reached it, so three rounds of a navigation and a scroll reach SESSION AUTH
+ * LOST. Contrastive pair: the same rounds signed in say nothing.
+ */
+async function readWhileSignInLands(baseUrl: string, authProject: string, deadState: string, liveState: string): Promise<void> {
+  console.log("auth loss: a redirect to sign-in that lands while a scroll runs is the page going on its own");
+  const rounds = async (state: string): Promise<string[]> => {
+    const engine = new BrowserEngine();
+    try {
+      await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: state });
+      const out: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        await engine.navigate(`${baseUrl}/gated-on-scroll.html`);
+        out.push(await engine.scroll("bottom"));
+      }
+      return out;
+    } finally {
+      await engine.close().catch(() => {});
+    }
+  };
+  const stale = await rounds(deadState);
+  // Every round, not only the first: a round whose redirect has not landed by the time the scroll returns is lost to
+  // the next round's navigation, which cancels it, and the verdict then comes a round late.
+  check(
+    "each scroll during which the page went to sign-in reports it as the page going on its own",
+    stale.every((o) => o.includes("SIGNED OUT AFTER LOAD") && o.includes("while this call ran")),
+    stale.join("\n---\n"),
+  );
+  check("...and the third round in a row raises SESSION AUTH LOST", stale[2].includes("SESSION AUTH LOST"), stale[2]);
+  const fresh = await rounds(liveState);
+  check(
+    "the same rounds signed in say nothing of sign-in",
+    fresh.every((o) => !/SIGNED OUT|AUTH LOST|sign-in page/.test(o)),
+    fresh.join("\n---\n"),
+  );
+}
+
+/**
+ * A tester who clicks "Sign out" lands on the sign-in page on purpose. The click is told where it went, but it is not
+ * a lost sign-in: not counted toward SESSION AUTH LOST, and the page it left is not marked. Contrast: the gated pages
+ * the session then cannot reach are bounces, and only three of those are the verdict.
+ */
+async function signOutOnPurpose(baseUrl: string, authProject: string, liveState: string): Promise<void> {
+  console.log("auth loss: a click on Sign out is said, not counted as a lost sign-in");
+  const engine = new BrowserEngine();
+  try {
+    await engine.attach({ url: `${baseUrl}/signout-link.html`, projectDir: authProject, mode: "read-only", storageStatePath: liveState });
+    const snap = await engine.snapshot();
+    const ref = /(e\d+) link "Sign out"/.exec(snap)?.[1];
+    check("the account page offers its sign-out link", ref !== undefined, snap);
+    if (!ref) return;
+    const out = await engine.click(ref);
+    check("the click is told it went to the sign-in page", /went from \/signout-link\.html to the sign-in page \/login/.test(out), out);
+    check("...and it is not reported as a lost sign-in", !/SIGNED OUT|NOT counted as covered|AUTH LOST/.test(out), out);
+    const nav1 = await engine.navigate(`${baseUrl}/gated.html`);
+    const nav2 = await engine.navigate(`${baseUrl}/gated.html`);
+    check("two bounces after the sign-out are not yet the verdict", !nav1.includes("AUTH LOST") && !nav2.includes("AUTH LOST"), nav2);
+    const nav3 = await engine.navigate(`${baseUrl}/gated.html`);
+    check("...and the third is", nav3.includes("SESSION AUTH LOST"), nav3);
+  } finally {
+    await engine.close().catch(() => {});
+  }
 }

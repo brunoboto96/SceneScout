@@ -96,7 +96,7 @@ import {
   type CreationEvidence,
   type OwnedIds,
 } from "../src/engine/ownership.ts";
-import { AUTH_LOSS_STREAK, AuthLossTracker, LOGIN_ROUTE_RE, shouldReattach } from "../src/engine/authloss.ts";
+import { AUTH_LOSS_STREAK, AuthLossTracker, lateSignInBounce, lateSignInVerdict, LOGIN_ROUTE_RE, shouldReattach } from "../src/engine/authloss.ts";
 import {
   bodyDigest,
   headerOf,
@@ -466,6 +466,89 @@ test("a clean sweep produces no batch verdict", () => {
   t.record({ requestedRoute: "/a", landedRoute: "/a", bounced: false, role: "admin" });
   t.clear();
   assert.equal(t.batchVerdict(), "", "nothing went wrong, so nothing is claimed");
+});
+
+// ---------------------------------------------------------------------------
+// A sign-in page the page went to on its own, between or during calls
+// ---------------------------------------------------------------------------
+
+test("a page that went to sign-in since the session last saw it is a bounce of that page, only with a sign-in held", () => {
+  const base = "http://app.test";
+  const on = (seen: string, now: string, watching = true) => lateSignInBounce({ watching, seen, now, baseUrl: base });
+  // Contrastive pairs: each differs from the bounce in the one fact that clears it.
+  const cases: Array<[string | null, string | null, string]> = [
+    [on(`${base}/things/7`, `${base}/login?redirectTo=%2Fthings%2F7`), `${base}/things/7`, "on sign-in now, not before: the page it was on bounced"],
+    [on(`${base}/things/7`, `${base}/login?redirectTo=%2Fthings%2F7`, false), null, "the same move without a sign-in held costs and says nothing"],
+    [on(`${base}/things/7`, `${base}/things/8`), null, "a move to a page that is not a sign-in page"],
+    [on(`${base}/things/7`, `${base}/things/7`), null, "the page did not move"],
+    [on(`${base}/login`, `${base}/login?next=%2F`), null, "already on a sign-in page (asked for, or a bounce already recorded)"],
+    [on(`${base}/auth/start`, `${base}/signin`), null, "from one sign-in page to another"],
+    [on(`${base}/settings`, `${base}/auth/callback`), `${base}/settings`, "each sign-in shape counts (auth)"],
+    [on(`${base}/settings`, `${base}/sign-in`), `${base}/settings`, "each sign-in shape counts (sign-in)"],
+    [on(`${base}/things/7`, "https://idp.example/login"), null, "a sign-in page on another origin is the origin fence's"],
+    [on("about:blank", `${base}/login`), null, "about:blank is no page of the app"],
+    [on("", `${base}/login`), null, "nothing seen yet"],
+    [on(`${base}/loginhelp`, `${base}/login`), `${base}/loginhelp`, "a path that merely starts like one is not a sign-in page"],
+  ];
+  for (const [got, want, why] of cases) assert.equal(got, want, why);
+});
+
+test("a sign-in page found as an action ends is said, not counted: the tester may have signed out on purpose", () => {
+  // Contrastive pairs: the same sign-in page, and the one fact that decides it is when it was found and by what call.
+  const cases: Array<[ReturnType<typeof lateSignInVerdict>, ReturnType<typeof lateSignInVerdict>, string]> = [
+    [lateSignInVerdict("moves", "end"), "note", "a click on Sign out or a Log in link lands there on purpose"],
+    [lateSignInVerdict("moves", "before"), "count", "found before the next action, the page went there on its own"],
+    [lateSignInVerdict("reads", "end"), "count", "a snapshot or a scroll cannot send the page to sign-in: it went on its own"],
+    [lateSignInVerdict("reads", "before"), "count", "...and before a read, likewise"],
+    [lateSignInVerdict("judges", "end"), "none", "a navigation, crawl or plan has recorded its own landing"],
+    [lateSignInVerdict("judges", "before"), "count", "...but what happened before it ran is still the page going on its own"],
+  ];
+  for (const [got, want, why] of cases) assert.equal(got, want, why);
+});
+
+test("a late bounce takes back the navigation that reached the page, so a dead session with a late guard reaches the verdict", () => {
+  // Each round: the navigation lands where it asked (the guard has not fired yet), then a later call finds sign-in.
+  const lateRounds = (t: AuthLossTracker, late: boolean): string => {
+    let notice = "";
+    for (let i = 0; i < AUTH_LOSS_STREAK; i++) {
+      t.record({ requestedRoute: "/reports", landedRoute: "/reports", bounced: false, role: "member" });
+      t.take();
+      if (late) t.recordLate({ requestedRoute: "/reports", landedRoute: "/login", role: "member" });
+      else t.record({ requestedRoute: "/reports", landedRoute: "/login", bounced: true, role: "member" });
+      notice = t.take();
+    }
+    return notice;
+  };
+  const withLate = new AuthLossTracker();
+  withLate.beginSession("file", "member");
+  const notice = lateRounds(withLate, true);
+  assert.match(notice, /SESSION AUTH LOST/, "the third late bounce in a row is the verdict");
+  assert.match(notice, /NOT counted as covered/);
+  assert.equal(withLate.lost, true);
+  // Contrast: the same bounces counted on top of the navigation that reached the page each restart the streak.
+  const counted = new AuthLossTracker();
+  counted.beginSession("file", "member");
+  assert.doesNotMatch(lateRounds(counted, false), /SESSION AUTH LOST/);
+  assert.equal(counted.lost, false);
+  // A role session's late verdict earns its one re-attach, back to the page that went to sign-in.
+  const role = new AuthLossTracker();
+  role.beginSession("role", "member");
+  lateRounds(role, true);
+  assert.deepEqual(role.takeReattach(), { returnTo: "/reports", retry: [] });
+});
+
+test("a late bounce of a page other than the last navigation's counts as one more bounce, taking nothing back", () => {
+  const t = new AuthLossTracker();
+  t.beginSession("file", "member");
+  t.record({ requestedRoute: "/a", landedRoute: "/login", bounced: true, role: "member" });
+  t.record({ requestedRoute: "/b", landedRoute: "/b", bounced: false, role: "member" });
+  // The session moved on from /b (a click to /c, say) before /c went to sign-in: the clear navigation to /b stands.
+  t.recordLate({ requestedRoute: "/c", landedRoute: "/login", role: "member" });
+  t.record({ requestedRoute: "/d", landedRoute: "/login", bounced: true, role: "member" });
+  t.take();
+  assert.equal(t.lost, false, "two bounces since /b landed signed in");
+  t.record({ requestedRoute: "/e", landedRoute: "/login", bounced: true, role: "member" });
+  assert.equal(t.lost, true);
 });
 
 // ---------------------------------------------------------------------------

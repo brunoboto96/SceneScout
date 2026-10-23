@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area (guard on scroll)</title>
+  </head>
+  <body>
+    <main style="min-height: 3000px">
+      <h1 data-testid="gated-on-scroll-heading">Gated area</h1>
+      <p>Reports for signed-in members.</p>
+    </main>
+    <script>
+      // A client-side auth guard that checks the sign-in when the visitor first scrolls (a lazy section loading behind a
+      // session check) and sends a signed-out visitor to sign-in on the check's answer. A scroll only reads the page, so
+      // a sign-in page it ends on is the page going there on its own while the call ran. Signed in (the "smoke-auth"
+      // flag a storage state sets), the page stays put.
+      //
+      // The check is a request, started in the same task as the scroll, and the redirect starts on its answer while
+      // the request is still open (the server answers after 250 ms and holds its body back): the page is busy from the
+      // scroll to the sign-in page, so the scroll's wait for the page to settle sees it on any machine. A bare timer after the scroll event is not: a
+      // late frame can push it past that wait, and the next call's navigation then cancels the redirect.
+      history.scrollRestoration = "manual";
+      var checked = false;
+      function checkSession() {
+        if (checked || scrollY < 100) return;
+        checked = true;
+        try {
+          if (localStorage.getItem("smoke-auth") === "yes") return;
+        } catch (e) {
+          /* storage unavailable — treat as signed out */
+        }
+        fetch("/api/session-check", { cache: "no-store" }).then(function (res) {
+          if (res.status === 401) location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
+        });
+      }
+      // A scroll made in script is checked as it happens; one made by hand, when its scroll event arrives.
+      var nativeScrollTo = window.scrollTo.bind(window);
+      window.scrollTo = function () {
+        nativeScrollTo.apply(null, arguments);
+        checkSession();
+      };
+      addEventListener("scroll", checkSession);
+    </script>
+  </body>
+</html>

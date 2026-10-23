@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area (guard long after load)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="gated-later-heading">Gated area</h1>
+      <p>Reports for signed-in members.</p>
+    </main>
+    <script>
+      // A client-side auth guard that sends a signed-out visitor to sign-in 1.5 s after the page has loaded, as an app
+      // does whose token check answers slowly. That is later than a navigation or a crawl watches the address, so only a
+      // later call can see it. Signed in (the "smoke-auth" flag a storage state sets), the same page stays put: that is
+      // the one fact the per-call sign-in check must turn on. gated-soon.html is the crawl's; gated-late.html the attach's.
+      addEventListener("load", function () {
+        setTimeout(function () {
+          try {
+            if (localStorage.getItem("smoke-auth") === "yes") return;
+          } catch (e) {
+            /* storage unavailable — treat as signed out */
+          }
+          location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
+        }, 1500);
+      });
+    </script>
+  </body>
+</html>

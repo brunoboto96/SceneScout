@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Account (with a sign-out link)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="signout-link-heading">Your account</h1>
+      <!--
+        A sign-out link as many apps have one: it drops the sign-in (the "smoke-auth" flag a storage state sets) and goes
+        to the sign-in page. A tester who clicks it lands on sign-in on purpose: that is not a sign-in that ran out.
+      -->
+      <a data-testid="signout-link-action" href="/login" onclick="localStorage.removeItem('smoke-auth')">Sign out</a>
+    </main>
+  </body>
+</html>
