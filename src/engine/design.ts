@@ -166,6 +166,31 @@ interface DesignPagePayload {
   density: number;
   /** Filled engine-side (needs trusted keyboard events, not in-page JS). */
   focusSamples: FocusSample[];
+  /** Sibling boxes that paint an edge, grouped by parent: what touchingContainers() reads. Absent from an older collector. */
+  boxGroups?: BoxGroup[];
+}
+
+/** One child box that paints something of its own: a border, a background or a shadow. Measured in-page, judged by touchingContainers(). */
+export interface PaintedBox {
+  label: string;
+  rect: { x: number; y: number; w: number; h: number };
+  /** The widest visible border side, in px; 0 for none. */
+  border: number;
+  /** Its own computed background colour (normalized rgba), "unknown" when unreadable. */
+  bg: string;
+  /** The background it sits on: the parent's effective one, or "image"/"unknown". */
+  parentBg: string;
+  /** Computed box-shadow, or "". */
+  shadow: string;
+  /** Corner radii in px: top-left, top-right, bottom-right, bottom-left. */
+  radii: [number, number, number, number];
+}
+
+/** A parent's painted children, in document order, and whether the parent sits in the app shell. */
+export interface BoxGroup {
+  parent: string;
+  shell: boolean;
+  boxes: PaintedBox[];
 }
 
 export interface DesignPayload {
@@ -446,6 +471,64 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     const label = tid ? "[" + tid + "]" : (img.getAttribute("alt") || (img.getAttribute("src") || "").split("/").pop() || "img").slice(0, 40);
     images.push({ label, nw: img.naturalWidth, nh: img.naturalHeight, rw: Math.round(r.width), rh: Math.round(r.height), fit: window.getComputedStyle(img).objectFit || "fill" });
   }
+  // Sibling boxes that paint an edge (a border, their own background or a
+  // shadow), grouped by parent, for the touching-containers rule. Only raw
+  // measurements are read here; touchingContainers() decides what touches.
+  const boxGroups = [];
+  const nonContainer = interactiveSel + ', table, thead, tbody, tfoot, tr, td, th, col, colgroup, caption, svg, img, picture, video, canvas, br, hr';
+  const nameBox = (el) => {
+    const tid = el.getAttribute("data-testid");
+    if (tid) return "[" + tid + "]";
+    const head = el.querySelector("h1, h2, h3, h4, h5, h6, legend, [role=heading]");
+    const words = ((head || el).textContent || "").trim().replace(/\\s+/g, " ").slice(0, 30);
+    return "<" + el.tagName.toLowerCase() + "> \\"" + (words || "(no text)") + "\\"";
+  };
+  const nameParent = (el) => {
+    const tid = el.getAttribute("data-testid");
+    if (tid) return "[" + tid + "]";
+    const id = el.id ? "#" + el.id : "";
+    const cls = !id && typeof el.className === "string" && el.className.trim() ? "." + el.className.trim().split(/\\s+/)[0].slice(0, 40) : "";
+    return "<" + el.tagName.toLowerCase() + id + cls + ">";
+  };
+  const visibleBorder = (s) => {
+    let w = 0;
+    for (const side of ["Top", "Right", "Bottom", "Left"]) {
+      const st = s["border" + side + "Style"];
+      const c = parseColor(s["border" + side + "Color"]);
+      if (st === "none" || st === "hidden" || !c || c[3] === 0) continue;
+      w = Math.max(w, px(s["border" + side + "Width"]));
+    }
+    return w;
+  };
+  let parentsSeen = 0;
+  for (const parent of all) {
+    if (boxGroups.length >= 150 || parentsSeen >= 3000) break;
+    if (parent.children.length < 2) continue;
+    parentsSeen += 1;
+    const boxes = [];
+    for (const child of parent.children) {
+      if (boxes.length >= 40) break;
+      if (child.matches(nonContainer) || child.matches(shellSel)) continue;
+      const r = child.getBoundingClientRect();
+      if (r.width < 48 || r.height < 24) continue;
+      const s = window.getComputedStyle(child);
+      if (s.visibility === "hidden" || s.display === "none" || s.display === "contents" || s.position === "absolute" || s.position === "fixed") continue;
+      const border = visibleBorder(s);
+      const own = parseColor(s.backgroundColor);
+      const shadow = s.boxShadow && s.boxShadow !== "none" ? s.boxShadow.replace(/\\s+/g, " ").slice(0, 400) : "";
+      if (border === 0 && !shadow && !(own && own[3] > 0)) continue;
+      boxes.push({
+        label: nameBox(child),
+        rect: { x: Math.round(r.x * 10) / 10, y: Math.round(r.y * 10) / 10, w: Math.round(r.width * 10) / 10, h: Math.round(r.height * 10) / 10 },
+        border,
+        bg: normColor(s.backgroundColor),
+        parentBg: effBg(parent),
+        shadow,
+        radii: [px(s.borderTopLeftRadius), px(s.borderTopRightRadius), px(s.borderBottomRightRadius), px(s.borderBottomLeftRadius)],
+      });
+    }
+    if (boxes.length >= 2) boxGroups.push({ parent: nameParent(parent), shell: inShell(parent), boxes });
+  }
   const page = {
     scrollW: Math.max(document.documentElement.scrollWidth, document.body ? document.body.scrollWidth : 0),
     clientW: window.innerWidth,
@@ -453,6 +536,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     images,
     density,
     focusSamples: [],
+    boxGroups,
   };
   return { records: out, page };
 })()`;
@@ -773,7 +857,16 @@ function tooSmall(r: StyleRecord, all: readonly StyleRecord[]): boolean {
  * craft suggestion is a judgement call and is deliberately not.
  */
 export interface DesignDefect {
-  rule: "contrast" | "tiny-target" | "clipped-text" | "focus-indicator" | "image-aspect" | "horizontal-scroll" | "off-grid-spacing" | "indistinct-link";
+  rule:
+    | "contrast"
+    | "tiny-target"
+    | "clipped-text"
+    | "focus-indicator"
+    | "image-aspect"
+    | "horizontal-scroll"
+    | "touching-containers"
+    | "off-grid-spacing"
+    | "indistinct-link";
   detail: string;
   /** Part of the shared app shell rather than this page: one fix, however many pages show it. */
   chrome?: boolean;
@@ -786,6 +879,8 @@ export interface DesignScore {
   craft: number;
   consistency: number;
   clarity: number;
+  /** Every deduction behind the numbers, largest first (scoreFrom). */
+  deductions: ScoreDeduction[];
 }
 
 /** An image the audit measured: its natural size, its rendered box and its computed object-fit. */
@@ -811,6 +906,154 @@ export function aspectDistortion(img: PageImage): number | null {
   if (img.fit !== "fill") return null;
   const off = Math.abs(img.rw / img.rh / (img.nw / img.nh) - 1);
   return off > ASPECT_TOLERANCE ? off : null;
+}
+
+/** At most this many px between two boxes on the axis they are stacked on, and they touch. */
+const TOUCH_GAP = 2;
+/** A corner this round reads as the corner of a separate card, not of a joined group. */
+const ROUND_CORNER = 2;
+
+/**
+ * Whether a box shows an edge against what it sits on: a visible border, a
+ * drawn shadow, or a background that differs from its parent's. A white box
+ * on a white page with neither border nor shadow is invisible, so two of them
+ * touching is nothing anyone sees.
+ */
+export function paintsEdge(b: PaintedBox): boolean {
+  if (b.border >= 1 || shadowLayers(b.shadow).length > 0) return true;
+  const own = parseRgb(b.bg);
+  const under = parseRgb(b.parentBg);
+  if (!own || own[3] === 0 || !under) return false;
+  const a = own[3];
+  return [0, 1, 2].some((i) => Math.abs(own[i] * a + under[i] * (1 - a) - under[i]) > 6);
+}
+
+/** Two boxes that touch, the axis they are stacked on and the px between them. */
+export interface TouchingPair {
+  a: string;
+  b: string;
+  axis: "vertical" | "horizontal";
+  gap: number;
+}
+
+/**
+ * Sibling containers drawn as separate boxes with no space between them: both
+ * paint an edge (paintsEdge), they are stacked on one axis with 0–2px between
+ * them and overlap on the other by at least half the smaller one, and they read
+ * as separate cards: a corner where they meet is rounded.
+ *
+ * The last condition is what keeps intended joins out. A list group, an
+ * accordion, a table's rows, tabs over their panel, a segmented control and
+ * full-bleed page bands abut on purpose, and they square the corners where
+ * they meet, shadowed or not; two rounded cards meeting edge to edge are a
+ * missing gap. Shell groups, and shell landmarks among the children (an app
+ * bar over the content), are left to the shared-chrome pass. One entry per parent, since the
+ * fix is usually one gap on the shared wrapper.
+ */
+export function touchingContainers(groups: readonly BoxGroup[]): Array<{ parent: string; pairs: TouchingPair[] }> {
+  const out: Array<{ parent: string; pairs: TouchingPair[] }> = [];
+  for (const g of groups) {
+    if (g.shell) continue;
+    const boxes = g.boxes.filter(paintsEdge);
+    const pairs: TouchingPair[] = [];
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const pair = touching(boxes[i], boxes[j]);
+        if (pair) pairs.push(pair);
+      }
+    }
+    if (pairs.length > 0) out.push({ parent: g.parent, pairs });
+  }
+  return out;
+}
+
+/** The pair's touch, if the two boxes touch as separate cards; null otherwise. */
+function touching(p: PaintedBox, q: PaintedBox): TouchingPair | null {
+  const span = (a0: number, a1: number, b0: number, b1: number): [number, number] => [Math.max(a0, b0), Math.min(a1, b1)];
+  // A corner counts only where the two boxes meet: its position along the shared edge lies inside the overlap.
+  // A folder tab's square foot on a wider panel whose far corner is rounded is a join, not two cards.
+  const roundIn = ([from, to]: [number, number], corners: Array<[number, number]>): boolean =>
+    corners.some(([at, r]) => r >= ROUND_CORNER && at >= from - 1 && at <= to + 1);
+  // Vertical stack: `top` above `bottom`, sharing at least half the narrower one's width.
+  const [top, bottom] = p.rect.y <= q.rect.y ? [p, q] : [q, p];
+  const vGap = bottom.rect.y - (top.rect.y + top.rect.h);
+  const hs = span(top.rect.x, top.rect.x + top.rect.w, bottom.rect.x, bottom.rect.x + bottom.rect.w);
+  if (vGap >= -0.5 && vGap <= TOUCH_GAP && hs[1] - hs[0] >= Math.min(top.rect.w, bottom.rect.w) / 2) {
+    const tr = top.rect;
+    const br = bottom.rect;
+    const facing = roundIn(hs, [
+      [tr.x + tr.w, top.radii[2]],
+      [tr.x, top.radii[3]],
+      [br.x, bottom.radii[0]],
+      [br.x + br.w, bottom.radii[1]],
+    ]);
+    return facing ? { a: top.label, b: bottom.label, axis: "vertical", gap: Math.max(0, Math.round(vGap)) } : null;
+  }
+  const [left, right] = p.rect.x <= q.rect.x ? [p, q] : [q, p];
+  const hGap = right.rect.x - (left.rect.x + left.rect.w);
+  const vs = span(left.rect.y, left.rect.y + left.rect.h, right.rect.y, right.rect.y + right.rect.h);
+  if (hGap >= -0.5 && hGap <= TOUCH_GAP && vs[1] - vs[0] >= Math.min(left.rect.h, right.rect.h) / 2) {
+    const lr = left.rect;
+    const rr = right.rect;
+    const facing = roundIn(vs, [
+      [lr.y, left.radii[1]],
+      [lr.y + lr.h, left.radii[2]],
+      [rr.y, right.radii[0]],
+      [rr.y + rr.h, right.radii[3]],
+    ]);
+    if (facing) return { a: left.label, b: right.label, axis: "horizontal", gap: Math.max(0, Math.round(hGap)) };
+  }
+  return null;
+}
+
+/** Which part of the score a deduction comes off. */
+export type ScoreDimension = "a11y" | "craft" | "consistency" | "clarity";
+
+/**
+ * One reason a page lost points: what was measured, how many times, and the
+ * points it cost the overall score. The report lists the largest beside the
+ * score so a ranking can be checked against what caused it.
+ */
+export interface ScoreDeduction {
+  dimension: ScoreDimension;
+  /** What was measured, in a few words: "touching containers", "6 button heights". */
+  label: string;
+  /** How many times; shown as ×n when more than one. */
+  count: number;
+  points: number;
+}
+
+/** "-16 touching containers ×2": a deduction as the report prints it. */
+export function formatDeduction(d: ScoreDeduction): string {
+  return `-${d.points} ${d.label}${d.count > 1 ? ` ×${d.count}` : ""}`;
+}
+
+/** Deductions the report prints beside a page's score. */
+export const TOP_DEDUCTIONS = 3;
+
+/**
+ * A subscore falls this many times faster than the overall: each dimension is
+ * one part of four, so a cost the overall takes once is a larger share of the
+ * part it belongs to, and the dimension that holds the cause shows it.
+ */
+const SUBSCORE_FACTOR = 2;
+
+/**
+ * The page's score from its deductions. Overall is 100 less every deduction;
+ * each subscore is 100 less SUBSCORE_FACTOR times its own. Both floor at 0.
+ */
+export function scoreFrom(deductions: readonly ScoreDeduction[]): DesignScore {
+  const sum = (dim?: ScoreDimension): number => deductions.filter((d) => !dim || d.dimension === dim).reduce((n, d) => n + d.points, 0);
+  const sub = (dim: ScoreDimension): number => Math.max(0, Math.round(100 - SUBSCORE_FACTOR * sum(dim)));
+  const sorted = deductions.filter((d) => d.points > 0).sort((a, b) => b.points - a.points || a.label.localeCompare(b.label));
+  return {
+    overall: Math.max(0, Math.round(100 - sum())),
+    a11y: sub("a11y"),
+    craft: sub("craft"),
+    consistency: sub("consistency"),
+    clarity: sub("clarity"),
+    deductions: sorted,
+  };
 }
 
 /**
@@ -860,9 +1103,11 @@ export function analyzeDesign(
   const { pad, mar } = spacingSection(records, sections);
   const tiny = tinyTargetSection(records, allRecords, sections);
   const clipped = clippedSection(records, sections);
+  const touchingGroups = touchingSection(page, sections);
+  const touchingPairs = touchingGroups.reduce((n, g) => n + g.pairs.length, 0);
   const nearMiss = alignmentSection(records, viewport, sections);
   const { consistency, buttonRadii, buttonHeights, shadows } = consistencySection(records, sections);
-  const { palette, grays, hueFamilies } = paletteSection(records, prose, sections);
+  const { palette, grays, hueFamilies, pureBlackCount } = paletteSection(records, prose, sections);
   const slopTells = slopTellSection(records, sections);
   const structure = structureSection(page, sections);
   const names = namesSection(records, sections);
@@ -879,26 +1124,49 @@ export function analyzeDesign(
     `${grays.length} grays (4–6) · ${hueFamilies.size} accent hue families (1–3 + status) · ${gridPct}% spacing on 4px grid · ` +
     `${page.density} interactive elements in first viewport${page.density > 40 ? " (dense — consider progressive disclosure)" : ""}`;
 
-  // ---- Multi-indicator PAGE SCORE. Deductive: start at 100 per dimension,
-  //      subtract per measured issue, floor at 0. Weights favour a11y and
-  //      task clarity — a page can be pretty and still hard to use.
-  const floor0 = (n: number): number => Math.max(0, Math.round(n));
-  const a11yScore = floor0(100 - contrastFails.length * 4 - focusless.length * 6 - tiny.length * 3 - names.unnamed.length * 6 - names.placeholder.length * 4);
-  const craftScore = floor0(100 - readability.length * 4 - palette.length * 4 - slopTells.length * 5 - clipped.length * 3 - distorted.length * 4);
-  const consistencyScore = floor0(
-    100 -
-      consistency.length * 8 -
-      (pad.n > 10 && pad.pct > 20 ? 10 : 0) -
-      (mar.n > 10 && mar.pct > 20 ? 6 : 0) -
-      nearMiss.length * 3 -
-      (sizes.length > 7 ? 5 : 0) -
-      (nearDupSizes.length > 0 ? 5 : 0),
-  );
-  const clarityScore = floor0(100 - effort.length * 8 - (page.scrollW > viewport.width + 8 ? 15 : 0) - structure.length * 4);
-  const overall = Math.round(a11yScore * 0.3 + craftScore * 0.25 + consistencyScore * 0.2 + clarityScore * 0.25);
+  // ---- Multi-indicator PAGE SCORE, from named deductions (scoreFrom). Each
+  //      rule costs points per occurrence up to a cap, so no one rule can sink
+  //      a page alone, and craft and consistency cost enough to move the
+  //      overall. Calibrated on the synthetic pages in design-test and the
+  //      design-scores smoke suite: a clean page stays at 100, each defect
+  //      class lands below it, and a page with several lands below 80.
+  const ded: ScoreDeduction[] = [];
+  const add = (dimension: ScoreDimension, label: string, count: number, each: number, cap: number): void => {
+    if (count > 0) ded.push({ dimension, label, count, points: Math.min(cap, count * each) });
+  };
+  const beyond = (n: number, healthy: number): number => Math.max(0, n - healthy);
+  add("a11y", "contrast failures", contrastFails.length, 3, 15);
+  add("a11y", "no visible focus", focusless.length, 4, 12);
+  add("a11y", "small targets", tiny.length, 2, 10);
+  add("a11y", "unnamed controls", names.unnamed.length, 5, 15);
+  add("a11y", "placeholder-only labels", names.placeholder.length, 3, 9);
+  add("craft", "touching containers", touchingPairs, 8, 24);
+  add("craft", "readability", readability.length, 2, 8);
+  add("craft", `${grays.length} grays`, beyond(grays.length, 6) > 0 ? 1 : 0, 2 * beyond(grays.length, 6), 12);
+  add("craft", `${hueFamilies.size} accent hues`, beyond(hueFamilies.size, 5) > 0 ? 1 : 0, 2 * beyond(hueFamilies.size, 5), 6);
+  add("craft", "pure black body text", pureBlackCount > 0 ? 1 : 0, 2, 2);
+  add("craft", "template tells", slopTells.length, 3, 9);
+  add("craft", "clipped text", clipped.length, 3, 9);
+  add("craft", "distorted images", distorted.length, 4, 8);
+  add("consistency", `${buttonHeights.length} button heights`, beyond(buttonHeights.length, 3) > 0 ? 1 : 0, 4 * beyond(buttonHeights.length, 3), 12);
+  add("consistency", `${buttonRadii.length} button radii`, beyond(buttonRadii.length, 2) > 0 ? 1 : 0, 3 * beyond(buttonRadii.length, 2), 9);
+  add("consistency", `${shadows.size} shadow styles`, beyond(shadows.size, 3) > 0 ? 1 : 0, 2 * beyond(shadows.size, 3), 8);
+  add("consistency", "paddings off the 4px grid", pad.n > 10 && pad.pct > 20 ? 1 : 0, 6, 6);
+  add("consistency", "margins off the 4px grid", mar.n > 10 && mar.pct > 20 ? 1 : 0, 4, 4);
+  add("consistency", "near-miss alignments", nearMiss.length, 2, 6);
+  add("consistency", `${sizes.length} font sizes`, beyond(sizes.length, 7) > 0 ? 1 : 0, 2 * beyond(sizes.length, 7), 8);
+  add("consistency", "font sizes under 1px apart", nearDupSizes.length > 0 ? 1 : 0, 3, 3);
+  add("clarity", "task-effort issues", effort.length, 6, 18);
+  add("clarity", "sideways scroll", page.scrollW > viewport.width + 8 ? 1 : 0, 12, 12);
+  add("clarity", "heading structure", structure.length, 3, 9);
+  const score = scoreFrom(ded);
+  const { overall, a11y: a11yScore, craft: craftScore, consistency: consistencyScore, clarity: clarityScore } = score;
   const grade = overall >= 90 ? "A" : overall >= 80 ? "B" : overall >= 70 ? "C" : overall >= 60 ? "D" : "E";
-  const score: DesignScore = { overall, a11y: a11yScore, craft: craftScore, consistency: consistencyScore, clarity: clarityScore };
-  const scoreLine = `PAGE SCORE: ${overall}/100 (${grade}) — a11y ${a11yScore} · craft ${craftScore} · consistency ${consistencyScore} · task-clarity ${clarityScore}`;
+  const top = score.deductions.slice(0, TOP_DEDUCTIONS).map(formatDeduction);
+  const more = score.deductions.length - top.length;
+  const scoreLine =
+    `PAGE SCORE: ${overall}/100 (${grade}) — a11y ${a11yScore} · craft ${craftScore} · consistency ${consistencyScore} · task-clarity ${clarityScore}\n` +
+    (top.length === 0 ? `  why: no deductions` : `  why: ${top.join(" · ")}${more > 0 ? ` (+${more} smaller)` : ""}`);
 
   const { chromeSection, chromeDefects } = sharedChromeSection(chromeRecords, allRecords, chromeIndistinct, dominantBody);
 
@@ -924,6 +1192,7 @@ export function analyzeDesign(
     ...(page.scrollW > viewport.width + 8
       ? [{ rule: "horizontal-scroll" as const, detail: `content ${page.scrollW}px wide in a ${viewport.width}px viewport` }]
       : []),
+    ...touchingGroups.map((g) => ({ rule: "touching-containers" as const, detail: touchingDetail(g) })),
     // The same thresholds as the SPACING and AFFORDANCES lines above, so the check and the audit agree on what they saw.
     // Worded without counts or percentages: a spacing scale and a link style are app-wide conventions, so the same
     // values on ten pages are one entry on ten routes, and the entry's fingerprint does not move when content does.
@@ -1116,6 +1385,31 @@ function alignmentSection(records: StyleRecord[], viewport: { width: number; hei
   return nearMiss;
 }
 
+/** One wording for a parent's touching boxes, in the report and as a defect: the parent first, since the fix is usually its gap. */
+function touchingDetail(g: { parent: string; pairs: TouchingPair[] }): string {
+  const shown = g.pairs
+    .slice(0, 3)
+    .map((p) => `${p.a} and ${p.b} ${p.gap}px apart`)
+    .join("; ");
+  return `in ${g.parent}: ${shown}${g.pairs.length > 3 ? `; +${g.pairs.length - 3} more` : ""}`;
+}
+
+/** Section 7b of the audit, TOUCHING CONTAINERS: sibling cards drawn edge to edge with no gap. */
+function touchingSection(page: DesignPagePayload, sections: string[]): Array<{ parent: string; pairs: TouchingPair[] }> {
+  const groups = touchingContainers(page.boxGroups ?? []);
+  const pairs = groups.reduce((n, g) => n + g.pairs.length, 0);
+  if (groups.length > 0) {
+    sections.push(
+      `TOUCHING CONTAINERS (${pairs} pair${pairs === 1 ? "" : "s"}):\n` +
+        groups
+          .slice(0, 6)
+          .map((g) => `  ⚠ ${touchingDetail(g)} — separate boxes with 0–${TOUCH_GAP}px between them; give the parent a gap`)
+          .join("\n"),
+    );
+  }
+  return groups;
+}
+
 /** Section 8 of the audit, CONSISTENCY: button radii and heights, and shadow styles. */
 function consistencySection(
   records: StyleRecord[],
@@ -1127,7 +1421,7 @@ function consistencySection(
   const radiusLabel = (r: StyleRecord): string => (r.radius >= r.rect.h / 2 && r.radius > 0 ? "pill" : `${r.radius}px`);
   const buttons = records.filter((r) => r.interactive && r.tag === "button");
   const buttonRadii = [...new Set(buttons.map(radiusLabel))];
-  if (buttonRadii.length > 3) {
+  if (buttonRadii.length > 2) {
     consistency.push(`→ buttons use ${buttonRadii.length} different corner radii (${buttonRadii.slice(0, 6).join(", ")}) — pick one radius per control tier`);
   }
   const buttonHeights = [...new Set(buttons.filter((b) => b.rect.h >= 12 && b.rect.h <= 80).map((b) => Math.round(b.rect.h / 2) * 2))].sort((a, b) => a - b);
@@ -1142,7 +1436,7 @@ function consistencySection(
     const key = elevationKey(r.shadow);
     if (key) shadows.set(key, (shadows.get(key) ?? 0) + 1);
   }
-  if (shadows.size > 4) {
+  if (shadows.size > 3) {
     const keys = [...shadows.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
     const top = keys.slice(0, 3).map((k) => `"${distinguishingLayer(k, keys.slice(0, 3)).slice(0, 60)}"`);
     consistency.push(`→ ${shadows.size} distinct box-shadow styles (${top.join(", ")}…) — an elevation system needs 2–3 levels, not one per component`);
@@ -1156,7 +1450,7 @@ function paletteSection(
   records: StyleRecord[],
   prose: StyleRecord[],
   sections: string[],
-): { palette: string[]; grays: Array<{ rgb: [number, number, number]; n: number }>; hueFamilies: Map<number, number> } {
+): { palette: string[]; grays: Array<{ rgb: [number, number, number]; n: number }>; hueFamilies: Map<number, number>; pureBlackCount: number } {
   // ---- 9. PALETTE discipline: near-black beats #000; a gray SCALE beats ad-hoc grays; few accent hues beat many.
   const palette: string[] = [];
   const pureBlack = prose.filter((r) => r.color === "rgba(0, 0, 0, 1)" && (parseRgb(r.bg) ?? [0, 0, 0]).slice(0, 3).every((c) => c >= 250));
@@ -1192,7 +1486,7 @@ function paletteSection(
     );
   }
   if (palette.length > 0) sections.push(`PALETTE:\n` + palette.map((s) => `  ${s}`).join("\n"));
-  return { palette, grays, hueFamilies };
+  return { palette, grays, hueFamilies, pureBlackCount: pureBlack.length };
 }
 
 /** Section 9b of the audit, AI-SLOP TELLS: stylistic patterns that read as template output. */

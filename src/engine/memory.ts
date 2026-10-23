@@ -523,6 +523,8 @@ export interface PageScore {
   craft: number;
   consistency: number;
   clarity: number;
+  /** What the points were lost to, largest first (design.ts ScoreDeduction); absent on a score an older engine kept. */
+  deductions?: Array<{ dimension: string; label: string; count: number; points: number }>;
   at: string;
   url: string;
 }

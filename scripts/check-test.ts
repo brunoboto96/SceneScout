@@ -332,6 +332,29 @@ test("intended layering is no issue in the check, while the same layout without 
   assert.deepEqual(rulesOf([], designOf([icon("select", 0), icon("remove", 20)])), ["tiny-target", "tiny-target"]);
 });
 
+test("touching containers are a low issue in the check, and the same cards 8px apart are none", () => {
+  const card = (label: string, y: number) => ({
+    label,
+    rect: { x: 40, y, w: 600, h: 120 },
+    border: 1,
+    bg: "rgba(255, 255, 255, 1)",
+    parentBg: "rgb(255, 255, 255)",
+    shadow: "",
+    radii: [8, 8, 8, 8] as [number, number, number, number],
+  });
+  const issuesAt = (gap: number) => {
+    const payload = designPayload([{ text: "Settings" }]);
+    payload.page.boxGroups = [{ parent: "[settings-stack]", shell: false, boxes: [card("[profile]", 100), card("[password]", 220 + gap)] }];
+    return issuesFromRoutes([route({ design: analyzeDesign(payload, { width: 1280, height: 900 }).defects })], ORIGIN).filter(
+      (i) => i.rule === "touching-containers",
+    );
+  };
+  const [touching] = issuesAt(0);
+  assert.equal(touching?.severity, "low");
+  assert.match(touching?.evidence ?? "", /in \[settings-stack\]: \[profile\] and \[password\] 0px apart/);
+  assert.deepEqual(issuesAt(8), []);
+});
+
 test("every OVERLAY line the probe can write is classified: the certain ones block, the placement ones do not", () => {
   // The probe's messages live in a script that runs in the page; read them from its source.
   const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "engine", "probes.ts"), "utf8");

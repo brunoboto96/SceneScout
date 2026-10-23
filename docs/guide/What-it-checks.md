@@ -54,8 +54,30 @@ A few do more than their name suggests:
 
 - **Snapshots that diff.** A second snapshot of the same route returns only what changed, and refs stay valid (on a 130-element page, 10.7 kB became 0.7 kB).
 - **Several roles at once.** Calls to different sessions run in parallel; `safe-write` ownership is shared, so one role can create what another approves. The report has a role capability matrix.
-- **Design audit with page scores.** Measurable defects (contrast, small targets, clipped text, missing focus) apart from craft suggestions, and a 0 to 100 score per page kept from run to run. The shared shell is scored once, separately.
+- **Design audit with page scores.** Measurable defects (contrast, small targets, clipped text, missing focus, cards touching with no gap between them) apart from craft suggestions, and a 0 to 100 score per page kept from run to run. The shared shell is scored once, separately. See [how a page is scored](#how-a-page-is-scored).
 - **Scrolls like a user.** It finds the inner scroll pane on app-shell layouts, and scrolls one region when a page has several.
 - **Memory across runs.** States are fingerprinted, so the next run skips what the last one covered; `scout_note` keeps what the agent learned about the app in `.scenescout/ASSUMPTIONS.md`.
 - **A gap ledger it can be held to.** Each entry is something to do, not noise (a search box is not a form left unsubmitted), and API and download addresses never enter the route list.
 - **Robust as a long-running server.** A time limit on every tool, a Chromium left behind by a crash cleaned up on the next start (Firefox and WebKit are not), and a bounded close.
+
+## How a page is scored
+
+A design audit ends with a page score and the reasons for it:
+
+```
+PAGE SCORE: 62/100 (D) — a11y 100 · craft 48 · consistency 76 · task-clarity 100
+  why: -16 touching containers ×2 · -12 6 button heights · -10 11 grays
+```
+
+Each rule the audit measures costs points for each time it is seen, up to a cap, so one rule cannot sink a page on its own. The overall score is 100 less every deduction. Each of the four subscores is 100 less twice its own deductions, so the part of the page that holds the cause is the one that drops. The `why:` line lists the three largest deductions.
+
+| Dimension | What costs points |
+|---|---|
+| a11y | contrast failures (3 each, up to 15), no visible focus (4 each, up to 12), small targets (2 each, up to 10), unnamed controls (5 each, up to 15), fields labelled only by a placeholder (3 each, up to 9) |
+| craft | touching containers (8 a pair, up to 24), readability (2 each, up to 8), grays beyond 6 (2 each, up to 12), accent hues beyond 5 (2 each, up to 6), pure black body text (2), template tells (3 each, up to 9), clipped text (3 each, up to 9), distorted images (4 each, up to 8) |
+| consistency | button heights beyond 3 (4 each, up to 12), button radii beyond 2 (3 each, up to 9), shadow styles beyond 3 (2 each, up to 8), paddings off a 4px grid (6), margins off it (4), near-miss alignments (2 each, up to 6), font sizes beyond 7 (2 each, up to 8), sizes under 1px apart (3) |
+| task clarity | task-effort issues (6 each, up to 18), sideways scroll (12), heading structure (3 each, up to 9) |
+
+**Touching containers** are sibling boxes drawn as separate cards (a border, a background unlike what they sit on, or a shadow) with 0 to 2px between them on the axis they are stacked on. They count when a corner where they meet is rounded. A list group, an accordion, table rows, tabs over their panel, a segmented control or full-width bands meet with square corners on purpose, shadowed or not, and are not counted; nor are the app's navigation, header or footer. The finding names the parent, since a missing gap on the shared wrapper is the usual cause.
+
+The weights were set on a small set of pages that differ from a clean one in a single fact: two pairs of touching cards, six button heights, twelve grays, and all three together. The clean page scores 100 and the page with all three scores below 80. A test holds that order, so a later change to the weights cannot flatten the scale without failing it. Scores from before this scale are not comparable with scores after it: re-audit a page before comparing it with an older run.

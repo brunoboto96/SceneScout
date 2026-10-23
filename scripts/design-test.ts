@@ -17,9 +17,14 @@ import {
   elevationKey,
   focusedControl,
   grayCensus,
+  formatDeduction,
   namesFilter,
+  paintsEdge,
+  scoreFrom,
   shadowLayers,
   styleSignature,
+  touchingContainers,
+  type BoxGroup,
   type FocusDocument,
   type FocusElement,
   type PageImage,
@@ -116,7 +121,8 @@ test("a page carrying only shell contrast failures scores clean once they are kn
   // rendered a breadcrumb.
   const records = [rec({ text: "Real page content" }), BAD_BADGE, BAD_SEPARATOR, BAD_SEPARATOR, BAD_SEPARATOR, BAD_SEPARATOR];
   const naive = analyzeDesign(payload(records), VIEWPORT);
-  assert.equal(naive.score?.a11y, 100 - 5 * 4, "unaware of chrome: five failures, twenty points");
+  // Three points each off the overall, twice that off the a11y subscore (scoreFrom).
+  assert.equal(naive.score?.a11y, 100 - 2 * 5 * 3, "unaware of chrome: five failures, fifteen points, thirty off a11y");
 
   const chrome = new Set([styleSignature(BAD_BADGE), styleSignature(BAD_SEPARATOR)]);
   const aware = analyzeDesign(payload(records), VIEWPORT, chrome);
@@ -739,4 +745,195 @@ test("the focus walk measures the control focused inside a same-origin frame, ne
     ["a same-origin frame with nothing focused inside is skipped", doc(frame(doc(null))), "frame"],
   ];
   for (const [name, d, want] of cases) assert.equal(focusedControl(d), want, name);
+});
+
+// ---------------------------------------------------------------------------
+// Touching containers: separate cards drawn edge to edge
+// ---------------------------------------------------------------------------
+
+type Box = BoxGroup["boxes"][number];
+const PAGE_BG = "rgb(255, 255, 255)";
+const CARD_SHADOW = "rgba(0, 0, 0, 0.08) 0px 1px 3px 0px";
+
+/** A bordered, rounded card 600×120 at (x, y); override what a case is about. */
+function box(label: string, y: number, over: Partial<Box> = {}): Box {
+  return {
+    label,
+    rect: { x: 40, y, w: 600, h: 120 },
+    border: 1,
+    bg: "rgba(255, 255, 255, 1)",
+    parentBg: PAGE_BG,
+    shadow: "",
+    radii: [8, 8, 8, 8],
+    ...over,
+  };
+}
+
+/** Two cards stacked in one parent, `gap` px apart. */
+const stack = (gap: number, over: Partial<Box> = {}): BoxGroup => ({
+  parent: "<div.settings>",
+  shell: false,
+  boxes: [box('<section> "Profile"', 100, over), box('<section> "Password"', 220 + gap, over)],
+});
+
+test("two rounded bordered cards 0px apart touch; the same cards 8px apart do not", () => {
+  const touching = touchingContainers([stack(0)]);
+  assert.deepEqual(touching, [{ parent: "<div.settings>", pairs: [{ a: '<section> "Profile"', b: '<section> "Password"', axis: "vertical", gap: 0 }] }]);
+  assert.equal(touchingContainers([stack(2)]).length, 1, "2px still reads as touching");
+  assert.deepEqual(touchingContainers([stack(8)]), [], "an 8px gap is a gap");
+  assert.deepEqual(touchingContainers([stack(3)]), [], "past 2px is outside the rule");
+});
+
+test("a group joined with square corners is an intended join, shadowed or not", () => {
+  const square = { radii: [0, 0, 0, 0] as Box["radii"] };
+  assert.deepEqual(touchingContainers([stack(0, square)]), [], "a list group squares the corners where its items meet");
+  assert.deepEqual(touchingContainers([stack(0, { ...square, shadow: CARD_SHADOW })]), [], "an elevated accordion's items meet square too");
+  assert.equal(touchingContainers([stack(0, { shadow: CARD_SHADOW })]).length, 1, "rounded shadowed cards meeting are two cards");
+  // A tab sitting on a wider panel: the panel's far top-right corner is rounded, but nowhere near the tab.
+  const tabs: BoxGroup = {
+    parent: "<div.tabs>",
+    shell: false,
+    boxes: [
+      box('<div> "Tab"', 100, { rect: { x: 40, y: 100, w: 300, h: 40 }, radii: [6, 6, 0, 0] }),
+      box('<div> "Panel"', 140, { rect: { x: 40, y: 140, w: 600, h: 200 }, radii: [0, 6, 6, 6] }),
+    ],
+  };
+  assert.deepEqual(touchingContainers([tabs]), [], "only corners inside the shared edge count");
+  // Rounded only on the group's outer corners: the first item's top, the last item's bottom.
+  const outer: BoxGroup = {
+    parent: "<ul.list-group>",
+    shell: false,
+    boxes: [box('<li> "One"', 100, { radii: [8, 8, 0, 0] }), box('<li> "Two"', 220, { radii: [0, 0, 8, 8] })],
+  };
+  assert.deepEqual(touchingContainers([outer]), [], "a group rounded only at its outer corners is one shape");
+});
+
+test("a box shows an edge only by a border, a shadow or a fill unlike what it sits on", () => {
+  const bare = { border: 0 };
+  assert.equal(paintsEdge(box("a", 0, bare)), false, "a white box on a white page with no border is invisible");
+  assert.deepEqual(touchingContainers([stack(0, bare)]), [], "so two of them touching is nothing anyone sees");
+  assert.equal(paintsEdge(box("a", 0, { ...bare, bg: "rgba(243, 244, 246, 1)" })), true, "a gray fill on white is a visible box");
+  assert.equal(touchingContainers([stack(0, { ...bare, bg: "rgba(243, 244, 246, 1)" })]).length, 1);
+  assert.equal(paintsEdge(box("a", 0, { ...bare, bg: "rgba(0, 0, 0, 0.01)" })), false, "a near-transparent tint changes nothing visible");
+  assert.equal(paintsEdge(box("a", 0, { ...bare, shadow: "rgba(0, 0, 0, 0) 0px 0px 0px 0px" })), false, "an empty shadow layer draws nothing");
+});
+
+test("cards side by side touch on the horizontal axis; shell groups are left to the shell", () => {
+  const row: BoxGroup = {
+    parent: "[stats-row]",
+    shell: false,
+    boxes: [box("[stat-a]", 100, { rect: { x: 40, y: 100, w: 200, h: 100 } }), box("[stat-b]", 100, { rect: { x: 241, y: 100, w: 200, h: 100 } })],
+  };
+  assert.deepEqual(touchingContainers([row])[0]?.pairs, [{ a: "[stat-a]", b: "[stat-b]", axis: "horizontal", gap: 1 }]);
+  assert.deepEqual(touchingContainers([{ ...row, shell: true }]), []);
+  const offset: BoxGroup = { ...row, boxes: [row.boxes[0], { ...row.boxes[1], rect: { x: 241, y: 180, w: 200, h: 100 } }] };
+  assert.deepEqual(touchingContainers([offset]), [], "boxes that share under half their height are not stacked side by side");
+});
+
+test("touching containers are a defect naming the parent, and cost the page points", () => {
+  const primary = rec({
+    tag: "button",
+    text: "Save",
+    interactive: true,
+    filled: true,
+    rect: { x: 40, y: 400, w: 100, h: 36 },
+    bg: "rgb(30, 64, 175)",
+    color: "rgb(255, 255, 255)",
+  });
+  const page = (gap: number): ReturnType<typeof analyzeDesign> =>
+    analyzeDesign({ ...payload([rec({ text: "Settings" }), primary]), page: { ...payload([]).page, boxGroups: [stack(gap)] } }, VIEWPORT);
+  const touching = page(0);
+  const spaced = page(8);
+  assert.deepEqual(
+    touching.defects.filter((d) => d.rule === "touching-containers").map((d) => d.detail),
+    ['in <div.settings>: <section> "Profile" and <section> "Password" 0px apart'],
+  );
+  assert.ok(/TOUCHING CONTAINERS \(1 pair\):\n  ⚠ in <div\.settings>/.test(touching.report), touching.report);
+  assert.ok(!spaced.defects.some((d) => d.rule === "touching-containers"), spaced.report);
+  assert.equal(spaced.score?.overall, 100);
+  assert.equal(touching.score?.overall, 92);
+  assert.ok(touching.report.includes("  why: -8 touching containers"), touching.report);
+});
+
+// ---------------------------------------------------------------------------
+// Score: deductions, their weight and the calibration set
+// ---------------------------------------------------------------------------
+
+test("the score is 100 less its deductions; a subscore falls twice as fast and the largest are listed first", () => {
+  const s = scoreFrom([
+    { dimension: "craft", label: "touching containers", count: 2, points: 16 },
+    { dimension: "consistency", label: "6 button heights", count: 1, points: 12 },
+    { dimension: "a11y", label: "contrast failures", count: 1, points: 3 },
+  ]);
+  assert.deepEqual(
+    { overall: s.overall, a11y: s.a11y, craft: s.craft, consistency: s.consistency, clarity: s.clarity },
+    { overall: 69, a11y: 94, craft: 68, consistency: 76, clarity: 100 },
+  );
+  assert.deepEqual(s.deductions.map(formatDeduction), ["-16 touching containers ×2", "-12 6 button heights", "-3 contrast failures"]);
+  assert.equal(scoreFrom(Array.from({ length: 30 }, () => ({ dimension: "a11y" as const, label: "x", count: 1, points: 9 }))).overall, 0, "floors at 0");
+});
+
+/**
+ * The calibration set: synthetic pages the design-scores smoke suite renders
+ * as test-app/design-score-*.html. Each defect page differs from the clean one
+ * in the one fact it is named for.
+ */
+function calibrationPage(kind: "clean" | "touching" | "spaced" | "heights" | "grays" | "defective"): Payload {
+  const text = (t: string, color = "rgb(23, 23, 23)") => rec({ text: t, color });
+  // One filled primary action and outlined secondary ones, so the page has a next step and nothing competes with it.
+  const button = (h: number, i: number) =>
+    rec({
+      tag: "button",
+      text: `Action ${i}`,
+      interactive: true,
+      filled: i === 0,
+      rect: { x: 40 + i * 120, y: 400, w: 100, h },
+      radius: 6,
+      ...(i === 0 ? { bg: "rgb(30, 64, 175)", color: "rgb(255, 255, 255)" } : { color: "rgb(30, 64, 175)" }),
+    });
+  const heights = kind === "heights" || kind === "defective" ? [28, 32, 36, 40, 44, 48] : [36, 36, 36, 36, 36, 36];
+  const grays =
+    kind === "grays" || kind === "defective"
+      ? Array.from({ length: 12 }, (_, i) => `rgb(${30 + i * 5}, ${30 + i * 5}, ${30 + i * 5})`)
+      : ["rgb(64, 64, 64)", "rgb(115, 115, 115)"];
+  const records = [rec({ tag: "h1", text: "Settings", fontSize: 30 }), ...grays.map((g, i) => text(`Note ${i}`, g)), ...heights.map(button)];
+  const gap = kind === "touching" || kind === "defective" ? 0 : 8;
+  const groups = [stack(gap), { ...stack(gap), parent: "<div.billing>" }];
+  return { records, page: { ...payload([]).page, boxGroups: groups } };
+}
+
+test("calibration: the clean page stays high, each defect lands below it, and a page with all three lands below 80", () => {
+  const scores = Object.fromEntries(
+    (["clean", "spaced", "touching", "heights", "grays", "defective"] as const).map((k) => [k, analyzeDesign(calibrationPage(k), VIEWPORT).score!]),
+  );
+  const o = (k: keyof typeof scores) => scores[k].overall;
+  assert.equal(o("clean"), 100, JSON.stringify(scores.clean.deductions));
+  assert.equal(o("spaced"), o("clean"), "the 8px-gap twin of the touching page scores as the clean page");
+  assert.ok(o("touching") < o("clean") && o("heights") < o("clean") && o("grays") < o("clean"), JSON.stringify(scores));
+  // Two pairs of touching cards are the most visible of the three, so they cost the most.
+  assert.ok(o("touching") < o("heights") && o("touching") < o("grays"), JSON.stringify(scores));
+  assert.ok(o("defective") < 80, `the page with every defect scored ${o("defective")}`);
+  assert.ok(o("defective") < o("touching"), "and below any single defect");
+  // The subscore that holds the cause shows it.
+  assert.ok(scores.heights.consistency <= 80, `six button heights left consistency at ${scores.heights.consistency}`);
+  assert.ok(scores.grays.craft <= 80, `twelve grays left craft at ${scores.grays.craft}`);
+  assert.ok(scores.touching.craft <= 80, `two touching pairs left craft at ${scores.touching.craft}`);
+});
+
+test("the report lists the top deductions beside the score", () => {
+  const { report } = analyzeDesign(calibrationPage("defective"), VIEWPORT);
+  const why = report.match(/PAGE SCORE: [^\n]*\n  why: ([^\n]*)/)?.[1];
+  assert.equal(why, "-16 touching containers ×2 · -12 12 grays · -12 6 button heights", report);
+  assert.ok(/  why: no deductions/.test(analyzeDesign(calibrationPage("clean"), VIEWPORT).report));
+});
+
+test("button radii past two and shadow styles past three are flagged, as they now cost points", () => {
+  const btn = (radius: number, i: number) => rec({ tag: "button", text: `B${i}`, interactive: true, radius, rect: { x: i * 100, y: 0, w: 80, h: 36 } });
+  const primary = rec({ tag: "a", text: "Next", interactive: true, filled: true, bg: "rgb(30, 64, 175)", color: "rgb(255, 255, 255)" });
+  const three = analyzeDesign(payload([rec({ text: "x" }), primary, ...[2, 4, 6].map(btn)]), VIEWPORT);
+  const two = analyzeDesign(payload([rec({ text: "x" }), primary, ...[4, 6].map(btn)]), VIEWPORT);
+  assert.ok(three.report.includes("3 different corner radii"), three.report);
+  assert.equal(three.score?.deductions.map(formatDeduction).join(), "-3 3 button radii");
+  assert.ok(!two.report.includes("corner radii"), two.report);
+  assert.equal(two.score?.overall, 100);
 });

@@ -223,6 +223,7 @@ What `scenescout check` measures, with each rule's severity. `--ignore` takes th
 | `tiny-target` | low | Small click target |
 | `clipped-text` | low | Text clipped |
 | `image-aspect` | low | Image distorted |
+| `touching-containers` | low | Containers touching |
 | `flow-step-failed` | high | Saved flow broke |
 | `visual-change` | high | Differs from its visual baseline (only with `--baseline`) |
 | `off-grid-spacing` | worth a look | Spacing off a 4px grid |
