@@ -12,7 +12,9 @@
  * - the `i` flag folds the ASCII letters and the other letters whose case JavaScript
  *   folds without the `u` flag, and nothing more (RE2 would also fold the long s
  *   and the Kelvin sign onto `s` and `k`);
- * - `\uXXXX` is `\x{XXXX}`, and `[\s\S]` is any character.
+ * - `\uXXXX` is `\x{XXXX}`, and `[\s\S]` is any character;
+ * - the text is read a UTF-16 code unit at a time, so a surrogate pair counts as
+ *   two characters toward `{8,80}` (linear-regex.ts's `codeUnits`).
  *
  * What RE2 cannot do is refused, so a pattern that needs it is written for
  * LinearRegex by hand: a lookahead or a lookbehind, a back reference, a named
@@ -20,13 +22,15 @@
  * So is what RE2 would read otherwise than JavaScript: an escaped letter
  * JavaScript reads as the letter itself (`\a`, `\z`, `\A`, `\Q`; RE2 reads a
  * bell, an end, a start, a quote), `\p{…}` (without the `u` flag JavaScript
- * reads the letter p), and with `i` a class range the flag folds past its ends.
+ * reads the letter p), with `i` a class range the flag folds past its ends, and
+ * a surrogate or a private-use character U+E000 to U+E7FF, which `codeUnits`
+ * reads as one.
  *
  * Every pattern built here is kept (`jsPatterns`) with the source and flags
  * it was read from, so memory-test can hold each to a JavaScript RegExp of the
  * same source on the suites' own strings and on generated ones.
  */
-import { LINE_END, LinearRegex, type LinearOptions, SPACE } from "./linear-regex.js";
+import { LINE_END, LinearRegex, type LinearOptions, SPACE, SURROGATE_STAND_IN } from "./linear-regex.js";
 
 /** Every pattern built by `fromJs`, with the JavaScript pattern it stands for. */
 export const jsPatterns: Array<{ source: string; flags: string; pattern: LinearRegex }> = [];
@@ -64,6 +68,17 @@ function caseVariants(c: string): string[] {
   }
   // The character itself first, then the others.
   return [c, ...(foldGroups.get(canonical(c)) ?? []).filter((v) => v !== c)];
+}
+
+/**
+ * Whether the characters `lo` to `hi` hold some but not all of the surrogates and their stand-ins (linear-regex.ts's
+ * `codeUnits`): the pattern would then tell a surrogate from a private-use character JavaScript tells apart, or the
+ * other way round, so it is refused.
+ */
+function splitsStandIns(lo: number, hi: number): boolean {
+  const first = 0xd800;
+  const last = 0xdfff + SURROGATE_STAND_IN;
+  return hi >= first && lo <= last && !(lo <= first && hi >= last);
 }
 
 /** A literal character as RE2 reads it, escaped when it is punctuation. */
@@ -139,6 +154,7 @@ export function jsToRe2(source: string, flags = ""): string {
     const c = source[i];
     if (c === "\\") {
       const text = escape(false);
+      if (escaped !== undefined && splitsStandIns(escaped.charCodeAt(0), escaped.charCodeAt(0))) return fail("a surrogate or a private-use character");
       const variants = fold && escaped !== undefined ? caseVariants(escaped) : [];
       out += variants.length > 1 ? `[${variants.map(literal).join("")}]` : text;
     } else if (c === "(") {
@@ -187,6 +203,8 @@ export function jsToRe2(source: string, flags = ""): string {
         if (a.single && source[i] === "-" && i + 1 < source.length && source[i + 1] !== "]") {
           i += 1;
           const b = atom();
+          if (b.single && a.plain !== undefined && b.plain !== undefined && splitsStandIns(a.plain.charCodeAt(0), b.plain.charCodeAt(0)))
+            return fail("a range over some of the surrogates or private-use characters");
           if (b.single) {
             body += `${a.text}-${b.text}`;
             if (fold && a.plain !== undefined && b.plain !== undefined && isAsciiLetter(a.plain) && isAsciiLetter(b.plain))
@@ -205,6 +223,7 @@ export function jsToRe2(source: string, flags = ""): string {
           }
           continue;
         }
+        if (a.plain !== undefined && splitsStandIns(a.plain.charCodeAt(0), a.plain.charCodeAt(0))) return fail("a surrogate or a private-use character");
         const variants = fold && a.plain !== undefined ? caseVariants(a.plain) : [];
         body += variants.length > 1 ? variants.map(literal).join("") : a.text;
       }
@@ -213,6 +232,7 @@ export function jsToRe2(source: string, flags = ""): string {
       out += `[^${LINE_END}]`;
       i += 1;
     } else {
+      if (splitsStandIns(c.charCodeAt(0), c.charCodeAt(0))) return fail("a surrogate or a private-use character");
       const variants = fold ? caseVariants(c) : [c];
       out += variants.length > 1 ? `[${variants.map(literal).join("")}]` : c;
       i += 1;
@@ -234,5 +254,5 @@ export function registerJsPattern(source: string, flags: string, pattern: Linear
  */
 export function fromJs(source: string, flags = "", options: LinearOptions = {}, original = source): LinearRegex {
   if (flags.replaceAll("i", "") !== "") throw new Error(`fromJs reads the i flag only, not "${flags}": ${source}`);
-  return registerJsPattern(original, flags, new LinearRegex(jsToRe2(source, flags), options));
+  return registerJsPattern(original, flags, new LinearRegex(jsToRe2(source, flags), { ...options, codeUnits: true }));
 }

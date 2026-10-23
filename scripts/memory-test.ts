@@ -17,9 +17,21 @@ import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
+import "../src/engine/brief.ts";
 import "../src/engine/calibration.ts";
+import "../src/engine/check.ts";
+import "../src/engine/ci-lanes.ts";
+import "../src/engine/crawl.ts";
+import "../src/engine/expiry.ts";
+import { endpointSignatures, isDuplicateFinding, sameFinding } from "../src/engine/finding-dedup.ts";
 import "../src/engine/fingerprint.ts";
+import "../src/engine/flow.ts";
+import "../src/engine/from-run.ts";
+import { statedRequests } from "../src/engine/lane.ts";
 import "../src/engine/policy.ts";
+import { tokenShapeOf } from "../src/engine/postmessage.ts";
+import { leadsAway } from "../src/engine/scripted-login.ts";
+import "../src/engine/strict-writes.ts";
 import "../src/engine/tickets.ts";
 import { fromJs, jsPatterns, jsToRe2 } from "../src/engine/js-regex.ts";
 import { LinearRegex, SPACE } from "../src/engine/linear-regex.ts";
@@ -1629,13 +1641,26 @@ test("a redaction announces itself and keeps the matched scheme", () => {
   assert.ok(/\[1 secret redacted\]/.test(out), `the edit is disclosed: ${out}`);
 });
 
-test("every pattern in the route, ticket, calibration and write-policy readers matches what JavaScript's engine did (#618)", () => {
-  // Each of these patterns was a JavaScript regular expression and now runs on the linear-time engine. fromJs keeps the
-  // JavaScript source it stands for (a lookaround is kept as written), so each is held to a RegExp of that source: the
-  // same first match, index and groups, on every string in the suites that exercise them and on generated ones.
+/** Every string literal in the suites that exercise the converted readers, the texts below and generated ones: the inputs the identity checks compare on. */
+let corpus: Set<string> | null = null;
+function identityCorpus(): Set<string> {
+  if (corpus) return corpus;
   const scripts = path.dirname(fileURLToPath(import.meta.url));
   const strings = new Set<string>();
-  for (const file of ["policy-test.ts", "tickets-test.ts", "calibration-test.ts", "contract-test.ts", "memory-test.ts"]) {
+  for (const file of [
+    "policy-test.ts",
+    "tickets-test.ts",
+    "calibration-test.ts",
+    "contract-test.ts",
+    "memory-test.ts",
+    "lane-test.ts",
+    "check-test.ts",
+    "ci-test.ts",
+    "brief-test.ts",
+    "profiles-test.ts",
+    "oracle-test.ts",
+    "scripted-login-test.ts",
+  ]) {
     const source = ts.createSourceFile(file, fs.readFileSync(path.join(scripts, file), "utf8"), ts.ScriptTarget.Latest, true);
     const visit = (node: ts.Node): void => {
       if ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) && node.text.length < 400) strings.add(node.text);
@@ -1717,7 +1742,86 @@ test("every pattern in the route, ticket, calibration and write-policy readers m
     "index.html",
     ".pdf",
     "format=csv",
+    "```",
+    "```json\n",
+    "&amp;",
+    "&#x41;",
+    "&#65;",
+    "GET /api/x 404",
+    "POST https://h/a/ -> 500",
+    "[session a] ",
+    "Nothing to crawl",
+    "PROBLEM ROUTES (2):",
+    " — 200 · 3 el",
+    "/a → x",
+    "/b: why",
+    "continue with",
+    "Continue With",
+    " your ",
+    " work ",
+    " e-mail",
+    " phone",
+    " sms-code",
+    " code",
+    "try again",
+    "didn’t",
+    "eyJabcdefghijk",
+    "Bearer ",
+    "access_token=",
+    "abcdefghij0123456789",
+    "data.auth",
+    "[0]",
+    "deleteUser",
+    "HTTPServer",
+    "AAa",
+    "{",
+    "action:",
+    "a=1&",
+    "es",
+    "ies",
+    "entries",
+    "(quoted words here)",
+    '"quoted words here"',
+    "#frag",
+    "0123456789ab",
+    "Download is starting",
+    "😀😀😀😀",
   ];
+  // Whole texts for the lookarounds written in code, each beside its near misses: "continue with" and what may follow it
+  // (#618), a plural after three letters of a word, an id segment of twelve characters with a digit.
+  for (const text of [
+    "Continue with phone",
+    "continue with your email",
+    "Continue with work e-mail",
+    "continue with an sms-code",
+    "continue with a code",
+    "continue with my x-y code",
+    "continue with x-y  code",
+    "continue with -continue with code",
+    "Continue with Google",
+    "Continue with WORK EMAIL",
+    "continue with wor\u212a email",
+    "continue with  email",
+    "continue with personal phonebook",
+    "continue withemail",
+    "continue with codes",
+    "continue with",
+    "a/es",
+    "abces",
+    "ab_s",
+    "a1bes",
+    "abcdefghijk1",
+    "abcdefghij1",
+    "abcdefghijkl",
+    "12",
+    "ab12",
+    // A surrogate pair is two characters to JavaScript without the u flag: eight of a count, four emoji.
+    '"🎉 Done!"',
+    '"😀😀😀😀"',
+    `"${"😀".repeat(41)}"`,
+    `access_token=${"😀".repeat(8)}`,
+  ])
+    strings.add(text);
   let seed = 7;
   const next = (): number => {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
@@ -1728,7 +1832,16 @@ test("every pattern in the route, ticket, calibration and write-policy readers m
     for (let k = 1 + Math.floor(next() * 9); k > 0; k--) text += pieces[Math.floor(next() * pieces.length)];
     strings.add(text);
   }
-  assert.ok(jsPatterns.length >= 120, `the patterns are registered: ${jsPatterns.length}`);
+  corpus = strings;
+  return strings;
+}
+
+test("every pattern in the route, ticket, calibration and write-policy readers matches what JavaScript's engine did (#618)", () => {
+  // Each of these patterns was a JavaScript regular expression and now runs on the linear-time engine. fromJs keeps the
+  // JavaScript source it stands for (a lookaround is kept as written), so each is held to a RegExp of that source: the
+  // same first match, index and groups, on every string in the suites that exercise them and on generated ones.
+  const strings = identityCorpus();
+  assert.ok(jsPatterns.length >= 170, `the patterns are registered: ${jsPatterns.length}`);
   for (const { source, flags, pattern } of jsPatterns) {
     const js = new RegExp(source, flags);
     for (const text of strings) {
@@ -1742,6 +1855,60 @@ test("every pattern in the route, ticket, calibration and write-policy readers m
       assert.deepEqual(yours, mine, `${source} ${flags} on ${JSON.stringify(text)}`);
     }
   }
+});
+
+test("statedRequests reads what its JavaScript pattern read: the head on the linear-time engine, the rest in code (#618)", () => {
+  // The pattern statedRequests ran before #618, and the function around it, as they were: the reference this one is held to.
+  const STATED_REQUEST_RE =
+    /\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$*~%-]*)(?:\?[^\s#]*)?(?:#\S*)?(?:(?:\s*(?:->|→|=>|:)\s*|\s+)([1-5]\d{2})\b)?/gi;
+  const reference = (text: string) =>
+    [...text.matchAll(STATED_REQUEST_RE)].map((m) => {
+      const raw = m[2].replace(/[.:,]+$/, "");
+      const start = (m.index ?? 0) + m[0].indexOf(m[2]);
+      return { method: m[1].toUpperCase(), segments: segmentsOf(raw), status: m[3] ?? null, start, end: start + raw.length };
+    });
+  const segmentsOf = (p: string): string[] => {
+    const trimmed = p.replace(/\/+$/, "");
+    if (trimmed === "") return [];
+    return trimmed
+      .slice(1)
+      .split("/")
+      .map((seg) => {
+        try {
+          return decodeURIComponent(seg).toLowerCase();
+        } catch {
+          return seg.toLowerCase();
+        }
+      });
+  };
+  const texts = [
+    ...identityCorpus(),
+    "GET /a 404",
+    "GET /a:404",
+    "GET /a : 404",
+    "GET /a -> 4045",
+    "GET /a ->  404x",
+    "GET /a  404 POST /b→201",
+    "GET http://h/ 500",
+    "get https://h:80/x/y?q=1#f => 302",
+    "GET /a?x#y 200",
+    "GET /a?x y 200",
+    "GET http://h",
+    "DELETE  /a/{id}/b. then",
+    "GET /a\u00a0404",
+    "GET /a\u2028-> 404",
+    "xGET /a 404",
+    "GET /a/./,: 404",
+  ];
+  for (const text of texts) {
+    assert.deepEqual(statedRequests(text), reference(text), JSON.stringify(text));
+  }
+});
+
+test('leadsAway reads what its JavaScript pattern read, "continue with" and its lookahead included (#618)', () => {
+  const AWAY_WORDS =
+    /\b(forgot|reset|sign[\s-]?up|register|create|continue with(?! (your |my |a |an |work |personal )?(e-?mail|phone|([\w-]+ )?code))|provider|google|microsoft|github|apple|facebook|sso|single sign|passkey|magic link|cancel|back|re-?send|remember|new code|another|(send|try)\b.*\bagain|different|change|edit|instead|didn['’]?t|did not|not you)\b/i;
+  for (const text of identityCorpus()) assert.equal(leadsAway(text), AWAY_WORDS.test(text), JSON.stringify(text));
 });
 
 test("fromJs reads a JavaScript pattern the way JavaScript does, and refuses what RE2 cannot run (#618)", () => {
@@ -1784,6 +1951,63 @@ test("fromJs reads a JavaScript pattern the way JavaScript does, and refuses wha
   assert.throws(() => fromJs("[à-þ]", "i"), /folds past its ends/);
   assert.throws(() => fromJs("[\\n-Z]", "i"), /folds past its ends/);
   assert.throws(() => fromJs("a", "g"), /i flag only/);
+});
+
+test("a pattern read from JavaScript counts a surrogate pair as two characters, as JavaScript did (#618)", () => {
+  // Without the u flag JavaScript reads UTF-16 code units, so `[^"]{8,80}` takes four emoji and refuses 41; RE2 reads
+  // code points and, alone, would refuse the four and take the 41. Each pair differs in the one count that flips it.
+  const quoted = fromJs(String.raw`"([^"]{8,80})"`);
+  for (const text of [
+    '"🎉 Done!"',
+    '"😀😀😀😀"',
+    '"😀😀😀"',
+    `"${"😀".repeat(40)}"`,
+    `"${"😀".repeat(41)}"`,
+    '"\ud800\ud800\ud800\ud800"',
+    '"ab\udc00cdefgh"',
+  ]) {
+    const js = /"([^"]{8,80})"/.exec(text);
+    const mine = quoted.exec(text);
+    assert.deepEqual(mine && [mine.index, mine.text, mine.groups[1]], js && [js.index, js[0], js[1]], JSON.stringify(text));
+  }
+  // A lone surrogate after a pair, and a group read back from the text as given.
+  const run = fromJs(String.raw`(.{3})$`);
+  assert.equal(run.exec("ab😀\udc00")?.groups[1], "😀\udc00".slice(-3));
+  // What the readers make of it: a quoted literal of four emoji and a token of eight are what they were.
+  const toast = { category: "ux-confusing", detail: "", state: "/a" };
+  assert.ok(
+    sameFinding({ ...toast, title: 'Toast "🎉 Done!" shows twice', evidence: "first" }, { ...toast, title: 'Banner keeps "🎉 Done!"', evidence: "second" }),
+  );
+  assert.deepEqual(tokenShapeOf("data.url", `?access_token=${"😀".repeat(8)}`), { shape: "url-param", secret: "😀".repeat(8) });
+  assert.equal(tokenShapeOf("data.url", `?access_token=${"😀".repeat(7)}a`), null);
+  // A pattern that names a surrogate, or the private-use characters standing in for them, is written by hand.
+  for (const source of ["\\ud83d", "😀", "[\\ue000]", "[\\u0000-\\udbff]", "[^\\ue700-\\uf8ff]x"]) {
+    assert.throws(() => fromJs(source), /written by hand/, source);
+  }
+  // A range over all of them, or none, reads them alike, as JavaScript reads the surrogates and private use alike.
+  for (const source of ["[\\u0000-\\uffff]", "[^\\uf000-\\uffff]", "[\\u0000-\\ud7ff\\ue800-\\uffff]"]) assert.doesNotThrow(() => fromJs(source), source);
+});
+
+test("finding dedup reads each title and evidence once, not once a pair, and hands back its own copies (#618)", () => {
+  // The store compares every finding with every other as it loads. On the linear-time engine a pair cost about four
+  // times what it did on JavaScript's; read once a text, 300 findings compared pairwise take well under a second.
+  const words = ["Save", "button", "does", "nothing", "when", "the", "form", "entries", "displays", "error", "after", "submit"];
+  const findings = Array.from({ length: 300 }, (_, i) => ({
+    id: `f${i}`,
+    status: "open" as const,
+    category: ["functional", "ux-confusing", "console-error"][i % 3],
+    state: `/orders#${i % 7}`,
+    title: Array.from({ length: 9 }, (_, k) => words[(i * 7 + k * 3) % words.length]).join(" ") + ` ${i}`,
+    evidence: `POST /api/orders/${i % 13}/items ${i % 2 ? 404 : 500}: "${words[i % words.length]} failed here" then ${"the form shows an error ".repeat(6)}`,
+  }));
+  const started = performance.now();
+  for (const a of findings) for (const b of findings) isDuplicateFinding(a, b);
+  const ms = performance.now() - started;
+  assert.ok(ms < 5000, `90,000 pairs in ${Math.round(ms)} ms`);
+  // What a reader kept is not what a caller is given: a change to one result leaves the next as it was.
+  const first = endpointSignatures(findings[0].evidence);
+  first.clear();
+  assert.deepEqual([...endpointSignatures(findings[0].evidence)], ["POST /api/orders/:id/items 500"]);
 });
 
 test("a rejected name=value match does not hide the next secret's name (#619)", () => {
@@ -1882,6 +2106,14 @@ test("redaction, the field checks, the credential check and the ticket, calibrat
     "calibration.ts",
     "tickets.ts",
     "policy.ts",
+    "crawl.ts",
+    "expiry.ts",
+    "brief.ts",
+    "ci-lanes.ts",
+    "lane.ts",
+    "finding-dedup.ts",
+    "postmessage.ts",
+    "strict-writes.ts",
   ].map((file) => path.join(engine, file));
   assert.deepEqual(javaScriptRegexUses(files), [], "these files use JavaScript's engine");
   // A string's match, matchAll and search turn a string argument into a JavaScript regular expression, with no

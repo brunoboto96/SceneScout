@@ -47,6 +47,7 @@
  * oracle-test; browser.ts installs the script and reports what it hands back.
  */
 import { normalizePath } from "./fingerprint.js";
+import { fromJs } from "./js-regex.js";
 
 /** The binding the capture script reports through. */
 export const POSTMESSAGE_BINDING = "__scenescoutPostMessage";
@@ -168,21 +169,24 @@ const CREDENTIAL_KEYS: ReadonlySet<string> = new Set([
   "jwt",
 ]);
 
-const JWT_RE = /^eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*$/;
-const BEARER_RE = /^Bearer\s+([A-Za-z0-9._~+/=-]{16,})$/i;
-const OPAQUE_RE = /^[A-Za-z0-9._~+/=-]{20,}$/;
-const URL_PARAM_RE = /(?:^|[?#&])(?:access_token|id_token|refresh_token)=([^&#\s]{16,})/;
+const JWT_RE = fromJs(String.raw`^eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*$`);
+const BEARER_RE = fromJs(String.raw`^Bearer\s+([A-Za-z0-9._~+/=-]{16,})$`, "i");
+const OPAQUE_RE = fromJs(String.raw`^[A-Za-z0-9._~+/=-]{20,}$`);
+const LETTER_RE = fromJs(String.raw`[A-Za-z]`);
+const DIGIT_RE = fromJs(String.raw`[0-9]`);
+/** The last key of a path: `.name` or `[index]` at its end. */
+const LAST_KEY_RE = fromJs(String.raw`(?:\.([^.[\]]+)|\[[^\]]*\])$`);
+const URL_PARAM_RE = fromJs(String.raw`(?:^|[?#&])(?:access_token|id_token|refresh_token)=([^&#\s]{16,})`);
 /** Paths are page text; cut so a hostile message cannot fill the report. */
 const MAX_PATH_LENGTH = 120;
 
 /** The last key of a path such as `data.auth.access_token` or `data.list[0]`. */
 function lastKey(path: string): string {
-  const m = /(?:\.([^.[\]]+)|\[[^\]]*\])$/.exec(path);
-  return m?.[1] ?? "";
+  return LAST_KEY_RE.exec(path)?.groups[1] ?? "";
 }
 
 function isOpaque(value: string): boolean {
-  return OPAQUE_RE.test(value) && /[A-Za-z]/.test(value) && /[0-9]/.test(value);
+  return OPAQUE_RE.test(value) && LETTER_RE.test(value) && DIGIT_RE.test(value);
 }
 
 /** Masked preview of a credential: its first four characters and its length. Nothing past the fourth character is ever included. */
@@ -199,10 +203,11 @@ export function tokenShapeOf(path: string, raw: string): { shape: TokenShape; se
   const value = raw.trim();
   if (JWT_RE.test(value)) return { shape: "jwt", secret: value };
   const bearer = BEARER_RE.exec(value);
-  if (bearer) return { shape: "bearer", secret: bearer[1] };
-  if (CREDENTIAL_KEYS.has(lastKey(path).toLowerCase().replace(/[_-]/g, "")) && isOpaque(value)) return { shape: "credential-key", secret: value };
+  if (bearer) return { shape: "bearer", secret: bearer.groups[1] ?? "" };
+  if (CREDENTIAL_KEYS.has(lastKey(path).toLowerCase().replaceAll("_", "").replaceAll("-", "")) && isOpaque(value))
+    return { shape: "credential-key", secret: value };
   const param = URL_PARAM_RE.exec(value);
-  if (param) return { shape: "url-param", secret: param[1] };
+  if (param) return { shape: "url-param", secret: param.groups[1] ?? "" };
   return null;
 }
 

@@ -6,21 +6,60 @@
  */
 import type { Finding } from "./memory.js";
 import { normalizePath, shortHash } from "./fingerprint.js";
+import { fromJs } from "./js-regex.js";
 
-/** Shared finding-similarity helpers (used by live dedup and retro-merge). */
-function findingTokens(s: string): Set<string> {
-  return new Set(
-    s
-      .toLowerCase()
-      .replace(/[^a-z0-9/ ]+/g, " ")
-      .split(/\s+/)
-      .filter((t) => t.length > 2)
-      // crude stemming so entries/entry, displays/display collide
-      .map((t) => t.replace(/ies$/, "y").replace(/(?<=\w{3})e?s$/, "")),
-  );
+const NOT_TOKEN_RE = fromJs(String.raw`[^a-z0-9/ ]+`);
+const WHITE_SPACE_RE = fromJs(String.raw`\s+`);
+const IES_END_RE = fromJs(String.raw`ies$`);
+const isWordChar = (c: string): boolean => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_";
+/** `(?<=\w{3})e?s$`: a plural's ending after three letters of a word, the lookbehind a check of the three before. */
+const PLURAL_END_RE = fromJs(
+  String.raw`e?s$`,
+  "",
+  { accept: ({ index }, text) => [1, 2, 3].every((k) => index >= k && isWordChar(text[index - k])) },
+  String.raw`(?<=\w{3})e?s$`,
+);
+const LITERAL_RE = fromJs(String.raw`"([^"]{8,80})"|'([^']{8,80})'|\(([^)]{8,80})\)|“([^”]{8,80})”`);
+const FAILING_SIGNATURE_RE = fromJs(String.raw`\s[45]\d{2}$`);
+const ENDPOINT_RE = fromJs(String.raw`\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$-]*)`, "i");
+const TRAILING_SLASHES_RE = fromJs(String.raw`\/+$`);
+const STATUS_RE = fromJs(String.raw`\b([45]\d{2})\b`);
+
+/** The most texts each reader below keeps what it read from. */
+const READ_CACHE_MAX = 4096;
+
+/**
+ * `read`, keeping what it gave for each of the last texts it was given. The
+ * store compares every finding with every other when it loads (retroMerge) and
+ * each incoming one with every stored one, so the same title and evidence are
+ * read once a pair; the linear-time engine costs several times what
+ * JavaScript's did on ordinary text, and is run once a text instead. What is
+ * kept is shared, so it is read-only: an exported reader hands back a copy.
+ */
+function keptReads<T>(read: (text: string) => T): (text: string) => T {
+  const kept = new Map<string, T>();
+  return (text) => {
+    const hit = kept.get(text);
+    if (hit !== undefined || kept.has(text)) return hit as T;
+    if (kept.size >= READ_CACHE_MAX) kept.clear();
+    const value = read(text);
+    kept.set(text, value);
+    return value;
+  };
 }
 
-function findingJaccard(a: Set<string>, b: Set<string>): number {
+/** Shared finding-similarity helpers (used by live dedup and retro-merge). */
+const findingTokens = keptReads(
+  (s: string): ReadonlySet<string> =>
+    new Set(
+      WHITE_SPACE_RE.splitText(NOT_TOKEN_RE.replace(s.toLowerCase(), " "))
+        .filter((t) => t.length > 2)
+        // crude stemming so entries/entry, displays/display collide
+        .map((t) => PLURAL_END_RE.replaceFirst(IES_END_RE.replaceFirst(t, "y"), "")),
+    ),
+);
+
+function findingJaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
   const inter = [...a].filter((t) => b.has(t)).length;
   const union = new Set([...a, ...b]).size;
   return union === 0 ? 0 : inter / union;
@@ -38,15 +77,18 @@ export function titleSimilarity(a: string, b: string): number {
  */
 function findingLiterals(...texts: Array<string | undefined>): Set<string> {
   const out = new Set<string>();
-  for (const text of texts) {
-    if (!text) continue;
-    for (const m of text.matchAll(/"([^"]{8,80})"|'([^']{8,80})'|\(([^)]{8,80})\)|“([^”]{8,80})”/g)) {
-      const literal = (m[1] ?? m[2] ?? m[3] ?? m[4] ?? "").toLowerCase().trim();
-      if (literal) out.add(literal);
-    }
-  }
+  for (const text of texts) if (text) for (const literal of literalsOf(text)) out.add(literal);
   return out;
 }
+
+const literalsOf = keptReads((text: string): readonly string[] => {
+  const out: string[] = [];
+  for (const m of LITERAL_RE.matchAll(text)) {
+    const literal = (m.groups[1] ?? m.groups[2] ?? m.groups[3] ?? m.groups[4] ?? "").toLowerCase().trim();
+    if (literal) out.push(literal);
+  }
+  return out;
+});
 
 /**
  * Canonical `METHOD /path STATUS` triples named by a finding's evidence.
@@ -66,20 +108,25 @@ function findingLiterals(...texts: Array<string | undefined>): Set<string> {
  * of a second copy of this regex, which is what it had.
  */
 export function failingSignatures(evidence: string | undefined): Set<string> {
-  return new Set([...endpointSignatures(evidence)].filter((sig) => /\s[45]\d{2}$/.test(sig)));
+  return new Set(evidence ? failingOf(evidence) : []);
 }
+
+const failingOf = keptReads((evidence: string): ReadonlySet<string> => new Set([...signaturesOf(evidence)].filter((sig) => FAILING_SIGNATURE_RE.test(sig))));
 
 /**
  * The endpoint signatures a piece of evidence names: method + normalised path,
  * with the failure status when one follows.
  */
 export function endpointSignatures(evidence: string | undefined): Set<string> {
+  return new Set(evidence ? signaturesOf(evidence) : []);
+}
+
+const signaturesOf = keptReads((evidence: string): ReadonlySet<string> => {
   const out = new Set<string>();
-  if (!evidence) return out;
-  const endpoints = [...evidence.matchAll(/\b(GET|POST|PUT|PATCH|DELETE)\s+(?:https?:\/\/[^/\s]+)?(\/[A-Za-z0-9/_.:{}$-]*)/gi)];
+  const endpoints = [...ENDPOINT_RE.matchAll(evidence)];
   for (const [i, m] of endpoints.entries()) {
-    const method = m[1].toUpperCase();
-    const path = normalizePath(m[2].replace(/\/+$/, "") || "/").toLowerCase();
+    const method = (m.groups[1] ?? "").toUpperCase();
+    const path = normalizePath(TRAILING_SLASHES_RE.replaceFirst(m.groups[2] ?? "", "") || "/").toLowerCase();
     // Each endpoint takes the status from its OWN window — the text between it
     // and the next endpoint mentioned. Pairing every endpoint with every status
     // in the string invented signatures that were never claimed: evidence
@@ -94,13 +141,13 @@ export function endpointSignatures(evidence: string | undefined): Set<string> {
     // `GET /api/x` and will not merge with the same bug written the other way
     // round: a visible duplicate, which is the safe direction to fail, since
     // the alternative discards a finding.
-    const from = (m.index ?? 0) + m[0].length;
-    const to = i + 1 < endpoints.length ? (endpoints[i + 1].index ?? evidence.length) : evidence.length;
-    const status = /\b([45]\d{2})\b/.exec(evidence.slice(from, to))?.[1];
+    const from = m.end;
+    const to = i + 1 < endpoints.length ? endpoints[i + 1].index : evidence.length;
+    const status = STATUS_RE.exec(evidence.slice(from, to))?.groups[1];
     out.add(status ? `${method} ${path} ${status}` : `${method} ${path}`);
   }
   return out;
-}
+});
 
 /**
  * Same endpoint, same failure — regardless of which route it was filed from.
@@ -115,9 +162,9 @@ function sharesEndpointSignature(a: { evidence?: string }, b: { evidence?: strin
   // `POST /api/orders` (the endpoint answered 2xx, or no status was named)
   // says which endpoint was involved, not what went wrong: a double submit
   // and an accepted negative quantity both name it, and are two bugs.
-  const aSigs = failingSignatures(a.evidence);
+  const aSigs = failingOf(a.evidence);
   if (aSigs.size === 0) return false;
-  for (const sig of failingSignatures(b.evidence)) if (aSigs.has(sig)) return true;
+  for (const sig of failingOf(b.evidence)) if (aSigs.has(sig)) return true;
   return false;
 }
 
@@ -150,7 +197,7 @@ export function sameEndpointBug(
  * a toast's text) disagrees with nothing.
  */
 export function requestsDisagree(a: string | undefined, b: string | undefined): boolean {
-  const requests = (ev: string | undefined) => new Set([...endpointSignatures(ev)].map((sig) => sig.split(" ").slice(0, 2).join(" ")));
+  const requests = (ev: string | undefined) => new Set([...(ev ? signaturesOf(ev) : [])].map((sig) => sig.split(" ").slice(0, 2).join(" ")));
   const aReq = requests(a);
   const bReq = requests(b);
   if (aReq.size === 0 || bReq.size === 0) return false;
@@ -217,6 +264,13 @@ export function sameKind(a: string | undefined, b: string | undefined): boolean 
   return (!!a && a === b) || sameFamily(a, b);
 }
 
+/** Evidence in lower case with each run of white space one space, to compare two as written. */
+function squashed(evidence: string | undefined): string | undefined {
+  return typeof evidence === "string" ? squash(evidence) : undefined;
+}
+
+const squash = keptReads((evidence: string): string => WHITE_SPACE_RE.replace(evidence.toLowerCase(), " ").trim());
+
 export function sameFinding(
   a: { title: string; detail?: string; evidence?: string; category?: string },
   b: { title: string; detail?: string; evidence?: string; category?: string },
@@ -224,8 +278,8 @@ export function sameFinding(
   // What is wrong before where: two kinds of defect are two findings, however
   // alike their evidence, quoted text or titles.
   if (!sameKind(a.category, b.category)) return false;
-  const aEv = a.evidence?.toLowerCase().replace(/\s+/g, " ").trim();
-  const bEv = b.evidence?.toLowerCase().replace(/\s+/g, " ").trim();
+  const aEv = squashed(a.evidence);
+  const bEv = squashed(b.evidence);
   if (aEv && bEv && aEv === bEv) return true;
   // A shared distinctive literal (e.g. "Document not found anymore") marks the
   // same bug even when two sessions wrote DIFFERENT evidence strings. The
