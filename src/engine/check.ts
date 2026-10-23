@@ -172,6 +172,11 @@ export const CHECK_RULES = {
   },
   "clipped-text": { severity: "low", title: "Text clipped", help: "Text is wider than its box and cut off without an ellipsis." },
   "image-aspect": { severity: "low", title: "Image distorted", help: "The rendered box does not match the image's proportions." },
+  "touching-containers": {
+    severity: "low",
+    title: "Containers touching",
+    help: "Two sibling boxes drawn as separate cards (a border, a background or a shadow, with a rounded corner where they meet) sit 0–2px apart. The evidence names their parent, whose gap is usually the fix. Joins whose corners are square or tightened where they meet, such as list groups, accordions, table rows and grouped chat bubbles, are not reported.",
+  },
   "flow-step-failed": {
     severity: "high",
     title: "Saved flow broke",

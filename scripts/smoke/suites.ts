@@ -19,6 +19,7 @@ import * as refreshCookie from "./refresh-cookie.ts";
 import * as liveView from "./live-view.ts";
 import * as contradiction from "./contradiction.ts";
 import * as geometry from "./geometry.ts";
+import * as designScores from "./design-scores.ts";
 import * as attribution from "./attribution.ts";
 import * as frames from "./frames.ts";
 import * as injection from "./injection.ts";
@@ -67,6 +68,7 @@ export const suites: SmokeSuite[] = [
   postmessage,
   contradiction,
   geometry,
+  designScores,
   attribution,
   frames,
   snapshotContents,
