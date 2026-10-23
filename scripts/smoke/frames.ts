@@ -18,6 +18,12 @@ export const title = "frames";
 const ABSENT_MS = 1500;
 /** The same for a move of the whole page, which has to load a page of the other site before that page can write. */
 const MOVED_ABSENT_MS = 2500;
+/**
+ * How long Playwright is given to report a frame's move to data: once the data: page itself has said it loaded. In a
+ * pass it reports the move together with the load; in Firefox a move whose commit its protocol left out is never
+ * reported, however long the wait.
+ */
+const DATA_COMMIT_MS = 5000;
 
 export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeContext): Promise<void> {
   const engine = new BrowserEngine();
@@ -423,17 +429,37 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     );
 
     // The tester's own no-referrer click out, while a foreign frame sits on data:: refused, and said so.
-    await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
-    await loadedAs("redirected");
-    await frameAs("redirected")!
-      .evaluate(() => (window as unknown as { dataFetch: () => void }).dataFetch())
-      .catch(() => {});
-    await until("the embed to sit on a data: URL", () =>
-      page
-        .mainFrame()
-        .childFrames()
-        .some((f) => f.url().startsWith("data:")),
-    );
+    // The engine sees frames only through Playwright, and in Firefox its protocol can leave out the commit of this
+    // frame's move to data:, so the frame keeps its old address for good. The data: page tells the app page it has
+    // loaded; when it has and Playwright still shows another address, the move was lost, and the setup is done again.
+    const DATA_SETUP_TRIES = 3;
+    for (let attempt = 1; ; attempt++) {
+      await engine.navigate(`${baseUrl}/frames-redirect.html?foreign=${encodeURIComponent(foreignBaseUrl)}`);
+      await loadedAs("redirected");
+      await frameAs("redirected")!
+        .evaluate(() => (window as unknown as { dataFetch: () => void }).dataFetch())
+        .catch(() => {});
+      await until("the embed's data: page to say it has loaded", () =>
+        page.evaluate(() => (window as unknown as { embedOnData?: boolean }).embedOnData === true).catch(() => false),
+      );
+      const seen = await eventually(
+        () =>
+          page
+            .mainFrame()
+            .childFrames()
+            .some((f) => f.url().startsWith("data:")),
+        DATA_COMMIT_MS,
+      );
+      if (seen) break;
+      const urls = page
+        .frames()
+        .map((f) => f.url().slice(0, 80))
+        .join(" | ");
+      if (attempt === DATA_SETUP_TRIES) {
+        throw new Error(`the embed loaded its data: page ${attempt} times and Playwright never reported the move: ${urls}`);
+      }
+      console.log(`  (${BROWSER}: the embed is on its data: page, but Playwright did not report the move, attempt ${attempt}; setting it up again: ${urls})`);
+    }
     const outSnap = await engine.snapshot(true);
     const outRef = /(e\d+) link "Leave the app"/.exec(outSnap)?.[1];
     const clicked = outRef ? await engine.click(outRef) : `no ref in:\n${outSnap}`;

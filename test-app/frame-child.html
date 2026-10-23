@@ -51,10 +51,13 @@
       const target = location.origin + '/frame-popup.html?via=top';
       location.href = 'data:text/html,' + encodeURIComponent('<script>top.location = ' + JSON.stringify(target) + ';<\/script>');
     };
-    // Load a data: URL in this frame's place that posts to this frame's site with "Origin: null".
+    // Load a data: URL in this frame's place that posts to this frame's site with "Origin: null". It also tells the
+    // embedding page it has loaded, so a test can tell that this frame now holds the data: document from the page itself.
     window.dataFetch = () => {
       const target = location.origin + '/api/frame-datafetch';
-      location.href = 'data:text/html,' + encodeURIComponent('<script>fetch(' + JSON.stringify(target) + ', { method: "POST", body: "x", mode: "no-cors" });<\/script>');
+      location.href =
+        'data:text/html,' +
+        encodeURIComponent('<script>parent.postMessage("embed-on-data", "*"); fetch(' + JSON.stringify(target) + ', { method: "POST", body: "x", mode: "no-cors" });<\/script>');
     };
     // From a data: URL loaded in this frame's place, a form aimed at the top window that posts to this frame's site.
     window.dataTopForm = () => {

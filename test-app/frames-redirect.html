@@ -15,6 +15,11 @@
     if (other) document.getElementById('embed').src = other + '/frame-redirect';
     // A link out to another site (the second port under another host name), sending no Referer.
     if (port) document.getElementById('out').href = 'http://localhost:' + Number(port[1]) + '/page2.html';
+    // The embed says when it holds the data: document its dataFetch() loads: a test reads that here, from the page.
+    window.embedOnData = false;
+    window.addEventListener('message', (e) => {
+      if (e.source === document.getElementById('embed').contentWindow && e.data === 'embed-on-data') window.embedOnData = true;
+    });
   </script>
 </body>
 </html>
