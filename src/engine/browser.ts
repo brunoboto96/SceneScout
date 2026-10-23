@@ -76,7 +76,7 @@ import {
   describeCover,
   type CoverFacts,
 } from "./collector.js";
-import { OracleMonitor, formatViolations, httpErrorDetail, planStopsAt, requestKey, type PlanViolationRule } from "./oracles.js";
+import { OracleMonitor, formatViolations, httpErrorDetail, planStopsAt, requestKey, withoutFragment, type PlanViolationRule } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, journeyTime, measureJourney } from "./journey.js";
 import {
@@ -5922,7 +5922,7 @@ export class BrowserEngine {
         const resp = await this.gotoSettlingFailure(current, url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs }).catch((err: unknown) => {
           // A missing file or feed the browser refused to show is the step's failure by its status, as a page's is.
           if (err instanceof AnsweredNavigationError && err.answer.status >= 400) {
-            collect(redactSecrets(httpErrorDetail("GET", err.answer.url.replace(/#.*$/, ""), err.answer.status)));
+            collect(redactSecrets(httpErrorDetail("GET", withoutFragment(err.answer.url), err.answer.status)));
           }
           return Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs));
         });
@@ -5933,7 +5933,7 @@ export class BrowserEngine {
           failure = answeredStatus({ status, contentType: mediaTypeOf(resp?.headers()["content-type"]) });
           // The page's own status is this step's failure; the oracle's record of the same response is not a second issue.
           // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
-          collect(redactSecrets(httpErrorDetail("GET", current.url().replace(/#.*$/, ""), status)));
+          collect(redactSecrets(httpErrorDetail("GET", withoutFragment(current.url()), status)));
         }
       } else if (step.action === "upload") {
         const loc = step.target ? BrowserEngine.locatorFor(current, parseTarget(step.target)!).first() : null;

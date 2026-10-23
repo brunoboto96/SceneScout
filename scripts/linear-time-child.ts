@@ -17,11 +17,15 @@ import { templateIds } from "../src/engine/calibration.ts";
 import { markdownCell, withoutOwnResponse, type RouteHealth } from "../src/engine/check.ts";
 import { crawlFoundNothing, crawlNotes } from "../src/engine/ci-lanes.ts";
 import { downloadIsNavigations } from "../src/engine/crawl.ts";
+import { shadowLayers } from "../src/engine/design.ts";
 import { readLifetime } from "../src/engine/expiry.ts";
 import { endpointSignatures, sameFinding } from "../src/engine/finding-dedup.ts";
 import { requestPathMatches } from "../src/engine/flow.ts";
 import { isPattern } from "../src/engine/from-run.ts";
 import { parseLaneReport, statedRequests } from "../src/engine/lane.ts";
+import type { Finding } from "../src/engine/memory.ts";
+import { withoutFragment } from "../src/engine/oracles.ts";
+import { formatEvidenceSection, plainStep } from "../src/engine/plain.ts";
 import { tokenShapeOf } from "../src/engine/postmessage.ts";
 import { chooseSubmit, type FieldInfo } from "../src/engine/scripted-login.ts";
 import { identifierIsDestructive, strictBodyIsDestructive } from "../src/engine/strict-writes.ts";
@@ -45,6 +49,24 @@ import { maskFillCalls, redactPersonal, secretWordKind } from "../src/engine/sen
 function megabyte(unit: string, prefix = "", suffix = ""): string {
   const room = 1_000_000 - prefix.length - suffix.length;
   return prefix + unit.repeat(Math.max(1, Math.floor(room / unit.length))) + suffix;
+}
+
+/** A finding with a picture, so the Evidence section lists it under this title. */
+function titled(title: string): Finding {
+  return {
+    id: "0a1b2c3d4e",
+    severity: "low",
+    category: "visual",
+    title,
+    detail: "",
+    evidence: "",
+    url: "http://h/",
+    state: "/",
+    repro: [],
+    foundAt: "2026-01-01T00:00:00.000Z",
+    runs: 1,
+    picture: "recordings/s1/finding-0a1b2c3d4e.png",
+  };
 }
 
 /** A submit button with this text, as the scripted login reads it from a page. */
@@ -176,6 +198,13 @@ const CASES: Record<string, Array<[string, () => unknown]>> = {
     ["a button of 'try' over and over (scripted login's away words)", () => chooseSubmit([button(megabyte("A-TRY\u0000"))])],
     ["a button of 'continue with' over and over (scripted login's lookahead)", () => chooseSubmit([button(megabyte("continue with a code "))])],
     ["a button of 'continue with' and 'send' over and over (scripted login's lookahead)", () => chooseSubmit([button(megabyte("continue with a code send "))])],
+    // #618, the last sites. On JavaScript's engine each took 0.9 to 18 s at 100 KB and over a minute at 1 MB.
+    ["a page url of hash marks (a step's own response)", () => withoutFragment(megabyte("#", "", "\n#"))],
+    ["a box-shadow of full stops (a shadow layer's lengths)", () => shadowLayers(megabyte(".", "1px "))],
+    ["a box-shadow of open colours (a shadow layer's colour)", () => shadowLayers(megabyte("rgb(", "1px "))],
+    ["a chosen option of quotes and equals signs (the plain step's select)", () => plainStep(`select ${megabyte('" = ', '0 "', "\n")}`)],
+    ["an attached file of arrows (the plain step's upload)", () => plainStep(`upload ${megabyte(" ← \u0000", "", "\n ← ( (")}`)],
+    ["a finding's title of tabs (the Evidence heading)", () => formatEvidenceSection({ current: [titled(megabyte("\t", "", "\u0000\n"))] })],
   ],
   credential: [
     ["one long word (#578: the address remover)", () => holdsCredential(megabyte("a"))],

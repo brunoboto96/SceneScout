@@ -22,12 +22,15 @@ import "../src/engine/calibration.ts";
 import "../src/engine/check.ts";
 import "../src/engine/ci-lanes.ts";
 import "../src/engine/crawl.ts";
+import { shadowColour, shadowLengths } from "../src/engine/design.ts";
 import "../src/engine/expiry.ts";
 import { endpointSignatures, isDuplicateFinding, sameFinding } from "../src/engine/finding-dedup.ts";
 import "../src/engine/fingerprint.ts";
 import "../src/engine/flow.ts";
 import "../src/engine/from-run.ts";
 import { statedRequests } from "../src/engine/lane.ts";
+import { withoutFragment } from "../src/engine/oracles.ts";
+import "../src/engine/plain.ts";
 import "../src/engine/policy.ts";
 import { tokenShapeOf } from "../src/engine/postmessage.ts";
 import { leadsAway } from "../src/engine/scripted-login.ts";
@@ -1660,6 +1663,8 @@ function identityCorpus(): Set<string> {
     "profiles-test.ts",
     "oracle-test.ts",
     "scripted-login-test.ts",
+    "design-test.ts",
+    "guided-test.ts",
   ]) {
     const source = ts.createSourceFile(file, fs.readFileSync(path.join(scripts, file), "utf8"), ts.ScriptTarget.Latest, true);
     const visit = (node: ts.Node): void => {
@@ -1786,6 +1791,13 @@ function identityCorpus(): Set<string> {
     "0123456789ab",
     "Download is starting",
     "😀😀😀😀",
+    " = ",
+    " ← ",
+    "px",
+    "-2.5px",
+    "rgb(",
+    "rgba(0, 0, 0, 0)",
+    "\r",
   ];
   // Whole texts for the lookarounds written in code, each beside its near misses: "continue with" and what may follow it
   // (#618), a plural after three letters of a word, an id segment of twelve characters with a digit.
@@ -1909,6 +1921,29 @@ test('leadsAway reads what its JavaScript pattern read, "continue with" and its 
   const AWAY_WORDS =
     /\b(forgot|reset|sign[\s-]?up|register|create|continue with(?! (your |my |a |an |work |personal )?(e-?mail|phone|([\w-]+ )?code))|provider|google|microsoft|github|apple|facebook|sso|single sign|passkey|magic link|cancel|back|re-?send|remember|new code|another|(send|try)\b.*\bagain|different|change|edit|instead|didn['’]?t|did not|not you)\b/i;
   for (const text of identityCorpus()) assert.equal(leadsAway(text), AWAY_WORDS.test(text), JSON.stringify(text));
+});
+
+test("withoutFragment drops what its JavaScript pattern dropped: from the first # after the last line end (#618)", () => {
+  for (const text of [...identityCorpus(), "http://h/a#b", "http://h/a#b#c", "a#b\nc", "a#b\nc#d", "a#b\u2028c#d", "a#\r", "#", ""])
+    assert.equal(withoutFragment(text), text.replace(/#.*$/, ""), JSON.stringify(text));
+});
+
+test("a shadow layer's lengths and colour are what their JavaScript patterns found (#618)", () => {
+  const texts = [
+    ...identityCorpus(),
+    "rgba(0, 0, 0, 0.1) 0px 1px 3px 0px",
+    "rgb(229, 231, 235) 0px 0px 0px 1px inset",
+    "-1.5px --2px -.px 1..2px 3 px 4pxpx",
+    "rgbargb(1) rgba(2)",
+    "rgba rgb(",
+    "rgb(1 rgba(2) rgb(3)",
+    "1.2.3",
+    "-",
+  ];
+  for (const text of texts) {
+    assert.deepEqual(shadowLengths(text), text.match(/-?[0-9.]+px/g) ?? [], JSON.stringify(text));
+    assert.equal(shadowColour(text), text.match(/rgba?\([^)]*\)/)?.[0] ?? null, JSON.stringify(text));
+  }
 });
 
 test("fromJs reads a JavaScript pattern the way JavaScript does, and refuses what RE2 cannot run (#618)", () => {

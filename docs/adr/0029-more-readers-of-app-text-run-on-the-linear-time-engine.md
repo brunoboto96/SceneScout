@@ -125,12 +125,33 @@ tree a scan reads, Playwright's error messages), where their input is capped sho
 of harm, or where they run inside the page under test (the page could stall itself
 anyway, and RE2JS is not there).
 
-## Not converted yet
+## The last sites (#618)
 
-Files another change was editing at the time hold flagged patterns that read app
-text: `browser.ts` (a URL's fragment), `design.ts` (pixel and colour values from
-computed styles), `plain.ts` (step text of the plain report) and `report.ts` (the
-report's own folds). The other readers of app text (the request replay, the
-oracles, the claims checks, the export of findings, the signed-in check, the form
-and injection readers) hold patterns the checker found linear; they are converted
-the same way when they change.
+Four files another change was editing during the second round held flagged
+patterns that read app text. Each took from 0.9 to 18 s at 100 KB on
+JavaScript's engine, and did not finish in a minute at 1 MB:
+
+- a page address's fragment, `#.*$` (`browser.ts`, where a flow step's own
+  response is told from the oracle's record of it, and `check.ts`): now
+  `withoutFragment` in `oracles.ts`, a search for the last line end and then the
+  first `#` after it;
+- a box-shadow layer's lengths and colour (`design.ts`): now `shadowLengths` and
+  `shadowColour`, read in code. A design audit reads every styled element's
+  shadow, and on RE2 an audit of 1,500 elements took about twice as long
+  (6 ms to 12 ms); read in code it takes what it did;
+- a chosen option and an attached file in a plain step, and the line breaks in a
+  finding's title under Evidence (`plain.ts`): built with `fromJs`. Six steps take
+  about 7 microseconds where they took 2, and the Evidence section for 40
+  findings about 0.4 ms where it took 0.1, once per report.
+
+The pattern listed in `report.ts` (the fold tags in the report's own HTML) had
+already been removed by the change that escapes text written into a fold. The
+code-read functions are held to their old JavaScript patterns in memory-test, on
+the same strings as the patterns, and each site has a 1 MB case in the child
+process. The static checker now flags no pattern in `browser.ts`, `design.ts`,
+`plain.ts` or `report.ts`.
+
+The other readers of app text (the request replay, the oracles, the claims
+checks, the export of findings, the signed-in check, the form and injection
+readers) hold patterns the checker found linear; they are converted the same way
+when they change.
