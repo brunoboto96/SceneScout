@@ -24,7 +24,7 @@ import { formatLoadRetries } from "./limits.js";
 import { formatNeverSubmittedEmpty } from "./forms.js";
 import {
   DEFAULT_REPORT_AUDIENCE,
-  escapeSummaryText,
+  escapeFoldText,
   escapeTableCell,
   formatPlainSection,
   pictureOf,
@@ -157,13 +157,13 @@ function formatWorthALook(items: readonly Finding[], sessionStart: string, folde
   ];
   for (const f of items) {
     // Inside the fold a title is text, as a finding's is (findingRenderer).
-    lines.push(`### ${folded ? escapeSummaryText(f.title) : f.title}`, ``);
+    lines.push(`### ${folded ? escapeFoldText(f.title) : f.title}`, ``);
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}${f.foundAt >= sessionStart ? "" : " · seen in an earlier run"}`);
     lines.push(`- **A defect only if** your project uses ${f.convention ?? "a convention the finding does not name"}`);
     if (f.evidence) lines.push(`- **Seen:** \`${f.evidence}\``);
     lines.push(`- **Where:** \`${f.state}\` (${f.url})${alsoSeenOn(f)}`);
     lines.push(...pictureLine(f));
-    lines.push(``, f.detail, ``);
+    lines.push(``, folded ? escapeFoldText(f.detail, true) : f.detail, ``);
   }
   return lines;
 }
@@ -844,7 +844,7 @@ export function generateReport(
   // ---- The tickets the run was given, criterion by criterion. ----
   const ticketRun = memory.ticketsThisRun();
   const ticketInput: TicketReportInput = { tickets: ticketRun.tickets, verdicts: ticketRun.verdicts, findings: memory.findings };
-  lines.push(...formatTicketsTechnical(ticketInput));
+  lines.push(...formatTicketsTechnical(ticketInput, foldsTechnical(extras)));
 
   // The sections in the report's order; each writes its own lines.
   const scores = pageScoreSection(lines, memory);
@@ -1026,7 +1026,7 @@ function gapLedgerSection(lines: string[], memory: MemoryStore, extras: ReportEx
 function findingRenderer(lines: string[], folded = false): (f: Finding, complete?: boolean) => void {
   const renderFinding = (f: Finding, complete = false): void => {
     // Inside the fold a title is text: a `</details>` in it would close the fold.
-    const title = folded ? escapeSummaryText(f.title) : f.title;
+    const title = folded ? escapeFoldText(f.title) : f.title;
     lines.push(complete ? `### 🟢 [COMPLETE] ${title}` : `### ${SEVERITY_ICON[f.severity]} [${f.severity.toUpperCase()}] ${title}`);
     lines.push(``);
     if (complete) lines.push(`- **Resolved** (was ${f.severity})`);
@@ -1039,7 +1039,7 @@ function findingRenderer(lines: string[], folded = false): (f: Finding, complete
     // A merge the model made is shown with what was filed, so a wrong one can be seen, and refiled as its own defect (ADR 4).
     for (const m of judgedMergesOf(f)) {
       lines.push(
-        `- **Merged by the dedup judge** (p_same ${m.pSame.toFixed(2)}, ${m.at.slice(0, 10)}): [${m.severity}] ${m.title}, filed as ${m.category}${m.evidence ? ` with evidence \`${m.evidence}\`` : ""}`,
+        `- **Merged by the dedup judge** (p_same ${m.pSame.toFixed(2)}, ${m.at.slice(0, 10)}): [${m.severity}] ${folded ? escapeFoldText(m.title) : m.title}, filed as ${m.category}${m.evidence ? ` with evidence \`${m.evidence}\`` : ""}`,
       );
     }
     // Only printed once somebody has re-tested it. A finding nobody has looked
@@ -1049,14 +1049,14 @@ function findingRenderer(lines: string[], folded = false): (f: Finding, complete
     }
     lines.push(``);
     // Inside the fold, a detail line that is itself a fold's tag would open or close one; it is written as text.
-    lines.push(folded ? f.detail.replace(/^(\s*)<(\/?(?:details|summary)\b)/gim, "$1&lt;$2") : f.detail);
+    lines.push(folded ? escapeFoldText(f.detail, true) : f.detail);
     lines.push(``);
     if (f.repro.length > 0) {
       // Inside the folded technical part the trace is a plain list: a fold in
       // a fold is one more click, and not every Markdown viewer nests them.
       lines.push(folded ? `**Repro trace (last actions before finding):**` : `<details><summary>Repro trace (last actions before finding)</summary>`);
       lines.push(``);
-      f.repro.forEach((step, i) => lines.push(`${i + 1}. ${step}`));
+      f.repro.forEach((step, i) => lines.push(`${i + 1}. ${escapeFoldText(step)}`));
       lines.push(``);
       if (!folded) lines.push(`</details>`, ``);
     }

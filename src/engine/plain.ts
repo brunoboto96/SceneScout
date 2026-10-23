@@ -173,7 +173,15 @@ export function plainStep(line: string): string | null {
   }
   if (action === "hover") return `Point at ${control(target)}`;
   if (action === "press") return `Press ${target}`;
-  if (action === "scroll") return target ? `Scroll ${control(target)}` : "Scroll the page";
+  if (action === "scroll") {
+    // A plan's scroll step moves the page: to an edge, or by a number of pixels (600 when it names neither).
+    // The target a plan carries is not read as an element, so the words never name one.
+    if (raw.startsWith("plan:")) {
+      if (target === "top" || target === "bottom") return `Scroll to the ${target} of the page`;
+      return `Scroll the page down ${/^\d+$/.test(target) ? target : "600"} pixels`;
+    }
+    return target ? `Scroll ${control(target)}` : "Scroll the page";
+  }
   if (action === "back") return "Go back to the previous page";
   return null;
 }
@@ -278,6 +286,20 @@ export function escapeTableCell(text: string): string {
  */
 export function escapeSummaryText(text: string): string {
   return text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] as string).replace(/\r?\n/g, " ");
+}
+
+/**
+ * App text written into a Markdown line that sits inside a `<details>` fold,
+ * where a `</details>` or `<summary>` in it would close or reopen the fold on
+ * GitHub. `&`, `<` and `>` become entities; the HTML report and the live view
+ * decode them once. Backticks are dropped: a code span shows an entity
+ * literally on GitHub, so a backticked title would read `&lt;` there, and a
+ * title without its code styling is the lesser loss. With `keepNewlines` the
+ * line breaks stay (a finding's detail); otherwise they are flattened.
+ */
+export function escapeFoldText(text: string, keepNewlines = false): string {
+  const escaped = text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] as string).replace(/`/g, "");
+  return keepNewlines ? escaped : escaped.replace(/\r?\n/g, " ");
 }
 
 /** How long a run took, in words: "under a minute", "4 minutes", "1 hour 5 minutes". */
@@ -501,15 +523,15 @@ export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, 
   const lines = [
     `<details><summary>${index}. ${escapeSummaryText(card.title)}</summary>`,
     ``,
-    `**${card.impact}** · ${card.problem} · on ${f.url}${card.alsoOn.length > 0 ? `, and also seen on ${card.alsoOn.join(", ")}` : ""}`,
+    `**${card.impact}** · ${card.problem} · on ${escapeFoldText(f.url)}${card.alsoOn.length > 0 ? `, and also seen on ${escapeFoldText(card.alsoOn.join(", "))}` : ""}`,
     ``,
   ];
   if (card.steps.length > 0) {
     lines.push(`**What was done:**`, ``);
-    card.steps.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
+    card.steps.forEach((s, i) => lines.push(`${i + 1}. ${escapeFoldText(s)}`));
     lines.push(``);
   }
-  lines.push(`**What was expected:** ${card.expected}`, ``, `**What happened:** ${card.happened}`, ``);
+  lines.push(`**What was expected:** ${card.expected}`, ``, `**What happened:** ${escapeFoldText(card.happened)}`, ``);
   if (card.picture) lines.push(`**Picture:** under ${EVIDENCE_HEADING}, as problem ${index}.`, ``);
   // The id, category, severity and route are for whoever fixes it, so they
   // fold once more under their own name: a Summary reader who opened the

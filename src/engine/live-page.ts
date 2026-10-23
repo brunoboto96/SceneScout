@@ -623,7 +623,8 @@ export const LIVE_PAGE = `<!doctype html>
     function flush() {
       if (!para.length) return;
       var p = el('p');
-      inline(p, para.join(' '));
+      var paraText = para.join(' ');
+      inline(p, folds.length ? decodeEntities(paraText) : paraText);
       container.appendChild(p);
       para = [];
     }
@@ -633,7 +634,7 @@ export const LIVE_PAGE = `<!doctype html>
       var m;
       while (i < lines.length && (m = re.exec(lines[i]))) {
         var li = el('li');
-        inline(li, m[1]);
+        inline(li, folds.length ? decodeEntities(m[1]) : m[1]);
         box.appendChild(li);
         // A finding names its id on its first bullet; the frames recorded
         // around it hang under that list, so the proof sits with the claim.

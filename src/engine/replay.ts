@@ -396,7 +396,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
   const flush = (): void => {
     if (!para.length) return;
     const text = para.join(" ");
-    out.push(`<p>${inline(text)}</p>`);
+    out.push(`<p>${inline(open.length > 0 ? decodeEntities(text) : text)}</p>`);
     para = [];
   };
   const closeItem = (): void => {
@@ -522,7 +522,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
       while (i < lines.length && (m = /^\s*[-*] (.*)$/.exec(lines[i]))) {
         const id = /\*\*Id:\*\* `([0-9a-f]+)`/.exec(m[1])?.[1];
         if (id && !shown.has(id)) found = evidence.find((e) => e.id === id);
-        items.push(`<li>${inline(m[1])}</li>`);
+        items.push(`<li>${inline(open.length > 0 ? decodeEntities(m[1]) : m[1])}</li>`);
         i += 1;
       }
       out.push(`<ul>${items.join("")}</ul>`);
@@ -534,7 +534,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
       flush();
       const items: string[] = [];
       while (i < lines.length && (m = /^\d+\. (.*)$/.exec(lines[i]))) {
-        items.push(`<li>${inline(m[1])}</li>`);
+        items.push(`<li>${inline(open.length > 0 ? decodeEntities(m[1]) : m[1])}</li>`);
         i += 1;
       }
       out.push(`<ol>${items.join("")}</ol>`);
