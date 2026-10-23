@@ -69,6 +69,30 @@ export function lateSignInBounce(opts: { watching: boolean; seen: string; now: s
 }
 
 /**
+ * What a watched call does to the page's address: `judges` its own landing (a navigation, a crawl, a plan, a replay, a
+ * baseline capture), only `reads` the page (a snapshot, a scroll, a hover, a design audit, an element capture), or
+ * `moves` it as a person would (a click, typing, a select, a key press, an upload, a back).
+ */
+export type WatchedCall = "judges" | "reads" | "moves";
+
+/**
+ * What a sign-in page found by lateSignInBounce means, by when it was found and by what call.
+ *
+ * Found `before` a call runs, the page went there on its own since the last call: a bounce (`count`). Found as a call
+ * ends, it depends on the call. A call that only reads cannot have sent the page there, so that too is the page going
+ * on its own (`count`). An action can: a click on "Sign out" or on a "Log in" link lands on a sign-in page on purpose,
+ * and counting it would mark the page the tester was on as not covered, add to SESSION AUTH LOST and, for a role
+ * session, sign the tester back in after they signed out. So it is said, not counted (`note`); whether the sign-in
+ * still holds is for the next navigation to a signed-in page to show. A call that judges its own landing has already
+ * recorded it (`none`).
+ */
+export function lateSignInVerdict(call: WatchedCall, when: "before" | "end"): "count" | "note" | "none" {
+  if (when === "before") return "count";
+  if (call === "reads") return "count";
+  return call === "moves" ? "note" : "none";
+}
+
+/**
  * Where a recovered session goes next: back to what the navigation that
  * declared the loss asked for (not the login page it landed on), then to the
  * streak's other targets, which bounced too and are not covered. Each is a

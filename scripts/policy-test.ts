@@ -96,7 +96,7 @@ import {
   type CreationEvidence,
   type OwnedIds,
 } from "../src/engine/ownership.ts";
-import { AUTH_LOSS_STREAK, AuthLossTracker, lateSignInBounce, LOGIN_ROUTE_RE, shouldReattach } from "../src/engine/authloss.ts";
+import { AUTH_LOSS_STREAK, AuthLossTracker, lateSignInBounce, lateSignInVerdict, LOGIN_ROUTE_RE, shouldReattach } from "../src/engine/authloss.ts";
 import {
   bodyDigest,
   headerOf,
@@ -489,6 +489,19 @@ test("a page that went to sign-in since the session last saw it is a bounce of t
     [on("about:blank", `${base}/login`), null, "about:blank is no page of the app"],
     [on("", `${base}/login`), null, "nothing seen yet"],
     [on(`${base}/loginhelp`, `${base}/login`), `${base}/loginhelp`, "a path that merely starts like one is not a sign-in page"],
+  ];
+  for (const [got, want, why] of cases) assert.equal(got, want, why);
+});
+
+test("a sign-in page found as an action ends is said, not counted: the tester may have signed out on purpose", () => {
+  // Contrastive pairs: the same sign-in page, and the one fact that decides it is when it was found and by what call.
+  const cases: Array<[ReturnType<typeof lateSignInVerdict>, ReturnType<typeof lateSignInVerdict>, string]> = [
+    [lateSignInVerdict("moves", "end"), "note", "a click on Sign out or a Log in link lands there on purpose"],
+    [lateSignInVerdict("moves", "before"), "count", "found before the next action, the page went there on its own"],
+    [lateSignInVerdict("reads", "end"), "count", "a snapshot or a scroll cannot send the page to sign-in: it went on its own"],
+    [lateSignInVerdict("reads", "before"), "count", "...and before a read, likewise"],
+    [lateSignInVerdict("judges", "end"), "none", "a navigation, crawl or plan has recorded its own landing"],
+    [lateSignInVerdict("judges", "before"), "count", "...but what happened before it ran is still the page going on its own"],
   ];
   for (const [got, want, why] of cases) assert.equal(got, want, why);
 });

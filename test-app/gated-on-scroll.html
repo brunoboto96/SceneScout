@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area (guard on scroll)</title>
+  </head>
+  <body>
+    <main style="min-height: 3000px">
+      <h1 data-testid="gated-on-scroll-heading">Gated area</h1>
+      <p>Reports for signed-in members.</p>
+    </main>
+    <script>
+      // A client-side auth guard that checks the sign-in when the visitor first scrolls (a lazy section loading behind a
+      // token check) and sends a signed-out visitor to sign-in. A scroll only reads the page, so a sign-in page it ends
+      // on is the page going there on its own while the call ran. Signed in (the "smoke-auth" flag a storage state
+      // sets), the page stays put.
+      // Only a scroll the visitor made: a browser may send a scroll event as the page loads (Firefox does), or put back
+      // where an earlier visit had scrolled to.
+      history.scrollRestoration = "manual";
+      var checked = false;
+      addEventListener("scroll", function () {
+        if (checked || scrollY < 100) return;
+        checked = true;
+        try {
+          if (localStorage.getItem("smoke-auth") === "yes") return;
+        } catch (e) {
+          /* storage unavailable — treat as signed out */
+        }
+        // A moment later, as the token check answers, while the scroll call is still waiting for the page to settle.
+        setTimeout(function () {
+          location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
+        }, 50);
+      });
+    </script>
+  </body>
+</html>

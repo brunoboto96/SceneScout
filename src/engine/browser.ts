@@ -38,7 +38,7 @@ import {
 } from "./claims.js";
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
-import { AuthLossTracker, lateSignInBounce } from "./authloss.js";
+import { AuthLossTracker, lateSignInBounce, lateSignInVerdict, type WatchedCall } from "./authloss.js";
 import { captureClip, cutByViewport, type Box } from "./capture.js";
 import { maskedScreenshot } from "./secret-pixels.js";
 import { NEXT_FRAME_SCRIPT, NEXT_FRAME_WAIT_MS, STOP_ANIMATIONS_SCRIPT, steadyPicture, unsteadyNote, type PictureSettings } from "./baseline.js";
@@ -2279,51 +2279,52 @@ export class BrowserEngine {
   private heldSignInNotice = "";
 
   /**
-   * A tool call, watched for a sign-in page the page went to on its own (authloss.ts lateSignInBounce): before it runs,
-   * against the address the last call ended on, and, when `atEnd`, again as it ends, for a redirect that landed while it
-   * ran. A navigation, a crawl and a plan judge their own landings, so they only note where they ended. A bounce found
-   * either way leads the result, or the error when the call throws. Without a sign-in, the call runs as it is.
+   * A tool call, watched for a sign-in page the page went to (authloss.ts lateSignInBounce): before it runs, against the
+   * address the last call ended on, and as it ends, against the address it started on. What a sign-in page found means
+   * depends on when and on the call (authloss.ts lateSignInVerdict): before any call, or as a call that only reads ends,
+   * the page went there on its own and that is a bounce; as an action ends, it may be the tester's own sign-out, so it
+   * is said and not counted; a call that judges its own landing has recorded it. What is found leads the result, or the
+   * error when the call throws. Without a sign-in, the call runs as it is.
    */
-  private async watchSignIn(run: () => Promise<string>, atEnd: boolean): Promise<string> {
-    return this.watchedCall(run, atEnd, (notice, out) => notice + out);
+  private async watchSignIn(run: () => Promise<string>, call: WatchedCall): Promise<string> {
+    return this.watchedCall(run, call, (notice, out) => notice + out);
   }
 
   /** watchSignIn for a call whose result is not text: what it finds is held for the next call's result. */
-  private async watchSignInAround<T>(run: () => Promise<T>): Promise<T> {
-    return this.watchedCall(run, false, (notice, out) => {
+  private async watchSignInAround<T>(run: () => Promise<T>, call: WatchedCall): Promise<T> {
+    return this.watchedCall(run, call, (notice, out) => {
       this.heldSignInNotice += notice;
       return out;
     });
   }
 
-  private async watchedCall<T>(run: () => Promise<T>, atEnd: boolean, say: (notice: string, out: T) => T): Promise<T> {
+  private async watchedCall<T>(run: () => Promise<T>, call: WatchedCall, say: (notice: string, out: T) => T): Promise<T> {
     if (!this.watchesForBounce || this.signInDepth > 0) return run();
     this.signInDepth += 1;
     try {
-      const before = this.heldSignInNotice + (await this.lateSignIn(true));
+      const before = this.heldSignInNotice + (await this.lateSignIn(call, "before"));
       this.heldSignInNotice = "";
       let out: T;
       try {
         out = await run();
       } catch (err) {
-        // A call that judged its own landing has recorded it: the next call must not judge the same move again.
-        if (!atEnd) this.noteSeen();
-        if (!before) throw err;
+        // A call that judged its own landing has recorded it, and an action's own landing is said here: the next call
+        // must not take either for a page that went to sign-in on its own. A read leaves it for the next call to judge.
+        const own = call === "moves" ? this.ownSignInNote() : "";
+        if (call === "judges") this.noteSeen();
+        const notice = before + own;
+        if (!notice) throw err;
         if (!(err instanceof Error)) {
-          this.heldSignInNotice = before;
+          this.heldSignInNotice = notice;
           throw err;
         }
-        const wrapped = new Error(`${before}${err.message}`);
+        const wrapped = new Error(`${notice}${err.message}`);
         wrapped.name = err.name;
         throw wrapped;
       }
-      if (!atEnd) {
-        this.noteSeen();
-        return say(before, out);
-      }
       let after: string;
       try {
-        after = await this.lateSignIn(false);
+        after = await this.lateSignIn(call, "end");
       } catch (err) {
         // The re-attach that answered the bounce failed; the call itself had finished, so its result still stands.
         after = `${err instanceof Error ? err.message : String(err)}\n`;
@@ -2340,15 +2341,19 @@ export class BrowserEngine {
   }
 
   /**
-   * Whether the page is on a sign-in page it was not on when the session last saw it (authloss.ts lateSignInBounce).
-   * `between`: seen before a call runs, so the page went there on its own after the last call (an app whose scripts
-   * send a signed-out visitor to sign-in later than a navigation watches its address), and the navigation that seemed
-   * to reach that page is taken back (AuthLossTracker.recordLate). Otherwise seen as a call ends: the call's own move,
-   * or a redirect while it ran, counted as a bounce like any other. Either way the page it was on is not covered, the
-   * streak and its SESSION AUTH LOST verdict count it, and a role session may re-attach once. One read of the address;
-   * "" when nothing moved there.
+   * Whether the page is on a sign-in page it was not on when the session last saw it (authloss.ts lateSignInBounce),
+   * and what that means (authloss.ts lateSignInVerdict). Counted, the page it was on is not covered, the streak and its
+   * SESSION AUTH LOST verdict count it in place of the navigation that seemed to reach it (AuthLossTracker.recordLate),
+   * and a role session may re-attach once. An action's own landing is only said (ownSignInNote). One read of the
+   * address; "" when nothing moved there.
    */
-  private async lateSignIn(between: boolean): Promise<string> {
+  private async lateSignIn(call: WatchedCall, when: "before" | "end"): Promise<string> {
+    const verdict = lateSignInVerdict(call, when);
+    if (verdict === "none") {
+      this.noteSeen();
+      return "";
+    }
+    if (verdict === "note") return this.ownSignInNote();
     const page = this.page;
     if (!page || page.isClosed()) return "";
     const now = page.url();
@@ -2358,15 +2363,35 @@ export class BrowserEngine {
     if (bounced === null) return "";
     this.logAction({ action: "sign-in:late-redirect", target: bounced, url: now });
     this.authLoss.clear();
-    this.recordNavigationOutcome(bounced, now, between);
-    const lead = between
-      ? `⚠ SIGNED OUT AFTER LOAD: the page at ${normalizePath(bounced)} went to the sign-in page ${new URL(now).pathname} on its own since it was last read.\n`
-      : `⚠ SIGNED OUT: the page went from ${normalizePath(bounced)} to the sign-in page ${new URL(now).pathname} during this call.\n`;
+    this.recordNavigationOutcome(bounced, now, true);
+    const lead =
+      `⚠ SIGNED OUT AFTER LOAD: the page at ${normalizePath(bounced)} went to the sign-in page ${new URL(now).pathname} on its own ` +
+      (when === "before" ? "since the last call.\n" : "while this call ran.\n");
     try {
       return lead + (await this.answerLoss(page, ""));
     } finally {
       this.noteSeen();
     }
+  }
+
+  /**
+   * An action that ended on a sign-in page it did not start on: a sign-out, a "Log in" link, or a sign-in that ran out.
+   * Said, never counted (authloss.ts lateSignInVerdict), and the address is noted so the next call does not count it.
+   */
+  private ownSignInNote(): string {
+    const page = this.page;
+    if (!page || page.isClosed()) return "";
+    const now = page.url();
+    const seen = this.seenUrl;
+    this.seenUrl = now;
+    const from = lateSignInBounce({ watching: this.watchesForBounce, seen, now, baseUrl: this.baseUrl });
+    if (from === null) return "";
+    this.logAction({ action: "sign-in:action-landed", target: from, url: now });
+    return (
+      `Note: this call went from ${normalizePath(from)} to the sign-in page ${new URL(now).pathname}. An action can sign out or open sign-in on ` +
+      `purpose, so this is not counted as a lost sign-in and ${normalizePath(from)} is not marked; if it was not meant to, the next ` +
+      `navigation to a signed-in page shows whether the sign-in still holds.\n`
+    );
   }
 
   /** Requests started and not yet finished, failed, or left behind by their frame. */
@@ -2513,7 +2538,7 @@ export class BrowserEngine {
   }
 
   async snapshot(full = false): Promise<string> {
-    return this.watchSignIn(() => this.snapshotUnwatched(full), true);
+    return this.watchSignIn(() => this.snapshotUnwatched(full), "reads");
   }
 
   /** snapshot, unwatched: watchSignIn runs it. */
@@ -3415,7 +3440,7 @@ export class BrowserEngine {
 
   /** `leave` answers a leave confirmation the click raises (policy.ts dialogResponse); undefined lets the mode decide. */
   async click(ref: string, clicks = 1, leave?: boolean): Promise<string> {
-    return this.watchSignIn(() => this.clickUnwatched(ref, clicks, leave), true);
+    return this.watchSignIn(() => this.clickUnwatched(ref, clicks, leave), "moves");
   }
 
   /** click, unwatched: watchSignIn runs it. */
@@ -3647,7 +3672,7 @@ export class BrowserEngine {
   }
 
   async type(ref: string, text: string, pressEnter = false, replace = false): Promise<string> {
-    return this.watchSignIn(() => this.typeUnwatched(ref, text, pressEnter, replace), true);
+    return this.watchSignIn(() => this.typeUnwatched(ref, text, pressEnter, replace), "moves");
   }
 
   /** type, unwatched: watchSignIn runs it. */
@@ -3725,7 +3750,7 @@ export class BrowserEngine {
    * fixture unless `filePath` names one inside the attached project.
    */
   async upload(opts: UploadOptions): Promise<string> {
-    return this.watchSignIn(() => this.uploadUnwatched(opts), true);
+    return this.watchSignIn(() => this.uploadUnwatched(opts), "moves");
   }
 
   /** upload, unwatched: watchSignIn runs it. */
@@ -3977,7 +4002,7 @@ export class BrowserEngine {
    * look, not an interaction, and the element still deserves a click.
    */
   async hover(ref: string): Promise<string> {
-    return this.watchSignIn(() => this.hoverUnwatched(ref), true);
+    return this.watchSignIn(() => this.hoverUnwatched(ref), "reads");
   }
 
   /** hover, unwatched: watchSignIn runs it. */
@@ -4072,7 +4097,7 @@ export class BrowserEngine {
   }
 
   async select(ref: string, value: string): Promise<string> {
-    return this.watchSignIn(() => this.selectUnwatched(ref, value), true);
+    return this.watchSignIn(() => this.selectUnwatched(ref, value), "moves");
   }
 
   /** select, unwatched: watchSignIn runs it. */
@@ -4172,7 +4197,7 @@ export class BrowserEngine {
   private static readonly ACTIVATION_KEY_RE = /^(Enter|NumpadEnter|Space| )$/i;
 
   async press(key: string): Promise<string> {
-    return this.watchSignIn(() => this.pressUnwatched(key), true);
+    return this.watchSignIn(() => this.pressUnwatched(key), "moves");
   }
 
   /** press, unwatched: watchSignIn runs it. */
@@ -4249,7 +4274,7 @@ export class BrowserEngine {
 
   /** `leave` answers a leave confirmation the page raises (policy.ts dialogResponse); undefined lets the mode decide. */
   async navigate(target: string, leave?: boolean): Promise<string> {
-    return this.watchSignIn(() => this.navigateUnwatched(target, leave), false);
+    return this.watchSignIn(() => this.navigateUnwatched(target, leave), "judges");
   }
 
   /** navigate, unwatched: watchSignIn runs it. */
@@ -4925,7 +4950,7 @@ export class BrowserEngine {
 
   /** `leave` answers a leave confirmation the page raises (policy.ts dialogResponse); undefined lets the mode decide. */
   async goBack(leave?: boolean): Promise<string> {
-    return this.watchSignIn(() => this.goBackUnwatched(leave), true);
+    return this.watchSignIn(() => this.goBackUnwatched(leave), "moves");
   }
 
   /** goBack, unwatched: watchSignIn runs it. */
@@ -5049,7 +5074,7 @@ export class BrowserEngine {
    * stay unvisited. The first run's time budget is the only caller.
    */
   async crawl(paths?: string[], opts: { inspect?: boolean; limit?: number; measureOnly?: boolean; deadline?: number } = {}): Promise<string> {
-    return this.watchSignIn(() => this.crawlUnwatched(paths, opts), false);
+    return this.watchSignIn(() => this.crawlUnwatched(paths, opts), "judges");
   }
 
   /** crawl, unwatched: watchSignIn runs it. */
@@ -5356,7 +5381,7 @@ export class BrowserEngine {
    * an earlier one. A failed step or a policy refusal still stops it.
    */
   async runPlan(steps: PlanStep[], onViolation: PlanViolationRule = "stop"): Promise<string> {
-    return this.watchSignIn(() => this.runPlanUnwatched(steps, onViolation), false);
+    return this.watchSignIn(() => this.runPlanUnwatched(steps, onViolation), "judges");
   }
 
   /** runPlan, unwatched: watchSignIn runs it. */
@@ -5733,7 +5758,7 @@ export class BrowserEngine {
    * step does not count as done until the page has settled.
    */
   async replayFlow(steps: readonly FlowStep[], mode: "observe" | "read-only" = this.mode === "observe" ? "observe" : "read-only"): Promise<FlowReplay> {
-    return this.watchSignInAround(() => this.replayFlowUnwatched(steps, mode));
+    return this.watchSignInAround(() => this.replayFlowUnwatched(steps, mode), "judges");
   }
 
   /** replayFlow, unwatched: watchSignInAround runs it. */
@@ -6022,7 +6047,7 @@ export class BrowserEngine {
 
   /** Computed-style design audit of the current page — visual judgment material without pixels. */
   async designAudit(): Promise<string> {
-    return this.watchSignIn(() => this.designAuditUnwatched(), false);
+    return this.watchSignIn(() => this.designAuditUnwatched(), "reads");
   }
 
   /** designAudit, unwatched: watchSignIn runs it. */
@@ -6073,7 +6098,7 @@ export class BrowserEngine {
    * silently cut off from everything below the fold).
    */
   async scroll(to?: "top" | "bottom", by?: number, target?: string): Promise<string> {
-    return this.watchSignIn(() => this.scrollUnwatched(to, by, target), true);
+    return this.watchSignIn(() => this.scrollUnwatched(to, by, target), "reads");
   }
 
   /** scroll, unwatched: watchSignIn runs it. */
@@ -6105,7 +6130,7 @@ export class BrowserEngine {
    * capture.ts.
    */
   async captureElement(target: { ref?: string; key?: string }, margin: number, log = true): Promise<{ png: Buffer; key: string; label: string; url: string }> {
-    return this.watchSignInAround(() => this.captureElementUnwatched(target, margin, log));
+    return this.watchSignInAround(() => this.captureElementUnwatched(target, margin, log), "reads");
   }
 
   /** captureElement, unwatched: watchSignInAround runs it. */
@@ -6348,7 +6373,7 @@ export class BrowserEngine {
     target: FlowTarget | null,
     how: PictureSettings,
   ): Promise<{ png: Buffer; viewport: { width: number; height: number }; deviceScaleFactor: number; cut: string | null; unsteady: string | null }> {
-    return this.watchSignInAround(() => this.captureForBaselineUnwatched(pathOnApp, target, how));
+    return this.watchSignInAround(() => this.captureForBaselineUnwatched(pathOnApp, target, how), "judges");
   }
 
   /** captureForBaseline, unwatched: watchSignInAround runs it. */
