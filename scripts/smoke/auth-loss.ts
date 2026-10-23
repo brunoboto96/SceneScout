@@ -224,10 +224,12 @@ async function readWhileSignInLands(baseUrl: string, authProject: string, deadSt
     }
   };
   const stale = await rounds(deadState);
+  // Every round, not only the first: a round whose redirect has not landed by the time the scroll returns is lost to
+  // the next round's navigation, which cancels it, and the verdict then comes a round late.
   check(
-    "a scroll during which the page went to sign-in reports it as the page going on its own",
-    stale[0].includes("SIGNED OUT AFTER LOAD") && stale[0].includes("while this call ran"),
-    stale[0],
+    "each scroll during which the page went to sign-in reports it as the page going on its own",
+    stale.every((o) => o.includes("SIGNED OUT AFTER LOAD") && o.includes("while this call ran")),
+    stale.join("\n---\n"),
   );
   check("...and the third round in a row raises SESSION AUTH LOST", stale[2].includes("SESSION AUTH LOST"), stale[2]);
   const fresh = await rounds(liveState);

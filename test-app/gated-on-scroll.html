@@ -11,14 +11,17 @@
     </main>
     <script>
       // A client-side auth guard that checks the sign-in when the visitor first scrolls (a lazy section loading behind a
-      // token check) and sends a signed-out visitor to sign-in. A scroll only reads the page, so a sign-in page it ends
-      // on is the page going there on its own while the call ran. Signed in (the "smoke-auth" flag a storage state
-      // sets), the page stays put.
-      // Only a scroll the visitor made: a browser may send a scroll event as the page loads (Firefox does), or put back
-      // where an earlier visit had scrolled to.
+      // session check) and sends a signed-out visitor to sign-in on the check's answer. A scroll only reads the page, so
+      // a sign-in page it ends on is the page going there on its own while the call ran. Signed in (the "smoke-auth"
+      // flag a storage state sets), the page stays put.
+      //
+      // The check is a request, started in the same task as the scroll, and the redirect starts on its answer while
+      // the request is still open (the server answers after 250 ms and holds its body back): the page is busy from the
+      // scroll to the sign-in page, so the scroll's wait for the page to settle sees it on any machine. A bare timer after the scroll event is not: a
+      // late frame can push it past that wait, and the next call's navigation then cancels the redirect.
       history.scrollRestoration = "manual";
       var checked = false;
-      addEventListener("scroll", function () {
+      function checkSession() {
         if (checked || scrollY < 100) return;
         checked = true;
         try {
@@ -26,11 +29,17 @@
         } catch (e) {
           /* storage unavailable — treat as signed out */
         }
-        // A moment later, as the token check answers, while the scroll call is still waiting for the page to settle.
-        setTimeout(function () {
-          location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
-        }, 50);
-      });
+        fetch("/api/session-check", { cache: "no-store" }).then(function (res) {
+          if (res.status === 401) location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
+        });
+      }
+      // A scroll made in script is checked as it happens; one made by hand, when its scroll event arrives.
+      var nativeScrollTo = window.scrollTo.bind(window);
+      window.scrollTo = function () {
+        nativeScrollTo.apply(null, arguments);
+        checkSession();
+      };
+      addEventListener("scroll", checkSession);
     </script>
   </body>
 </html>
