@@ -17,7 +17,7 @@ import { httpJudgeAsk } from "../ci-run.js";
 import { laneCloseGuard } from "../engine/lane.js";
 import { liveViewUrl } from "../engine/status-pane.js";
 import { LIVE_ENV } from "../engine/live.js";
-import { decideOpen, OPEN_CHOICES, OPEN_ENV, opensLiveView, type OpenChoice } from "../engine/open.js";
+import { decideOpen, notOpenedLine, OPEN_CHOICES, OPEN_ENV, opensLiveView, type OpenChoice } from "../engine/open.js";
 import { parseLoginArgs } from "../engine/profiles.js";
 import type { BrowserEngineName } from "../browsers.js";
 import { LOGIN_WINDOW_MAX_MS, savedLine, startLoginWindow } from "../login-run.js";
@@ -363,6 +363,7 @@ export function registerSessionTools(): void {
           .describe(
             `Open the live view (on this attach) and/or report.html (when scout_report writes it) in the user's default browser: 'live', 'report', 'both' or 'none'. ` +
               `Default: the ${OPEN_ENV} environment variable, else 'both' on a local desktop session (headed or headless) and 'none' in CI, over SSH, or with no display. ` +
+              `It can ask for less, never more: what ${OPEN_ENV} leaves out stays shut (${OPEN_ENV}=none shuts both), and with ${OPEN_ENV} unset CI, SSH or no display shuts both; the result says what was not opened and why. ` +
               "Pass it only when the user asked for something other than the default.",
           ),
       },
@@ -576,16 +577,18 @@ export function registerSessionTools(): void {
           if (liveAddress && opensLiveView(opening, open !== undefined, liveOpened)) {
             setLiveOpened(true);
             openNote = openForUser("the live view", liveViewUrl(liveAddress.port, liveAddress.token));
-          } else if (opening.refused && open !== undefined && (open === "live" || open === "both")) {
-            // The operator's setting or the environment outranks the argument: say so every time it is asked.
-            openNote = `\nThe live view was not opened: ${opening.refused}.`;
           } else if (opening.live && open !== undefined && !liveAddress) {
             // Asked for by this attach and not there to open: say why rather than nothing.
             openNote = `\nThe live view was not opened: ${process.env[LIVE_ENV] === "off" ? `${LIVE_ENV}=off keeps it from running` : "it is not running"}.`;
-          } else if (!opening.live && liveAddress && !openWhySaid) {
+          } else if (!opening.live && liveAddress && !openWhySaid && !opening.refused) {
             // Once per server, so a person wondering why no window appeared is told how to change it.
             setOpenWhySaid(true);
-            openNote = `\nNot opened in a browser (${opening.why}); scout_attach {open} or ${OPEN_ENV} changes that.`;
+            openNote = `\n${notOpenedLine(opening.why)}`;
+          }
+          if (opening.refused) {
+            // The operator's setting or the environment outranks the argument: said on every attach that asks, for the live view or the report.
+            setOpenWhySaid(true);
+            openNote += `\n${opening.refused}.`;
           }
           // Recording writes pictures of the app under test into the project, so
           // a run doing it says where they go rather than leaving the person to

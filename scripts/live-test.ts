@@ -100,6 +100,7 @@ import { register as registerMod } from "../mods/scenescout-mod/hooks/register.j
 import {
   COULD_NOT_OPEN,
   decideOpen,
+  notOpenedLine,
   OPEN_CHOICES,
   OPEN_ENV,
   openableTarget,
@@ -1850,6 +1851,44 @@ test("open: the operator and the environment outrank scout_attach {open}; the ar
     assert.deepEqual([d.live, d.report, d.refused !== undefined], [live, report, refused], name);
     if (refused) assert.match(d.refused ?? "", /does not override/, `${name}: says why`);
   }
+});
+
+test("open: a refusal names what it kept shut, the report included, and the one setting that changes it", () => {
+  const ctx = (env: Record<string, string>, platform: NodeJS.Platform = "darwin"): OpenContext => ({ env, platform });
+  const cases: Array<[string, OpenChoice, OpenContext, boolean, boolean, string]> = [
+    // name, argument, context, live, report, the line
+    [
+      "CI + arg report: the report is refused, not left unsaid",
+      "report",
+      ctx({ CI: "true" }),
+      false,
+      false,
+      `Not opened in a browser: report.html (a CI run; scout_attach {open: "report"} does not override that, ${OPEN_ENV} in the server's environment does)`,
+    ],
+    [
+      "env live + arg both: the live view opens and the report's refusal is named",
+      "both",
+      ctx({ [OPEN_ENV]: "live" }),
+      true,
+      false,
+      `Not opened in a browser: report.html (${OPEN_ENV} is live; scout_attach {open: "both"} does not override that, ${OPEN_ENV} in the server's environment does)`,
+    ],
+    [
+      "no display + arg both: both named",
+      "both",
+      ctx({}, "linux"),
+      false,
+      false,
+      `Not opened in a browser: the live view and report.html (no display to show a window on; scout_attach {open: "both"} does not override that, ${OPEN_ENV} in the server's environment does)`,
+    ],
+  ];
+  for (const [name, asked, c, live, report, line] of cases) {
+    const d = decideOpen(asked, c);
+    assert.deepEqual([d.live, d.report, d.refused], [live, report, line], name);
+  }
+  // The once-per-server line for an attach that asked for nothing: the argument cannot widen it, so it is not offered.
+  assert.equal(notOpenedLine("a CI run"), `Not opened in a browser (a CI run); ${OPEN_ENV} in the server's environment changes that.`);
+  assert.doesNotMatch(notOpenedLine("a CI run"), /scout_attach/);
 });
 
 test("open: SCENESCOUT_OPEN is read, and a value outside the choices is refused", () => {

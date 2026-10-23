@@ -945,9 +945,17 @@ async function openCheck(): Promise<void> {
     await ci.connect(new StdioClientTransport({ command: "node", args: [serverPath], env: { ...env, CI: "true" } }));
     try {
       const attached = textOf(await ci.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir } }));
-      if (attached.includes("Opened") || !attached.includes("Not opened in a browser (a CI run); scout_attach {open} or SCENESCOUT_OPEN changes that."))
+      if (attached.includes("Opened") || !attached.includes("Not opened in a browser (a CI run); SCENESCOUT_OPEN in the server's environment changes that."))
         fail(`a CI attach opened the live view, or did not say why not:\n${attached}`);
-      const reported = textOf(await ci.callTool({ name: "scout_report", arguments: { force: true, level: "minimal" } }));
+      // The agent's own open asks for less, never more: in CI it is refused, and the result says so once.
+      const asked = textOf(
+        await ci.callTool({ name: "scout_attach", arguments: { url: fixture.baseUrl, projectPath: projectDir, session: "asked", open: "both" } }),
+      );
+      const refusal =
+        'Not opened in a browser: the live view and report.html (a CI run; scout_attach {open: "both"} does not override that, SCENESCOUT_OPEN in the server\'s environment does).';
+      if (asked.includes("Opened") || asked.split(refusal).length !== 2 || asked.includes("changes that."))
+        fail(`a CI attach asking for open: "both" opened something, or did not say once why not:\n${asked}`);
+      const reported = textOf(await ci.callTool({ name: "scout_report", arguments: { force: true, level: "minimal", session: "asked" } }));
       if (reported.includes("Opened")) fail(`a CI run opened the report:\n${reported}`);
       assertClosedAll(textOf(await ci.callTool({ name: "scout_close", arguments: { all: true } })));
     } finally {
@@ -984,7 +992,9 @@ async function openCheck(): Promise<void> {
     } finally {
       await client.close();
     }
-    console.log("✓ on a local session the live view opens once and the report when written, whatever the client declares; CI and open: none open nothing");
+    console.log(
+      "✓ on a local session the live view opens once and the report when written, whatever the client declares; CI and open: none open nothing, and CI refuses an attach's open",
+    );
   } finally {
     await fixture.close();
     fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });

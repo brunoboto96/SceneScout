@@ -35,7 +35,7 @@ export interface OpenDecision {
   report: boolean;
   /** Why, in a phrase, for the attach reply. */
   why: string;
-  /** Set when an attach's `open` asked for more than the environment allows: the plain line the attach result carries. */
+  /** Set when an attach's `open` asked for more than the environment allows: the plain line the attach result carries, naming what was not opened and why. */
   refused?: string;
 }
 
@@ -89,8 +89,20 @@ export function decideOpen(asked: OpenChoice | undefined, ctx: OpenContext): Ope
   if (!limit) return wants;
   const live = wants.live && limit.live;
   const report = wants.report && limit.report;
-  const refused = (wants.live && !live) || (wants.report && !report) ? `${limit.why}, which scout_attach {open: "${asked}"} does not override` : undefined;
+  const held = [wants.live && !live ? "the live view" : "", wants.report && !report ? "report.html" : ""].filter(Boolean);
+  const refused = held.length
+    ? `Not opened in a browser: ${held.join(" and ")} (${limit.why}; scout_attach {open: "${asked}"} does not override that, ${OPEN_ENV} in the server's environment does)`
+    : undefined;
   return { live, report, why: refused ? limit.why : wants.why, ...(refused ? { refused } : {}) };
+}
+
+/**
+ * The line an attach that asked for nothing carries, once per server, when the
+ * live view stays shut. Only the server's environment can change it: an
+ * attach's `open` asks for less, never more, than the environment allows.
+ */
+export function notOpenedLine(why: string): string {
+  return `Not opened in a browser (${why}); ${OPEN_ENV} in the server's environment changes that.`;
 }
 
 /**
