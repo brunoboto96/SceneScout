@@ -173,7 +173,18 @@ export function plainStep(line: string): string | null {
   }
   if (action === "hover") return `Point at ${control(target)}`;
   if (action === "press") return `Press ${target}`;
-  if (action === "scroll") return target ? `Scroll ${control(target)}` : "Scroll the page";
+  if (action === "scroll") {
+    // A plan's scroll step moves the page, read as the engine reads it: to the bottom when it names nothing,
+    // to an edge, or by a number of pixels (negative is up, and 600 down for anything else).
+    // The target a plan carries is not read as an element, so the words never name one.
+    if (raw.startsWith("plan:")) {
+      const v = target.trim() || "bottom";
+      if (v === "top" || v === "bottom") return `Scroll to the ${v} of the page`;
+      const by = Number.parseInt(v, 10) || 600;
+      return `Scroll the page ${by < 0 ? "up" : "down"} ${Math.abs(by)} pixels`;
+    }
+    return target ? `Scroll ${control(target)}` : "Scroll the page";
+  }
   if (action === "back") return "Go back to the previous page";
   return null;
 }
@@ -278,6 +289,43 @@ export function escapeTableCell(text: string): string {
  */
 export function escapeSummaryText(text: string): string {
   return text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] as string).replace(/\r?\n/g, " ");
+}
+
+/**
+ * App text written into a Markdown line that sits inside a `<details>` fold,
+ * where a `</details>` or `<summary>` in it would close or reopen the fold on
+ * GitHub. `&`, `<` and `>` become entities; the HTML report and the live view
+ * decode them once. Backticks are dropped: a code span shows an entity
+ * literally on GitHub, so a backticked title would read `&lt;` there, and a
+ * title without its code styling is the lesser loss. With `keepNewlines` the
+ * line breaks stay (a finding's detail); otherwise they are flattened.
+ */
+export function escapeFoldText(text: string, keepNewlines = false): string {
+  const escaped = text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] as string).replace(/`/g, "");
+  return keepNewlines ? escaped : escaped.replace(/\r?\n/g, " ");
+}
+
+/**
+ * A web address written into a fold. Entities would break it on GitHub (an
+ * autolink keeps `&amp;` in its href and shows it), so `<` and `>` are
+ * percent-encoded instead, as a browser sends them, and `&` stays as it is.
+ */
+export function foldUrl(url: string): string {
+  return url.replace(/</g, "%3C").replace(/>/g, "%3E").replace(/\r?\n/g, " ");
+}
+
+/**
+ * App text as a Markdown code span. Its fence is one backtick longer than the
+ * longest run of backticks inside, so a backtick in the text cannot end the
+ * span early and leave a `</details>` after it as markup. Text with no
+ * backtick gets the usual single one.
+ */
+export function codeSpan(text: string): string {
+  const flat = text.replace(/\r?\n/g, " ");
+  const longest = Math.max(0, ...(flat.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longest + 1);
+  const pad = longest > 0 ? " " : "";
+  return `${fence}${pad}${flat}${pad}${fence}`;
 }
 
 /** How long a run took, in words: "under a minute", "4 minutes", "1 hour 5 minutes". */
@@ -501,15 +549,15 @@ export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, 
   const lines = [
     `<details><summary>${index}. ${escapeSummaryText(card.title)}</summary>`,
     ``,
-    `**${card.impact}** · ${card.problem} · on ${f.url}${card.alsoOn.length > 0 ? `, and also seen on ${card.alsoOn.join(", ")}` : ""}`,
+    `**${card.impact}** · ${card.problem} · on ${foldUrl(f.url)}${card.alsoOn.length > 0 ? `, and also seen on ${escapeFoldText(card.alsoOn.join(", "))}` : ""}`,
     ``,
   ];
   if (card.steps.length > 0) {
     lines.push(`**What was done:**`, ``);
-    card.steps.forEach((s, i) => lines.push(`${i + 1}. ${s}`));
+    card.steps.forEach((s, i) => lines.push(`${i + 1}. ${escapeFoldText(s)}`));
     lines.push(``);
   }
-  lines.push(`**What was expected:** ${card.expected}`, ``, `**What happened:** ${card.happened}`, ``);
+  lines.push(`**What was expected:** ${card.expected}`, ``, `**What happened:** ${escapeFoldText(card.happened)}`, ``);
   if (card.picture) lines.push(`**Picture:** under ${EVIDENCE_HEADING}, as problem ${index}.`, ``);
   // The id, category, severity and route are for whoever fixes it, so they
   // fold once more under their own name: a Summary reader who opened the
@@ -518,8 +566,8 @@ export function plainFinding(f: Finding, index: number, input: Pick<PlainInput, 
   // "Id" when there is no Evidence section to hold them.
   lines.push(`<details><summary>${TECHNICAL_DETAIL_FOLD}</summary>`, ``);
   lines.push(`- **Finding id:** \`${card.id}\` · **Category:** ${card.technical.category} · **Severity:** ${card.severity}`);
-  if (card.technical.evidence) lines.push(`- **Evidence:** \`${card.technical.evidence}\``);
-  lines.push(`- **Route:** \`${card.technical.route}\``);
+  if (card.technical.evidence) lines.push(`- **Evidence:** ${codeSpan(card.technical.evidence)}`);
+  lines.push(`- **Route:** ${codeSpan(card.technical.route)}`);
   if (input.audience !== "qa") lines.push(`- The full entry, with the repro trace and a test skeleton, is under the same id in the technical details below.`);
   lines.push(``, `</details>`, ``, `</details>`, ``);
   return lines;

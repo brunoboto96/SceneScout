@@ -1,0 +1,57 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-28-0-5",
+  "date": "2026-10-19",
+  "note": "Unattended scenescout ci run (scheduled) of v3.28.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Home notices request fails with HTTP 500",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Account data download link is clipped and unreachable",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "account.html Download my data UNREACHABLE overflow-hidden"
+    },
+    {
+      "title": "Overdue status text has insufficient contrast on loans page",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "loans overdue label contrast 1.84:1"
+    },
+    {
+      "title": "Fines page presents an empty list after its data request is forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403"
+    },
+    {
+      "title": "Event join confirmation page offers no way onward",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "events-joined.html confirmation has zero interactable elements"
+    },
+    {
+      "title": "Hold cancellation control has no accessible name",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "holds page button holds-drop-32 accessible name empty"
+    },
+    {
+      "title": "Checkout reports success after the loan request is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/loans 403; status claims checked out NOT-A-MEMBER"
+    },
+    {
+      "title": "Data-export link is visually indistinguishable from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "account-export link has no underline and matches body text color"
+    }
+  ],
+  "decisions": []
+}
