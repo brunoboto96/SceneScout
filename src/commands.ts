@@ -12,7 +12,7 @@
  */
 
 /** Every subcommand, each run by a handler cli.ts supplies. */
-export type Subcommand = "scan" | "serve" | "install" | "doctor" | "check" | "ci" | "login" | "export" | "status" | "watch" | "policy" | "preflight";
+export type Subcommand = "scan" | "serve" | "install" | "doctor" | "check" | "ci" | "login" | "export" | "status" | "watch" | "policy" | "config" | "preflight";
 const HANDLERS_OF: Readonly<Record<Subcommand, true>> = {
   scan: true,
   serve: true,
@@ -25,6 +25,7 @@ const HANDLERS_OF: Readonly<Record<Subcommand, true>> = {
   status: true,
   watch: true,
   policy: true,
+  config: true,
   preflight: true,
 };
 export const SUBCOMMANDS = Object.keys(HANDLERS_OF) as Subcommand[];
@@ -43,7 +44,7 @@ interface FlagSpec {
 
 /**
  * Commands that read their arguments by hand. `check`, `ci`, `login`,
- * `export`, `policy` and `preflight` are absent: their own parsers refuse unknown options. `serve` is absent on
+ * `export`, `policy`, `config` and `preflight` are absent: their own parsers refuse unknown options. `serve` is absent on
  * purpose: it is the line an MCP client launches, and a stray argument there
  * should not stop the server from starting.
  */

@@ -86,6 +86,7 @@ import { trackerEnv } from "../src/engine/ticket-preview.ts";
 import { GUIDED_PROMPTS, guidedPromptText, livePrompt, loginPrompt, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../src/prompts.ts";
 
 import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
+import { EXIT_CONFIG, runConfigCommand } from "../src/engine/config-explain.ts";
 import { EXIT_POLICY, runPolicyCommand } from "../src/engine/policy-explain.ts";
 import {
   downloadLine,
@@ -2352,6 +2353,8 @@ test("check, ci, login, export and policy keep their own option parsing, and ser
     ["login", "http://127.0.0.1:3000", "--nope"],
     ["export", "--to", "github", "--nope"],
     ["policy", "explain", "POST", "http://127.0.0.1:3000/api/x", "--nope"],
+    ["config", "explain", "--nope"],
+    ["config", "explain", "--project", "some/project"],
     ["policy", "explain", "DELETE", "http://127.0.0.1:3000/api/x", "--mode", "read-only", "--header", "X-Trace: 1"],
     ["serve", "--stray"],
   ]) {
@@ -2468,6 +2471,62 @@ test("the CLI runs `scenescout policy explain` and exits with its code (one proc
   const ok = cli("explain", "DELETE", "https://app.example.com/api/things/3", "--mode", "read-only");
   assert.equal(ok.status, EXIT_POLICY.explained, ok.stderr);
   assert.match(ok.stdout, /^  read-only +refused /m);
+});
+
+test("`scenescout config explain`: exit 0 with a line per key, exit 2 with one line on a bad argument, an invalid file or a folder outside projectsRoot", () => {
+  const run = (args: string[], files: Record<string, string> = {}, env: Record<string, string | undefined> = {}) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    // Keyed by resolved path, so the stand-in files are found however the command joins its paths on this platform.
+    const byPath = new Map(Object.entries(files).map(([f, text]) => [path.resolve(f), text]));
+    const reader = { exists: (f: string) => byPath.has(path.resolve(f)), read: (f: string) => byPath.get(path.resolve(f)) ?? "", realpath: (f: string) => f };
+    const code = runConfigCommand(args, { env, launchDir: path.resolve("/launch"), reader, out: (l) => out.push(l), err: (l) => err.push(l) });
+    return { code, out: out.join("\n"), err: err.join("\n") };
+  };
+  const none = run(["explain"]);
+  assert.equal(none.code, EXIT_CONFIG.explained);
+  assert.match(none.out, /^Config files: none/);
+  assert.match(none.out, /^ {2}egress +all +\(default\)$/m);
+  const strict = run(["explain"], { "/launch/.scenescout/config.json": '{"preset":"strict"}' });
+  assert.equal(strict.code, EXIT_CONFIG.explained);
+  assert.match(strict.out, /^ {2}maxMode +observe +\(operator file's preset "strict"\)$/m);
+  for (const [args, files, message] of [
+    [[], {}, /^scenescout config: say what to do/],
+    [["explain", "--nope"], {}, /^scenescout config: unknown option --nope$/],
+    [["explain", "extra"], {}, /^scenescout config: unexpected argument extra$/],
+    [["explain", "--project"], {}, /^scenescout config: /],
+    [["frobnicate"], {}, /^scenescout config: unknown action frobnicate/],
+    [["explain"], { "/launch/.scenescout/config.json": '{"maxmode":"observe"}' }, /unknown key "maxmode"/],
+    [["explain"], { "/launch/.scenescout/config.json": "{" }, /not valid JSON/],
+    [["explain"], { "/launch/.scenescout/config.json": '{"projectsRoot":"/work"}' }, /outside|not inside|projectsRoot/],
+  ] as const) {
+    const r = run([...args], { ...files }, {});
+    assert.equal(r.code, EXIT_CONFIG.couldNotExplain, args.join(" "));
+    assert.match(r.err, message);
+    assert.equal(r.err.split("\n").length, 1);
+    assert.equal(r.out, "");
+  }
+  // An environment value the server refuses stops it too.
+  assert.equal(run(["explain"], {}, { SCENESCOUT_STRICT_WRITES: "maybe" }).code, EXIT_CONFIG.couldNotExplain);
+});
+
+test("the CLI runs `scenescout config explain` and exits with its code (one process: the codes themselves are tested above)", () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const env: Record<string, string | undefined> = { ...process.env };
+  for (const name of ["SCENESCOUT_CONFIG", "SCENESCOUT_STRICT_WRITES", "SCENESCOUT_REFUSE_DESTRUCTIVE_GETS", "SCENESCOUT_READ_POSTS", "SCENESCOUT_AUTH_POSTS"])
+    delete env[name];
+  const cli = (...args: string[]) =>
+    spawnSync(process.execPath, ["--import", "tsx", path.join(repo, "src", "cli.ts"), "config", ...args], {
+      cwd: repo,
+      env,
+      encoding: "utf8",
+    });
+  const ok = cli("explain");
+  assert.equal(ok.status, EXIT_CONFIG.explained, ok.stderr);
+  assert.match(ok.stdout, /^ {2}egress +all +\(default\)$/m);
+  const bad = cli("explain", "--nope");
+  assert.equal(bad.status, EXIT_CONFIG.couldNotExplain);
+  assert.match(bad.stderr, /^scenescout config: unknown option --nope/);
 });
 
 test("the top level: help, version, and an unknown or missing command", async () => {

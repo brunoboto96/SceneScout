@@ -35,6 +35,7 @@ import { EXPORT_OPTION_NAMES, parseExportArgs } from "../src/engine/export.ts";
 import { LOGIN_OPTION_NAMES } from "../src/engine/profiles.ts";
 import { SCRIPT_FLAGS } from "../src/engine/scripted-login.ts";
 import { looksLikeUrl, SUBCOMMANDS } from "../src/commands.ts";
+import { CONFIG_EXPLAIN_OPTION_NAMES } from "../src/engine/config-explain.ts";
 import { POLICY_EXPLAIN_OPTION_NAMES } from "../src/engine/policy-explain.ts";
 import { PREFLIGHT_OPTION_NAMES } from "../src/engine/preflight.ts";
 import { FIRST_RUN_DEFAULTS, FIRST_RUN_OPTION_NAMES, parseFirstRunArgs } from "../src/first-run.ts";
@@ -401,7 +402,7 @@ test("the reference lists every command the CLI dispatches, and the first run an
   assert.deepEqual(listed, COMMANDS);
 });
 
-test("the reference lists exactly the options of check, ci, login, export, policy and preflight", () => {
+test("the reference lists exactly the options of check, ci, login, export, policy, config and preflight", () => {
   const listed = (command: string) => sorted(tableIn(REFERENCE, `### \`scenescout ${command}\``).flatMap((r) => optionsIn(r[0])));
   assert.deepEqual(listed("check"), sorted(CHECK_OPTION_NAMES));
   assert.deepEqual(listed("ci"), sorted(CI_OPTION_NAMES));
@@ -409,6 +410,7 @@ test("the reference lists exactly the options of check, ci, login, export, polic
   assert.deepEqual(listed("export"), sorted(EXPORT_OPTION_NAMES));
   assert.deepEqual(listed("<url>"), sorted(FIRST_RUN_OPTION_NAMES));
   assert.deepEqual(listed("policy"), sorted(POLICY_EXPLAIN_OPTION_NAMES));
+  assert.deepEqual(listed("config"), sorted(CONFIG_EXPLAIN_OPTION_NAMES));
   assert.deepEqual(listed("preflight"), sorted(PREFLIGHT_OPTION_NAMES));
 });
 
