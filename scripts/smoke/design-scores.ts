@@ -2,7 +2,8 @@
  * The design score against its calibration set, in a real browser: one page
  * (test-app/design-score.html) and the same page with one defect switched on
  * by `?with=`: two stacks of cards with no gap between them, six button
- * heights, twelve grays, and all three at once.
+ * heights, twelve grays, and all three at once. `?with=type` sets three sizes
+ * off the page's type scale, against the clean page whose sizes are all on it.
  *
  * The contrastive pair is the touching variant against the clean page, which
  * keeps an 8px gap between the same cards; the joined list group present in
@@ -94,6 +95,21 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       /^-16 touching containers ×2 · (-6 6 button heights · -\d+ \d+ grays|-\d+ \d+ grays · -6 6 button heights)$/.test(whyOf(all)),
       whyOf(all) || all,
     );
+
+    console.log("design scores: type sizes off the scale, the contrastive pair");
+    {
+      // The clean page's type is 28, 20 and 16px, each on a 2px step; ?with=type moves the headings, notes and buttons to 19, 15 and 17px.
+      const type = await audit("type");
+      check("the clean page names no size off the type scale", !clean.includes("off the type scale"), clean);
+      check(
+        "three sizes off the scale in headings, body text and buttons are named and charged as a suggestion",
+        type.includes("3 sizes off the type scale in headings, body text or controls: 15, 17, 19px") &&
+          whyOf(type).startsWith("-3 type sizes off the scale: 15, 17, 19px") &&
+          overallOf(type) < scores.clean &&
+          overallOf(type) > scores.heights,
+        `${overallOf(type)} ${whyOf(type)}\n${type}`,
+      );
+    }
 
     console.log("design scores: pages compared with each other, the contrastive pair");
     {
@@ -199,5 +215,40 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
   } finally {
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+  await typeScalesAtWidths(baseUrl);
+}
+
+/**
+ * Deliberate type systems in test-app/design-type-scales.html, at a desktop
+ * width and a phone's: responsive calc(rem + vw) headings and a clamp() scale
+ * compute to sizes such as 27.6px under 1200px wide, and none of them is
+ * charged. The same page with three sizes picked one at a time is, at both.
+ */
+async function typeScalesAtWidths(baseUrl: string): Promise<void> {
+  const offScaleLine = (audit: string): string => audit.split("\n").find((l) => l.includes("off the type scale")) ?? "";
+  for (const width of [1280, 390]) {
+    console.log(`design scores: deliberate type scales at ${width}px wide`);
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-design-type-"));
+    const engine = new BrowserEngine();
+    engine.sessionKey = `design-type-${width}`;
+    try {
+      await engine.attach({ url: baseUrl, projectDir, mode: "read-only", viewport: { width, height: 900 } });
+      for (const scale of ["steps", "responsive", "fluid", "root18"]) {
+        await engine.navigate(`/design-type-scales.html?scale=${scale}`);
+        const audit = await engine.designAudit();
+        check(`${scale}'s scale names no size off it at ${width}px`, offScaleLine(audit) === "", offScaleLine(audit) || audit);
+      }
+      await engine.navigate("/design-type-scales.html?scale=strays");
+      const strays = offScaleLine(await engine.designAudit());
+      check(
+        `three sizes picked one at a time are named at ${width}px`,
+        strays.includes("3 sizes off the type scale") && strays.includes("15, 17, 19px"),
+        strays,
+      );
+    } finally {
+      await engine.close();
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
   }
 }

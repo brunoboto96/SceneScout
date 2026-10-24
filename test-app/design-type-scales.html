@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Type scales</title>
+  <!--
+    Deliberate type systems, each written the way its framework writes it, for
+    the type-scale read. None of them may be charged for sizes off the scale,
+    at a desktop width or a phone's.
+      ?scale=steps      A utility framework's common default steps: 12, 14, 16, 18, 20, 24, 30, 36, 48px.
+      ?scale=responsive A component framework's headings with responsive font sizes:
+                        under 1200px wide h1 to h4 are calc(rem + vw), so at a
+                        phone's width they compute to sizes such as 27.6px.
+      ?scale=fluid      A fluid scale: every step a clamp() between a 1.2 scale
+                        from 16px and a 1.25 scale from 20px.
+      ?scale=root18     The same framework's rem multipliers under an 18px root.
+      ?scale=strays     The contrast: the common steps with three picked one at
+                        a time (15, 17 and 19px), which is charged at every width.
+  -->
+  <style>
+    body { margin: 0; padding: 24px; font-family: system-ui, sans-serif; color: rgb(31, 41, 55); background: rgb(255, 255, 255); }
+    h1, h2, h3, h4, h5, h6, p { margin: 0 0 12px; font-weight: 600; }
+    p { font-weight: 400; max-width: 60ch; line-height: 1.5; }
+    button { margin: 0 8px 8px 0; padding: 8px 16px; min-height: 40px; border: 1px solid rgb(31, 41, 55); border-radius: 6px; background: rgb(255, 255, 255); color: rgb(31, 41, 55); }
+
+    .steps h1 { font-size: 3rem; } .steps h2 { font-size: 2.25rem; } .steps h3 { font-size: 1.875rem; }
+    .steps h4 { font-size: 1.5rem; } .steps h5 { font-size: 1.25rem; } .steps h6 { font-size: 1.125rem; }
+    .steps p { font-size: 1rem; } .steps p.small { font-size: 0.875rem; } .steps p.lead { font-size: 1.125rem; }
+    .steps button { font-size: 0.875rem; }
+
+    .responsive h1 { font-size: calc(1.375rem + 1.5vw); } .responsive h2 { font-size: calc(1.325rem + 0.9vw); }
+    .responsive h3 { font-size: calc(1.3rem + 0.6vw); } .responsive h4 { font-size: calc(1.275rem + 0.3vw); }
+    .responsive h5 { font-size: 1.25rem; } .responsive h6 { font-size: 1rem; }
+    @media (min-width: 1200px) {
+      .responsive h1 { font-size: 2.5rem; } .responsive h2 { font-size: 2rem; } .responsive h3 { font-size: 1.75rem; } .responsive h4 { font-size: 1.5rem; }
+    }
+    .responsive p { font-size: 1rem; } .responsive p.small { font-size: 0.875em; } .responsive p.lead { font-size: 1.25rem; }
+    .responsive button { font-size: 1rem; }
+
+    .fluid h1 { font-size: clamp(2.0736rem, 1.6rem + 2.4vw, 3.0518rem); } .fluid h2 { font-size: clamp(1.728rem, 1.4rem + 1.6vw, 2.4414rem); }
+    .fluid h3 { font-size: clamp(1.44rem, 1.2rem + 1.1vw, 1.9531rem); } .fluid h4 { font-size: clamp(1.2rem, 1.05rem + 0.7vw, 1.5625rem); }
+    .fluid h5, .fluid h6 { font-size: clamp(1rem, 0.9rem + 0.45vw, 1.25rem); }
+    .fluid p { font-size: clamp(1rem, 0.9rem + 0.45vw, 1.25rem); } .fluid p.small { font-size: clamp(0.8333rem, 0.78rem + 0.25vw, 1rem); }
+    .fluid p.lead { font-size: clamp(1.2rem, 1.05rem + 0.7vw, 1.5625rem); } .fluid button { font-size: clamp(1rem, 0.9rem + 0.45vw, 1.25rem); }
+
+    html.root18 { font-size: 18px; }
+    .root18 h1 { font-size: 2.5rem; } .root18 h2 { font-size: 2rem; } .root18 h3 { font-size: 1.75rem; } .root18 h4 { font-size: 1.5rem; }
+    .root18 h5 { font-size: 1.25rem; } .root18 h6 { font-size: 1rem; }
+    .root18 p { font-size: 1rem; } .root18 p.small { font-size: 0.875rem; } .root18 p.lead { font-size: 1.25rem; } .root18 button { font-size: 1rem; }
+
+    .strays h1 { font-size: 48px; } .strays h2 { font-size: 36px; } .strays h3 { font-size: 30px; } .strays h4 { font-size: 19px; }
+    .strays h5 { font-size: 20px; } .strays h6 { font-size: 18px; }
+    .strays p { font-size: 16px; } .strays p.small { font-size: 15px; } .strays p.lead { font-size: 18px; } .strays button { font-size: 17px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Release notes for the spring update</h1>
+    <h2>What changed in your workspace</h2>
+    <p>Projects now open where you left them, and the list of recent files keeps its order between sessions on every device you use.</p>
+    <p class="lead">Sharing a project with a team now takes one step instead of three.</p>
+    <h3>Faster search across every project</h3>
+    <p>Search reads titles, descriptions and comments, and it narrows its results as you type rather than after you press enter.</p>
+    <h4>Settings you can now change</h4>
+    <p>The default view, the first day of the week and the time zone used in exported reports are now kept per workspace.</p>
+    <h5>Notifications you receive</h5>
+    <p>A weekly summary replaces the daily emails, and you can still turn the daily emails back on from your profile settings.</p>
+    <h6>Accessibility improvements</h6>
+    <p class="small">Every dialog now returns focus to the control that opened it when it closes.</p>
+    <button type="button" data-testid="type-scales-save-click">Save changes</button>
+    <button type="button" data-testid="type-scales-preview-click">Preview</button>
+  </main>
+  <script>
+    const scale = new URLSearchParams(location.search).get("scale") || "steps";
+    document.documentElement.classList.add(scale);
+    document.body.classList.add(scale);
+  </script>
+</body>
+</html>

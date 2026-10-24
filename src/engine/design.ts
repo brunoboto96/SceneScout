@@ -1820,7 +1820,7 @@ export function analyzeDesign(
 
   // Each section builder adds its lines to `sections` in the report's order and returns what the score and the defects need.
   const contrastFails = contrastSection(records, sections);
-  const { sizes, families, nearDupSizes } = typographySection(records, sections);
+  const { sizes, families, nearDupSizes, offScale } = typographySection(records, sections);
   const { readability, prose } = readabilitySection(records, sections);
   const { pad, mar } = spacingSection(records, sections);
   const tiny = tinyTargetSection(records, allRecords, sections);
@@ -1891,6 +1891,7 @@ export function analyzeDesign(
   add("suggestion", "consistency", "near-miss alignments", nearMiss.length, 2, 6);
   add("suggestion", "consistency", `${sizes.length} font sizes`, beyond(sizes.length, 7) > 0 ? 1 : 0, 2 * beyond(sizes.length, 7), 8);
   add("suggestion", "consistency", "font sizes under 1px apart", nearDupSizes.length > 0 ? 1 : 0, 3, 3);
+  add("suggestion", "consistency", `type sizes off the scale: ${typeSizesText(offScale)}`, offScale.length > 0 ? 1 : 0, 2 * offScale.length, 8);
   add("defect", "clarity", "sideways scroll", page.scrollW > viewport.width + 8 ? 1 : 0, 12, 12);
   add("suggestion", "clarity", "task-effort issues", effort.length, 6, 18);
   add("suggestion", "clarity", "heading structure", structure.length, 3, 9);
@@ -2003,23 +2004,160 @@ function contrastSection(records: StyleRecord[], sections: string[]): string[] {
   return contrastFails;
 }
 
+// ---------------------------------------------------------------------------
+// Type scale: whether the page's font sizes are steps of one scale.
+// ---------------------------------------------------------------------------
+
+/** The ratios a type scale is commonly built on, from a major second (1.125) to the golden ratio (1.618). */
+export const TYPE_RATIOS: readonly number[] = [1.125, 1.2, 1.25, 1.333, 1.414, 1.5, 1.618];
+/** A size is a step of the scale when it is within this share of one (or TYPE_FIT_PX, whichever is larger): designers round a step to a whole pixel. */
+const TYPE_FIT = 0.025;
+const TYPE_FIT_PX = 0.5;
+/** The steps of a scale counted from the base: a little text below it, headings far above. */
+const TYPE_STEPS = { below: 2, above: 10 } as const;
+/** A step system: every size a whole multiple of this many pixels (12, 14, 16, 18, 20, 24, 30…). */
+const TYPE_GRID = 2;
+/** A ratio is inferred from the page only when it explains at least this many sizes off the step grid (and more than it leaves out): one fit is a coincidence. */
+const TYPE_RATIO_MIN_FITS = 2;
+/** Text under this size is a caption, a badge or a footnote, where an off-scale size is ordinary. */
+const TYPE_MIN_PX = 12;
+/** Off-scale sizes needed before the page is charged: a page legitimately keeps one or two. */
+export const TYPE_OFF_MIN = 3;
+
+/** What the type-scale read found on a page. */
+export interface TypeScale {
+  /** The body size the scale is counted from: the size carrying the most text between 12 and 24px. Null when no text that matters is in that range. */
+  base: number | null;
+  /** The ratio inferred from the page, from TYPE_RATIOS; null when none explains TYPE_RATIO_MIN_FITS sizes off the step grid. */
+  ratio: number | null;
+  /** Distinct sizes of the text that matters, px, ascending. */
+  sizes: number[];
+  /** Whole-pixel sizes that are neither a step of the scale, the base itself, nor on a step grid (2px, or an eighth of the base). */
+  offScale: number[];
+}
+
+/** Lower-cased family names (the first one the page asks for) of fonts whose sizes follow their own rules: code and icons. */
+const TYPE_EXEMPT_FAMILIES = ["mono", "code", "consolas", "menlo", "monaco", "courier", "icon", "awesome", "symbol", "glyph"];
+const TYPE_EXEMPT_TAGS = new Set(["code", "pre", "kbd", "samp", "var"]);
+const HEADING_TAGS = new Set(["h1", "h2", "h3", "h4", "h5", "h6"]);
+/** Non-interactive text this long is body text; shorter is a label or a badge. */
+const TYPE_BODY_CHARS = 20;
+
+/**
+ * The text whose size a type scale is about: headings, controls and body
+ * text, at least TYPE_MIN_PX, with a letter in it, and not code or an icon
+ * font. A badge, a footnote, a code sample or an icon glyph keeps its own
+ * size on a well-made page, so none of them counts.
+ */
+function typeScaleText(r: StyleRecord): boolean {
+  if (!r.text || r.fontSize < TYPE_MIN_PX || TYPE_EXEMPT_TAGS.has(r.tag)) return false;
+  const family = r.fontFamily.toLowerCase();
+  if (TYPE_EXEMPT_FAMILIES.some((f) => family.includes(f))) return false;
+  if (!/\p{L}/u.test(r.text)) return false;
+  return HEADING_TAGS.has(r.tag) || r.interactive || r.textLen >= TYPE_BODY_CHARS;
+}
+
+const onStep = (size: number, step: number, within: number): boolean => Math.abs(size - step * Math.round(size / step)) <= within;
+/**
+ * Whether a size is on a step grid: the 2px one, or an eighth of the body size,
+ * which is 0.125rem where the body is set at the root (an 18px root's 1.5rem is
+ * 27px). Sizes are read to a tenth of a pixel, so the second allows that much.
+ */
+const onTypeGrid = (size: number, base: number): boolean => onStep(size, TYPE_GRID, 0.25) || onStep(size, base / 8, 0.06);
+/**
+ * A size that is not a whole pixel was computed, by a fluid formula (clamp(), a
+ * vw term such as responsive headings below a breakpoint) or a multiplier, and at one
+ * viewport the audit cannot tell that formula from a deliberate scale. Only a
+ * whole-pixel size is held to be picked one at a time.
+ */
+const wholePixel = (size: number): boolean => Number.isInteger(size);
+
+/** How far `size` is from the nearest step of `ratio` counted from `base`, as a share of that step; null when that step is past the ones counted. */
+function typeStepError(size: number, base: number, ratio: number): number | null {
+  const k = Math.round(Math.log(size / base) / Math.log(ratio));
+  if (k < -TYPE_STEPS.below || k > TYPE_STEPS.above) return null;
+  const step = base * ratio ** k;
+  const off = Math.abs(size - step);
+  return off <= Math.max(TYPE_FIT * step, TYPE_FIT_PX) ? off / step : null;
+}
+
+/**
+ * Whether a page's type follows a scale. The base is the size most of the
+ * page's text that matters is set in (12–24px). A size is on the scale when
+ * it is on the 2px step grid most systems use (or an eighth of the base, the
+ * same grid under another root size), or a step of one ratio (TYPE_RATIOS)
+ * counted from the base. The ratio is inferred from the sizes the grid does
+ * not explain: the one that explains the most of them, if it explains at
+ * least two and more than it leaves out, so a rem-based scale (16, 20, 25,
+ * 31.25px) reads as a scale while stray sizes that happen to fit a ratio do
+ * not. What is left, and is a whole pixel, is off the scale: a size with a
+ * fraction was computed (a fluid clamp() or vw size, a multiplier), and at
+ * one viewport that cannot be told from a deliberate scale.
+ */
+export function typeScale(records: readonly StyleRecord[]): TypeScale {
+  const chars = new Map<number, number>();
+  for (const r of records.filter(typeScaleText)) {
+    const size = Math.round(r.fontSize * 10) / 10;
+    chars.set(size, (chars.get(size) ?? 0) + Math.max(1, r.textLen));
+  }
+  const sizes = [...chars.keys()].sort((a, b) => a - b);
+  const body = sizes.filter((s) => s >= TYPE_MIN_PX && s <= 24);
+  if (body.length === 0) return { base: null, ratio: null, sizes, offScale: [] };
+  const base = body.reduce((best, s) => (chars.get(s)! > chars.get(best)! ? s : best));
+  const offGrid = sizes.filter((s) => s !== base && !onTypeGrid(s, base));
+  let ratio: number | null = null;
+  let best = { fits: 0, error: Infinity };
+  for (const r of TYPE_RATIOS) {
+    const errors = offGrid.map((s) => typeStepError(s, base, r)).filter((e): e is number => e !== null);
+    const error = errors.reduce((n, e) => n + e, 0) / Math.max(1, errors.length);
+    if (errors.length > best.fits || (errors.length === best.fits && errors.length > 0 && error < best.error)) {
+      best = { fits: errors.length, error };
+      ratio = r;
+    }
+  }
+  // A ratio must explain at least two sizes, and more than it leaves out: with seven ratios and a tolerance, two
+  // stray sizes often fit one by chance, and a fourth stray must never excuse the first three.
+  if (best.fits < TYPE_RATIO_MIN_FITS || best.fits <= offGrid.length - best.fits) ratio = null;
+  const offScale = offGrid.filter((s) => wholePixel(s) && (ratio === null || typeStepError(s, base, ratio) === null));
+  return { base, ratio, sizes, offScale };
+}
+
+/** "15, 17, 19px", at most four, then how many more. */
+export function typeSizesText(sizes: readonly number[]): string {
+  const shown = sizes.slice(0, 4).join(", ");
+  return `${shown}px${sizes.length > 4 ? ` +${sizes.length - 4}` : ""}`;
+}
+
 /** Section 2 of the audit, TYPOGRAPHY: the page's font sizes and families. */
-function typographySection(records: StyleRecord[], sections: string[]): { sizes: number[]; families: string[]; nearDupSizes: number[] } {
+function typographySection(records: StyleRecord[], sections: string[]): { sizes: number[]; families: string[]; nearDupSizes: number[]; offScale: number[] } {
   // ---- 2. TYPOGRAPHY entropy: a page using >7 font sizes or >2 families usually
-  //      lacks a scale, and sizes <1px apart are drift, not deliberate steps.
+  //      lacks a scale, sizes <1px apart are drift, not deliberate steps, and
+  //      several sizes that are neither a step of the page's scale nor on a 2px
+  //      grid are sizes picked one at a time (typeScale).
   const sizes = [...new Set(records.filter((r) => r.text).map((r) => r.fontSize))].sort((a, b) => a - b);
   const families = [...new Set(records.filter((r) => r.text && r.fontFamily).map((r) => r.fontFamily))];
   const nearDupSizes = sizes.filter((s, i) => i > 0 && s - sizes[i - 1] < 1 && s - sizes[i - 1] > 0);
-  if (sizes.length > 7 || families.length > 2 || nearDupSizes.length > 0) {
+  const scale = typeScale(records);
+  const offScale = scale.offScale.length >= TYPE_OFF_MIN ? scale.offScale : [];
+  if (sizes.length > 7 || families.length > 2 || nearDupSizes.length > 0 || offScale.length > 0) {
+    const eighth = scale.base === null ? TYPE_GRID : Math.round((scale.base / 8) * 1000) / 1000;
+    const grid = eighth === TYPE_GRID ? `a ${TYPE_GRID}px step grid` : `a ${TYPE_GRID}px or ${eighth}px step grid`;
+    const against =
+      scale.ratio === null
+        ? `not on ${grid}, and no ${TYPE_RATIOS[0]}–${TYPE_RATIOS[TYPE_RATIOS.length - 1]}× scale from the ${scale.base}px body size fits them`
+        : `neither steps of the ${scale.ratio}× scale from the ${scale.base}px body size nor on ${grid}`;
     sections.push(
       `TYPOGRAPHY: ${sizes.length} distinct font sizes (${sizes.slice(0, 12).join(", ")}${sizes.length > 12 ? "…" : ""})` +
         (families.length > 2 ? ` · ${families.length} font families (${families.slice(0, 4).join(", ")})` : "") +
         (nearDupSizes.length > 0
           ? `\n  → sizes <1px apart (${nearDupSizes.join(", ")}) are drift, not scale steps — a type scale wants ≥1.15× between steps`
+          : "") +
+        (offScale.length > 0
+          ? `\n  → ${offScale.length} sizes off the type scale in headings, body text or controls: ${typeSizesText(offScale)} — ${against}; set each on a step`
           : ""),
     );
   }
-  return { sizes, families, nearDupSizes };
+  return { sizes, families, nearDupSizes, offScale };
 }
 
 /** Section 3 of the audit, READABILITY: measure, line height, body size, justified text and long capitals. */

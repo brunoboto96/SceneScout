@@ -32,6 +32,7 @@ import {
   type DesignSystemSample,
   styleSignature,
   touchingContainers,
+  typeScale,
   type BoxGroup,
   type FocusDocument,
   type FocusElement,
@@ -1086,6 +1087,192 @@ test("button radii past two and shadow styles past three are flagged, as they no
   assert.equal(three.score?.deductions.map(formatDeduction).join(), "-2 3 button radii");
   assert.ok(!two.report.includes("corner radii"), two.report);
   assert.equal(two.score?.overall, 100);
+});
+
+// ---------------------------------------------------------------------------
+// Type scale: font sizes that are steps of one scale, and sizes that are not
+// ---------------------------------------------------------------------------
+
+/** Body text: the size most of the page's words are set in, which the scale is counted from. */
+const bodyText = (fontSize: number, i = 0) => rec({ tag: "p", text: `Body paragraph ${i} of the page`, textLen: 120, fontSize });
+const heading = (fontSize: number, level = 2) => rec({ tag: `h${level}`, text: `Heading at ${fontSize}`, textLen: 12, fontSize });
+const control = (fontSize: number) => rec({ tag: "button", text: "Continue", textLen: 8, interactive: true, fontSize, rect: { x: 0, y: 0, w: 120, h: 36 } });
+/** A page on a 1.25 scale from a 16px body: 12.8, 16, 20, 25, 31.25 and 39.06px, of which four are off the 2px grid. */
+const onScale = (): Rec[] => [
+  bodyText(16, 1),
+  bodyText(16, 2),
+  rec({ tag: "p", text: "A footnote under the table", textLen: 26, fontSize: 12.8 }),
+  heading(20, 3),
+  heading(25, 2),
+  heading(31.25, 1),
+  heading(39.06, 1),
+  control(16),
+];
+const typeLine = (report: string): string => report.split("\n").find((l) => l.includes("off the type scale")) ?? "";
+const typeDeduction = (r: ReturnType<typeof analyzeDesign>) => r.score?.deductions.find((d) => d.label.startsWith("type sizes off the scale"));
+
+test("a page on a 1.25 scale is on its scale; the same page with three stray sizes is charged for them", () => {
+  const scale = typeScale(onScale());
+  assert.deepEqual({ base: scale.base, ratio: scale.ratio, off: scale.offScale }, { base: 16, ratio: 1.25, off: [] });
+  const clean = analyzeDesign(payload(onScale()), VIEWPORT);
+  assert.equal(typeDeduction(clean), undefined, clean.report);
+  assert.equal(typeLine(clean.report), "", clean.report);
+
+  // The one fact that differs: a 15px paragraph, a 17px button and a 19px heading, none of them a step of 1.25 from 16 or a 2px step.
+  const strays = analyzeDesign(payload([...onScale(), bodyText(15, 3), control(17), heading(19, 3)]), VIEWPORT);
+  assert.deepEqual(typeScale([...onScale(), bodyText(15, 3), control(17), heading(19, 3)]).offScale, [15, 17, 19]);
+  assert.equal(formatDeduction(typeDeduction(strays)!), "-3 type sizes off the scale: 15, 17, 19px", strays.report);
+  assert.equal(typeDeduction(strays)!.dimension, "consistency");
+  assert.ok(
+    typeLine(strays.report).includes(
+      "3 sizes off the type scale in headings, body text or controls: 15, 17, 19px — neither steps of the 1.25× scale from the 16px body size",
+    ),
+    strays.report,
+  );
+  assert.ok(strays.score!.consistency < clean.score!.consistency, JSON.stringify([strays.score, clean.score]));
+});
+
+test("a ratio is inferred only from two sizes it explains: one fit is a coincidence", () => {
+  assert.deepEqual(typeScale([bodyText(16), heading(25), heading(31.25)]).ratio, 1.25);
+  const one = typeScale([bodyText(16), heading(25)]);
+  assert.deepEqual({ ratio: one.ratio, off: one.offScale }, { ratio: null, off: [25] });
+  // Sizes on the 2px step grid are on the scale with or without a ratio: a 12/14/16/18/24/30/36px system is never charged.
+  assert.deepEqual(typeScale([12, 14, 16, 18, 24, 30, 36, 48].map((s, i) => (s === 16 ? bodyText(s) : heading(s, (i % 6) + 1)))).offScale, []);
+});
+
+test("a fourth stray size never excuses the first three, though two of them happen to fit a ratio", () => {
+  // 19 and 23px lie within 2.5% of 1.2's steps from 16px (19.2 and 23.04): a ratio explaining no more than it leaves out is not the page's scale.
+  const three = typeScale([bodyText(16), heading(15, 3), heading(17, 3), heading(19, 3)]);
+  const four = typeScale([bodyText(16), heading(15, 3), heading(17, 3), heading(19, 3), heading(23, 3)]);
+  assert.deepEqual(three.offScale, [15, 17, 19]);
+  assert.deepEqual({ ratio: four.ratio, off: four.offScale }, { ratio: null, off: [15, 17, 19, 23] });
+});
+
+test("type sizes: italic body text is measured like any other", () => {
+  const strays = [15, 17, 19].map((fontSize) => rec({ tag: "i", text: "An aside set in italics for emphasis", textLen: 36, fontSize }));
+  assert.ok(typeDeduction(analyzeDesign(payload([...onScale(), ...strays]), VIEWPORT)));
+});
+
+test("type sizes: two off the scale are not charged and three are", () => {
+  const two = analyzeDesign(payload([...onScale(), bodyText(15, 3), control(17)]), VIEWPORT);
+  const three = analyzeDesign(payload([...onScale(), bodyText(15, 3), control(17), heading(19, 3)]), VIEWPORT);
+  assert.equal(typeDeduction(two), undefined, two.report);
+  assert.ok(typeDeduction(three), three.report);
+  // Seven are charged as four would be: a cap, so the rule cannot sink a page alone. Seven strays outnumber the four
+  // sizes the 1.25 scale explains, so no ratio is the page's scale: of those four only 25px is a whole pixel and listed.
+  const seven = analyzeDesign(payload([...onScale(), ...[15, 17, 19, 21, 23, 27, 29].map((s) => heading(s, 3))]), VIEWPORT);
+  assert.equal(formatDeduction(typeDeduction(seven)!), "-4 type sizes off the scale: 15, 17, 19, 21px +4", seven.report);
+});
+
+test("type sizes: the same three strays in code, an icon font, tiny text, a badge or a glyph are not charged", () => {
+  const strays = (over: Partial<Rec>): Rec[] => [15, 17, 19].map((fontSize) => heading(fontSize, 3)).map((r) => ({ ...r, ...over }));
+  const charged = (records: Rec[]) => typeDeduction(analyzeDesign(payload([...onScale(), ...records]), VIEWPORT));
+  assert.ok(charged(strays({})), "the contrast: as headings they are charged");
+  assert.equal(charged(strays({ fontFamily: "JetBrains Mono" })), undefined, "a monospace family");
+  assert.equal(charged(strays({ tag: "code" })), undefined, "a code element");
+  assert.equal(charged(strays({ fontFamily: "Material Icons" })), undefined, "an icon font");
+  assert.equal(charged(strays({ text: "→ ✓ ×" })), undefined, "text without a letter");
+  // A short label that is neither a heading nor a control (a badge, a tag) keeps its own size.
+  assert.equal(charged(strays({ tag: "span", text: "New", textLen: 3 })), undefined, "a badge");
+  assert.equal(charged([9, 11, 11.5].map((fontSize) => heading(fontSize, 3))), undefined, "text under 12px");
+});
+
+/** A page in one framework's sizes: the body text first, then the headings h1 down, then a lead paragraph, small print and a button. */
+function framework(body: number, headings: number[], lead: number, small: number, button: number): Rec[] {
+  const at = (n: number) => Math.round(n * 10) / 10;
+  return [
+    bodyText(at(body), 1),
+    bodyText(at(body), 2),
+    ...headings.map((s, i) => heading(at(s), Math.min(6, i + 1))),
+    rec({ tag: "p", text: "A lead paragraph under the title", textLen: 32, fontSize: at(lead) }),
+    rec({ tag: "p", text: "Small print below the form", textLen: 26, fontSize: at(small) }),
+    control(at(button)),
+  ];
+}
+/** A component framework's headings at a viewport `vw` px wide: under 1200px its responsive font sizes make h1 to h4 calc(rem + vw). */
+const responsiveAt = (vw: number, root = 16): Rec[] => {
+  const fluid = (rem: number, v: number, fixed: number) => (vw >= 1200 ? fixed * root : rem * root + (v * vw) / 100);
+  const h = [fluid(1.375, 1.5, 2.5), fluid(1.325, 0.9, 2), fluid(1.3, 0.6, 1.75), fluid(1.275, 0.3, 1.5), 1.25 * root, root];
+  return framework(root, h, 1.25 * root, 0.875 * root, root);
+};
+
+test("type sizes: the deliberate scales of common frameworks are not charged", () => {
+  const charged = (records: Rec[]) => typeDeduction(analyzeDesign(payload(records), VIEWPORT));
+  // A utility framework's common default steps: 18 and 30px are steps of its scale, not strays.
+  assert.deepEqual(typeScale(framework(16, [48, 36, 30, 24, 20, 18], 18, 14, 14)).offScale, []);
+  // A design system's display-to-body scale with a 34px step.
+  assert.deepEqual(typeScale(framework(16, [96, 60, 48, 34, 24, 20], 16, 14, 14)).offScale, []);
+  // The responsive framework at a desktop width, where its headings are whole rems.
+  assert.deepEqual(typeScale(responsiveAt(1280)).offScale, []);
+  // The same headings at a phone's, a tablet's and a small laptop's width: calc(rem + vw) computes to sizes such as
+  // 21.6 and 27.9px, which no ratio from the body size explains. A formula computed them, so they are not charged.
+  for (const vw of [390, 768, 1024])
+    assert.equal(charged(responsiveAt(vw)), undefined, `responsive headings at ${vw}px: ${typeScale(responsiveAt(vw)).offScale}`);
+  // A clamp() scale between a 1.2 scale from 16px and a 1.25 scale from 20px, at widths between its bounds.
+  for (const t of [0.3, 0.6]) {
+    const clamp = (k: number) => 16 * 1.2 ** k + (20 * 1.25 ** k - 16 * 1.2 ** k) * t;
+    const page = framework(clamp(0), [4, 3, 2, 1].map(clamp), clamp(1), clamp(-1), clamp(0));
+    assert.equal(charged(page), undefined, `clamp() at ${t}: ${typeScale(page).offScale}`);
+  }
+});
+
+test("type sizes: a rem scale under a root other than 16px is not charged", () => {
+  // The responsive framework's rem multipliers (2.5, 2, 1.75, 1.5, 1.25 and 0.875rem) under another root: at 18px, 45, 36, 31.5, 27, 22.5 and 15.75px.
+  for (const root of [14, 15, 17, 18]) {
+    const page = responsiveAt(1280, root);
+    assert.equal(typeDeduction(analyzeDesign(payload(page), VIEWPORT)), undefined, `${root}px root: ${typeScale(page).offScale}`);
+  }
+  assert.deepEqual(typeScale(responsiveAt(1280, 18)).offScale, []);
+  // The contrast: the same 18px-root page with three whole-pixel sizes picked one at a time is charged for those three alone.
+  const strays = [...responsiveAt(1280, 18), heading(19, 3), bodyText(17, 3), control(23)];
+  assert.deepEqual(typeScale(strays).offScale, [17, 19, 23]);
+  assert.ok(typeDeduction(analyzeDesign(payload(strays), VIEWPORT)));
+});
+
+test("type sizes: three whole-pixel strays on a fluid page are still charged", () => {
+  // The responsive framework's computed headings at a phone's width, plus 15, 17 and 19px picked one at a time.
+  const page = [...responsiveAt(390), bodyText(15, 3), control(17), heading(19, 5)];
+  const found = typeDeduction(analyzeDesign(payload(page), VIEWPORT));
+  assert.equal(found && formatDeduction(found), "-3 type sizes off the scale: 15, 17, 19px");
+});
+
+/** The calibration page's ?with=type variant as records: 28, 20 and 16px, then its headings at 19, notes at 15 and buttons at 17px. */
+function typeCalibration(strays: boolean): Payload {
+  const h2 = strays ? 19 : 20;
+  const note = strays ? 15 : 16;
+  const btn = strays ? 17 : 16;
+  return payload([
+    rec({ tag: "h1", text: "Account settings", textLen: 16, fontSize: 28 }),
+    ...["Profile", "Password", "Billing", "Notifications"].map((t) => rec({ tag: "h2", text: t, textLen: t.length, fontSize: h2 })),
+    ...["Your name and photo.", "Change how you sign in.", "Your plan and invoices.", "What we tell you about.", "Files you asked for."].map((t) =>
+      rec({ tag: "p", text: t, textLen: t.length, fontSize: 16 }),
+    ),
+    rec({ tag: "p", text: "Changes apply to every workspace you belong to.", textLen: 47, fontSize: note }),
+    rec({ tag: "p", text: "Last saved a moment ago.", textLen: 24, fontSize: note }),
+    ...["Save changes", "Preview", "Export"].map((t, i) =>
+      rec({
+        tag: "button",
+        text: t,
+        textLen: t.length,
+        interactive: true,
+        filled: i === 0,
+        fontSize: btn,
+        rect: { x: i * 120, y: 400, w: 100, h: 36 },
+        radius: 6,
+        ...(i === 0 ? { bg: "rgb(30, 64, 175)", color: "rgb(255, 255, 255)" } : { color: "rgb(30, 64, 175)" }),
+      }),
+    ),
+  ]);
+}
+
+test("calibration: three sizes off the scale cost a suggestion's points, below the clean page and above every measured defect", () => {
+  const clean = analyzeDesign(typeCalibration(false), VIEWPORT);
+  const type = analyzeDesign(typeCalibration(true), VIEWPORT);
+  assert.equal(clean.score?.overall, 100, clean.report);
+  assert.equal(type.score?.overall, 97, type.report);
+  assert.ok(type.report.includes("  why: -3 type sizes off the scale: 15, 17, 19px"), type.report);
+  // A suggestion, so it costs less than the smallest single defect in the calibration set (six button heights, 94).
+  assert.ok(type.score!.overall > analyzeDesign(calibrationPage("heights"), VIEWPORT).score!.overall);
 });
 
 // ---------------------------------------------------------------------------
