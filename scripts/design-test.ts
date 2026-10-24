@@ -23,8 +23,13 @@ import {
   gradientColours,
   namesFilter,
   paintsEdge,
+  formatSiteConsistency,
   scoreFrom,
   shadowLayers,
+  siteAuditSection,
+  siteConsistency,
+  siteScore,
+  type DesignSystemSample,
   styleSignature,
   touchingContainers,
   type BoxGroup,
@@ -1081,4 +1086,189 @@ test("button radii past two and shadow styles past three are flagged, as they no
   assert.equal(three.score?.deductions.map(formatDeduction).join(), "-2 3 button radii");
   assert.ok(!two.report.includes("corner radii"), two.report);
   assert.equal(two.score?.overall, 100);
+});
+
+// ---------------------------------------------------------------------------
+// Consistency across pages: each page's values beside the other pages'
+// ---------------------------------------------------------------------------
+
+/** One page's design-system values: a quiet, consistent page; override what a case is about. */
+function sample(over: Partial<DesignSystemSample> = {}): DesignSystemSample {
+  return {
+    buttonHeights: [36],
+    buttonRadii: ["6px"],
+    headers: ["28px 700"],
+    tabs: [],
+    grays: ["rgb(64, 64, 64)", "rgb(115, 115, 115)"],
+    fontSizes: [14, 16, 28],
+    spacing: [8, 16],
+    ...over,
+  };
+}
+
+/** Pages keyed by route, as memory keeps their scores: each with no deductions of its own. */
+function site(samples: Record<string, DesignSystemSample>): Record<string, { system: DesignSystemSample; deductions: [] }> {
+  return Object.fromEntries(Object.entries(samples).map(([route, system]) => [route, { system, deductions: [] }]));
+}
+
+const fourPages = (d: Partial<DesignSystemSample> = {}, all: Partial<DesignSystemSample> = {}) =>
+  site({ "/a": sample(all), "/b": sample(all), "/c": sample(all), "/d": sample({ ...all, ...d }) });
+
+test("three pages with 36px buttons and one with 44px: that page alone pays; every page at 44px pays nothing", () => {
+  const outlier = siteConsistency(fourPages({ buttonHeights: [44] }))!;
+  assert.deepEqual(Object.keys(outlier.deductions), ["/d"]);
+  assert.deepEqual(outlier.deductions["/d"].map(formatDeduction), ["-2 button height only on this page: 44px"]);
+  assert.equal(outlier.deductions["/d"][0].dimension, "consistency");
+  assert.equal(siteScore({ deductions: [] }, outlier, "/d").overall, 98);
+  assert.equal(siteScore({ deductions: [] }, outlier, "/a").overall, 100);
+  // The contrastive twin: the same four pages, every one at 44px. One value, one convention, nothing to charge.
+  const same = siteConsistency(fourPages({}, { buttonHeights: [44] }))!;
+  assert.deepEqual(same.deductions, {});
+  assert.deepEqual(same.properties.find((p) => p.key === "buttonHeights")?.dominant, "44");
+});
+
+test("the comparison waits for four pages, and a property with no dominant value charges nobody", () => {
+  assert.equal(siteConsistency(site({ "/a": sample(), "/b": sample(), "/c": sample({ buttonHeights: [44] }) })), null);
+  // A page with no sample (a score an older engine kept) is not counted.
+  assert.equal(siteConsistency({ ...site({ "/a": sample(), "/b": sample(), "/c": sample() }), "/old": {} }), null);
+  // Four pages, four heights: no value on 60% of them, so no page is an outlier.
+  const spread = siteConsistency(
+    site({
+      "/a": sample({ buttonHeights: [28] }),
+      "/b": sample({ buttonHeights: [32] }),
+      "/c": sample({ buttonHeights: [36] }),
+      "/d": sample({ buttonHeights: [40] }),
+    }),
+  )!;
+  assert.deepEqual(spread.deductions, {});
+  assert.equal(spread.properties.find((p) => p.key === "buttonHeights")?.dominant, null);
+});
+
+test("a lone value the page's own rule already charged for is not charged again", () => {
+  // Every page uses 32, 36 and 40px; /d adds 44px, its fourth height, which its own rule charged as one past three.
+  const paid = siteConsistency(fourPages({ buttonHeights: [32, 36, 40, 44] }, { buttonHeights: [32, 36, 40] }))!;
+  assert.equal(paid.deductions["/d"], undefined, JSON.stringify(paid.deductions));
+  // The same lone 44px on a page with two heights was not charged by the page, so the comparison charges it.
+  const unpaid = siteConsistency(fourPages({ buttonHeights: [36, 44] }, { buttonHeights: [32, 36, 40] }))!;
+  assert.deepEqual(unpaid.deductions["/d"].map(formatDeduction), ["-2 button height only on this page: 44px"]);
+  // Six heights, five of them lone: three past the healthy three were charged on the page, so two are left to charge here.
+  const six = siteConsistency(fourPages({ buttonHeights: [36, 40, 44, 48, 52, 56] }))!;
+  assert.deepEqual(
+    six.deductions["/d"].map((d) => [d.count, d.points]),
+    [[2, 4]],
+    "five lone, three already paid",
+  );
+});
+
+test("grays a unit or two apart are one step across pages, as within one", () => {
+  const near = siteConsistency(fourPages({ grays: ["rgb(66, 66, 66)", "rgb(115, 115, 115)"] }))!;
+  assert.deepEqual(near.deductions, {});
+  const far = siteConsistency(fourPages({ grays: ["rgb(64, 64, 64)", "rgb(115, 115, 115)", "rgb(180, 180, 180)"] }))!;
+  assert.deepEqual(far.deductions["/d"].map(formatDeduction), ["-2 gray only on this page: rgb(180, 180, 180)"]);
+});
+
+test("two near grays joined can be the dominant step, though each alone is used on fewer pages than another gray", () => {
+  // rgb(80…) on three of six pages; rgb(120…) and rgb(122…) on two each, one step on four of six: that step is dominant.
+  const g = (v: number) => `rgb(${v}, ${v}, ${v})`;
+  const joined = siteConsistency(
+    site({
+      "/a": sample({ grays: [g(80), g(120)] }),
+      "/b": sample({ grays: [g(80), g(120)] }),
+      "/c": sample({ grays: [g(80), g(122)] }),
+      "/d": sample({ grays: [g(122), g(200)] }),
+      "/e": sample({ grays: [g(150)] }),
+      "/f": sample({ grays: [g(150)] }),
+    }),
+  )!;
+  const grays = joined.properties.find((p) => p.key === "grays")!;
+  assert.equal(grays.dominant, g(120));
+  assert.equal(grays.values[0].routes.length, 4);
+  assert.deepEqual(joined.deductions["/d"].map(formatDeduction), ["-2 gray only on this page: rgb(200, 200, 200)"]);
+});
+
+test("a pale tint one page alone uses (a status chip's green) is not compared; the same lightness untinted, or a darker slate, is", () => {
+  const tint = siteConsistency(fourPages({ grays: ["rgb(64, 64, 64)", "rgb(115, 115, 115)", "rgb(231, 246, 236)"] }))!;
+  assert.deepEqual(tint.deductions, {});
+  assert.ok(!formatSiteConsistency(tint).some((l) => l.includes("231, 246, 236")), "and not listed");
+  const neutral = siteConsistency(fourPages({ grays: ["rgb(64, 64, 64)", "rgb(115, 115, 115)", "rgb(238, 238, 238)"] }))!;
+  assert.deepEqual(neutral.deductions["/d"].map(formatDeduction), ["-2 gray only on this page: rgb(238, 238, 238)"]);
+  const slate = siteConsistency(fourPages({ grays: ["rgb(64, 64, 64)", "rgb(115, 115, 115)", "rgb(184, 192, 202)"] }))!;
+  assert.deepEqual(slate.deductions["/d"].map(formatDeduction), ["-2 gray only on this page: rgb(184, 192, 202)"]);
+});
+
+test("a page header or tab style one page alone uses is charged; font sizes and spacing are listed but not charged", () => {
+  const header = siteConsistency(fourPages({ headers: ["40px 800"] }))!;
+  assert.deepEqual(header.deductions["/d"].map(formatDeduction), ["-2 page header (h1) only on this page: 40px 800"]);
+  const tabs = siteConsistency(fourPages({ tabs: ["44px tall, pill radius"] }, { tabs: ["36px tall, 0px radius"] }))!;
+  assert.deepEqual(tabs.deductions["/d"].map(formatDeduction), ["-2 tab style only on this page: 44px tall, pill radius"]);
+  const listed = siteConsistency(fourPages({ fontSizes: [14, 16, 28, 48], spacing: [8, 16, 13] }))!;
+  assert.deepEqual(listed.deductions, {});
+  assert.deepEqual(listed.properties.find((p) => p.key === "fontSizes")?.outliers, { "/d": ["48"] });
+});
+
+test("the comparison costs a page at most ten points however many values it alone uses", () => {
+  const odd = siteConsistency(
+    fourPages(
+      {
+        buttonHeights: [44, 48],
+        buttonRadii: ["pill", "12px"],
+        headers: ["40px 800"],
+        tabs: ["44px tall, pill radius"],
+        grays: ["rgb(180, 180, 180)", "rgb(30, 30, 30)"],
+      },
+      { tabs: ["36px tall, 0px radius"] },
+    ),
+  )!;
+  const total = odd.deductions["/d"].reduce((n, d) => n + d.points, 0);
+  assert.equal(total, 10, JSON.stringify(odd.deductions["/d"]));
+  assert.deepEqual(Object.keys(odd.deductions), ["/d"]);
+});
+
+test("the summary lists each value, how many pages use it, the dominant one and where the outliers are", () => {
+  const s = siteConsistency(fourPages({ buttonHeights: [44] }))!;
+  const lines = formatSiteConsistency(s);
+  assert.equal(
+    lines.find((l) => l.includes("button heights")),
+    "→ button heights: 2 values (36, 44px) across 4 pages — dominant 36px; only one page uses: /d (44px)",
+  );
+  assert.ok(
+    lines.some((l) => l.startsWith("· font sizes: 3 values (14, 16, 28px) across 4 pages — dominant 14px (listed, not scored)")),
+    lines.join("\n"),
+  );
+  assert.ok(!lines.some((l) => l.includes("tab styles")), "a property no page uses is left out");
+  // Routes are written as the caller asks: the report puts them in code spans.
+  assert.ok(formatSiteConsistency(s, (r) => `\`${r}\``).some((l) => l.includes("`/d` (44px)")));
+});
+
+test("the audit's site block shows the page against the site, and is empty under four pages", () => {
+  const pages = fourPages({ buttonHeights: [44] });
+  const block = siteAuditSection(pages, "/d");
+  assert.ok(block.startsWith("SITE CONSISTENCY (4 audited pages;"), block);
+  assert.ok(block.includes("this page (/d) against the site: 98/100 — -2 button height only on this page: 44px"), block);
+  assert.ok(siteAuditSection(pages, "/a").includes("this page (/a): no value only it uses; its score stands at 100/100"));
+  assert.equal(siteAuditSection(site({ "/a": sample(), "/b": sample() }), "/a"), "");
+});
+
+test("the audit keeps the page's design-system values with its score, the shell's landmarks left out and the census's chrome kept", () => {
+  const records = [
+    rec({ tag: "h1", text: "Orders", fontSize: 28, fontWeight: 700 }),
+    rec({ tag: "button", text: "Save", interactive: true, rect: { x: 0, y: 0, w: 80, h: 36 }, radius: 6 }),
+    rec({ tag: "button", text: "Open", interactive: true, rect: { x: 100, y: 0, w: 80, h: 37 }, radius: 20 }),
+    rec({ tag: "button", text: "Tab one", interactive: true, role: "tab", rect: { x: 0, y: 60, w: 80, h: 40 }, radius: 0 }),
+    rec({ text: "Muted", color: "rgb(115, 115, 115)" }),
+    rec({ tag: "nav", text: "Shell link", shell: true, fontSize: 11, color: "rgb(200, 200, 200)" }),
+  ];
+  const system = analyzeDesign(payload(records), VIEWPORT).score?.system;
+  // A button the census already counts as chrome is out of the score but still in the values: they do not depend on audit order.
+  const census = analyzeDesign(payload(records), VIEWPORT, new Set(["button:save"])).score?.system;
+  assert.deepEqual(census, system);
+  assert.deepEqual(system, {
+    buttonHeights: [36, 38, 40],
+    buttonRadii: ["0px", "6px", "pill"],
+    headers: ["28px 700"],
+    tabs: ["40px tall, 0px radius"],
+    grays: ["rgb(115, 115, 115)"],
+    fontSizes: [16, 28],
+    spacing: [8],
+  });
 });

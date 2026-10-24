@@ -29,7 +29,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
-import { contrastVerdict, DESIGN_COLLECT_SCRIPT, type DesignPayload } from "../../dist/engine/design.js";
+import { contrastVerdict, DESIGN_COLLECT_SCRIPT, siteAuditSection, siteConsistency, type DesignPayload } from "../../dist/engine/design.js";
 import { check, type SmokeContext } from "./harness.ts";
 
 export const title = "design scores";
@@ -94,6 +94,39 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       /^-16 touching containers ×2 · (-6 6 button heights · -\d+ \d+ grays|-\d+ \d+ grays · -6 6 button heights)$/.test(whyOf(all)),
       whyOf(all) || all,
     );
+
+    console.log("design scores: pages compared with each other, the contrastive pair");
+    {
+      // Four routes (?section= is part of a route): the same clean page four times, then the fourth with six button heights.
+      const sections = ["1", "2", "3", "4"];
+      for (const n of sections) await engine.navigate(`/design-score.html?section=${n}`).then(() => engine.designAudit());
+      const sectionScores = () => Object.fromEntries(Object.entries(engine.memory!.pageScores).filter(([route]) => route.includes("section=")));
+      const consistent = siteConsistency(sectionScores());
+      const kept = sectionScores()["/design-score.html?section=1"]?.system;
+      check(
+        "an audit keeps the page's design-system values with its score",
+        kept?.buttonHeights.join() === "36" && kept.headers.length === 1,
+        JSON.stringify(kept),
+      );
+      check(
+        "four pages alike: compared, and no page charged",
+        consistent !== null && consistent.pages === 4 && Object.keys(consistent.deductions).length === 0,
+        JSON.stringify(consistent?.deductions),
+      );
+      await engine.navigate("/design-score.html?section=4&with=heights");
+      await engine.designAudit();
+      const outlier = siteConsistency(sectionScores());
+      const route = "/design-score.html?section=4";
+      check(
+        "the same four with six button heights on one: only that page is charged, for heights no other page uses",
+        outlier !== null &&
+          Object.keys(outlier.deductions).join() === route &&
+          outlier.deductions[route].some((d) => d.label.startsWith("button heights only on this page")),
+        JSON.stringify(outlier?.deductions),
+      );
+      const block = siteAuditSection(sectionScores(), route);
+      check("the audit's site block names the page against the site", block.includes(`this page (${route}) against the site:`), block);
+    }
 
     console.log("design scores: text over painted backgrounds, the contrastive pairs");
     await engine.navigate("/design-contrast.html");
