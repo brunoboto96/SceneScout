@@ -759,17 +759,19 @@ function originOf(address: string): string | null {
  * []`, which the attach passes on in place of its own: an option, even an
  * empty one, wins over the SCENESCOUT_READ_POSTS environment variable
  * (policy.ts readPostsSetting), so a server started with it cannot loosen a
- * guided check's observe either. It also carries `operatorAuthPosts: false`,
- * so SCENESCOUT_AUTH_POSTS, whose entries go out of observe as sign-ins, is
- * not read and the path rule decides (policy.ts isAuthExempt). With no plan,
- * neither is set and the attach reads its option and the environment as before.
+ * guided check's observe either. It also carries `guided: true`, so the
+ * sign-in allowlist (the config's authPosts, SCENESCOUT_AUTH_POSTS) only
+ * narrows the path rule: a POST must be listed and also look like a sign-in
+ * by its path (project-config.ts writeRulesSettings, policy.ts isAuthExempt).
+ * With no plan, neither is set and the attach reads its option and the
+ * environment as before.
  */
 export function guidedAttachVerdict(
   plans: Pick<GuidedPlans, "open" | "get"> & { requiredByConfig?: boolean },
   input: { planId?: string; mode: AnyMode; url: string; readPosts?: readonly string[]; trustedEmbeds?: readonly string[] },
-): { ok: true; plan?: GuidedPlan; readPosts?: string[]; operatorAuthPosts?: false } | { ok: false; why: string } {
+): { ok: true; plan?: GuidedPlan; readPosts?: string[]; guided?: true } | { ok: false; why: string } {
   const verdict = attachVerdict(plans, input);
-  return verdict.ok && plans.open ? { ...verdict, readPosts: [], operatorAuthPosts: false } : verdict;
+  return verdict.ok && plans.open ? { ...verdict, readPosts: [], guided: true } : verdict;
 }
 
 function attachVerdict(

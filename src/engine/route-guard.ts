@@ -115,8 +115,10 @@ export interface RouteGuardHost {
   writeClassifier(): WriteClassifier;
   /** Whether a page load whose address is a destructive command is refused in observe and read-only (strict-writes.ts destructiveGet; off unless turned on). */
   refuseDestructiveGets(): boolean;
-  /** The sign-in POSTs the operator listed (SCENESCOUT_AUTH_POSTS), or null for the path rule (policy.ts isAuthExempt). */
+  /** The sign-in POSTs the operator listed (the config's authPosts or SCENESCOUT_AUTH_POSTS), or null for the path rule (policy.ts isAuthExempt). */
   authPosts(): readonly ReadPost[] | null;
+  /** True: a listed POST must also look like a sign-in to the path rule, so the list only narrows it (a guided check). Absent: false. */
+  authPostsNarrowOnly?(): boolean;
 }
 
 /** What the route handler does with a write it sees, short of the ownership rule. */
@@ -239,7 +241,7 @@ export class RouteGuard {
   /** The operator's sign-in allowlist as one request is judged against it, or null when none is set. */
   authListFor(url: string): AuthPostList | null {
     const entries = this.host.authPosts();
-    return entries ? { entries, appUrl: this.host.appUrl(), url } : null;
+    return entries ? { entries, appUrl: this.host.appUrl(), url, andSignInPath: this.host.authPostsNarrowOnly?.() === true } : null;
   }
 
   /** Whether the write policy stopped this request, at the route handler or at the browser level. */
