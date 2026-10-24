@@ -32,23 +32,50 @@ const STATE_NAMES: Record<string, string> = {
   "LAST-ACK": "LAST_ACK",
 };
 
+/** The states Windows' netstat prints, after STATE_NAMES. */
+const WINDOWS_STATES = new Set([
+  "LISTENING",
+  "ESTABLISHED",
+  "TIME_WAIT",
+  "CLOSE_WAIT",
+  "FIN_WAIT_1",
+  "FIN_WAIT_2",
+  "SYN_SENT",
+  "SYN_RECEIVED",
+  "LAST_ACK",
+  "CLOSING",
+  "CLOSED",
+  "BOUND",
+  "DELETE_TCB",
+]);
+
 /**
  * The machine's TCP sockets, from `netstat -ano` on Windows (with the owning
  * process), `netstat -an -p tcp` on macOS, or `ss -tan` on Linux. Lines that
- * are not a TCP socket (headings, UDP) are skipped. On Windows the process is
- * the last field and the state is everything between the remote address and
- * it, so a localised state name with a space in it still parses.
+ * are not a TCP socket (headings, UDP) are skipped. On Windows the state is the
+ * first field after the remote address that names a state, and the process is
+ * the field after it, so a column added after the process (the offload state of
+ * `netstat -ano -o`) does not move it. A localised state name matches none, so
+ * the process is then the last field and the state everything between.
  */
 export function parseTcpTable(text: string): TcpRow[] {
   const rows: TcpRow[] = [];
   for (const line of text.split(/\r?\n/)) {
     const f = line.trim().split(/\s+/);
     // Windows: TCP <local> <remote> <state…> <pid>
-    const last = f[f.length - 1];
-    if (f[0] === "TCP" && f.length >= 5 && /^\d+$/.test(last)) {
-      const state = f.slice(3, -1).join(" ");
-      rows.push({ state: STATE_NAMES[state] ?? state, local: f[1], remote: f[2], pid: Number(last) });
-      continue;
+    if (f[0] === "TCP" && f.length >= 5) {
+      const at = f.findIndex((field, i) => i >= 3 && WINDOWS_STATES.has(field.toUpperCase()));
+      if (at >= 3 && /^\d+$/.test(f[at + 1] ?? "")) {
+        const state = f[at].toUpperCase();
+        rows.push({ state: STATE_NAMES[state] ?? state, local: f[1], remote: f[2], pid: Number(f[at + 1]) });
+        continue;
+      }
+      const last = f[f.length - 1];
+      if (/^\d+$/.test(last)) {
+        const state = f.slice(3, -1).join(" ");
+        rows.push({ state: STATE_NAMES[state] ?? state, local: f[1], remote: f[2], pid: Number(last) });
+        continue;
+      }
     }
     // macOS: tcp4|tcp6|tcp46 <recv-q> <send-q> <local> <remote> <state>
     if (/^tcp(4|6|46)?$/.test(f[0]) && f.length >= 6) {
@@ -117,11 +144,18 @@ const runCommand: CommandRunner = (cmd, args) =>
 const firstLine = (err: unknown): string => (err instanceof Error ? err.message.split("\n")[0] : String(err));
 
 /**
- * The machine's TCP table as one line: on Windows also the processes holding
- * the most sockets. Never throws: a table that cannot be read says so in the
+ * The machine's TCP table as one line. With `owners` set, on Windows also the
+ * processes holding the most sockets, by name and pid: that is for a CI log
+ * only. The default leaves them out, because the engine puts this line in the
+ * report (limits.ts LoadRetry.sockets) and a process name or pid belongs
+ * nowhere a person shares. Never throws: a table that cannot be read says so in the
  * line, and a process list that cannot be read leaves the table it read.
  */
-export async function readMachineSockets(platform: NodeJS.Platform = process.platform, run: CommandRunner = runCommand): Promise<string> {
+export async function readMachineSockets(
+  platform: NodeJS.Platform = process.platform,
+  run: CommandRunner = runCommand,
+  options: { owners?: boolean } = {},
+): Promise<string> {
   let rows: TcpRow[];
   try {
     const [cmd, args] = platform === "win32" ? ["netstat", ["-ano"]] : platform === "darwin" ? ["netstat", ["-an", "-p", "tcp"]] : ["ss", ["-tan"]];
@@ -129,7 +163,7 @@ export async function readMachineSockets(platform: NodeJS.Platform = process.pla
   } catch (err) {
     return `(could not read the TCP table: ${firstLine(err)})`;
   }
-  if (platform !== "win32") return socketLine(rows);
+  if (platform !== "win32" || !options.owners) return socketLine(rows);
   let names: Map<number, string>;
   try {
     names = parseTasklist(await run("tasklist", ["/FO", "CSV", "/NH"]));

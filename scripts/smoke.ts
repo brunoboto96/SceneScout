@@ -69,7 +69,8 @@ function windowsPortRange(): string {
 
 /**
  * Fail a suite that leaves a TCP socket of this process open: a stand-in
- * server it never closed, or a connection to one still open, unref'd or not.
+ * server it never closed, or a connection to one still open. A server that was unref'd is not
+ * listed by Node's active resources, so it is not seen here.
  * The wait matches the process check's, because on Windows that check does
  * not run and a browser Playwright is still closing holds its connections to
  * the fixture server until it goes. Returns the baseline the next suite is held
@@ -81,7 +82,7 @@ async function checkSockets(suite: string, baseline: string[]): Promise<string[]
   let left: string[] = [];
   await eventually(() => (left = socketsLeft(baseline, process.getActiveResourcesInfo())).length === 0, 40_000);
   check(`${suite}: leaves no socket of its own open`, left.length === 0, `open: ${left.join(", ")}`);
-  console.log(`  (sockets after this suite: ${await readMachineSockets()})`);
+  console.log(`  (sockets after this suite: ${await readMachineSockets(process.platform, undefined, { owners: true })})`);
   return left.length === 0 ? baseline : process.getActiveResourcesInfo();
 }
 
@@ -120,7 +121,7 @@ async function main(): Promise<void> {
   // The shared fixture server's listening sockets are open for the whole run; each suite is held to what is open now.
   let socketBaseline = process.getActiveResourcesInfo();
   if (process.platform === "win32") console.log(`(${windowsPortRange()})`);
-  console.log(`(sockets before the first suite: ${await readMachineSockets()})`);
+  console.log(`(sockets before the first suite: ${await readMachineSockets(process.platform, undefined, { owners: true })})`);
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "scout-smoke-"));
   const ctx: SmokeContext = { baseUrl: server.baseUrl, foreignBaseUrl: server.foreignBaseUrl, projectDir, stats: server.stats };
   let ran = 0;
@@ -134,7 +135,7 @@ async function main(): Promise<void> {
       } catch (err) {
         // The table as soon as the suite has given up, before the checks below wait on anything.
         if (/ERR_NO_BUFFER_SPACE/.test(err instanceof Error ? err.message : String(err)))
-          console.log(`  (sockets when the page failed to load: ${await readMachineSockets()})`);
+          console.log(`  (sockets when the page failed to load: ${await readMachineSockets(process.platform, undefined, { owners: true })})`);
         recordCrash(suite.title, err);
       }
       await checkNothingLeft(suite.title);
