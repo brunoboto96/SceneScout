@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -24,6 +25,9 @@ import {
   engineOf,
   explainError,
   hasCheckCommand,
+  hasPreflightCommand,
+  preflightArgs,
+  preflightFailure,
   noCheckCommand,
   installPackage,
   installTarget,
@@ -44,6 +48,23 @@ import {
   writtenReplay,
 } from "../action/check-action.mjs";
 import { botChallenge, challengeBodyMatters, startPageWarning } from "../src/engine/challenge.ts";
+import {
+  BLOCKED_PORT,
+  DEFAULT_PREFLIGHT_TIMEOUT_MS,
+  EXIT_PREFLIGHT,
+  judgeModelReply,
+  judgePage,
+  judgeSignIn,
+  modelListRequest,
+  networkCause,
+  networkSentence,
+  parsePreflightArgs,
+  PREFLIGHT_USER_AGENT,
+  preflightExitCode,
+  runPreflight,
+  type PreflightIo,
+} from "../src/engine/preflight.ts";
+import { fsPolicyReader } from "../src/engine/project-config.ts";
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engine/design.ts";
 import {
@@ -4528,4 +4549,532 @@ test("filming: the work's error is its own, the video is still stopped, and a vi
   assert.deepEqual(calls, ["start v/1.webm -", "stop"]);
   const empty = await film(cast, "v/2.webm", null, async () => 1, filmIo(false));
   assert.deepEqual(empty, { value: 1, video: null, videoError: "no video was written" });
+});
+
+// ── scenescout preflight ─────────────────────────────────────────────────────
+
+const pf = (args: string[]) => parsePreflightArgs(args, "/work", (cwd, p) => path.resolve(cwd, p));
+
+test("preflight: its arguments, their defaults, and each one it refuses with a reason", () => {
+  const plain = pf(["https://app.example.com/start"]);
+  assert.ok(plain.ok);
+  assert.deepEqual(plain.options, { url: "https://app.example.com/start", projectDir: "/work", modelApi: false, timeoutMs: DEFAULT_PREFLIGHT_TIMEOUT_MS });
+  const full = pf([
+    "http://127.0.0.1:3000",
+    "--role",
+    "admin",
+    "--project=sub",
+    "--model-api",
+    "--provider",
+    "openai",
+    "--base-url",
+    "https://gw.example.com/v1/",
+    "--timeout-ms",
+    "2500",
+  ]);
+  assert.ok(full.ok);
+  assert.deepEqual(full.options, {
+    url: "http://127.0.0.1:3000/",
+    role: "admin",
+    projectDir: path.resolve("/work", "sub"),
+    modelApi: true,
+    provider: "openai",
+    baseUrl: "https://gw.example.com/v1",
+    timeoutMs: 2500,
+  });
+  const state = pf(["http://127.0.0.1:3000", "--storage-state", "auth.json"]);
+  assert.ok(state.ok && state.options.storageState === path.resolve("/work", "auth.json"));
+  const refused: Array<[string[], RegExp]> = [
+    [[], /give the app's address/],
+    [["http://a.example", "http://b.example"], /unexpected argument/],
+    [["app.example.com"], /not an absolute http or https URL/],
+    [["ftp://app.example.com"], /only http and https/],
+    [["https://user:hunter2@app.example.com"], /no credentials in the URL/],
+    [["https://app.example.com", "--role", "a", "--storage-state", "s.json"], /--role or --storage-state, not both/],
+    [["https://app.example.com", "--role", "../etc"], /role/],
+    [["https://app.example.com", "--provider", "openai"], /add --model-api/],
+    [["https://app.example.com", "--model-api", "--provider", "gemini"], /--provider must be one of anthropic, openai/],
+    [["https://app.example.com", "--model-api", "--base-url", "http://gw.example.com/v1"], /must be https/],
+    [["https://app.example.com", "--model-api=yes"], /takes no value/],
+    [["https://app.example.com", "--timeout-ms", "999"], /from 1000 to 120000/],
+    [["https://app.example.com", "--timeout-ms", "120001"], /from 1000 to 120000/],
+    [["https://app.example.com", "--timeout-ms", "5s"], /whole number/],
+    [["https://app.example.com", "--timeout-ms"], /needs a value/],
+    [["https://app.example.com", "--headed"], /unknown option --headed/],
+  ];
+  for (const [args, why] of refused) {
+    const r = pf(args);
+    assert.ok(!r.ok, args.join(" "));
+    assert.match(r.error, why, args.join(" "));
+  }
+  // A refused address is never repeated: it may carry a token.
+  const secret = pf(["https://user:s3cr3t-value@app.example.com"]);
+  assert.ok(!secret.ok && !secret.error.includes("s3cr3t-value"));
+});
+
+/** An error shaped as Node's fetch throws it: "fetch failed", with the reason in `cause`. */
+const fetchFailed = (cause: unknown) => Object.assign(new TypeError("fetch failed"), { cause });
+const coded = (code: string, message = code) => Object.assign(new Error(message), { code });
+
+test("preflight: a failed request's cause is read from the errors behind Node's \"fetch failed\"", () => {
+  const cases: Array<[unknown, string, string]> = [
+    [fetchFailed(coded("ENOTFOUND", "getaddrinfo ENOTFOUND app.internal")), "dns", "ENOTFOUND"],
+    [fetchFailed(coded("EAI_AGAIN")), "dns", "EAI_AGAIN"],
+    [fetchFailed(coded("ECONNREFUSED")), "connection", "ECONNREFUSED"],
+    [fetchFailed(coded("ECONNRESET")), "connection", "ECONNRESET"],
+    [fetchFailed(coded("EHOSTUNREACH")), "connection", "EHOSTUNREACH"],
+    // localhost tried on ::1 and 127.0.0.1: an AggregateError holding one error per address.
+    [fetchFailed(Object.assign(new AggregateError([coded("ECONNREFUSED"), coded("ECONNREFUSED")]), { code: "ECONNREFUSED" })), "connection", "ECONNREFUSED"],
+    [fetchFailed(new AggregateError([coded("ECONNREFUSED"), coded("ETIMEDOUT")])), "timeout", "ETIMEDOUT"],
+    [fetchFailed(coded("UND_ERR_CONNECT_TIMEOUT")), "timeout", "UND_ERR_CONNECT_TIMEOUT"],
+    [new DOMException("The operation was aborted due to timeout", "TimeoutError"), "timeout", "TimeoutError"],
+    [fetchFailed(coded("CERT_HAS_EXPIRED")), "tls", "CERT_HAS_EXPIRED"],
+    [fetchFailed(coded("DEPTH_ZERO_SELF_SIGNED_CERT")), "tls", "DEPTH_ZERO_SELF_SIGNED_CERT"],
+    [fetchFailed(coded("UNABLE_TO_GET_ISSUER_CERT_LOCALLY")), "tls", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"],
+    [fetchFailed(coded("ERR_TLS_CERT_ALTNAME_INVALID")), "tls", "ERR_TLS_CERT_ALTNAME_INVALID"],
+    [fetchFailed(coded("ERR_SSL_WRONG_VERSION_NUMBER")), "tls", "ERR_SSL_WRONG_VERSION_NUMBER"],
+    [fetchFailed(new Error("bad port")), "connection", BLOCKED_PORT],
+    // A code it does not know is a failed connection that keeps its code; no code at all says so.
+    [fetchFailed(coded("EWEIRD")), "connection", "EWEIRD"],
+    [new TypeError("fetch failed"), "connection", "no code"],
+    ["a string", "connection", "no code"],
+  ];
+  for (const [err, cause, code] of cases) assert.deepEqual(networkCause(err), { cause, code }, `${cause} ${code}`);
+  // A cycle of causes ends.
+  const loop: { cause?: unknown } = new Error("loop");
+  loop.cause = loop;
+  assert.deepEqual(networkCause(loop), { cause: "connection", code: "no code" });
+});
+
+test("preflight: each network cause is its own sentence, naming the host and port and what to do", () => {
+  const url = "https://app.example.com/start";
+  assert.match(
+    networkSentence(url, { cause: "dns", code: "ENOTFOUND" }, 10_000),
+    /could not resolve app\.example\.com \(DNS, ENOTFOUND\).*runner inside that network/,
+  );
+  assert.match(networkSentence(url, { cause: "connection", code: "ECONNREFUSED" }, 10_000), /could not connect to app\.example\.com:443 \(ECONNREFUSED\)/);
+  assert.match(networkSentence("http://127.0.0.1:6000/", { cause: "connection", code: BLOCKED_PORT }, 10_000), /port 6000 is one browsers refuse/);
+  assert.match(networkSentence("http://app.example.com/", { cause: "timeout", code: "TimeoutError" }, 2500), /app\.example\.com:80 within 2500 ms/);
+  assert.match(
+    networkSentence(url, { cause: "tls", code: "CERT_HAS_EXPIRED" }, 10_000),
+    /TLS handshake with app\.example\.com failed \(CERT_HAS_EXPIRED\).*NODE_EXTRA_CA_CERTS/,
+  );
+  assert.match(networkSentence(url, { cause: "timeout", code: "UND_ERR_CONNECT_TIMEOUT" }, 30_000), /Node's 10-second connect limit.*cannot lengthen/);
+});
+
+const answer = (status: number, extra: { headers?: Record<string, string>; body?: string; finalUrl?: string } = {}) => ({
+  status,
+  headers: extra.headers ?? {},
+  body: extra.body,
+  finalUrl: extra.finalUrl ?? "https://app.example.com/",
+  ms: 42,
+});
+
+test("preflight: a bot challenge is told from the app's own refusal, by the rule check stops on", () => {
+  const url = "https://app.example.com/";
+  // The same 403, once with Cloudflare's challenge script and once as the app's own page: only the first is a challenge.
+  const challenged = judgePage(url, answer(403, { body: "<html><script>window._cf_chl_opt={}</script></html>" }));
+  assert.equal(challenged.kind === "fail" && challenged.cause, "challenge");
+  assert.match(challenged.line, /Cloudflare answered https:\/\/app\.example\.com\/ with a bot challenge \(HTTP 403\)/);
+  const own = judgePage(url, answer(403, { body: "<html><title>Forbidden</title>You may not see this.</html>" }));
+  assert.equal(own.kind === "fail" && own.cause, "http");
+  assert.match(own.line, /answered HTTP 403\. The page needs a signed-in session/);
+  // A header that marks a challenge decides on any status; DataDome's header on a page it lets through does not.
+  const header = judgePage(url, answer(200, { headers: { "cf-mitigated": "challenge" } }));
+  assert.equal(header.kind === "fail" && header.cause, "challenge");
+  assert.equal(judgePage(url, answer(200, { headers: { "x-datadome": "protected" } })).kind, "ok");
+  assert.equal(judgePage(url, answer(403, { headers: { "x-datadome": "protected" } })).kind === "fail" && "challenge", "challenge");
+});
+
+test("preflight: an HTTP error names its status and the likely fix; a success says how long it took and where redirects ended", () => {
+  const url = "https://app.example.com/";
+  const fail = (status: number) => {
+    const v = judgePage(url, answer(status));
+    assert.ok(v.kind === "fail" && v.cause === "http", String(status));
+    return v.line;
+  };
+  assert.match(fail(404), /HTTP 404\. Check the URL and its path/);
+  assert.match(fail(401), /signed-in session/);
+  assert.match(fail(429), /rate-limiting/);
+  assert.match(fail(502), /proxy or load balancer/);
+  assert.match(fail(410), /HTTP 410\. Check the URL\.$/);
+  const ok = judgePage(url, answer(200));
+  assert.deepEqual(ok, { kind: "ok", line: "https://app.example.com/ answered HTTP 200 in 42 ms" });
+  const moved = judgePage(url, answer(200, { finalUrl: "https://login.example.com/sso?token=abcdefabcdefabcdefabcdef1234" }));
+  assert.match(moved.line, /after redirects, at https:\/\/login\.example\.com\/sso/);
+  // A redirect's address is printed as every other address is: a token in it masked.
+  assert.ok(!moved.line.includes("abcdefabcdefabcdefabcdef1234"), moved.line);
+});
+
+const cookie = (name: string, expires: number) => ({
+  name,
+  value: "v",
+  domain: "app.example.com",
+  path: "/",
+  expires,
+  httpOnly: true,
+  secure: true,
+  sameSite: "Lax",
+});
+
+test("preflight: a saved sign-in fails only when every dated credential in it has ended; the same profile with time left passes", () => {
+  const now = Date.UTC(2026, 9, 24, 12);
+  const sec = (ms: number) => Math.floor(ms / 1000);
+  const o = { label: 'for role "admin"', url: "https://app.example.com/", now, rerun: "`scenescout login https://app.example.com/ --role admin`" };
+  const expired = judgeSignIn(JSON.stringify({ cookies: [cookie("sid", sec(now - 3_600_000))], origins: [] }), o);
+  assert.equal(expired.kind === "fail" && expired.cause, "signIn");
+  assert.match(expired.line, /for role "admin" has expired.*scenescout login https:\/\/app\.example\.com\/ --role admin/);
+  const live = judgeSignIn(JSON.stringify({ cookies: [cookie("sid", sec(now + 3_600_000))], origins: [] }), o);
+  assert.equal(live.kind, "ok");
+  assert.match(live.line, /has not expired\. Lasts: about/);
+  // An ended cookie beside a session cookie with no date: the server decides, so it is a note, not a failure.
+  const mixed = judgeSignIn(JSON.stringify({ cookies: [cookie("old", sec(now - 3_600_000)), cookie("session", -1)], origins: [] }), o);
+  assert.equal(mixed.kind, "note");
+  assert.match(mixed.line, /may still work.*does not sign in/);
+  const broken = judgeSignIn('{"cookies": [{"name": "sid", "value": "live-session-value"', o);
+  assert.equal(broken.kind === "fail" && broken.cause, "signIn");
+  assert.ok(!broken.line.includes("live-session-value"), "a profile that is not JSON is never quoted");
+});
+
+test("preflight: the models list is asked with the key and nothing of the app; a refused key fails, an API with no list is still reachable", () => {
+  const anthropic = modelListRequest("anthropic", "https://api.anthropic.com/v1", "k");
+  assert.deepEqual(anthropic, {
+    url: "https://api.anthropic.com/v1/models",
+    headers: { "x-api-key": "k", "anthropic-version": "2023-06-01", "user-agent": PREFLIGHT_USER_AGENT },
+  });
+  assert.deepEqual(modelListRequest("openai", "https://gw.example.com/v1", "k").headers, { authorization: "Bearer k", "user-agent": PREFLIGHT_USER_AGENT });
+  const api = "the OpenAI API at https://api.openai.com/v1";
+  const table: Array<[number, string]> = [
+    [200, "ok"],
+    [401, "fail"],
+    [403, "fail"],
+    [500, "fail"],
+    [503, "fail"],
+    [404, "note"],
+    [405, "note"],
+    [429, "note"],
+    [400, "note"],
+  ];
+  for (const [status, kind] of table) assert.equal(judgeModelReply(api, status).kind, kind, String(status));
+  assert.match(judgeModelReply(api, 401).line, /refused the key \(HTTP 401\)/);
+  assert.match(judgeModelReply(api, 404).line, /reachable, but does not list models.*key was not checked/);
+});
+
+test("preflight: the exit code is the first failure's, in the order the checks ran", () => {
+  const ok = { kind: "ok", line: "" } as const;
+  const note = { kind: "note", line: "" } as const;
+  assert.equal(preflightExitCode([ok, note]), EXIT_PREFLIGHT.ready);
+  assert.equal(preflightExitCode([ok, { kind: "fail", cause: "signIn", line: "" }, { kind: "fail", cause: "modelApi", line: "" }]), EXIT_PREFLIGHT.signIn);
+  assert.equal(
+    preflightExitCode([
+      { kind: "fail", cause: "dns", line: "" },
+      { kind: "fail", cause: "signIn", line: "" },
+    ]),
+    EXIT_PREFLIGHT.dns,
+  );
+  // Every cause has its own code, none of them the 0, 1 and 2 the other commands use.
+  const codes = Object.entries(EXIT_PREFLIGHT)
+    .filter(([k]) => k !== "ready" && k !== "couldNotRun")
+    .map(([, v]) => v);
+  assert.equal(new Set(codes).size, codes.length);
+  for (const c of codes) assert.ok(c > 2, String(c));
+});
+
+/** A server on 127.0.0.1 that answers each request with `reply`, and keeps what it was sent. */
+async function standIn(reply: (req: http.IncomingMessage, res: http.ServerResponse) => void) {
+  const seen: Array<{ method: string; url: string; headers: http.IncomingHttpHeaders; body: string }> = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d));
+    req.on("end", () => {
+      seen.push({ method: req.method ?? "", url: req.url ?? "", headers: req.headers, body });
+      reply(req, res);
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  return {
+    base,
+    seen,
+    close: () =>
+      new Promise<void>((r) => {
+        server.close(() => r());
+        server.closeAllConnections();
+      }),
+  };
+}
+
+/** Run the preflight with the real fetch, in a fresh folder, with only this environment. */
+async function preflightRun(args: string[], env: Record<string, string> = {}, setup?: (dir: string) => void) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-preflight-"));
+  setup?.(dir);
+  const out: string[] = [];
+  const err: string[] = [];
+  const io: PreflightIo = {
+    fetch: (url, init) => fetch(url, init),
+    env,
+    readFile: (f) => fs.readFileSync(f, "utf8"),
+    exists: (f) => fs.existsSync(f),
+    now: () => Date.now(),
+    out: (l) => out.push(l),
+    err: (l) => err.push(l),
+    resolve: (cwd, p) => path.resolve(cwd, p),
+    cwd: dir,
+    config: fsPolicyReader,
+  };
+  try {
+    const code = await runPreflight(args, io);
+    return { code, out, err, dir };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("preflight over real HTTP: the app, a challenge, an HTTP error and a refused connection each end with their own code", async () => {
+  const app = await standIn((req, res) => {
+    if (req.url === "/challenged") {
+      res.writeHead(403, { "content-type": "text/html" });
+      return res.end("<html><title>Attention Required! | Cloudflare</title></html>");
+    }
+    if (req.url === "/down") {
+      res.writeHead(503);
+      return res.end("upstream down");
+    }
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end("<html><body>The app</body></html>");
+  });
+  try {
+    const ok = await preflightRun([`${app.base}/`]);
+    assert.equal(ok.code, EXIT_PREFLIGHT.ready, ok.err.join("\n"));
+    assert.match(ok.out.join("\n"), /✓ App: http:\/\/127\.0\.0\.1:\d+\/ answered HTTP 200 in \d+ ms\nPreflight passed: App\./);
+    assert.equal(app.seen[0].method, "GET");
+    assert.equal(app.seen[0].headers["user-agent"], PREFLIGHT_USER_AGENT);
+    const challenged = await preflightRun([`${app.base}/challenged`]);
+    assert.equal(challenged.code, EXIT_PREFLIGHT.challenge);
+    assert.match(challenged.err.join("\n"), /✗ App: Cloudflare answered .* with a bot challenge \(HTTP 403\)/);
+    const down = await preflightRun([`${app.base}/down`]);
+    assert.equal(down.code, EXIT_PREFLIGHT.http);
+    assert.match(down.err.join("\n"), /answered HTTP 503/);
+  } finally {
+    await app.close();
+  }
+  // An address nothing listens on: a port the system handed out, then closed.
+  const port = await new Promise<number>((r) => {
+    const probe = http.createServer().listen(0, "127.0.0.1", () => {
+      const p = (probe.address() as { port: number }).port;
+      probe.close(() => r(p));
+    });
+  });
+  const refused = await preflightRun([`http://127.0.0.1:${port}/`]);
+  assert.equal(refused.code, EXIT_PREFLIGHT.connection);
+  assert.match(refused.err.join("\n"), /✗ App: could not connect to 127\.0\.0\.1:\d+ \(ECONNREFUSED\)/);
+});
+
+test("preflight over real HTTP: a slow app is a timeout within the bound, not a hang", async () => {
+  const slow = await standIn(() => undefined);
+  try {
+    const started = Date.now();
+    const r = await preflightRun([`${slow.base}/`, "--timeout-ms", "1000"]);
+    assert.equal(r.code, EXIT_PREFLIGHT.timeout);
+    assert.ok(Date.now() - started < 5_000, "bounded by --timeout-ms");
+    assert.match(r.err.join("\n"), /no answer from 127\.0\.0\.1:\d+ within 1000 ms/);
+  } finally {
+    await slow.close();
+  }
+});
+
+test("preflight over real HTTP: the model API is asked for its models with the key and no page data, the key is never printed, and a refused key fails", async () => {
+  const key = "sk-test-preflight-key-0123456789abcdef";
+  const app = await standIn((_req, res) => {
+    res.writeHead(200);
+    res.end("app");
+  });
+  let status = 200;
+  const model = await standIn((_req, res) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end('{"data": []}');
+  });
+  try {
+    const ok = await preflightRun([`${app.base}/`, "--model-api", "--base-url", `${model.base}/v1`], { OPENAI_API_KEY: key });
+    assert.equal(ok.code, EXIT_PREFLIGHT.ready, ok.err.join("\n"));
+    assert.equal(model.seen.length, 1);
+    assert.deepEqual({ method: model.seen[0].method, url: model.seen[0].url, body: model.seen[0].body }, { method: "GET", url: "/v1/models", body: "" });
+    assert.equal(model.seen[0].headers.authorization, `Bearer ${key}`);
+    assert.match(ok.out.join("\n"), /✓ Model API: the OpenAI API at http:\/\/127\.0\.0\.1:\d+\/v1 answered and accepted the key/);
+    status = 401;
+    const refused = await preflightRun([`${app.base}/`, "--model-api", "--base-url", `${model.base}/v1`], { OPENAI_API_KEY: key });
+    assert.equal(refused.code, EXIT_PREFLIGHT.modelApi);
+    assert.match(refused.err.join("\n"), /refused the key \(HTTP 401\)/);
+    for (const r of [ok, refused]) assert.ok(![...r.out, ...r.err].some((l) => l.includes(key)), "the key is never printed");
+    // No key: the model check fails with the variable to set; the app check still ran.
+    const nokey = await preflightRun([`${app.base}/`, "--model-api"]);
+    assert.equal(nokey.code, EXIT_PREFLIGHT.modelApi);
+    assert.match(nokey.out.join("\n"), /✓ App/);
+    assert.match(nokey.err.join("\n"), /set ANTHROPIC_API_KEY or OPENAI_API_KEY/);
+  } finally {
+    await app.close();
+    await model.close();
+  }
+});
+
+test("preflight over real HTTP: a model API that redirects fails with 17 and names where, the key reaches no other address, and an echoed key is never printed", async () => {
+  const key = "sk-test-preflight-key-redirect-0123456789";
+  const app = await standIn((_req, res) => {
+    res.writeHead(200);
+    res.end("app");
+  });
+  const elsewhere = await standIn((req, res) => {
+    res.writeHead(200);
+    res.end(JSON.stringify(req.headers));
+  });
+  let mode: "redirect" | "401" | "500" = "redirect";
+  const model = await standIn((req, res) => {
+    if (mode === "redirect") {
+      res.writeHead(302, { location: `${elsewhere.base}/v1/models` });
+      return res.end();
+    }
+    // A body and a header that echo the key back, as a misconfigured proxy might.
+    res.writeHead(mode === "401" ? 401 : 500, { "x-echo": String(req.headers.authorization ?? req.headers["x-api-key"]) });
+    res.end(JSON.stringify(req.headers));
+  });
+  try {
+    for (const [provider, env] of [
+      ["openai", { OPENAI_API_KEY: key }],
+      ["anthropic", { ANTHROPIC_API_KEY: key }],
+    ] as const) {
+      mode = "redirect";
+      const args = [`${app.base}/`, "--model-api", "--provider", provider, "--base-url", `${model.base}/v1`];
+      const moved = await preflightRun(args, env);
+      assert.equal(moved.code, EXIT_PREFLIGHT.modelApi, moved.err.join("\n"));
+      assert.match(moved.err.join("\n"), /answered with a redirect \(HTTP 302 to http:\/\/127\.0\.0\.1:\d+\/v1\/models\)/);
+      assert.doesNotMatch(moved.err.join("\n"), /could not connect/, "a redirect is not a refused connection");
+      assert.equal(elsewhere.seen.length, 0, "the key is not sent on to the redirect's address");
+      for (const m of ["401", "500"] as const) {
+        mode = m;
+        const r = await preflightRun(args, env);
+        assert.equal(r.code, EXIT_PREFLIGHT.modelApi);
+        for (const line of [...r.out, ...r.err, ...moved.out, ...moved.err]) assert.ok(!line.includes(key), `the key is never printed: ${line}`);
+      }
+    }
+  } finally {
+    await app.close();
+    await elsewhere.close();
+    await model.close();
+  }
+});
+
+test("preflight over real HTTP: an app that redirects in a loop is an HTTP failure that says so, not a refused connection", async () => {
+  const loop = await standIn((req, res) => {
+    res.writeHead(302, { location: `${req.url}x` });
+    res.end();
+  });
+  try {
+    const r = await preflightRun([`${loop.base}/`]);
+    assert.equal(r.code, EXIT_PREFLIGHT.http, r.err.join("\n"));
+    assert.match(r.err.join("\n"), /✗ App: http:\/\/127\.0\.0\.1:\d+\/ redirected more than 20 times without answering: a redirect loop/);
+    assert.equal(loop.seen.length, 21, "fetch's own bound: the first request and 20 redirects");
+  } finally {
+    await loop.close();
+  }
+  // Contrast: a single redirect to a page is followed and passes.
+  const once = await standIn((req, res) => {
+    if (req.url === "/") {
+      res.writeHead(302, { location: "/home" });
+      return res.end();
+    }
+    res.writeHead(200);
+    res.end("home");
+  });
+  try {
+    const r = await preflightRun([`${once.base}/`]);
+    assert.equal(r.code, EXIT_PREFLIGHT.ready, r.err.join("\n"));
+    assert.match(r.out.join("\n"), /after redirects, at http:\/\/127\.0\.0\.1:\d+\/home/);
+  } finally {
+    await once.close();
+  }
+});
+
+test('preflight: egress "none" refuses the model check before any request; model-only lets it through', async () => {
+  const model = await standIn((_req, res) => {
+    res.writeHead(200);
+    res.end("{}");
+  });
+  const config = (egress: string) => (dir: string) => {
+    fs.mkdirSync(path.join(dir, ".scenescout"));
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), JSON.stringify({ egress }));
+  };
+  try {
+    const args = ["http://127.0.0.1:1/", "--model-api", "--base-url", `${model.base}/v1`];
+    const none = await preflightRun(args, { OPENAI_API_KEY: "k-123" }, config("none"));
+    assert.equal(none.code, EXIT_PREFLIGHT.couldNotRun);
+    assert.match(none.err.join("\n"), /refused by the SceneScout config .*egress "none".*Leave out --model-api/);
+    assert.equal(model.seen.length, 0, "nothing was sent");
+    assert.deepEqual(none.out, [], "and the app was not checked either: the command did not run");
+    const modelOnly = await preflightRun(
+      [`${model.base}/`, "--model-api", "--base-url", `${model.base}/v1`],
+      { OPENAI_API_KEY: "k-123" },
+      config("model-only"),
+    );
+    assert.equal(modelOnly.code, EXIT_PREFLIGHT.ready, modelOnly.err.join("\n"));
+  } finally {
+    await model.close();
+  }
+});
+
+test("preflight: a role with no saved sign-in, and an expired one, end with the sign-in code and the command that records it", async () => {
+  const app = await standIn((_req, res) => {
+    res.writeHead(200);
+    res.end("app");
+  });
+  try {
+    const missing = await preflightRun([`${app.base}/`, "--role", "admin"]);
+    assert.equal(missing.code, EXIT_PREFLIGHT.signIn);
+    assert.match(missing.err.join("\n"), /no sign-in is saved for role "admin".*scenescout login http:\/\/127\.0\.0\.1:\d+\/ --role admin/);
+    const save = (expires: number) => (dir: string) => {
+      fs.mkdirSync(path.join(dir, ".scenescout", "auth"), { recursive: true });
+      const c = { ...cookie("sid", expires), domain: "127.0.0.1", secure: false };
+      fs.writeFileSync(path.join(dir, ".scenescout", "auth", "admin.json"), JSON.stringify({ cookies: [c], origins: [] }));
+    };
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expired = await preflightRun([`${app.base}/`, "--role", "admin"], {}, save(nowSec - 600));
+    assert.equal(expired.code, EXIT_PREFLIGHT.signIn);
+    assert.match(expired.err.join("\n"), /✗ Sign-in: the saved sign-in for role "admin" has expired/);
+    const live = await preflightRun([`${app.base}/`, "--role", "admin"], {}, save(nowSec + 3600));
+    assert.equal(live.code, EXIT_PREFLIGHT.ready, live.err.join("\n"));
+    assert.match(live.out.join("\n"), /✓ Sign-in: the saved sign-in for role "admin" has not expired/);
+  } finally {
+    await app.close();
+  }
+});
+
+test("action: the preflight input runs `scenescout preflight` on the url and the check's storage state, before the browser is installed", () => {
+  assert.equal(preflightArgs({ url: "http://127.0.0.1:3000" }), null, "off by default");
+  assert.equal(preflightArgs({ url: "http://127.0.0.1:3000", preflight: "false" }), null);
+  assert.deepEqual(preflightArgs({ url: "http://127.0.0.1:3000", preflight: "true" }), ["preflight", "http://127.0.0.1:3000"]);
+  assert.deepEqual(preflightArgs({ url: "http://127.0.0.1:3000", preflight: "true", "storage-state": "auth.json", mode: "observe" }), [
+    "preflight",
+    "http://127.0.0.1:3000",
+    "--storage-state=auth.json",
+  ]);
+  assert.throws(() => preflightArgs({ url: "http://127.0.0.1:3000", preflight: "yes" }), /true or false/);
+  assert.throws(() => preflightArgs({ preflight: "true" }), /url input is required/);
+  // It is the action's own input: never passed to the check.
+  assert.ok(!checkArgs({ url: "http://127.0.0.1:3000", preflight: "true" }).some((a) => a.startsWith("--preflight")));
+  assert.ok(hasPreflightCommand(fs.readFileSync(path.join(REPO, "src", "cli.ts"), "utf8")), "the CLI's usage text no longer has the line the action looks for");
+  assert.ok(!hasPreflightCommand("  scenescout check <url>            Visit every route"));
+  assert.equal(
+    preflightFailure("✓ App: fine\n✗ Sign-in: the saved sign-in in auth.json has expired.\nPreflight failed (exit 16): Sign-in.\n", 16),
+    "Sign-in: the saved sign-in in auth.json has expired.",
+  );
+  assert.equal(preflightFailure("scenescout preflight: unknown option --x\n", 2), "scenescout preflight: unknown option --x");
+  assert.equal(preflightFailure("", 9), "scenescout preflight exited 9");
+  const steps = action.runs.steps as Array<{ name: string; if?: string; run?: string }>;
+  const names = steps.map((s) => s.name);
+  const step = steps.find((s) => s.name === "Preflight")!;
+  assert.equal(step.if, "inputs.preflight == 'true'");
+  assert.match(step.run ?? "", /check-action\.mjs" preflight$/);
+  assert.ok(names.indexOf("Get SceneScout") < names.indexOf("Preflight"), "after the CLI is resolved");
+  for (const later of ["Restore the browser cache", "Install the browser's system libraries", "Install the browser", "Run the check"])
+    assert.ok(names.indexOf("Preflight") < names.indexOf(later), `before ${later}`);
+  assert.equal(action.inputs.preflight.default, "false");
 });

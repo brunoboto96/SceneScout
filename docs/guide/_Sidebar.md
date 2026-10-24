@@ -12,6 +12,7 @@
 - [Recipes](Recipes.md)
 - [Safety model](Safety-model.md)
 - [What leaves the machine](What-leaves-the-machine.md)
+- [Network requirements](Network-requirements.md)
 
 #### Reference
 

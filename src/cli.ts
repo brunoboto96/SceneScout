@@ -63,6 +63,7 @@ import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys,
 import { configureCommand, fsPolicyReader, readCommandPolicy, type EgressPath } from "./engine/project-config.js";
 import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
 import { MAX_EXPLAIN_BODY, runPolicyCommand } from "./engine/policy-explain.js";
+import { runPreflight } from "./engine/preflight.js";
 import { VISUAL_DIRNAME } from "./engine/baseline.js";
 import { openOrSay } from "./engine/open.js";
 import {
@@ -282,6 +283,17 @@ Usage:
                                      --header "Name: value": a request header, such as a method override; repeatable;
                                      --app url: the address the server is attached to (default: the request's origin))
                                     Exit code: 0 explained, 2 could not (a bad argument, a body file not read).
+  scenescout preflight <url>        Whether this machine can reach what a run needs, in seconds and with no browser:
+                                    one GET of the URL (DNS, connection, timeout, TLS, HTTP status, a bot challenge),
+                                    a saved sign-in's expiry, and the model's API when asked. Run it first in CI.
+                                    (--role name or --storage-state file: also check that sign-in has not expired;
+                                     --project dir (default: here); --model-api: also ask the model's API for its
+                                      models with the key (no tokens, nothing of the app), as ci would reach it,
+                                      with --provider anthropic|openai and --base-url https://…/v1 as for ci;
+                                     --timeout-ms N (default 10000): the most each request may take)
+                                    Exit code: 0 ready; 2 could not run (a bad argument, a config that refuses it);
+                                    10 DNS, 11 connection refused or dropped, 12 timeout, 13 TLS, 14 HTTP 4xx or 5xx,
+                                    15 bot challenge, 16 sign-in missing or expired, 17 model API: the first failure's.
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
   scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
                                     of its page, and a live stream you can switch on per session
@@ -977,6 +989,23 @@ function policy(args: string[]): void {
   process.exit(code);
 }
 
+/** `scenescout preflight`: exits as EXIT_PREFLIGHT says. */
+async function preflight(args: string[]): Promise<never> {
+  const code = await runPreflight(args, {
+    fetch: (url, init) => fetch(url, init),
+    env: process.env,
+    readFile: (file) => fs.readFileSync(file, "utf8"),
+    exists: (file) => fs.existsSync(file),
+    now: () => Date.now(),
+    out: (line) => console.log(line),
+    err: (line) => console.error(line),
+    resolve: (cwd, p) => path.resolve(cwd, p),
+    cwd: process.cwd(),
+    config: fsPolicyReader,
+  });
+  process.exit(code);
+}
+
 const [, , command, ...args] = process.argv;
 
 // A CLI's failure mode should be a sentence, not a stack trace. `scan` on a
@@ -1008,6 +1037,7 @@ try {
       login,
       export: exportFindings,
       policy,
+      preflight,
       status: (a) => status(path.resolve(a[0] ?? process.cwd())),
       watch: (a) => {
         const positional = a.filter((x) => !x.startsWith("--"));

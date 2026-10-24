@@ -31,6 +31,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout ci <url>` | An unattended exploratory run driven by a model's API; exit 0 ran, 2 could not run |
 | `scenescout login <url> --role <name>` | Saves a sign-in as a role's profile; exit 0 saved, 1 not |
 | `scenescout export --to <tracker>` | Files the project's open findings, or a `check.json` or `ci.json` (`--from`), as GitHub or Jira issues, each once; a dry run unless `--yes`; exit 0 done, 2 could not export |
+| `scenescout preflight <url>` | Whether this machine can reach what a run needs, with no browser: the app (DNS, connection, timeout, TLS, HTTP status, bot challenge), a saved sign-in's expiry and, when asked, the model's API; exit 0 ready, 2 could not run, 10 to 17 one per cause |
 | `scenescout policy explain <METHOD> <URL>` | Whether the write policy would let one request out in each mode, and the rule that decided; sends nothing; exit 0 explained, 2 could not |
 | `scenescout status [path]` | What every session of a running engine is doing, as text |
 | `scenescout watch [path]` | Opens the live view in a browser |
@@ -193,6 +194,25 @@ npx -y scenescout policy explain POST https://app.example.com/api/things/3 --hea
 | `--body` | no body | A file holding the request body, read as text, at most 1 MB |
 | `--header` | none | A request header, `"Name: value"`, such as a method override. Repeat it for more |
 | `--app` | the request's origin | The address the server is attached to. A read `POST` or sign-in entry written as a path (`POST /api/search`) means this origin |
+
+### `scenescout preflight`
+
+`scenescout preflight <url>` makes one `GET` of the URL, following redirects, and needs no browser, so it can run before anything is downloaded. It judges a saved sign-in by its own dates when one is named, and, with `--model-api`, asks the model's API for its list of models with the key. Every check runs, and the exit code is the first failure's: 0 ready, 2 could not run, 10 DNS, 11 connection refused or dropped, 12 timeout, 13 TLS, 14 HTTP 4xx or 5xx, 15 bot challenge, 16 sign-in missing or expired, 17 model API. [Network requirements](Network-requirements.md#check-it-first-scenescout-preflight) says what each looks like and what the preflight does not check.
+
+```bash
+npx -y scenescout preflight https://staging.example.com --role admin
+npx -y scenescout preflight https://staging.example.com --model-api --base-url https://gateway.example.com/v1
+```
+
+| Option | Default | |
+|---|---|---|
+| `--role` | none | Also check that this role's saved sign-in (from `scenescout login`) exists and has not expired. It reads the profile's dates and sends nothing from it |
+| `--storage-state` | none | The same, for a storage-state file you name; not with `--role` |
+| `--project` | the current directory | Where `.scenescout/auth/` and the project's config file are |
+| `--model-api` | off | Also ask the model's API for its models, with the key from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. The request carries the key and nothing of the app, and spends no tokens. Refused when the config's `egress` is `none` |
+| `--provider` | the one whose key is set | `anthropic` or `openai`, needed only when both keys are set; with `--model-api` |
+| `--base-url` | the provider's API | Another endpoint that implements the same API, as for `ci`; with `--model-api` |
+| `--timeout-ms` | `10000` | The most each request may take, 1000 to 120000 |
 
 ### `scenescout watch`
 
@@ -410,6 +430,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and `replay.html` with its frames and videos on a recorded check |
 | `artifact-name` | empty | Empty means `scenescout-check-<job id>`; give each matrix cell its own |
 | `artifact-retention-days` | empty | Days to keep the artifact, 1 to 90; empty keeps the repository's setting |
+| `preflight` | `false` | Run `scenescout preflight` on `url`, with `storage-state` when set, before the browser is installed, and stop the job with its cause ([network requirements](Network-requirements.md#check-it-first-scenescout-preflight)) |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning; needs `security-events: write` |
 
 ### Action: ci

@@ -147,6 +147,10 @@ inputs:
     description: How many days to keep the artifact, 1 to 90. Empty keeps the repository's setting.
     required: false
     default: ""
+  preflight:
+    description: Run `scenescout preflight` on the url, with storage-state when it is set, before the browser is installed, and stop the job with its cause (DNS, connection, timeout, TLS, an HTTP error, a bot challenge or an expired sign-in) when the app cannot be checked. Needs a scenescout version that has the preflight command.
+    required: false
+    default: "false"
   upload-sarif:
     description: Upload check.sarif to GitHub code scanning. The job needs `permissions` with `security-events write`.
     required: false
@@ -225,6 +229,18 @@ runs:
       env:
         INPUTS: ${{ toJSON(inputs) }}
       run: node "$GITHUB_ACTION_PATH/action/check-action.mjs" resolve
+
+    # Before the browser's libraries and the browser are downloaded: a runner
+    # that cannot reach the app stops here, in seconds, with the cause.
+    - name: Preflight
+      if: inputs.preflight == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUTS: ${{ toJSON(inputs) }}
+        SCENESCOUT_CLI: ${{ steps.resolve.outputs.cli }}
+        SCENESCOUT_VERSION: ${{ steps.resolve.outputs.version }}
+      run: node "$GITHUB_ACTION_PATH/action/check-action.mjs" preflight
 
     # Restore and save are separate steps: the combined action saves in a post
     # step that runs only when the job succeeds, so a failed gate would never

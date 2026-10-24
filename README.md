@@ -206,6 +206,7 @@ npx -y scenescout login http://localhost:3000 --role admin    # then: /scenescou
 | [`scenescout ci`](docs/guide/Ways-to-use-it.md#scenescout-ci-an-unattended-exploratory-run) | An unattended exploratory run, driven by the Anthropic or OpenAI API. It reports and never fails the build | An API key |
 | [`/scenescout qa`](docs/guide/Ways-to-use-it.md#scenescout-qa-on-a-pull-request) | A comment on a pull request that tests its preview deploy and replies with the results; `/scenescout qa check` runs your own check instead | An API key (`qa check`: none) |
 | [`scenescout export`](docs/guide/Ways-to-use-it.md#filing-findings-as-issues) | Files the findings as GitHub or Jira issues, each once | No |
+| [`scenescout preflight`](docs/guide/Network-requirements.md#check-it-first-scenescout-preflight) | Checks in seconds, with no browser, that the runner can reach the app, that a saved sign-in has not expired and, when asked, the model's API; each cause has its own exit code | No |
 
 A gate on every pull request that keeps its evidence, as a GitHub Action:
 
@@ -264,6 +265,7 @@ The policy sits on the network, so a blocked request never reaches your server. 
 | [What it checks](docs/guide/What-it-checks.md) | Every check and every `scout_*` tool |
 | [Signing in](docs/guide/Signing-in.md) · [Safety model](docs/guide/Safety-model.md) | Roles and saved logins; what each mode refuses and why |
 | [What leaves the machine](docs/guide/What-leaves-the-machine.md) | Every path data leaves by, to whom, and the `egress` setting |
+| [Network requirements](docs/guide/Network-requirements.md) | Every host each command needs, `scenescout preflight` to check a runner reaches them, caches, mirrors and self-hosted runners |
 | [Recipes](docs/guide/Recipes.md) | Setups for seven kinds of project |
 | [Configuration reference](docs/guide/Configuration-reference.md) | Every option, environment variable and action input |
 | [Troubleshooting](docs/guide/Troubleshooting.md) | Symptoms and fixes, upgrading and uninstalling |
