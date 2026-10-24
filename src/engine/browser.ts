@@ -6964,7 +6964,8 @@ export class BrowserEngine {
    * round trip to the page is not ordered with that report. Bounded: a page whose content policy stops the marker, or
    * that cannot be armed, costs the bound once, and a page with nothing to leave is not armed. Only the page's own
    * document is armed: a frame's leaving writes are heard in no fixed order with it, and one heard late is still refused
-   * under the flow's rule (WriteRule), but may be missing from the flow's list.
+   * under the flow's rule (WriteRule), but may be missing from the flow's list. Until the marker is heard, however long
+   * after this wait has given up, the rule in force now keeps judging what the browser level hears (RouteGuard `rule`).
    */
   private async armLeaveMarker(page: Page): Promise<() => Promise<void>> {
     const none = async (): Promise<void> => {};
@@ -6994,7 +6995,7 @@ export class BrowserEngine {
       LEAVE_MARKER_WAIT_MS,
     );
     if (!armed) {
-      await marker.heard(0);
+      marker.unarmed();
       return none;
     }
     return () => marker.heard(LEAVE_MARKER_WAIT_MS);

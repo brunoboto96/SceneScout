@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium, firefox, webkit } from "playwright";
 import { createDemoServer } from "../../demo-app/server.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
-import { writeRedirectHopsJudged } from "../../dist/browsers.js";
+import { unloadWriteInterception, writeRedirectHopsJudged } from "../../dist/browsers.js";
 import { RouteGuard } from "../../dist/engine/route-guard.js";
 import { LEAVE_MARKER_PATH } from "../../dist/engine/unload.js";
 import { firstLook } from "../../dist/first-run.js";
@@ -1346,36 +1346,10 @@ async function flowWriteEdges({
     const slowLeavesBefore = writes("POST /api/leave");
     const slowEngine = new BrowserEngine();
     let slowReplay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
-    type Intercepts = { interceptUnseenWrites(browser: import("playwright").Browser): Promise<void> };
-    const guardProto = RouteGuard.prototype as unknown as Intercepts;
-    const intercept = guardProto.interceptUnseenWrites;
-    guardProto.interceptUnseenWrites = function (this: Intercepts, browser) {
-      let heardInOrder: Promise<unknown> = Promise.resolve();
-      const hearsLate = Object.create(browser, {
-        newBrowserCDPSession: {
-          value: async () => {
-            const session = await browser.newBrowserCDPSession();
-            const on = session.on.bind(session) as (name: string, listener: (event: { request: { url: string } }) => void) => unknown;
-            (session as unknown as { on: typeof on }).on = (name, listener) =>
-              on(name, (event) => {
-                const beacon = /\/api\/leave\b/.test(event.request.url);
-                if (name !== "Fetch.requestPaused" || !(beacon || event.request.url.includes(LEAVE_MARKER_PATH))) return listener(event);
-                heardInOrder = heardInOrder.then(() => (beacon ? settle(700) : undefined)).then(() => listener(event));
-              });
-            return session;
-          },
-        },
-      }) as import("playwright").Browser;
-      return intercept.call(this, hearsLate);
-    };
     try {
       const project = path.join(work, `flow-leave-beacon-late-${event}`);
       fs.mkdirSync(project, { recursive: true });
-      try {
-        await slowEngine.attach({ url: baseUrl, projectDir: project, mode: "read-only" });
-      } finally {
-        guardProto.interceptUnseenWrites = intercept;
-      }
+      await attachHearingBeaconsLate(slowEngine, baseUrl, project, 700);
       const guard = (slowEngine as unknown as { guard: Record<string, (...args: never[]) => Promise<unknown>> }).guard;
       const holdBack = (name: string, urlOf: (args: never[]) => string): void => {
         const judge = guard[name]!.bind(guard);
@@ -1403,6 +1377,62 @@ async function flowWriteEdges({
         (slowReplay.refusedBackground ?? []).some((sig) => /\/api\/leave\b/.test(sig)) &&
         writes("POST /api/leave") === slowLeavesBefore,
       `${JSON.stringify(slowReplay?.outcome)} refusedBackground=${JSON.stringify(slowReplay?.refusedBackground)} writes=${JSON.stringify(stats.writes)}`,
+    );
+  }
+
+  // The same beacon heard later than any fixed wait covers (#687): the browser level hears it 8 s after the page was
+  // left, past both the marker's wait and the 5 s WriteRule holds the flow's rule after the hand-back. Read-only lets
+  // a same-origin beacon out, so only the rule of the page it was sent from refuses it: the flow's, held until that
+  // page's leave marker, which follows the beacon, is heard. The contrast, with no flow: the same beacon from a page
+  // the session itself leaves goes out. Chromium only: elsewhere the route handler hears these as they are sent.
+  if (unloadWriteInterception(BROWSER) === "browser-fetch") {
+    const LATE_MS = 8000;
+    const lateLeavesBefore = writes("POST /api/leave");
+    const lateEngine = new BrowserEngine();
+    const refusedLate = () => (lateEngine as unknown as { blockedRequests: Array<{ sig: string }> }).blockedRequests.some((b) => /\/api\/leave\b/.test(b.sig));
+    let lateReplay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
+    let judged = false;
+    try {
+      const project = path.join(work, "flow-leave-beacon-later-than-the-hold");
+      fs.mkdirSync(project, { recursive: true });
+      await attachHearingBeaconsLate(lateEngine, baseUrl, project, LATE_MS);
+      lateReplay = await lateEngine.replayFlow(
+        [
+          { action: "navigate", target: "/check-flow-writes.html" },
+          { action: "click", target: "testid=writes-save-on-leave" },
+          { action: "expect-text", text: "Will save on leave" },
+        ],
+        "observe",
+      );
+      judged = await eventually(() => refusedLate() || writes("POST /api/leave") > lateLeavesBefore, LATE_MS + 5000);
+    } finally {
+      await lateEngine.close();
+    }
+    check(
+      `${BROWSER}: a beacon the flow's page sent as it was left, heard ${LATE_MS / 1000} s later, is refused under the flow's rule and listed, though the session's read-only would let it out; nothing reaches the server`,
+      judged && lateReplay?.outcome.status === "passed" && lateEngine.mode === "read-only" && refusedLate() && writes("POST /api/leave") === lateLeavesBefore,
+      `${JSON.stringify(lateReplay?.outcome)} judged=${judged} refused=${refusedLate()} writes=${JSON.stringify(stats.writes)}`,
+    );
+
+    const ownLeavesBefore = writes("POST /api/leave");
+    const ownEngine = new BrowserEngine();
+    let sent = false;
+    try {
+      const project = path.join(work, "session-leave-beacon-late");
+      fs.mkdirSync(project, { recursive: true });
+      await attachHearingBeaconsLate(ownEngine, baseUrl, project, LATE_MS);
+      const page = (ownEngine as unknown as { page: import("playwright").Page }).page;
+      await page.goto(new URL("/check-flow-writes.html", baseUrl).href);
+      await page.click('[data-testid="writes-save-on-leave"]');
+      await page.goto("about:blank");
+      sent = await eventually(() => writes("POST /api/leave") > ownLeavesBefore, LATE_MS + 5000);
+    } finally {
+      await ownEngine.close();
+    }
+    check(
+      `${BROWSER}: ...and the contrast: the same beacon, heard as late from a page the read-only session left with no flow, goes out under the session's rule`,
+      sent,
+      `writes=${JSON.stringify(stats.writes)}`,
     );
   }
 
@@ -1495,6 +1525,40 @@ async function flowWriteEdges({
  * the flow's test ID and requirements, and a manifest whose hashes are those of
  * the files on disk. Without --record the check stops before it starts.
  */
+/**
+ * Attach `engine` to `url` read-only with the browser-level interception (Chromium) hearing every `/api/leave` beacon `lateMs`
+ * late, and the leave marker a page sends after it no sooner, as what one page sent is heard in the order it was sent.
+ */
+async function attachHearingBeaconsLate(engine: BrowserEngine, url: string, projectDir: string, lateMs: number): Promise<void> {
+  type Intercepts = { interceptUnseenWrites(browser: import("playwright").Browser): Promise<void> };
+  const guardProto = RouteGuard.prototype as unknown as Intercepts;
+  const intercept = guardProto.interceptUnseenWrites;
+  guardProto.interceptUnseenWrites = function (this: Intercepts, browser) {
+    let heardInOrder: Promise<unknown> = Promise.resolve();
+    const hearsLate = Object.create(browser, {
+      newBrowserCDPSession: {
+        value: async () => {
+          const session = await browser.newBrowserCDPSession();
+          const on = session.on.bind(session) as (name: string, listener: (event: { request: { url: string } }) => void) => unknown;
+          (session as unknown as { on: typeof on }).on = (name, listener) =>
+            on(name, (event) => {
+              const beacon = /\/api\/leave\b/.test(event.request.url);
+              if (name !== "Fetch.requestPaused" || !(beacon || event.request.url.includes(LEAVE_MARKER_PATH))) return listener(event);
+              heardInOrder = heardInOrder.then(() => (beacon ? settle(lateMs) : undefined)).then(() => listener(event));
+            });
+          return session;
+        },
+      },
+    }) as import("playwright").Browser;
+    return intercept.call(this, hearsLate);
+  };
+  try {
+    await engine.attach({ url, projectDir, mode: "read-only" });
+  } finally {
+    guardProto.interceptUnseenWrites = intercept;
+  }
+}
+
 async function templateReport({
   project,
   checkWith,

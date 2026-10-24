@@ -279,6 +279,25 @@ request it is. A frame's leaving writes are heard in no fixed order with the
 page's marker, so one of those heard late is still refused but may be missing
 from the flow's list.
 
+The marker also ends the flow's rule, where five seconds after the hand-back
+had (#687). From the moment a page is armed until its marker is heard, the
+rule in force then is the strictest either judge applies (`LeftPageRules` in
+`unload.ts`, read through `RouteGuard.rule`), however late the browser reports
+what the page sent and whatever the session's rule has become; once the marker
+is heard, the rule is let go when the judgements already pending have settled.
+Judging by the sending document instead was measured and is not possible: the
+browser-level pause names only the frame, whose id survives the navigation to
+`about:blank`, with no loader id, and the route handler's frame is the same
+object before and after the navigation (on Firefox it already reports
+`about:blank`). A marker that is never heard (a content policy that refuses
+the beacon) holds the rule for at most 30 seconds (`LEFT_PAGE_RULE_CAP_MS`),
+after which the session's own rule judges again, as before the marker existed:
+the cost is that the crawl's writes in those seconds are judged by the flow's
+stricter rule. `WriteRule`'s five-second hold stays, for pages that could not
+be armed and for frames. The check smoke suite hears a flow's beacon 8 seconds
+late on Chromium and asserts it is refused, against the same beacon from a
+page the read-only session left with no flow, which goes out.
+
 ## Consequences
 
 A refusal is a tool result the agent must respect and cannot route around, and

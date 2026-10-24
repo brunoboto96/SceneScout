@@ -24,6 +24,7 @@ import {
   foreignWrite,
   isAuthExempt,
   offAppPageWrite,
+  stricterMode,
   trustsForeignWrite,
   type AuthPostList,
   type WriteMode,
@@ -278,5 +279,53 @@ export function leaveMarkerToken(url: string): string | null {
     return decodeURIComponent(rest);
   } catch {
     return "";
+  }
+}
+
+/**
+ * The longest a page the engine left under a rule keeps that rule in force while its leave marker is unheard. A marker
+ * the page could not send (a content policy that stops it, a renderer that died on the way out) is never heard; past
+ * this the session's own rule applies again, as it would have before the marker existed.
+ */
+export const LEFT_PAGE_RULE_CAP_MS = 30000;
+
+/**
+ * The rule each page the engine left is still judged under, until everything the page sent as it was left has been
+ * heard and judged: the page's leave marker (LEAVE_MARKER_PATH) is heard after the page's own leaving writes, so once
+ * it is, none of them is still to come. Until then a write the browser reports late, however late, is judged by the
+ * rule the page was left under (a flow's), never by the looser one the session has gone back to (policy.ts WriteRule
+ * holds a loosened rule for a fixed time only). Measured: the browser-level interception names only the sending frame,
+ * which keeps its id across the navigation away, and the route handler's frame is the same object before and after,
+ * so neither tells a write from the left document from one sent by the next: the marker's order does.
+ *
+ * The rule held is the strictest of all pages left and not yet heard; one unheard past `capMs` is let go.
+ */
+export class LeftPageRules {
+  private readonly pages = new Map<string, { mode: WriteMode; until: number }>();
+
+  constructor(private readonly capMs = LEFT_PAGE_RULE_CAP_MS) {}
+
+  /** A page is being left under `mode`, its marker carrying `token`. */
+  left(token: string, mode: WriteMode, now = Date.now()): void {
+    this.pages.set(token, { mode, until: now + this.capMs });
+  }
+
+  /** The page's marker was heard and what it sent before it judged; or the page was never armed, so no marker will come. */
+  heard(token: string): void {
+    this.pages.delete(token);
+  }
+
+  /** The strictest rule a page left and not yet heard holds, or null when none does. */
+  at(now = Date.now()): WriteMode | null {
+    let rule: WriteMode | null = null;
+    for (const [token, page] of this.pages) {
+      if (page.until < now) this.pages.delete(token);
+      else rule = rule === null ? page.mode : stricterMode(rule, page.mode);
+    }
+    return rule;
+  }
+
+  clear(): void {
+    this.pages.clear();
   }
 }
