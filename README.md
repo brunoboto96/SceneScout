@@ -246,6 +246,8 @@ The preview commands test a deployed preview, so the pull request's code never r
 
 A team can commit `.scenescout/config.json` to cap what any agent may choose, for example `{"preset": "strict"}` to keep every run in `observe` ([the config file](docs/guide/Configuration-reference.md#the-config-file)).
 
+SceneScout sends no telemetry. Every path by which data leaves the machine (the agent's model, `scenescout ci`, export, `/scenescout qa`, CI artifacts, downloads), what each carries and how to turn it off is in [What leaves the machine](docs/guide/What-leaves-the-machine.md). `{"egress": "none"}` in the config file makes SceneScout refuse every one it sends itself; it cannot stop your coding agent from sending what it reads to its own model.
+
 What the policy cannot stop: a link is opened like any page, so a link that changes something just by being opened (an unsubscribe link) is followed, unless you [turn on refusing those](docs/guide/Safety-model.md#stricter-judgement-of-destructive-writes) in `observe` and `read-only`; only HTTP is judged, so messages over a WebSocket are not; and in Firefox and WebKit the later hops of a redirect that keeps a write's method go out unjudged. Which refusals are guarantees and which are pattern matching is in the [Safety model](docs/guide/Safety-model.md#what-is-a-guarantee-and-what-is-best-effort).
 
 The policy sits on the network, so a blocked request never reaches your server. The page gets a refusal instead, which is how SceneScout catches a page that claims success anyway. A saved journey that creates something, like the order above, runs only when the check is told `--flow-writes allow`, against a test environment. Findings, memory and reports stay in a `.scenescout/` folder that keeps itself out of git.
@@ -261,6 +263,7 @@ The policy sits on the network, so a blocked request never reaches your server. 
 | [Ways to use it](docs/guide/Ways-to-use-it.md) | Interactive runs, parallel agents, CI, pull-request QA, filing issues |
 | [What it checks](docs/guide/What-it-checks.md) | Every check and every `scout_*` tool |
 | [Signing in](docs/guide/Signing-in.md) · [Safety model](docs/guide/Safety-model.md) | Roles and saved logins; what each mode refuses and why |
+| [What leaves the machine](docs/guide/What-leaves-the-machine.md) | Every path data leaves by, to whom, and the `egress` setting |
 | [Recipes](docs/guide/Recipes.md) | Setups for seven kinds of project |
 | [Configuration reference](docs/guide/Configuration-reference.md) | Every option, environment variable and action input |
 | [Troubleshooting](docs/guide/Troubleshooting.md) | Symptoms and fixes, upgrading and uninstalling |

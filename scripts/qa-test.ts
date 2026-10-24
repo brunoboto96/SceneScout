@@ -18,6 +18,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { EGRESS_MODES } from "../src/engine/project-config.ts";
 import {
   ALLOWED_ROLES,
   allowlist,
@@ -30,6 +31,10 @@ import {
   choosePreviewUrl,
   COMMENT_MARKER,
   deploymentUrl,
+  CONTENTS_UNREADABLE,
+  EGRESS_MODES as QA_EGRESS_MODES,
+  egressOf,
+  egressReply,
   gateDecision,
   githubClient,
   inert,
@@ -499,7 +504,9 @@ async function withGitHub(routes: (method: string, url: string) => unknown, fn: 
       // The team token is sent to the team membership route and nowhere else; the job's token everywhere else.
       assert.equal(auth, req.url!.startsWith("/orgs/") ? `Bearer ${TEAM_TOKEN}` : "Bearer test-token", `the right token for ${req.url}`);
       calls.push({ method: req.method!, url: req.url!, body: raw ? JSON.parse(raw) : null, auth });
-      const answer = routes(req.method!, req.url!);
+      let answer = routes(req.method!, req.url!);
+      // A repository whose files the job's token may read, unless a test says otherwise: the gate reads its top folder after a missing config.
+      if (answer === undefined && req.url === ROOT_ROUTE) answer = [];
       if (answer === undefined) {
         res.writeHead(404).end("{}");
         return;
@@ -550,6 +557,11 @@ function gateEnv(dir: string, apiUrl: string, login: string, body?: string, asso
 }
 
 const quiet = () => {};
+
+/** Where the gate reads the SceneScout config's egress: the contents API's default branch. */
+const CONFIG_ROUTE = "/repos/owner/app/contents/.scenescout/config.json";
+/** What the gate reads after a missing config, to tell no file from a file it may not read. */
+const ROOT_ROUTE = "/repos/owner/app/contents/";
 
 test("gate stage: a stranger gets a reaction and nothing else; the pull request is not even read", async () => {
   const dir = tempDir();
@@ -694,7 +706,7 @@ test("gate stage: an active team member starts a run, the team token going only 
     assert.equal(run.run, "true");
     assert.deepEqual(
       calls.map((c) => `${c.method} ${c.url}`),
-      [`GET ${MEMBERSHIP}`, "GET /repos/owner/app/pulls/7", "POST /repos/owner/app/issues/comments/55/reactions"],
+      [`GET ${MEMBERSHIP}`, "GET /repos/owner/app/pulls/7", `GET ${CONFIG_ROUTE}`, `GET ${ROOT_ROUTE}`, "POST /repos/owner/app/issues/comments/55/reactions"],
     );
     assert.ok(!lines.join("\n").includes(TEAM_TOKEN), "the token is never logged");
 
@@ -1769,10 +1781,10 @@ test("gate stage: a check reads no deployment, sets check=true with the branch a
       });
       assert.deepEqual(
         calls.map((c) => `${c.method} ${c.url}`),
-        ["GET /repos/owner/app/pulls/7", "POST /repos/owner/app/issues/comments/55/reactions"],
-        "the pull request and the reaction, and no deployment lookup",
+        ["GET /repos/owner/app/pulls/7", `GET ${CONFIG_ROUTE}`, `GET ${ROOT_ROUTE}`, "POST /repos/owner/app/issues/comments/55/reactions"],
+        "the pull request, the config's egress and the reaction, and no deployment lookup",
       );
-      assert.deepEqual(calls[1].body, { content: "eyes" });
+      assert.deepEqual(calls[3].body, { content: "eyes" });
 
       calls.length = 0;
       const unset = await runGate({ env: gateEnv(dir, api, "owner", "/scenescout qa check"), inputs: { "github-token": "test-token" }, log: quiet });
@@ -2434,4 +2446,109 @@ test("check stage: GitHub's words about an unclassified refusal reach the job's 
   const error = lines.find((l) => l.startsWith("::error"))!;
   assert.match(error, /HTTP 422; GitHub said: Something new, token \[redacted\]/);
   assert.ok(!error.includes("ghs_"), "no token-shaped text in the log");
+});
+
+// ── egress: the config's setting keeps a QA run from posting (issue #537) ────
+
+test("egress: the gate reads the same modes as the config file, and only `all` lets a run post", () => {
+  assert.deepEqual(QA_EGRESS_MODES, [...EGRESS_MODES], "the gate's modes are the config's");
+  const cases: Array<[string, string, ReturnType<typeof egressOf>, boolean]> = [
+    ["no egress key", `{"maxMode": "observe"}`, { ok: true, egress: "all" }, true],
+    ["egress all", `{"egress": "all"}`, { ok: true, egress: "all" }, true],
+    ["egress model-only", `{"egress": "model-only"}`, { ok: true, egress: "model-only" }, false],
+    ["egress none", `{"egress": "none"}`, { ok: true, egress: "none" }, false],
+    ["a preset alone sets no egress", `{"preset": "strict"}`, { ok: true, egress: "all" }, true],
+    ["not JSON", `{"egress": "none"`, { ok: false, error: "it is not valid JSON" }, false],
+    ["not an object", `["none"]`, { ok: false, error: "it is not a JSON object" }, false],
+    ["an egress that is not a mode", `{"egress": "some"}`, { ok: false, error: 'its "egress" must be one of "none", "model-only", "all"' }, false],
+    ["an egress that is not a string", `{"egress": false}`, { ok: false, error: 'its "egress" must be one of "none", "model-only", "all"' }, false],
+  ];
+  for (const [name, text, expected, runs] of cases) {
+    const got = egressOf(text);
+    assert.deepEqual(got, expected, name);
+    assert.equal(egressReply(got) === null, runs, `${name}: ${runs ? "runs" : "no run"}`);
+  }
+});
+
+test("gate: an egress other than `all` starts no run and no check, and the reply names the setting", () => {
+  const allowed = allowlist("", "owner");
+  const decide = (over: Record<string, unknown>) =>
+    gateDecision({ command: { url: "", focus: "" }, login: "owner", association: "OWNER", allowed, pr: SAME, allowForks: false, preview: PREVIEW, ...over });
+  // The pair: the same request, and only the setting differs.
+  assert.equal(decide({ egress: { ok: true, egress: "all" } }).run, true);
+  const none = decide({ egress: { ok: true, egress: "none" } });
+  assert.deepEqual([none.run, none.check, none.reaction], [false, undefined, "confused"]);
+  assert.match(none.reply!, /^No QA run was started: .*`\.scenescout\/config\.json` on the default branch.* `egress` to `none`/);
+  const modelOnly = decide({ egress: { ok: true, egress: "model-only" } });
+  assert.equal(modelOnly.run, false, "model-only lets a run reach the model but not post its results");
+  assert.match(modelOnly.reply!, /`egress` to `model-only`/);
+  const unread = decide({ egress: { ok: false, error: "GET … failed: HTTP 403" } });
+  assert.equal(unread.run, false, "a config that cannot be read starts nothing");
+  assert.match(unread.reply!, /could not be read: GET … failed: HTTP 403/);
+  const check = decide({ command: { url: "", focus: "", check: { focus: "" } }, checkWorkflow: "browser-tests.yml", egress: { ok: true, egress: "none" } });
+  assert.deepEqual([check.run, check.check], [false, undefined], "the project's own check posts its verdict too, so it is held as well");
+  // A stranger is still told nothing: the setting is never read out to someone who may not start a run.
+  assert.equal(decide({ login: "someone", association: "NONE", egress: { ok: true, egress: "none" } }).reply, null);
+});
+
+test("gate stage: the default branch's egress decides; none posts only the refusal and looks up no deployment", async () => {
+  const dir = tempDir();
+  const config = (text: string) => ({ type: "file", encoding: "base64", content: Buffer.from(text).toString("base64") });
+  const run = async (answer: unknown) => {
+    let out: Record<string, string | undefined> = {};
+    let seen: Call[] = [];
+    await withGitHub(
+      (method, url) => {
+        if (url === "/repos/owner/app/pulls/7") return SAME;
+        if (url === CONFIG_ROUTE) return answer;
+        if (method === "POST") return {};
+        return undefined;
+      },
+      async (api, calls) => {
+        out = await runGate({
+          env: gateEnv(dir, api, "owner", "/scenescout qa https://pr-7.preview.example.com"),
+          inputs: { "github-token": "test-token" },
+          log: quiet,
+        });
+        seen = calls;
+      },
+    );
+    return { out, calls: seen };
+  };
+  const allowedRun = await run(config(`{"egress": "all"}`));
+  assert.equal(allowedRun.out.run, "true");
+  const held = await run(config(`{"egress": "none", "maxMode": "observe"}`));
+  assert.equal(held.out.run, "false");
+  assert.deepEqual(
+    held.calls.map((c) => `${c.method} ${c.url}`),
+    ["GET /repos/owner/app/pulls/7", `GET ${CONFIG_ROUTE}`, "POST /repos/owner/app/issues/comments/55/reactions", "POST /repos/owner/app/issues/7/comments"],
+  );
+  assert.match(held.calls[3].body.body, /`egress` to `none`/);
+  assert.ok(!held.calls.some((c) => c.url.includes("/deployments")), "no deployment is looked up");
+  const refused = await run(new Refusal(403, "Resource not accessible by integration"));
+  assert.equal(refused.out.run, "false", "a config the token may not read is not taken for no config");
+  assert.match(refused.calls.at(-1)!.body.body, /could not be read: .*HTTP 403/);
+  const missing = await run(undefined);
+  assert.equal(missing.out.run, "true", "no file is today's behaviour");
+  // GitHub answers 404 for a private repository's file the token may not read, too: a 404 is no file only when the top folder can be read.
+  let hidden: Record<string, string | undefined> = {};
+  let hiddenCalls: Call[] = [];
+  await withGitHub(
+    (method, url) => {
+      if (url === "/repos/owner/app/pulls/7") return SAME;
+      if (url === ROOT_ROUTE) return 404;
+      if (method === "POST") return {};
+      return undefined;
+    },
+    async (api, calls) => {
+      hidden = await runGate({
+        env: gateEnv(dir, api, "owner", "/scenescout qa https://pr-7.preview.example.com"),
+        inputs: { "github-token": "test-token" },
+        log: quiet,
+      });
+      hiddenCalls = calls;
+    },
+  );
+  assert.equal(hidden.run, "false", "a config the gate may not see is not taken for no config");
+  assert.ok(hiddenCalls.at(-1)!.body.body.includes(CONTENTS_UNREADABLE));
 });

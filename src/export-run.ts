@@ -56,6 +56,7 @@ import {
   type PlanEntry,
 } from "./engine/export.js";
 import { MEMORY_DIRNAME, type ActionLogEntry, type Finding } from "./engine/memory.js";
+import { egressRefusal, forCommand, type LoadedPolicy } from "./engine/project-config.js";
 import { backoffMs } from "./engine/provider.js";
 import { frameOnDisk } from "./engine/replay.js";
 
@@ -75,6 +76,8 @@ class ExportError extends Error {
 
 export interface ExportDeps {
   env: Readonly<Record<string, string | undefined>>;
+  /** The SceneScout config the export runs under: its egress may refuse every call to the tracker, dry runs included. */
+  config: LoadedPolicy;
   /** Progress and the plan. */
   log: (line: string) => void;
   /** What went wrong. Defaults to `log`. */
@@ -694,6 +697,12 @@ export async function runExport(o: ExportOptions, deps: ExportDeps): Promise<Exp
     now: deps.now ?? Date.now,
     random: deps.random ?? Math.random,
   };
+  // Before anything is read or sent: a dry run reads the tracker too.
+  const refusedByEgress = egressRefusal(deps.config, "tracker", "scenescout export");
+  if (refusedByEgress) {
+    complain(`scenescout export: ${forCommand(refusedByEgress)}`);
+    return { exitCode: EXIT_EXPORT.couldNotExport, plan: [], filed: [], updated: [] };
+  }
   const pauseMs = deps.pauseMs ?? (o.to === "github" ? 1000 : 250);
   const where = o.to === "github" ? `GitHub ${o.github.repo}` : `Jira ${o.jira.projectKey} at ${o.jira.baseUrl}`;
   const filed: ExportOutcome["filed"] = [];
@@ -822,6 +831,8 @@ export async function readFiledIssues(
   deps: Omit<ExportDeps, "log" | "error">,
   recorded: Readonly<Record<string, { ref: string; number: number }>>,
 ): Promise<Map<string, FiledIssue>> {
+  const refusedByEgress = egressRefusal(deps.config, "tracker", "reading the filed tickets' state");
+  if (refusedByEgress) throw new Error(refusedByEgress);
   const credentials = trackerCredentials(o.to, deps.env);
   const secrets = credentialSecrets(deps.env);
   if (!credentials.ok) throw new Error(redactKeys(credentials.error, secrets));

@@ -77,3 +77,30 @@ override (issue #546).
 When the file cannot be read or understood, nothing runs: the server or the
 command stops at start and names the problem. When an argument and the file
 disagree, the file wins and the argument is refused.
+
+## Amendment: `egress`, what SceneScout itself may send off the machine (issue #537)
+
+- **`egress` is `none`, `model-only` or `all`, and unset is `all`.** It gates
+  the paths SceneScout itself sends data by: a model's API (`scenescout ci`
+  and the dedup judge, plus a finding's picture returned into the
+  conversation), an issue tracker (`scenescout export` and the ticket tools,
+  dry runs and reads included) and a pull request (`/scenescout qa`). The
+  rule is `egressAllows` in `project-config.ts`.
+- **Only the file sets it.** No environment variable or argument names it, so
+  nothing can loosen it, and a project's own file can only lower it.
+- **No preset sets it.** `strict` already keeps the judge off and pictures in
+  files; adding `egress` to it would stop exports that teams on `strict` run
+  today.
+- **`none` caps `dedup` at `rule` and `evidence` at `file`** for an attach, as
+  those keys would, with the refusal naming `egress`, and refuses the other
+  pictures of the app a tool would return (`scout_screenshot`, `scout_cards`
+  with inline pictures).
+- **The `/scenescout qa` gate reads it from the default branch** through the
+  contents API, never from the pull request, which could loosen it. GitHub
+  answers 404 also to a token that may not read a private repository, so a 404
+  counts as no file only when the repository's top folder can be read; any
+  other failure starts no run. The template's gate job asks for
+  `contents: read`, and a workflow without it is refused with that advice.
+- **It does not cover the coding agent's own model.** Over MCP the agent sends
+  what the tools return to its model; SceneScout cannot see that call. The
+  guide says so where it describes the setting.

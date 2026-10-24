@@ -63,12 +63,68 @@ export const PRESETS = ["strict"] as const;
 export type Preset = (typeof PRESETS)[number];
 
 /** The keys a config file may set; any other key is refused. */
-export const CONFIG_KEYS = ["preset", "maxMode", "requireGuidedPlan", "readPosts", "trustedEmbeds", "dedup", "evidence", "uploads", "projectsRoot"] as const;
+export const CONFIG_KEYS = [
+  "preset",
+  "maxMode",
+  "requireGuidedPlan",
+  "readPosts",
+  "trustedEmbeds",
+  "dedup",
+  "evidence",
+  "uploads",
+  "egress",
+  "projectsRoot",
+] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 
 /** What scout_upload may send: only files it generates, or a file from the project as well (the fence in uploads.ts). */
 export const UPLOAD_MODES = ["fixtures", "project"] as const;
 export type UploadMode = (typeof UPLOAD_MODES)[number];
+
+/**
+ * What SceneScout itself may send off the machine (issue #537), from the least
+ * to the most: `none` sends nothing, `model-only` sends pages to a model and
+ * nothing else, `all` is every path, as without a file.
+ */
+export const EGRESS_MODES = ["none", "model-only", "all"] as const;
+export type EgressMode = (typeof EGRESS_MODES)[number];
+
+/**
+ * The kinds of path by which SceneScout itself sends data off the machine:
+ * a model's API (`scenescout ci`, the dedup judge, a finding's picture in the
+ * conversation), an issue tracker (`scenescout export` and the ticket tools)
+ * and a pull request (`/scenescout qa`'s replies and its picture branch).
+ */
+export const EGRESS_PATHS = ["model", "tracker", "pull-request"] as const;
+export type EgressPath = (typeof EGRESS_PATHS)[number];
+
+/** Whether `egress` lets a path send. No setting is `all`, as without a file. */
+export function egressAllows(egress: EgressMode | undefined, via: EgressPath): boolean {
+  if (egress === undefined || egress === "all") return true;
+  return egress === "model-only" && via === "model";
+}
+
+/** What each path sends, as a refusal names it. */
+const EGRESS_WHAT: Record<EgressPath, string> = {
+  model: "sending the app's pages to a model's API",
+  tracker: "contacting GitHub or Jira with this project's findings",
+  "pull-request": "posting results on a pull request",
+};
+
+/**
+ * Why the config refuses a path that sends data off the machine, or null when
+ * it allows it. `what` names the command or tool, for the person reading it.
+ */
+export function egressRefusal(loaded: LoadedPolicy, via: EgressPath, what: string): string | null {
+  const egress = loaded.policy.egress;
+  if (egressAllows(egress, via)) return null;
+  return refusalText(loaded, [
+    {
+      key: "egress",
+      why: `egress "${egress}" ${egress === "none" ? "lets SceneScout send nothing off this machine" : "lets SceneScout send pages to a model and nothing else"}, so ${what} is not run (it means ${EGRESS_WHAT[via]})`,
+    },
+  ]);
+}
 
 /**
  * What a config file sets, after its preset is expanded. A key that is
@@ -89,6 +145,8 @@ export interface Policy {
   evidence?: EvidenceMode;
   /** The most scout_upload may send: "fixtures" refuses every file from disk, whatever SCENESCOUT_UPLOAD_ALLOW lists. */
   uploads?: UploadMode;
+  /** What SceneScout itself may send off the machine. Unset: everything, as without a file. */
+  egress?: EgressMode;
   /**
    * The folder every project folder must sit inside, by its real path: an
    * attach's projectPath (or the folder it would default to), scout_login's,
@@ -108,8 +166,12 @@ export interface LoadedPolicy {
 /** No file: every setting as it is without one. */
 export const NO_POLICY: LoadedPolicy = { policy: {}, sources: [] };
 
-/** What a preset sets: every key but projectsRoot, which names a folder on one machine. */
-export type PresetPolicy = Required<Omit<Policy, "projectsRoot">>;
+/**
+ * What a preset sets: every key but projectsRoot, which names a folder on one
+ * machine, and egress, which no preset sets so that adopting one never stops
+ * an export or a `ci` run that worked before.
+ */
+export type PresetPolicy = Required<Omit<Policy, "projectsRoot" | "egress">>;
 
 /** What each preset sets. A key the file sets beside the preset replaces the preset's value for that key. */
 export const PRESET_POLICY: Record<Preset, PresetPolicy> = {
@@ -130,6 +192,8 @@ const EVIDENCE_ORDER: readonly EvidenceMode[] = ["off", "file", "inline"];
 const DEDUP_ORDER: readonly DedupMode[] = ["rule", "judge"];
 /** Upload modes from the least that reads the disk to the most. */
 const UPLOAD_ORDER: readonly UploadMode[] = ["fixtures", "project"];
+/** Egress modes from the least that leaves the machine to the most. */
+const EGRESS_ORDER: readonly EgressMode[] = EGRESS_MODES;
 
 const below = <T>(order: readonly T[], a: T, b: T): T => (order.indexOf(a) <= order.indexOf(b) ? a : b);
 
@@ -215,6 +279,8 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
   if (!evidence.ok) return evidence;
   const uploads = oneOf("uploads", UPLOAD_MODES);
   if (!uploads.ok) return uploads;
+  const egress = oneOf("egress", EGRESS_MODES);
+  if (!egress.ok) return egress;
   const root = obj.projectsRoot;
   if (root !== undefined && (typeof root !== "string" || !path.isAbsolute(root.trim())))
     return bad(`"projectsRoot" must be the absolute path of a folder, not ${JSON.stringify(root)}`);
@@ -233,6 +299,7 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
     dedup: dedup.value,
     evidence: evidence.value,
     uploads: uploads.value,
+    egress: egress.value,
     projectsRoot: typeof root === "string" ? path.resolve(root.trim()) : undefined,
   };
   for (const [k, v] of Object.entries(set)) if (v !== undefined) (base as Record<string, unknown>)[k] = v;
@@ -272,6 +339,7 @@ export function tightenPolicy(a: Policy, b: Policy): Policy {
   if (a.dedup || b.dedup) out.dedup = a.dedup && b.dedup ? below(DEDUP_ORDER, a.dedup, b.dedup) : (a.dedup ?? b.dedup);
   if (a.evidence || b.evidence) out.evidence = a.evidence && b.evidence ? below(EVIDENCE_ORDER, a.evidence, b.evidence) : (a.evidence ?? b.evidence);
   if (a.uploads || b.uploads) out.uploads = a.uploads && b.uploads ? below(UPLOAD_ORDER, a.uploads, b.uploads) : (a.uploads ?? b.uploads);
+  if (a.egress || b.egress) out.egress = a.egress && b.egress ? below(EGRESS_ORDER, a.egress, b.egress) : (a.egress ?? b.egress);
   // The operator's only: withProjectPolicy refuses a project's file that sets it.
   if (a.projectsRoot) out.projectsRoot = a.projectsRoot;
   return out;
@@ -526,7 +594,7 @@ export interface EffectiveSettings {
 
 /** One argument the config refused, and why. */
 export interface Refusal {
-  key: keyof AskedSettings | "projectPath" | "filePath";
+  key: keyof AskedSettings | "projectPath" | "filePath" | "egress";
   why: string;
 }
 
@@ -607,28 +675,34 @@ export function resolveSettings(
   if (policy.trustedEmbeds) listed("trustedEmbeds", policy.trustedEmbeds, undefined, undefined, embedKey);
   else if (asked.trustedEmbeds !== undefined) settings.trustedEmbeds = [...asked.trustedEmbeds];
 
+  // egress "none" sends nothing to a model: the judge is off and pictures stay out of the conversation, whatever dedup and evidence say.
+  const noEgress = policy.egress === "none";
+  const dedupMax: DedupMode | undefined = noEgress ? "rule" : policy.dedup;
+  const dedupBy = noEgress && policy.dedup !== "rule" ? `egress "none"` : `dedup "${dedupMax}"`;
   settings.dedup = asked.dedup;
-  if (policy.dedup) {
-    const max = policy.dedup;
+  if (dedupMax) {
+    const max = dedupMax;
     if (asked.dedup !== undefined && below(DEDUP_ORDER, asked.dedup, max) !== asked.dedup)
-      refused.push({ key: "dedup", why: `dedup "${asked.dedup}" is above the config's dedup "${max}": the model judge is off for this project` });
+      refused.push({ key: "dedup", why: `dedup "${asked.dedup}" is above the config's ${dedupBy}: the model judge is off for this project` });
     else if (asked.dedup === undefined && max === "rule") {
       // Set, not left to the environment: an earlier attach's choice and SCENESCOUT_DEDUP both lose to the file.
       settings.dedup = "rule";
-      if ((env[DEDUP_ENV] ?? "").trim() === "judge") notes.push(`dedup "rule": ${DEDUP_ENV}=judge is above the config's dedup "rule"`);
+      if ((env[DEDUP_ENV] ?? "").trim() === "judge") notes.push(`dedup "rule": ${DEDUP_ENV}=judge is above the config's ${dedupBy}`);
     }
   }
 
+  const evidenceMax: EvidenceMode | undefined = noEgress ? (policy.evidence ? below(EVIDENCE_ORDER, policy.evidence, "file") : "file") : policy.evidence;
+  const evidenceBy = noEgress && evidenceMax !== policy.evidence ? `egress "none"` : `evidence "${evidenceMax}"`;
   settings.evidence = asked.evidence;
-  if (policy.evidence) {
-    const max = policy.evidence;
+  if (evidenceMax) {
+    const max = evidenceMax;
     if (asked.evidence !== undefined && below(EVIDENCE_ORDER, asked.evidence, max) !== asked.evidence)
-      refused.push({ key: "evidence", why: `evidence "${asked.evidence}" is above the config's evidence "${max}"` });
+      refused.push({ key: "evidence", why: `evidence "${asked.evidence}" is above the config's ${evidenceBy}` });
     else if (asked.evidence === undefined) {
       const would = defaults.evidence();
       if (below(EVIDENCE_ORDER, would, max) !== would) {
         settings.evidence = max;
-        notes.push(`evidence "${max}": "${would}" is above the config's evidence`);
+        notes.push(`evidence "${max}": "${would}" is above the config's ${noEgress && evidenceMax !== policy.evidence ? `egress "none"` : "evidence"}`);
       }
     }
   }
@@ -654,22 +728,28 @@ function flagGiven(args: readonly string[], name: string): boolean {
   return args.some((a) => a.startsWith("--") && flagName(a) === name);
 }
 
+/** A refusal as a command prints it: a command is run by a person, not an agent that might retry. */
+export const forCommand = (refusal: string): string => refusal.replace(/ Do not retry with a looser setting\.$/, "");
+
 /**
  * The config applied to a command (`check`, `ci`, a first look): its `--mode`, `ci`'s
  * `--dedup`, and the read POSTs it takes from the environment. A flag above the config's ceiling stops the command, naming the
- * file; a default above it is lowered, with a line saying so.
+ * file; a default above it is lowered, with a line saying so. `sends` names the path by which the command
+ * sends data off the machine (`ci`: a model's API), and a command whose path egress does not allow is refused.
  */
 export function applyToCommand(
   loaded: LoadedPolicy,
   env: Record<string, string | undefined>,
   args: readonly string[],
-  options: { mode: WriteMode; dedup?: DedupMode },
+  options: { mode: WriteMode; dedup?: DedupMode; sends?: { via: EgressPath; what: string } },
 ): { ok: true; mode: WriteMode; dedup?: DedupMode; readPosts?: string[]; note: string } | { ok: false; error: string } {
+  const egress = options.sends ? egressRefusal(loaded, options.sends.via, options.sends.what) : null;
+  if (egress) return { ok: false, error: forCommand(egress) };
   if (loaded.sources.length === 0) return { ok: true, mode: options.mode, dedup: options.dedup, note: "" };
   const asked: AskedSettings = { mode: flagGiven(args, "mode") ? options.mode : undefined };
   if (options.dedup !== undefined && flagGiven(args, "dedup")) asked.dedup = options.dedup;
   const r = resolveSettings(loaded, env, asked, { mode: options.mode, evidence: () => "off" });
-  if (r.refused.length > 0) return { ok: false, error: refusalText(loaded, r.refused).replace(/ Do not retry with a looser setting\.$/, "") };
+  if (r.refused.length > 0) return { ok: false, error: forCommand(refusalText(loaded, r.refused)) };
   const dedup = options.dedup === undefined ? undefined : (r.settings.dedup ?? options.dedup);
   const notes = [...r.notes];
   // Said once: resolveSettings already said so when the environment asked for the judge.
@@ -686,9 +766,27 @@ export function applyToCommand(
 }
 
 /**
+ * The config a command runs under: the launch file (CONFIG_ENV, else
+ * `launchDir`'s), joined with the project's own, after the project folder is
+ * checked against projectsRoot. An error stops the command.
+ */
+export function readCommandPolicy(
+  env: Record<string, string | undefined>,
+  launchDir: string,
+  projectDir: string,
+  fsx: PolicyReader,
+): { ok: true; loaded: LoadedPolicy } | { ok: false; error: string } {
+  const launch = readLaunchPolicy(env, launchDir, fsx);
+  if (!launch.ok) return launch;
+  // Before the project's own file is read: a folder outside the root is not the operator's to read from.
+  const outside = projectFolderRefusal(launch.loaded, projectDir, fsx);
+  if (outside) return { ok: false, error: forCommand(outside) };
+  return withProjectPolicy(launch.loaded, projectDir, fsx);
+}
+
+/**
  * The config for a command (`check`, `ci`, a first look), read and applied in
- * one step: the launch file (CONFIG_ENV, else `launchDir`'s), joined with the
- * project's own, then applyToCommand. `readPostsEnv` is what the command puts
+ * one step: readCommandPolicy, then applyToCommand. `readPostsEnv` is what the command puts
  * in READ_POSTS_ENV, since a command reads POST endpoints from there only;
  * undefined leaves the environment as it is.
  */
@@ -697,15 +795,10 @@ export function configureCommand(
   launchDir: string,
   projectDir: string,
   args: readonly string[],
-  options: { mode: WriteMode; dedup?: DedupMode },
+  options: { mode: WriteMode; dedup?: DedupMode; sends?: { via: EgressPath; what: string } },
   fsx: PolicyReader,
 ): { ok: true; mode: WriteMode; dedup?: DedupMode; note: string; readPostsEnv?: string } | { ok: false; error: string } {
-  const launch = readLaunchPolicy(env, launchDir, fsx);
-  if (!launch.ok) return launch;
-  // Before the project's own file is read: a folder outside the root is not the operator's to read from.
-  const outside = projectFolderRefusal(launch.loaded, projectDir, fsx);
-  if (outside) return { ok: false, error: outside.replace(/ Do not retry with a looser setting\.$/, "") };
-  const loaded = withProjectPolicy(launch.loaded, projectDir, fsx);
+  const loaded = readCommandPolicy(env, launchDir, projectDir, fsx);
   if (!loaded.ok) return loaded;
   const applied = applyToCommand(loaded.loaded, env, args, options);
   if (!applied.ok) return applied;

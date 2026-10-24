@@ -18,7 +18,9 @@
  * any of the pull request's code. They read the event payload, call the
  * GitHub REST API with the job's token (and, in the gate, read team
  * membership with the separate team token when a project allows teams), and,
- * for the shots and the report, read the run's artifact.
+ * for the shots and the report, read the run's artifact. The gate also reads
+ * the `egress` the repository's SceneScout config sets on its default branch,
+ * and starts no run unless it is `all` (issue #537).
  * The pure rules are exported and table-tested by qa-test.
  */
 import { randomUUID } from "node:crypto";
@@ -302,12 +304,16 @@ export function gateDecision({
   preview,
   base = { source: "none", url: "" },
   checkWorkflow = "",
+  egress = { ok: true, egress: "all" },
 }) {
   if (!command) return { run: false, reason: "not the command", reaction: null, reply: null };
   if (!teamMember && !isAllowed(login, association, allowed))
     return { run: false, reason: `@${login} is not in the list of accounts that may start a QA run`, reaction: "confused", reply: null };
   if (!pr || pr.state !== "open")
     return { run: false, reason: "the pull request is not open", reaction: "confused", reply: "The pull request is not open, so no QA run was started." };
+  // Before either kind of run: both end in a reply on the pull request, which only egress "all" allows.
+  const held = egressReply(egress);
+  if (held) return { run: false, reason: held.reason, reaction: "confused", reply: held.reply };
   if (command.check) return checkDecision({ pr, checkWorkflow });
   if (isFork(pr) && !allowForks)
     return {
@@ -363,6 +369,81 @@ export function gateDecision({
     return { run: true, reason: "ok", reaction: "eyes", reply: null, url: checked.url, show: capture.what, base: checkedBase.url };
   }
   return { run: true, reason: "ok", reaction: "eyes", reply: null, url: checked.url, show: capture?.what ?? "", base: "" };
+}
+
+/** The SceneScout config, as the gate reads it from the repository's default branch. */
+export const CONFIG_PATH = ".scenescout/config.json";
+/** What SceneScout itself may send off the machine, as the config's `egress` key takes it (src/engine/project-config.ts). */
+export const EGRESS_MODES = ["none", "model-only", "all"];
+
+/**
+ * The egress a config file's text sets: `all` when it sets none, as without a
+ * file. A QA run posts on the pull request, which only `all` allows. Text that
+ * is not a JSON object, or an egress that is not one of EGRESS_MODES, is an
+ * error: the gate cannot tell what the config allows, so no run starts.
+ *
+ * Only `egress` is read here. The rest of the file is the CLI's to check, and
+ * no preset sets egress.
+ * @param {string} text
+ * @returns {{ ok: true, egress: string } | { ok: false, error: string }}
+ */
+export function egressOf(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { ok: false, error: "it is not valid JSON" };
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "it is not a JSON object" };
+  if (raw.egress === undefined) return { ok: true, egress: "all" };
+  if (typeof raw.egress !== "string" || !EGRESS_MODES.includes(raw.egress))
+    return { ok: false, error: `its "egress" must be one of ${EGRESS_MODES.map((m) => `"${m}"`).join(", ")}` };
+  return { ok: true, egress: raw.egress };
+}
+
+/**
+ * Why the config keeps a QA run from starting, or null. `egress` is what
+ * readEgress found: a mode, or why the file could not be read.
+ * @param {{ ok: true, egress: string } | { ok: false, error: string }} egress
+ */
+export function egressReply(egress) {
+  if (egress.ok && egress.egress === "all") return null;
+  const why = egress.ok
+    ? `this repository's SceneScout config (\`${CONFIG_PATH}\` on the default branch) sets \`egress\` to \`${egress.egress}\`, which lets SceneScout post nothing on a pull request`
+    : `this repository's SceneScout config (\`${CONFIG_PATH}\` on the default branch) could not be read: ${egress.error}`;
+  return {
+    reason: egress.ok ? `egress "${egress.egress}"` : "the config could not be read",
+    reply: `No QA run was started: ${why}. Whoever looks after the repository can change it.`,
+  };
+}
+
+/** Why the gate cannot tell a missing config from one it may not read. */
+export const CONTENTS_UNREADABLE = "the gate cannot read the repository's files: give the gate job `contents: read`";
+
+/**
+ * The config's egress, read from the repository's default branch (the
+ * contents API's default), never from the pull request, which could loosen
+ * it. No file is `all`. GitHub answers 404 both for a file that is not there
+ * and for a private repository the token may not read, so a 404 counts as no
+ * file only when the repository's top folder can be read; otherwise, and on
+ * any other failure, it is an error and no run starts on a guess.
+ */
+async function readEgress(call, repo) {
+  let file;
+  try {
+    file = await call("GET", `/repos/${repo}/contents/${CONFIG_PATH}`);
+  } catch (err) {
+    if (err?.status !== 404) return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    try {
+      await call("GET", `/repos/${repo}/contents/`);
+    } catch {
+      return { ok: false, error: CONTENTS_UNREADABLE };
+    }
+    return { ok: true, egress: "all" };
+  }
+  if (file?.type !== "file" || file?.encoding !== "base64" || typeof file?.content !== "string")
+    return { ok: false, error: "GitHub did not return it as a file" };
+  return egressOf(Buffer.from(file.content, "base64").toString("utf8"));
 }
 
 /**
@@ -791,9 +872,11 @@ export async function runGate({ env = process.env, inputs = inputsFromEnv(), fet
   }
   // The pull request is read only for a command from an allowed account: anything else is decided without it.
   const pr = command && (teamMember || isAllowed(login, association, allowed)) ? await call("GET", `/repos/${repo}/pulls/${number}`) : null;
+  // Read only for an open pull request: anything earlier is refused without it.
+  const egress = pr && pr.state === "open" ? await readEgress(call, repo) : { ok: true, egress: "all" };
   let preview = { source: "none", url: "" };
   let base = { source: "none", url: "" };
-  if (pr && !command.check) {
+  if (pr && !command.check && egress.ok && egress.egress === "all") {
     const sha = String(pr.head?.sha ?? "");
     const needsDeployment = !command.url && !previewUrlFromTemplate(inputs["preview-url"], { pr: number, sha });
     const deployment = needsDeployment && sha ? deploymentUrl(await deploymentsOf(call, repo, { sha }, String(inputs.environment ?? "").trim())) : "";
@@ -816,6 +899,7 @@ export async function runGate({ env = process.env, inputs = inputsFromEnv(), fet
     preview,
     base,
     checkWorkflow: inputs["check-workflow"],
+    egress,
   });
   log(`${decision.run ? "Starting a QA run" : decision.check ? "Starting the project's check" : "No QA run"}: ${decision.reason}.`);
   if (decision.reaction && event.comment?.id)

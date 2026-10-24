@@ -12,7 +12,8 @@ import { z } from "zod";
 import { MAX_PREVIEW_IDS, TicketPreviews } from "../engine/ticket-preview.js";
 import { TICKET_STATUS_EVERY_MS, TicketStatusReads, ticketStatusText } from "../engine/ticket-status.js";
 import { fileTickets, previewTickets, ticketStatus } from "../ticket-run.js";
-import { errorText, projectEngine, server } from "../server-context.js";
+import { errorText, operatorPolicy, projectEngine, server } from "../server-context.js";
+import { fsPolicyReader, withProjectPolicy, type LoadedPolicy } from "../engine/project-config.js";
 import { askWithForm, projectDirFor } from "./guide.js";
 
 export const TICKET_PREVIEW_TOOL = "scout_ticket_preview";
@@ -30,6 +31,13 @@ function openProject(): string {
   if (!memory) throw new Error("No project is open yet: tickets are filed from the findings of the project a session attached to, so attach first.");
   memory.flush();
   return path.dirname(memory.dir);
+}
+
+/** The config a project's tickets are filed under: the operator's, tightened by the project's own file, read on every call. */
+function configFor(projectDir: string): LoadedPolicy {
+  const config = withProjectPolicy(operatorPolicy, projectDir, fsPolicyReader);
+  if (!config.ok) throw new Error(`the project's SceneScout config is not valid: ${config.error}`);
+  return config.loaded;
 }
 
 const TICKET = z.object({ id: z.string(), severity: z.enum(["high", "medium", "low"]), title: z.string() });
@@ -94,7 +102,8 @@ export function registerTicketTools(): void {
     },
     async ({ ids, to, target }: { ids: string[]; to: "github" | "jira"; target: string }) => {
       try {
-        const got = await previewTickets({ ids, to, target }, openProject(), previews, { env: process.env });
+        const dir = openProject();
+        const got = await previewTickets({ ids, to, target }, dir, previews, { env: process.env, config: configFor(dir) });
         if (!got.ok) throw new Error(got.error);
         return { content: [{ type: "text" as const, text: got.text }], structuredContent: { ...got.preview } };
       } catch (err) {
@@ -120,9 +129,10 @@ export function registerTicketTools(): void {
     async ({ previewId }: { previewId: string }, extra) => {
       try {
         // What the open project has found goes to disk first, so a preview of it is checked against what it holds now.
-        openProject();
+        const dir = openProject();
         const got = await fileTickets(previewId, previews, (form) => askWithForm(form.message, form.requestedSchema, extra, TICKET_FILE_TOOL), {
           env: process.env,
+          config: configFor(dir),
         });
         const { text, ...structured } = got;
         return { content: [{ type: "text" as const, text: `${text}\nTell the person: "${got.tellPerson}"` }], structuredContent: structured };
@@ -147,7 +157,8 @@ export function registerTicketTools(): void {
     },
     async ({ address }: { address?: string }) => {
       try {
-        const status = await ticketStatus(await projectDirFor(address), statusReads, { env: process.env });
+        const dir = await projectDirFor(address);
+        const status = await ticketStatus(dir, statusReads, { env: process.env, config: configFor(dir) });
         return { content: [{ type: "text" as const, text: ticketStatusText(status) }], structuredContent: { ...status } };
       } catch (err) {
         return errorText(err);
