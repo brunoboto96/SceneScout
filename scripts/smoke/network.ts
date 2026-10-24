@@ -33,11 +33,14 @@ const CLI = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../di
 const APP_HOST = "app.scenescout.test";
 const NOWHERE_HOST = "cdn.scenescout.test";
 const HEADER = "x-ci-allow";
+/** How long the fixture's file takes to arrive in full. */
+const FILE_STREAM_MS = 6000;
 const SECRET = "ci-allow-5e3f9a0c71";
 const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SCENESCOUT_PROXY"];
 const OWN_VARS = ["SCENESCOUT_APP_HEADER", "SCENESCOUT_RETRY_NETWORK"];
 
 interface Seen {
+  method: string;
   url: string;
   header: string | null;
   cookie: string | null;
@@ -48,7 +51,12 @@ async function server(handle: (req: http.IncomingMessage, res: http.ServerRespon
   const seen: Seen[] = [];
   const sockets = new Set<net.Socket>();
   const s = http.createServer((req, res) => {
-    seen.push({ url: req.url ?? "", header: (req.headers[HEADER] as string | undefined) ?? null, cookie: req.headers.cookie ?? null });
+    seen.push({
+      method: req.method ?? "",
+      url: req.url ?? "",
+      header: (req.headers[HEADER] as string | undefined) ?? null,
+      cookie: req.headers.cookie ?? null,
+    });
     handle(req, res, seen);
   });
   s.on("connection", (sock) => {
@@ -194,6 +202,21 @@ export async function run(_ctx: SmokeContext): Promise<void> {
       req.socket.destroy();
       return;
     }
+    if (url === "/report-moved") {
+      res.writeHead(302, { location: "/report.pdf", connection: "close" });
+      res.end();
+      return;
+    }
+    if (url === "/report.pdf") {
+      // A file that streams for longer than a navigation should take to hand it over: the browser must get it as it
+      // comes, never after SceneScout has read it whole.
+      res.writeHead(200, { "content-type": "application/pdf", "content-disposition": 'attachment; filename="report.pdf"', connection: "close" });
+      if (req.method === "HEAD") return void res.end();
+      res.write("%PDF-1.4\n");
+      const timer = setTimeout(() => res.end("%%EOF\n"), FILE_STREAM_MS);
+      res.on("close", () => clearTimeout(timer));
+      return;
+    }
     if (url === "/home" || url === "/api/moved") {
       res.writeHead(302, { location: url === "/home" ? "/signin" : "/api/data", connection: "close" });
       res.end();
@@ -297,6 +320,30 @@ export async function run(_ctx: SmokeContext): Promise<void> {
         "...and another origin never sees it: not its image, not the page a redirect from the app lands on",
         other.seen.some((s) => s.url.startsWith("/pixel.png")) && other.seen.some((s) => s.url === "/landed") && other.seen.every((s) => s.header === null),
         JSON.stringify(other.seen),
+      );
+      // A page load that answers with a file, behind a redirect within the app: handed back to the browser without the
+      // header, so it behaves as with none and is never read whole first. The contrast is the same load with no header.
+      const fileLoad = async (vars: Record<string, string>) =>
+        withEnv(vars, async () => {
+          await engine.attach({ url: `${app.base}/`, projectDir });
+          app.seen.length = 0;
+          const started = Date.now();
+          const error = await errorOf(() => engine.navigate(`${app.base}/report-moved`));
+          return { ms: Date.now() - started, error: error.split("\n")[0], seen: [...app.seen] };
+        });
+      const withHeader = await fileLoad(header);
+      const without = await fileLoad({});
+      const fileGets = withHeader.seen.filter((s) => s.method === "GET" && s.url === "/report.pdf");
+      const heads = withHeader.seen.filter((s) => s.method === "HEAD");
+      check(
+        "a page load that redirects within the app to a file is handed back to the browser: the file is fetched without the header, and the load returns as it does with no header",
+        fileGets.length > 0 &&
+          fileGets.every((s) => s.header === null) &&
+          heads.length > 0 &&
+          heads.every((s) => s.header === SECRET) &&
+          withHeader.ms < FILE_STREAM_MS &&
+          (withHeader.error === "") === (without.error === ""),
+        JSON.stringify({ withHeader, without: { ms: without.ms, error: without.error } }),
       );
       const recorded = filesUnder(projectDir).filter((f) => fs.readFileSync(f, "utf8").includes(SECRET));
       check("...and its value is in no file the session wrote", recorded.length === 0, recorded.join(", "));

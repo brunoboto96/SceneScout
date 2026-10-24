@@ -92,7 +92,8 @@ export async function run(): Promise<void> {
       return;
     }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-    const odd = at === "/once.html" && oddLoads > 0;
+    // Only a GET is a load: a HEAD (which a session with the allowlist header asks first) draws nothing.
+    const odd = at === "/once.html" && req.method === "GET" && oddLoads > 0;
     if (odd) oddLoads -= 1;
     const served = odd ? (variant === "before" ? "after" : "before") : variant;
     res.end(fs.readFileSync(path.join(variantsDir, served, "card.html")));

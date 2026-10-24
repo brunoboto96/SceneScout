@@ -145,6 +145,10 @@ import {
 import { fuzzCases, fuzzRates } from "./policy-fuzz.ts";
 import {
   abortCodeFor,
+  answersWithPage,
+  headVerdict,
+  withoutAppHeader,
+  forOwnSend,
   APP_HEADER_ENV,
   appHeaderApplies,
   appHeaderCarried,
@@ -4264,7 +4268,7 @@ test("allowlist header: a send that failed aborts with the network's code, so th
     ["apiRequestContext.fetch: read ECONNRESET", "connectionreset"],
     ["apiRequestContext.fetch: socket hang up", "connectionclosed"],
     ["apiRequestContext.fetch: connect ETIMEDOUT 10.0.0.1:443", "timedout"],
-    ["apiRequestContext.fetch: Timeout 20000ms exceeded.", "timedout"],
+    ["apiRequestContext.fetch: Timeout 20000ms exceeded.", "failed"],
     ["apiRequestContext.fetch: certificate has expired", "failed"],
     ["Target page, context or browser has been closed", "failed"],
   ];
@@ -4357,4 +4361,38 @@ test("allowlist header: a redirect within the app is followed with it, a page lo
   const page = redirectStandIn(`${app}/a?b=</script><script>alert(1)</script>`);
   assert.ok(page.includes("location.replace("));
   assert.ok(!page.includes("</script><script>alert"), "the address stays a string inside the script");
+});
+
+test("allowlist header: a page load is asked by HEAD whether it is a page or a file, through redirects within the app; a file goes back to the browser without the header", () => {
+  assert.ok(answersWithPage({ "content-type": "text/html; charset=utf-8" }));
+  assert.ok(answersWithPage({ "Content-Type": "application/xhtml+xml" }));
+  assert.ok(answersWithPage({}), "no type: the browser sniffs it, as a page");
+  assert.ok(!answersWithPage({ "content-type": "application/pdf" }));
+  assert.ok(!answersWithPage({ "content-type": "text/csv" }));
+  assert.ok(
+    !answersWithPage({ "content-type": "text/html", "content-disposition": "attachment; filename=x.html" }),
+    "an attachment is a download, whatever its type",
+  );
+  const app = "https://app.example.com";
+  const verdict = (status: number, headers: Record<string, string>) => headVerdict({ status, headers, requestUrl: `${app}/start`, appUrl: app });
+  assert.deepEqual(verdict(200, { "content-type": "text/html" }), { kind: "page" });
+  assert.deepEqual(verdict(200, { "content-type": "application/pdf" }), { kind: "file" });
+  assert.deepEqual(verdict(302, { location: "/report.pdf" }), { kind: "next", url: `${app}/report.pdf` });
+  assert.deepEqual(
+    verdict(302, { location: "https://files.example.net/r.pdf" }),
+    { kind: "unknown" },
+    "a redirect away from the app is the browser's, without the header",
+  );
+  assert.deepEqual(verdict(405, {}), { kind: "unknown" });
+  assert.deepEqual(verdict(501, {}), { kind: "unknown" });
+  // A 404 page is a page: sent with the header, as before.
+  assert.deepEqual(verdict(404, { "content-type": "text/html" }), { kind: "page" });
+  assert.deepEqual(withoutAppHeader({ accept: "*/*", "X-CI-Allow": "t" }, { name: "x-ci-allow", value: "t" }), { accept: "*/*" });
+});
+
+test("allowlist header: the HEAD a page load is asked by carries the request's headers, less those Node sets itself and the cookie the jar supplies", () => {
+  assert.deepEqual(forOwnSend({ accept: "text/html", Cookie: "sid=1", host: "x", connection: "keep-alive", ":authority": "x", "x-ci-allow": "t" }), {
+    accept: "text/html",
+    "x-ci-allow": "t",
+  });
 });

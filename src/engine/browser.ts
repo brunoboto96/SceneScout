@@ -205,6 +205,10 @@ import {
   appHeaderCarried,
   readAppHeader,
   withAppHeader,
+  withoutAppHeader,
+  forOwnSend,
+  headVerdict,
+  APP_HEADER_HEAD_MS,
   type AppHeader,
 } from "./app-header.js";
 import { startLoadHint } from "./network-failure.js";
@@ -4798,9 +4802,14 @@ export class BrowserEngine {
     const req = route.request();
     if (!appHeaderCarried(req.resourceType())) return this.passOn(route);
     let response: APIResponse;
+    // Bounded by the page-load limit, as the load it serves is; running out is the app's slowness (abortCodeFor).
+    const timeout = this.limits.navMs;
     try {
-      // No time limit of SceneScout's own: a slow answer is the app's, as it would be without the header.
-      response = await route.fetch({ headers: withAppHeader(req.headers(), header), maxRedirects: 0, timeout: 0 });
+      // A page load that answers with a file goes back to the browser without the header, so a download or a file
+      // shown as it is behaves as with no header, and is never read whole first (headVerdict).
+      if (req.resourceType() === "document" && req.method() === "GET" && (await this.appDocumentKind(req, header, timeout)) === "file")
+        return this.passOn(route, { headers: withoutAppHeader(req.headers(), header) });
+      response = await route.fetch({ headers: withAppHeader(req.headers(), header), maxRedirects: 0, timeout });
       // A redirect within the app: the browser would follow it unrouted, without the header (appRedirectPlan).
       let at = req.url();
       for (let hop = 0; hop < APP_HEADER_MAX_HOPS; hop++) {
@@ -4819,7 +4828,7 @@ export class BrowserEngine {
         }
         at = plan.url;
         // The context's own client, so the cookies the redirect set are sent with the next hop.
-        response = await this.context!.request.fetch(at, { method: plan.method, headers: withAppHeader(req.headers(), header), maxRedirects: 0, timeout: 0 });
+        response = await this.context!.request.fetch(at, { method: plan.method, headers: withAppHeader(req.headers(), header), maxRedirects: 0, timeout });
       }
     } catch (err) {
       await route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
@@ -4829,6 +4838,38 @@ export class BrowserEngine {
     await route.fulfill({ response }).catch(() => {
       /* the page went away before its answer */
     });
+  }
+
+  /**
+   * What a page load carrying the header answers with, asked by HEAD through its redirects within the app (headVerdict).
+   * Node's fetch, which settles on the answer's headers: a server that holds a HEAD open as it would the file's GET
+   * does not hold the load. The context's cookies for each address go with it. A HEAD that fails or does not answer
+   * within the bound says nothing ("unknown"): the load is then sent with the header as any other request.
+   */
+  private async appDocumentKind(req: Request, header: AppHeader, timeout: number): Promise<"page" | "file" | "unknown"> {
+    let at = req.url();
+    const base = forOwnSend(withAppHeader(req.headers(), header));
+    for (let hop = 0; hop <= APP_HEADER_MAX_HOPS; hop++) {
+      let verdict: ReturnType<typeof headVerdict>;
+      try {
+        const jar = (await this.context!.cookies(at)).map((c) => `${c.name}=${c.value}`).join("; ");
+        const head = await fetch(at, {
+          method: "HEAD",
+          headers: jar ? { ...base, cookie: jar } : base,
+          redirect: "manual",
+          signal: AbortSignal.timeout(Math.min(timeout, APP_HEADER_HEAD_MS)),
+        });
+        const headers: Record<string, string> = {};
+        head.headers.forEach((value, name) => (headers[name] = value));
+        await head.body?.cancel().catch(() => {});
+        verdict = headVerdict({ status: head.status, headers, requestUrl: at, appUrl: this.baseUrl });
+      } catch {
+        return "unknown";
+      }
+      if (verdict.kind !== "next") return verdict.kind;
+      at = verdict.url;
+    }
+    return "unknown";
   }
 
   /** Hand a request on as it is, or with overrides. A request the page has already cancelled rejects this; nothing is left to send then. */

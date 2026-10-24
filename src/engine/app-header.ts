@@ -149,8 +149,70 @@ export function abortCodeFor(message: string): AbortCode {
   if (words.has("ECONNRESET") || words.has("EPIPE")) return "connectionreset";
   if (words.has("ETIMEDOUT")) return "timedout";
   if (message.includes("socket hang up")) return "connectionclosed";
-  if (message.includes("Timeout") && message.includes("exceeded")) return "timedout";
+  // SceneScout's own limit on the send (the page-load limit) ran out: the app was slow, as a page load past that limit
+  // would be without the header. A plain failure, never the network's timeout.
   return "failed";
+}
+
+/** A request's headers without the allowlist header: what a request handed back to the browser is sent with. */
+export function withoutAppHeader(headers: Readonly<Record<string, string>>, header: AppHeader): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) if (name.toLowerCase() !== header.name) out[name] = value;
+  return out;
+}
+
+/** Headers Node's fetch sets itself or refuses, and the Cookie header, which a send of SceneScout's own builds from the browser's jar. */
+const OWN_SEND_DROPPED = new Set(["cookie", "host", "connection", "keep-alive", "transfer-encoding", "content-length", "upgrade", "expect", "te", "trailer"]);
+
+/** A request's headers as a send of SceneScout's own (Node's fetch) may carry them. */
+export function forOwnSend(headers: Readonly<Record<string, string>>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) if (!name.startsWith(":") && !OWN_SEND_DROPPED.has(name.toLowerCase())) out[name] = value;
+  return out;
+}
+
+/** The longest a page load's HEAD may take (never longer than the page-load limit): past it, nothing is learnt and the load goes as any other. */
+export const APP_HEADER_HEAD_MS = 5000;
+
+/**
+ * Whether an answer's headers say it is a page the browser shows, rather than
+ * a file it downloads or displays as it is: not an attachment, and HTML (or no
+ * type at all, which the browser sniffs).
+ */
+export function answersWithPage(headers: Readonly<Record<string, string>>): boolean {
+  const lower = (name: string) =>
+    Object.entries(headers)
+      .find(([n]) => n.toLowerCase() === name)?.[1]
+      ?.trim()
+      .toLowerCase() ?? "";
+  if (lower("content-disposition").startsWith("attachment")) return false;
+  const type = lower("content-type").split(";")[0].trim();
+  return type === "" || type === "text/html" || type === "application/xhtml+xml";
+}
+
+/**
+ * What a page load carrying the header is, learned by HEAD before any body is
+ * read (SceneScout sends the header's requests itself, and its send reads the
+ * whole answer, so a file would arrive whole before the browser saw it):
+ * - "page": an HTML page, perhaps behind redirects within the app: sent with the header;
+ * - "file": a download or a file shown as it is, perhaps behind redirects within
+ *   the app: handed back to the browser without the header, so it behaves as with none;
+ * - "unknown": HEAD is not answered (405, 501), or a redirect leaves the app:
+ *   sent with the header as any other request.
+ * `next` is the address of the hop to ask next, when the answer is a redirect within the app.
+ */
+export function headVerdict(input: {
+  status: number;
+  headers: Readonly<Record<string, string>>;
+  requestUrl: string;
+  appUrl: string;
+}): { kind: "page" | "file" | "unknown" } | { kind: "next"; url: string } {
+  if (input.status === 405 || input.status === 501) return { kind: "unknown" };
+  if (input.status >= 300 && input.status < 400) {
+    const plan = appRedirectPlan({ ...input, location: input.headers["location"], method: "GET", resourceType: "fetch" });
+    return plan && plan.kind === "follow" ? { kind: "next", url: plan.url } : { kind: "unknown" };
+  }
+  return { kind: answersWithPage(input.headers) ? "page" : "file" };
 }
 
 /** The most hops SceneScout follows itself for one request, as a browser would (the Fetch standard's limit). */
