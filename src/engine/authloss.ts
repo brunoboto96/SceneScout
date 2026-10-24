@@ -11,8 +11,11 @@
  * call's result). All three are cheap to pin once the logic stands alone.
  */
 
-/** Paths that look like a login/auth screen — the landing place of a dead session. */
-export const LOGIN_ROUTE_RE = /\/(login|signin|sign-in|auth)(\/|$)/;
+/**
+ * Paths that look like a login/auth screen — the landing place of a dead session. A whole segment, in any case: an app
+ * may name it `/Account/Login` or route to `/#/SignIn`, while `/Account/LoginHistory` and `/#/Loginhelp` are not one.
+ */
+export const LOGIN_ROUTE_RE = /\/(login|signin|sign-in|auth)(\/|$)/i;
 
 /**
  * The endpoints a single sign-on provider on another origin signs in at (`/authorize`, `/oauth2/…`, `/saml2/…`, `/sso/…`,
@@ -183,17 +186,33 @@ export function actionSignInCause(opts: {
 }
 
 /**
- * A sign-in page's address as the action log keeps it: on the app's own origin as it is, on another origin its origin
- * and path only. A provider's query carries the sign-in request's state (`state`, `SAMLRequest`, `RelayState`,
- * `code_challenge`), which redaction does not recognise as secret, so it is not written at all.
+ * Where an address on another origin than the app's is, as anything the engine keeps or says names it: its origin and
+ * path, never its query or fragment. Null for an address on the app's own origin (`baseUrl`'s), for one that is not an
+ * http or https page (about:blank, a browser's error page), and when either cannot be read.
  */
-export function signInLogUrl(url: string, baseUrl: string): string {
+export function offOriginPlace(url: string, baseUrl: string): string | null {
   try {
     const u = new URL(url);
-    return new URL(baseUrl).origin === u.origin ? url : `${u.origin}${u.pathname}`;
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return new URL(baseUrl).origin === u.origin ? null : `${u.origin}${u.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * An address as the action log and the memory keep it: on the app's own origin as it is, on another origin its origin
+ * and path only (offOriginPlace). Another site's query can carry a sign-in request's state (`state`, `SAMLRequest`,
+ * `RelayState`, `code_challenge`) or a provider's code, which redaction does not recognise as secret, so it is not
+ * written at all. An address that cannot be read is written as nothing.
+ */
+export function logAddress(url: string, baseUrl: string): string {
+  try {
+    new URL(url);
   } catch {
     return "";
   }
+  return offOriginPlace(url, baseUrl) ?? url;
 }
 
 /**
