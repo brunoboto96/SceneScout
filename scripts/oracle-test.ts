@@ -61,6 +61,7 @@ import {
   tokenShapeOf,
 } from "../src/engine/postmessage.ts";
 import type { Page } from "playwright";
+import { logAddress } from "../src/engine/authloss.ts";
 import {
   EmbedRequestLog,
   OracleMonitor,
@@ -1318,4 +1319,20 @@ test("a forced click names what covers its target, and says when a write-policy 
   assert.equal(describeCover({ role: null, tag: "div", text: "", testid: null }, false), "covered by <div>", "an unnamed layer is named by its tag");
   const long = describeCover({ role: null, tag: "aside", text: "x".repeat(200), testid: null }, false);
   assert.ok(long.length < 90 && long.endsWith('…"'), long);
+});
+
+test("OracleMonitor: a violation on another site's page names that page by its origin and path, as the engine's addresses do", () => {
+  let at = "https://idp.test/oauth2/authorize?client_id=app&state=provider-state-7f";
+  const page = Object.assign(new EventEmitter(), { url: () => at });
+  const monitor = new OracleMonitor();
+  monitor.setPageAddress((url) => logAddress(url, "http://app.test"));
+  monitor.attach(page as unknown as Page);
+  page.emit("pageerror", new Error("boom"));
+  const [onIdp] = monitor.drain();
+  assert.equal(onIdp?.url, "https://idp.test/oauth2/authorize", "the provider's query is not kept");
+  assert.equal(monitor.all.at(-1)?.url, "https://idp.test/oauth2/authorize", "...nor in the report's log");
+  // The contrast: the app's own page keeps its query, which can name the app's state.
+  at = "http://app.test/things?tab=open";
+  page.emit("pageerror", new Error("boom"));
+  assert.equal(monitor.drain()[0]?.url, "http://app.test/things?tab=open");
 });

@@ -2404,9 +2404,11 @@ function guardRig(
     refuseGets?: boolean;
     authPosts?: string[];
     narrowOnly?: boolean;
+    escape?: boolean;
   } = {},
 ) {
   const calls: GuardCall[] = [];
+  const logged: string[] = [];
   const owned = new Set<string>();
   const host: RouteGuardHost = {
     appUrl: () => "https://app.example.com",
@@ -2415,11 +2417,11 @@ function guardRig(
     trustedEmbeds: () => new Set(),
     movedByEmbed: () => null,
     noteBlocked: (e) => void calls.push(`noteBlocked ${e.sig} answered=${e.answered}${e.why ? ` why=${e.why}` : ""}`),
-    logAction: (e) => void calls.push(`log ${e.action}`),
+    logAction: (e) => void (calls.push(`log ${e.action}`), logged.push(e.target)),
     notePolicyBlock: () => void calls.push("notePolicyBlock"),
     noteSentWrite: () => void calls.push("noteSentWrite"),
     foreignWriteOf: () => opts.foreign ?? null,
-    embedEscapeNavigation: () => false,
+    embedEscapeNavigation: () => opts.escape === true,
     frameDocumentKind: () => opts.frameDoc ?? null,
     sentByMainFrame: () => true,
     readPostOf: (r, method, url) =>
@@ -2443,8 +2445,9 @@ function guardRig(
     path: string,
     { type = "xhr", body = null as string | null, created = undefined as string | undefined, answerAfterMs = 0, headers = {} as Record<string, string> } = {},
   ) => {
-    const url = `https://app.example.com${path}`;
+    const url = /^https?:/.test(path) ? path : `https://app.example.com${path}`;
     const request = {
+      isNavigationRequest: () => type === "document",
       method: () => method,
       url: () => url,
       resourceType: () => type,
@@ -2470,8 +2473,18 @@ function guardRig(
     const done = guard.handle(route as unknown as Route).then(() => outcome);
     return { request: request as unknown as Request, done };
   };
-  return { calls, guard, send };
+  return { calls, logged, guard, send };
 }
+
+test("RouteGuard: an embed's escape to another site is logged by that site's origin and path, never its query", async () => {
+  const { logged, guard, send } = guardRig("read-only", { escape: true });
+  const escape = send("GET", "https://pay.example.net/checkout/start?session=pay-session-91c2&state=x", { type: "document" });
+  await escape.done;
+  assert.equal(guard.refused(escape.request), true);
+  assert.equal(logged.length, 1);
+  assert.ok(logged[0].startsWith("navigation to https://pay.example.net/checkout/start ("), logged[0]);
+  assert.ok(!logged[0].includes("pay-session-91c2"), logged[0]);
+});
 
 test("RouteGuard: each verdict is applied to the request, and a refusal is recorded and reported", async () => {
   // Read-only: a plain POST goes out; the same POST carrying a destructive command is answered with a refusal (the contrastive pair).

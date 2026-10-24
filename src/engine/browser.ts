@@ -1816,6 +1816,7 @@ export class BrowserEngine {
     this.oracles = new OracleMonitor();
     this.oracles.setPolicyRefusalCheck((req) => this.guard.refused(req));
     this.oracles.setReplayCheck((req) => this.replayRequests.has(req));
+    this.oracles.setPageAddress((url) => logAddress(url, this.baseUrl));
     // A request an embed sends to the app is the app's to answer: only one headed outside the app is the embed's.
     this.oracles.setEmbedAttribution((req) => {
       let site: string | null = null;
@@ -5508,7 +5509,7 @@ export class BrowserEngine {
       if (!isNonPageResource(resource)) problems.push(`${path} → HTTP ${resource.status} (${resource.contentType})`);
       this.crawlHealth.push({
         path,
-        url: resource.url,
+        url: logAddress(resource.url, this.baseUrl),
         status: resource.status,
         contentType: resource.contentType,
         loginRedirect: false,
@@ -6385,7 +6386,7 @@ export class BrowserEngine {
     // shell) returns no score — recording it as audited anyway dropped it from
     // the "never design-audited" ledger while it had never been measured.
     if (score) {
-      this.memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: page.url() });
+      this.memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: logAddress(page.url(), this.baseUrl) });
       this.memory?.markRouteFact(route, { audited: true });
     }
     this.logAction({
