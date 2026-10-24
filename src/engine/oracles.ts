@@ -315,7 +315,7 @@ export class OracleMonitor {
       this.record({
         kind: "request_failed",
         severity: "medium",
-        detail: `${req.method()} ${req.url().slice(0, 200)} → ${failure}`,
+        detail: `${req.method()} ${this.requestAddress(req.url()).slice(0, 200)} → ${failure}`,
         url: page.url(),
         embed: this.embedOfRequest(req) ?? undefined,
       });
@@ -343,7 +343,7 @@ export class OracleMonitor {
       this.record({
         kind: "http_error",
         severity: status >= 500 ? "high" : "medium",
-        detail: httpErrorDetail(res.request().method(), res.url(), status),
+        detail: httpErrorDetail(res.request().method(), this.requestAddress(res.url()), status),
         url: page.url(),
         embed: this.embedOfRequest(res.request()) ?? undefined,
       });
@@ -429,6 +429,25 @@ export class OracleMonitor {
     this.embedOfRequest = ofRequest;
   }
 
+  /** How a violation names the page it happened on; the engine gives another site's page its origin and path only (authloss.ts logAddress). */
+  private pageAddress: (url: string) => string = (url) => url;
+
+  /**
+   * The engine knows the app's origin: a violation on another site's page (a sign-in provider's, where a crawl landed)
+   * is named through this, so the provider's query, which carries the sign-in's state, is not kept in the report.
+   */
+  setPageAddress(of: (url: string) => string): void {
+    this.pageAddress = of;
+  }
+
+  /**
+   * How a violation names a request: a request to another site keeps its origin and path only (its query can carry a
+   * sign-in request's state), one to the app keeps its query. An address that cannot be read is kept as it is.
+   */
+  private requestAddress(url: string): string {
+    return this.pageAddress(url) || url;
+  }
+
   /** The engine knows exactly which requests its policy stopped; failed requests and stand-in refusals are matched against that, not against wording. */
   setPolicyRefusalCheck(check: (req: Request) => boolean): void {
     this.refusedByPolicy = check;
@@ -475,7 +494,7 @@ export class OracleMonitor {
     // Another site's frame: its behaviour, reported, but never as the app's high-severity defect.
     const attributed = v.embed ? { ...v, severity: "medium" as const } : v;
     if (!attributed.embed) delete (attributed as { embed?: string }).embed;
-    const violation: OracleViolation = { ...redactViolation(attributed), at: new Date().toISOString() };
+    const violation: OracleViolation = { ...redactViolation({ ...attributed, url: this.pageAddress(attributed.url) }), at: new Date().toISOString() };
     this.buffer.push(violation);
     this.all.push(violation);
   }

@@ -477,7 +477,7 @@ export const AUTH_LOSS_PREFIX = "authloss:";
  * if they drift, which the previous "kept in sync by the migration test"
  * comment claimed but no test actually did.
  */
-export const LOGIN_ROUTE_RE_STORAGE = /\/(login|signin|sign-in|auth)(\/|$)/;
+export const LOGIN_ROUTE_RE_STORAGE = /\/(login|signin|sign-in|auth)(\.(aspx|php|html|htm|jsp|do|action))?(\/|$)/i;
 const LOGIN_ROUTE_RE = LOGIN_ROUTE_RE_STORAGE;
 
 /**

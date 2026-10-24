@@ -12,6 +12,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Browser, CDPSession, Page, Request, Response, Route } from "playwright";
+import { logAddress } from "./authloss.js";
 import { settleWithin } from "./best-effort.js";
 import { INFRASTRUCTURE_WRITE_RE } from "./claims.js";
 import {
@@ -419,7 +420,12 @@ export class RouteGuard {
       const why = ESCAPE_REFUSAL;
       // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
       this.host.noteBlocked({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType(), rule });
-      this.host.logAction({ action: "write-policy:blocked", target: `navigation to ${req.url().slice(0, 140)} (${why})`, url: this.host.pageUrl() ?? "" });
+      this.host.logAction({
+        action: "write-policy:blocked",
+        // Another site's address is logged without its query, as every address the engine keeps is (authloss.ts logAddress).
+        target: `navigation to ${logAddress(req.url(), this.host.appUrl()).slice(0, 140)} (${why})`,
+        url: this.host.pageUrl() ?? "",
+      });
       this.refusedByPolicy.add(req);
       this.host.notePolicyBlock();
       // Caught: a request the page has already cancelled rejects the abort, and an unhandled rejection ends the process.
@@ -743,7 +749,7 @@ export class RouteGuard {
           });
           this.host.logAction({
             action: "write-policy:blocked",
-            target: `${method} ${url.slice(0, 140)} (not judged: an error in the policy)`,
+            target: `${method} ${logAddress(url, this.host.appUrl()).slice(0, 140)} (not judged: an error in the policy)`,
             url: this.host.pageUrl() ?? "",
           });
           this.host.notePolicyBlock();

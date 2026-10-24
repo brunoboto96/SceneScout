@@ -618,6 +618,44 @@ ${late.slice(0, 400)}`);
   }
 }
 
+/**
+ * A lane folded while its page is on another site (a sign-in provider's, say) logs that page by origin and path: the
+ * query the site added (a sign-in state) is not kept in the run's log.
+ */
+async function laneOffSiteCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-lane-offsite-"));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  try {
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "away", mode: "read-only", objective: "away lane" });
+    // 1.5 s after load (later than the navigation watches), the page sends a signed-out visitor to an ordinary page of
+    // the other origin, adding a state of its own to the query.
+    await call("scout_navigate", {
+      session: "away",
+      task: "Opening the gated area",
+      target: `/sso-gated.html?secret=1&idp=${encodeURIComponent(fixture.foreignBaseUrl)}&to=${encodeURIComponent("/covered.html")}`,
+    });
+    await settle(2500);
+    const reply = JSON.stringify({ lane: "away", status: "complete", decisions: [], routes: ["/sso-gated.html"], blocked_by: null });
+    const folded = await call("scout_lane_report", { lane: "away", reply });
+    if (!/Lane report accepted/.test(folded)) fail(`the off-site lane's report was not accepted:\n${folded}`);
+    const dir = path.join(projectDir, ".scenescout");
+    const marks = fs
+      .readdirSync(dir)
+      .filter((f) => f.startsWith("session-") && f.endsWith(".jsonl"))
+      .flatMap((f) => fs.readFileSync(path.join(dir, f), "utf8").split("\n"))
+      .filter((l) => l.includes('"action":"lane-report"') && l.includes('"session":"away"'));
+    if (marks.length !== 1) fail(`folding the off-site lane left ${marks.length} lane-report markers`);
+    const url = (JSON.parse(marks[0]) as { url?: string }).url ?? "";
+    if (url !== `${fixture.foreignBaseUrl}/covered.html`) fail(`the lane-report marker kept more than the other site's origin and path: ${url}`);
+    console.log("✓ a lane folded on another site's page is logged by that page's origin and path");
+    assertClosedAll(await call("scout_close", { all: true }));
+  } finally {
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 /** Every file under a directory with its size and modification time, as one string to compare. */
 function treeState(dir: string): string {
   return (fs.readdirSync(dir, { recursive: true }) as string[])
@@ -1769,6 +1807,50 @@ async function configCheck(): Promise<void> {
       const shot = await call("scout_screenshot", {});
       if (shot.isError) fail(`egress "model-only" refused scout_screenshot:\n${shot.text}`);
     });
+    // redactPageText "pii": the page's email, phone and card reach the agent as markers in the snapshot, the title and an API
+    // response body; "off" returns them as written. A reserved example address is left either way.
+    const person = ["jo.sample", "contoso-mail.net"].join("@");
+    for (const mode of ["pii", "off"] as const) {
+      await withServer({ SCENESCOUT_CONFIG: configFile(`redact-${mode}.json`, { redactPageText: mode }) }, async (attach, call) => {
+        const r = await attach({ mode: "observe", url: `${fixture.baseUrl}/personal-data.html` });
+        if (r.isError) fail(`an observe attach under redactPageText "${mode}" was refused:\n${r.text}`);
+        if ((mode === "pii") !== /redactPageText "pii": email addresses, phone numbers and card numbers/.test(r.text))
+          fail(`the attach's Config line under redactPageText "${mode}" did not say what it masks, or said so when off:\n${r.text}`);
+        const snap = await call("scout_snapshot", {});
+        const api = await call("scout_request", { path: "/api/personal-data", task: "Reading the account record" });
+        for (const [what, out] of [
+          ["scout_snapshot", snap],
+          ["scout_request", api],
+        ] as const) {
+          if (out.isError) fail(`${what} failed under redactPageText "${mode}":\n${out.text}`);
+          const raw = [person, "7946 0958", "4111 1111 1111 1111"].filter((v) => out.text.includes(v));
+          const markers = ["[email redacted]", "[phone redacted]", "[card number redacted]"].filter((v) => out.text.includes(v));
+          if (mode === "pii" && (raw.length > 0 || markers.length !== 3))
+            fail(
+              `${what} under redactPageText "pii" returned ${raw.length > 0 ? `unmasked ${raw.join(", ")}` : `only ${markers.join(", ") || "no markers"}`}:\n${out.text}`,
+            );
+          if (mode === "off" && (raw.length !== 3 || markers.length > 0))
+            fail(`${what} under redactPageText "off" did not return the page as written:\n${out.text}`);
+        }
+        if (!snap.text.includes("help@example.com")) fail(`a reserved example address was masked under redactPageText "${mode}":\n${snap.text}`);
+      });
+    }
+    // Two projects in one server, one masking and one not: a call naming the unmasked session still masks, because its
+    // result can carry the masking session's page (here the session list names each session's address).
+    await withServer({}, async (attach, call) => {
+      const plain = path.join(dir, "redact-plain");
+      const masking = path.join(dir, "redact-masking");
+      fs.mkdirSync(plain, { recursive: true });
+      fs.mkdirSync(path.join(masking, ".scenescout"), { recursive: true });
+      fs.writeFileSync(path.join(masking, ".scenescout", "config.json"), JSON.stringify({ redactPageText: "pii" }));
+      const b = await attach({ mode: "observe", session: "masking", projectPath: masking, url: `${fixture.baseUrl}/personal-data.html?who=${person}` });
+      const a = await attach({ mode: "observe", session: "plain", projectPath: plain });
+      if (a.isError || b.isError) fail(`the two projects' attaches were refused:\n${a.text}\n${b.text}`);
+      for (const out of [a, await call("scout_session", { session: "plain" }), await call("scout_snapshot", { session: "plain" })])
+        if (out.text.includes(person)) fail(`a call naming the unmasked session returned the masking session's address unmasked:\n${out.text}`);
+      const listed = await call("scout_session", {});
+      if (!listed.text.includes("who=[email redacted]")) fail(`the session list did not name the masking session's address masked:\n${listed.text}`);
+    });
     // projectsRoot: a project folder outside it is refused at attach and at scan; one inside it is taken.
     const root = path.join(dir, "root");
     fs.mkdirSync(path.join(root, "app"), { recursive: true });
@@ -1857,7 +1939,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; redactPageText \"pii\" masks a page's email, phone and card in scout_snapshot and scout_request, and \"off\" does not, and a masking project masks a call naming another project's session; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();
@@ -2178,6 +2260,7 @@ async function main(): Promise<void> {
   await expiryBriefCheck(client);
   await findingPictureCheck(client);
   await laneCheck(client);
+  await laneOffSiteCheck(client);
   await reattachLaneCheck(client);
   await ticketsCheck(client);
   const liveProject = await liveViewCheck(client);

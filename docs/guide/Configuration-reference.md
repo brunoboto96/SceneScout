@@ -33,6 +33,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout export --to <tracker>` | Files the project's open findings, or a `check.json` or `ci.json` (`--from`), as GitHub or Jira issues, each once; a dry run unless `--yes`; exit 0 done, 2 could not export |
 | `scenescout preflight <url>` | Whether this machine can reach what a run needs, with no browser: the app (DNS, connection, timeout, TLS, HTTP status, bot challenge), a saved sign-in's expiry and, when asked, the model's API; exit 0 ready, 2 could not run, 10 to 17 one per cause |
 | `scenescout policy explain <METHOD> <URL>` | Whether the write policy would let one request out in each mode, and the rule that decided; sends nothing; exit 0 explained, 2 could not |
+| `scenescout config explain` | Every setting of the config file as a run would use it, and where each value came from (a default, a preset, the operator's file, the project's file, an environment variable); sends nothing; exit 0 explained, 2 could not |
 | `scenescout status [path]` | What every session of a running engine is doing, as text |
 | `scenescout watch [path]` | Opens the live view in a browser |
 
@@ -195,6 +196,19 @@ npx -y scenescout policy explain POST https://app.example.com/api/things/3 --hea
 | `--header` | none | A request header, `"Name: value"`, such as a method override. Repeat it for more |
 | `--app` | the request's origin | The address the server is attached to. A read `POST` or sign-in entry written as a path (`POST /api/search`) means this origin |
 
+### `scenescout config`
+
+`scenescout config explain` prints, for every key of the [config file](#the-config-file), the value a run would use and where it came from: `default` (no file sets it), the operator's file, a preset (`operator file's preset "strict"`), the project's own file (named only when it tightened the operator's value, since it can only tighten), or an environment variable (`SCENESCOUT_STRICT_WRITES`, `SCENESCOUT_REFUSE_DESTRUCTIVE_GETS`, `SCENESCOUT_AUTH_POSTS` and `SCENESCOUT_READ_POSTS`, where the file allows it). A ceiling is shown as a run enforces it: `dedup` and `evidence` read `rule` and `file` under `egress: "none"` whatever the file sets them to, and a sign-in list only the project's file sets says it narrows the path rule rather than replacing it. A last section lists what the file lowered or left out, such as environment entries a list does not allow. It reads the files exactly as `check` does (`SCENESCOUT_CONFIG`, else `.scenescout/config.json` in the directory it runs in, then the project's own file, after the `projectsRoot` check), starts no browser and sends nothing. An address in a printed entry or message loses its user name and password, and a token in its query is masked. Exit 0 explained, 2 could not: a file that is not valid (the message names the file and the key, as at an attach), a project folder outside `projectsRoot`, an environment value the server would refuse, or a bad argument.
+
+```bash
+npx -y scenescout config explain
+npx -y scenescout config explain --project ../other-app
+```
+
+| Option | Default | |
+|---|---|---|
+| `--project` | the current directory | The project whose own `.scenescout/config.json` is read after the operator's file |
+
 ### `scenescout preflight`
 
 `scenescout preflight <url>` makes one `GET` of the URL, following redirects, and needs no browser, so it can run before anything is downloaded. It judges a saved sign-in by its own dates when one is named, and, with `--model-api`, asks the model's API for its list of models with the key. Every check runs, and the exit code is the first failure's: 0 ready, 2 could not run, 10 DNS, 11 connection refused or dropped, 12 timeout, 13 TLS, 14 HTTP 4xx or 5xx, 15 bot challenge, 16 sign-in missing or expired, 17 model API. [Network requirements](Network-requirements.md#check-it-first-scenescout-preflight) says what each looks like and what the preflight does not check.
@@ -302,6 +316,7 @@ A JSON file a team commits to set what SceneScout may do, which no agent can loo
 | `writeClassifier` | `standard`, `strict` | `standard` | Which classifier judges whether a write is destructive. `strict` turns the strict classifier on for every attach, `check` and first look whatever `SCENESCOUT_STRICT_WRITES` says; `standard` lets the environment turn it on ([Safety model](Safety-model.md#stricter-judgement-of-destructive-writes)) |
 | `refuseDestructiveGets` | `true`, `false` | `false` | `true` refuses, in `observe` and `read-only`, a page load whose address is a destructive command, whatever `SCENESCOUT_REFUSE_DESTRUCTIVE_GETS` says; `false` lets the environment turn it on |
 | `authPosts` | a list of `"POST /path"` or `"POST https://host/path"` entries, at most 20 | no list | The only POSTs that count as signing in, in every mode, in place of the path rule. `[]` lets none count. `SCENESCOUT_AUTH_POSTS` may narrow it; entries it names outside the list are left out, and said so. While a guided plan is open, or when only a project's own file sets the list, a listed POST must also look like a sign-in by its path ([Safety model](Safety-model.md#what-counts-as-signing-in-in-observe)) |
+| `redactPageText` | `off`, `pii` | `off` | `pii` masks personal data in everything the `scout_*` tools return to the agent: email addresses, a phone number written after a word for one, and card numbers become `[email redacted]`, `[phone redacted]` and `[card number redacted]` in snapshots, page titles, API response bodies, console lines, network lines and findings. The oracles read the page as it is, before masking. Pictures are not masked. A project's own file can turn it on, never off. No preset sets it ([What leaves the machine](What-leaves-the-machine.md#masking-personal-data-in-page-text)) |
 
 The presets:
 
@@ -316,7 +331,7 @@ The presets:
 | `uploads` | `"fixtures"` |
 | `refuseDestructiveGets` | `true` |
 
-`strict` is the one-line answer for a team that wants every agent to look only, with nothing named by an argument, no file from disk uploaded, no link that reads as a delete followed, and nothing sent to a model but the agent's own conversation. A team that needs form submissions sets `"maxMode": "read-only"` beside it. No preset sets `writeClassifier`, `authPosts`, `egress` or `projectsRoot`: the strict classifier refuses writes the standard one lets out, and the others name one app's endpoints, one machine's folders or a team's own trackers.
+`strict` is the one-line answer for a team that wants every agent to look only, with nothing named by an argument, no file from disk uploaded, no link that reads as a delete followed, and nothing sent to a model but the agent's own conversation. A team that needs form submissions sets `"maxMode": "read-only"` beside it. No preset sets `writeClassifier`, `authPosts`, `egress`, `redactPageText` or `projectsRoot`: the strict classifier refuses writes the standard one lets out, `redactPageText` changes what the agent reads rather than what it may do, and the others name one app's endpoints, one machine's folders or a team's own trackers.
 
 **Where each lock shows.** The attach result's `🔒 CONFIG:` line, and the `Config:` line `check`, `ci` and a first look print, name the file and each lock it applied: a mode or default it lowered, entries it left out of an environment list, and `writeClassifier`, `refuseDestructiveGets` and `authPosts` when the file sets them. The session's own lines name where each write-judgement setting came from (the config or the environment variable). `scenescout policy explain` judges a request with the same settings, and its last line names them.
 

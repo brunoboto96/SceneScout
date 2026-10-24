@@ -43,6 +43,7 @@ import {
   resolveSettings,
   withProjectPolicy,
   writeRulesNote,
+  redactPageTextNote,
   writeRulesSettings,
 } from "../engine/project-config.js";
 import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, holdGuidedPlan, type CheckArea } from "../engine/guided.js";
@@ -454,7 +455,11 @@ export function registerSessionTools(): void {
           // The write-judgement locks: the config's joined with the environment's, the stricter winning; in a guided check a
           // sign-in list only narrows the path rule. An environment value that cannot be read refuses the attach.
           const writeRules = writeRulesSettings(config.loaded.policy, process.env, guided.guided === true);
-          const configNote = policyNote(config.loaded, [...resolved.notes, ...writeRulesNote(config.loaded.policy, writeRules)]);
+          const configNote = policyNote(config.loaded, [
+            ...resolved.notes,
+            ...writeRulesNote(config.loaded.policy, writeRules),
+            ...redactPageTextNote(config.loaded.policy),
+          ]);
           readPosts = resolved.settings.readPosts;
           trustedEmbeds = resolved.settings.trustedEmbeds;
           dedup = resolved.settings.dedup;

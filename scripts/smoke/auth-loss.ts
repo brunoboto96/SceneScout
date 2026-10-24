@@ -73,6 +73,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await hashRoutedSignIn(baseUrl, authProject, deadState);
     await navigationToAFileIsNotWaitedFor(baseUrl, stats, authProject, deadState);
     await signInOnAnotherOrigin(baseUrl, foreignBaseUrl, authProject, deadState);
+    await crawlJudgesAnotherOriginsSignIn(baseUrl, foreignBaseUrl, deadState);
   } finally {
     fs.rmSync(authProject, { recursive: true, force: true });
   }
@@ -484,4 +485,87 @@ async function signInOnAnotherOrigin(baseUrl: string, foreignBaseUrl: string, au
     soonFresh.navs.every((n) => !/REDIRECTED|NOT counted/.test(n)),
     soonFresh.navs.join("\n---\n"),
   );
+}
+
+/** The sign-in state sso-gated.html adds to the provider's address with ?secret=1: in no address the engine was asked for. */
+const PROVIDER_STATE = "idp-only-state-4c1e";
+
+/** Every file the session wrote under the project's .scenescout folder (the memory and the action log), as one text. */
+function keptText(project: string): string {
+  const dir = path.join(project, ".scenescout");
+  return fs
+    .readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile() && /\.(json|jsonl)$/.test(e.name))
+    .map((e) => fs.readFileSync(path.join(e.parentPath, e.name), "utf8"))
+    .join("\n");
+}
+
+/** The address of every page state the project's memory keeps. */
+function keptStateUrls(project: string): string[] {
+  const memory = JSON.parse(fs.readFileSync(path.join(project, ".scenescout", "memory.json"), "utf8")) as { states?: Record<string, { url: string }> };
+  return Object.values(memory.states ?? {}).map((s) => s.url);
+}
+
+/**
+ * A route that sends a signed-out visitor straight to a single sign-on provider on another origin (sso-gated.html with
+ * ?soon=1), seen by a crawl and by a navigation the origin fence takes back. The crawl judges the route by where it went,
+ * as the navigation does: AUTH-REDIRECT and not covered for the provider's sign-in (an authorize endpoint asked with
+ * client_id), and an ordinary redirect for the contrast, an ordinary page of the same other site. Neither page is kept
+ * as a state of the app. The provider's address carries a state the page added (?secret=1); neither the memory nor the
+ * action log (the origin-fence:bounced entry included) keeps it, only the provider's origin and path.
+ */
+async function crawlJudgesAnotherOriginsSignIn(baseUrl: string, foreignBaseUrl: string, deadState: string): Promise<void> {
+  console.log("auth loss: a crawl judges a route that goes to a sign-in provider on another origin, and nothing keeps the provider's query");
+  const route = (to: string): string => `/sso-gated.html?soon=1&secret=1&idp=${encodeURIComponent(foreignBaseUrl)}&to=${encodeURIComponent(to)}`;
+  const inProject = async <T>(run: (engine: BrowserEngine, project: string) => Promise<T>): Promise<T> => {
+    // A project of its own each time, so one visit's coverage is not another's.
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "ft-authcrawl-"));
+    const engine = new BrowserEngine();
+    try {
+      const copy = path.join(project, path.basename(deadState));
+      fs.copyFileSync(deadState, copy);
+      await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: project, mode: "read-only", storageStatePath: copy });
+      engine.knownRoutes = ["/sso-gated.html"];
+      return await run(engine, project);
+    } finally {
+      await engine.close().catch(() => {});
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  };
+  const crawl = (to: string) =>
+    inProject(async (engine, project) => {
+      const out = await engine.crawl([route(to)]);
+      await engine.close();
+      return { out, unvisited: engine.unvisitedKnownRoutes(), kept: keptText(project), states: keptStateUrls(project) };
+    });
+  const line = (out: string): string => out.split("\n").find((l) => l.startsWith("/sso-gated.html")) ?? "";
+  const idp = await crawl("/sso-provider/authorize?client_id=smoke-app&return=x");
+  check("a crawled route sent to a provider's sign-in on another origin is AUTH-REDIRECT", line(idp.out).includes("AUTH-REDIRECT"), idp.out);
+  check("...and is not covered", idp.unvisited.includes("/sso-gated.html"), JSON.stringify(idp.unvisited));
+  check("...and the provider's page is not kept as a state of the app", !idp.states.some((u) => u.startsWith(foreignBaseUrl)), JSON.stringify(idp.states));
+  check("...and nothing the crawl kept holds the provider's query", !idp.kept.includes(PROVIDER_STATE), idp.kept.slice(0, 4000));
+  const ordinary = await crawl("/covered.html");
+  check(
+    "the same route sent to an ordinary page of that site is an ordinary redirect, naming the other site",
+    line(ordinary.out).includes(`REDIRECTED → ${foreignBaseUrl}/covered.html`) && !line(ordinary.out).includes("AUTH-REDIRECT"),
+    ordinary.out,
+  );
+  check(
+    "...and that page is not kept as the app's own /covered.html",
+    !ordinary.states.some((u) => u.startsWith(foreignBaseUrl)),
+    JSON.stringify(ordinary.states),
+  );
+
+  const fenced = await inProject(async (engine, project) => {
+    const nav = await engine.navigate(`${baseUrl}${route("/sso-provider/authorize?client_id=smoke-app&return=x")}`);
+    await engine.close();
+    return { nav, kept: keptText(project) };
+  });
+  check("a navigation the fence takes back from the provider is a bounce", fenced.nav.includes("NOT counted as covered"), fenced.nav);
+  check(
+    "...and the action log's origin-fence entry names the provider by its origin and path",
+    fenced.kept.includes("origin-fence:bounced") && fenced.kept.includes(`${foreignBaseUrl}/sso-provider/authorize`),
+    fenced.kept.slice(0, 4000),
+  );
+  check("...without the provider's query anywhere the session kept", !fenced.kept.includes(PROVIDER_STATE), fenced.kept.slice(0, 4000));
 }

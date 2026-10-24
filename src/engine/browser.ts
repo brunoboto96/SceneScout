@@ -45,7 +45,8 @@ import {
   lateSignInBounce,
   lateSignInVerdict,
   leftSignIn,
-  signInLogUrl,
+  logAddress,
+  offOriginPlace,
   signInPlace,
   UNAUTHENTICATED_STATUSES,
   type WatchedCall,
@@ -939,7 +940,8 @@ export class BrowserEngine {
   /** Append to the shared action log, stamped with THIS session so per-session
    *  reads (journey paths) can separate concurrent roles' interleaved actions. */
   private logAction(entry: Omit<ActionLogEntry, "at" | "session">): void {
-    this.memory?.logAction({ ...entry, session: this.sessionKey });
+    // Another site's address is kept without its query, which can carry a sign-in request's state (authloss.ts logAddress).
+    this.memory?.logAction({ ...entry, url: logAddress(entry.url, this.baseUrl), session: this.sessionKey });
   }
   /** Requests blocked by the write policy since the last action (timestamped for attribution). */
   private blockedRequests: BlockedRequest[] = [];
@@ -1814,6 +1816,7 @@ export class BrowserEngine {
     this.oracles = new OracleMonitor();
     this.oracles.setPolicyRefusalCheck((req) => this.guard.refused(req));
     this.oracles.setReplayCheck((req) => this.replayRequests.has(req));
+    this.oracles.setPageAddress((url) => logAddress(url, this.baseUrl));
     // A request an embed sends to the app is the app's to answer: only one headed outside the app is the embed's.
     this.oracles.setEmbedAttribution((req) => {
       let site: string | null = null;
@@ -2077,7 +2080,7 @@ export class BrowserEngine {
           const sameOrigin = this.isSameOrigin(newPage.url());
           this.logAction({
             action: sameOrigin ? "popup:adopted" : "popup:closed-foreign",
-            target: newPage.url().slice(0, 200),
+            target: logAddress(newPage.url(), this.baseUrl).slice(0, 200),
             url: this.page?.url() ?? "",
           });
           if (sameOrigin) {
@@ -2496,7 +2499,7 @@ export class BrowserEngine {
     this.seenUrl = now;
     const bounced = lateSignInBounce({ watching: this.watchesForBounce, seen, now, baseUrl: this.baseUrl });
     if (bounced === null) return "";
-    this.logAction({ action: "sign-in:late-redirect", target: bounced, url: signInLogUrl(now, this.baseUrl) });
+    this.logAction({ action: "sign-in:late-redirect", target: bounced, url: now });
     this.authLoss.clear();
     this.recordNavigationOutcome(bounced, now, true);
     const lead =
@@ -2527,11 +2530,11 @@ export class BrowserEngine {
     if (from === null) {
       if (this.authLoss.signedOut && !this.callIsBack && leftSignIn({ seen, now, baseUrl: this.baseUrl })) {
         this.authLoss.signInAgain();
-        this.logAction({ action: "sign-in:action-left", target: signInLogUrl(seen, this.baseUrl), url: now });
+        this.logAction({ action: "sign-in:action-left", target: logAddress(seen, this.baseUrl), url: now });
       }
       return "";
     }
-    this.logAction({ action: "sign-in:action-landed", target: from, url: signInLogUrl(now, this.baseUrl) });
+    this.logAction({ action: "sign-in:action-landed", target: from, url: now });
     const went =
       `Note: this call went from ${normalizePath(from)} to the sign-in page ${signInPlace(now, this.baseUrl)}. An action can sign out or open sign-in on ` +
       `purpose, so this is not counted as a lost sign-in and ${normalizePath(from)} is not marked`;
@@ -2625,7 +2628,7 @@ export class BrowserEngine {
     const fp = fingerprintState(url, trackedElements(elements));
     this.memory?.visitState(
       fp,
-      url,
+      logAddress(url, this.baseUrl),
       normalizePath(url),
       trackedElements(elements).map((el) => el.key),
       inertKeys(elements),
@@ -2724,7 +2727,7 @@ export class BrowserEngine {
     this.currentFingerprint = fp;
     const isNew = memory.visitState(
       fp,
-      url,
+      logAddress(url, this.baseUrl),
       route,
       trackedElements(elements).map((el) => el.key),
       inertKeys(elements),
@@ -3165,7 +3168,7 @@ export class BrowserEngine {
     const dropped = await this.returnFromDroppedNavigation();
     if (dropped) {
       this.logAction({ action, target, url: dropped.errorUrl });
-      this.logAction({ action: "write-policy:navigation-blocked", target: dropped.errorUrl.slice(0, 200), url: dropped.errorUrl });
+      this.logAction({ action: "write-policy:navigation-blocked", target: logAddress(dropped.errorUrl, this.baseUrl).slice(0, 200), url: dropped.errorUrl });
       return (
         `OK: ${action} ${target}\nThe page tried to navigate with a request the write policy blocked, so the browser showed an error page; ${BrowserEngine.leftErrorPage(dropped)}.` +
         this.drainLoadRetries() +
@@ -3181,7 +3184,7 @@ export class BrowserEngine {
       // A click carried us off the app's origin.
       this.fencedLanding = url;
       this.logAction({ action, target, url });
-      this.logAction({ action: "origin-fence:bounced", target: url.slice(0, 200), url });
+      this.logAction({ action: "origin-fence:bounced", target: logAddress(url, this.baseUrl).slice(0, 200), url });
       const reload = await this.returnToAppPage(page);
       url = page.url();
       this.snapshots.dropRefs("the page left the app's origin");
@@ -5507,7 +5510,7 @@ export class BrowserEngine {
       if (!isNonPageResource(resource)) problems.push(`${path} → HTTP ${resource.status} (${resource.contentType})`);
       this.crawlHealth.push({
         path,
-        url: resource.url,
+        url: logAddress(resource.url, this.baseUrl),
         status: resource.status,
         contentType: resource.contentType,
         loginRedirect: false,
@@ -5529,9 +5532,13 @@ export class BrowserEngine {
     this.harvestPaused = opts.measureOnly === true;
     const { elements, forms, aliases } = await this.snapshots.collect().finally(() => (this.harvestPaused = false));
     const finalUrl = page.url();
-    const route = normalizePath(finalUrl);
+    // A route that sent the page to another site (a single sign-on provider's sign-in, or any other page there) is
+    // judged by where it went, as a navigation is when the origin fence takes it back (navigationLanding), but that
+    // page is not the app's: it is named by its origin and path, and none of it is kept as a state of the app.
+    const elsewhere = offOriginPlace(finalUrl, this.baseUrl);
+    const route = elsewhere ?? normalizePath(finalUrl);
     const fp = fingerprintState(finalUrl, trackedElements(elements));
-    if (!opts.measureOnly) {
+    if (!opts.measureOnly && elsewhere === null) {
       memory.visitState(
         fp,
         finalUrl,
@@ -5576,7 +5583,7 @@ export class BrowserEngine {
     const own = elements.filter((el) => !el.frame?.foreign);
     this.crawlHealth.push({
       path,
-      url: finalUrl,
+      url: logAddress(finalUrl, this.baseUrl),
       status: typeof status === "number" ? status : null,
       loginRedirect,
       elements: trackedElements(elements).length,
@@ -5855,7 +5862,7 @@ export class BrowserEngine {
       await this.settle();
       const dropped = await this.returnFromDroppedNavigation();
       if (dropped) {
-        this.logAction({ action: "write-policy:navigation-blocked", target: dropped.errorUrl.slice(0, 200), url: dropped.errorUrl });
+        this.logAction({ action: "write-policy:navigation-blocked", target: logAddress(dropped.errorUrl, this.baseUrl).slice(0, 200), url: dropped.errorUrl });
         note += `; the page tried to navigate with a request the write policy blocked, so the browser showed an error page; ${BrowserEngine.leftErrorPage(dropped)}`;
       }
       if (form) this.noteFormSubmit(preState, form.kind, form.probe);
@@ -6380,7 +6387,7 @@ export class BrowserEngine {
     // shell) returns no score — recording it as audited anyway dropped it from
     // the "never design-audited" ledger while it had never been measured.
     if (score) {
-      this.memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: page.url() });
+      this.memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: logAddress(page.url(), this.baseUrl) });
       this.memory?.markRouteFact(route, { audited: true });
     }
     this.logAction({

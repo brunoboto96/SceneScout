@@ -39,7 +39,8 @@ import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { SERVER_INSTRUCTIONS } from "./playbook.js";
 import { type EvidenceSettings } from "./engine/capture.js";
 import { GuidedPlans, type CheckArea } from "./engine/guided.js";
-import { NO_POLICY, type LoadedPolicy } from "./engine/project-config.js";
+import { NO_POLICY, pageTextMaskedFor, type LoadedPolicy } from "./engine/project-config.js";
+import { maskingHandler } from "./engine/redact.js";
 import { GuidedRuns, nowSentence, troubleOfResult, troubleTell } from "./engine/progress.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
@@ -92,6 +93,24 @@ type ToolResult = {
   content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
   isError?: boolean;
 };
+
+/**
+ * Every tool's result passes through here on its way to the agent, so the
+ * config's redactPageText masks personal data in one place (issue #537). A
+ * result is masked when the operator's config masks or any open session's
+ * does: a result can carry another session's page (the session list names
+ * each one's address), so one session's config cannot speak for a call alone.
+ * The engine's own oracles and stores read the page as it is; only what is
+ * returned is masked.
+ */
+const pageTextMasked = (): boolean =>
+  pageTextMaskedFor(
+    operatorPolicy.policy,
+    [...engines.values()].map((eng) => policyFor(eng).policy),
+  );
+const registerTool = server.registerTool.bind(server);
+server.registerTool = ((name: string, config: unknown, handler: (...args: never[]) => unknown) =>
+  registerTool(name, config as never, maskingHandler(handler, pageTextMasked) as never)) as typeof server.registerTool;
 
 export function text(t: string, session: string): ToolResult {
   const eng = engines.get(session);

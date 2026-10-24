@@ -24,8 +24,12 @@ import {
   EGRESS_PATHS,
   egressAllows,
   egressRefusal,
+  pageTextMaskedFor,
+  REDACT_PAGE_TEXT_MODES,
+  redactPageTextNote,
   readCommandPolicy,
   fsPolicyReader,
+  CONFIG_KEYS,
   NO_POLICY,
   parsePolicy,
   PRESET_POLICY,
@@ -115,7 +119,8 @@ import {
   LOGIN_ROUTE_RE,
   shouldReattach,
   SIGNED_OUT_ROUTES,
-  signInLogUrl,
+  logAddress,
+  offOriginPlace,
   signInPlace,
 } from "../src/engine/authloss.ts";
 import {
@@ -148,7 +153,16 @@ import {
   writeClassifierSetting,
   type WriteClassifier,
 } from "../src/engine/strict-writes.ts";
-import { fuzzCases, fuzzRates } from "./policy-fuzz.ts";
+import { fuzzCases, fuzzRates, ratesMarkdown, RATES_BEGIN, RATES_END } from "./policy-fuzz.ts";
+import {
+  explainConfig,
+  formatConfigExplanation,
+  parseConfigArgs,
+  runConfigCommand,
+  shown,
+  withoutUserinfo,
+  type ConfigLayer,
+} from "../src/engine/config-explain.ts";
 import {
   abortCodeFor,
   answersWithPage,
@@ -607,16 +621,23 @@ test("a sign-in page: whole segments of the path or the hash route, and a provid
     ["https://idp.example/#/login", true, "a hash route on another origin"],
     ["https://shop.example/authorized-dealers", false, "a segment that only starts like a provider's"],
     ["https://idp.example/OAuth2/Authorize", false, "a provider's upper-case endpoint with no sign-in request"],
-    ["https://idp.example/Login", false, "a sign-in segment matches by case, as on the app's own origin"],
-    [`${base}/Login`, false, "...where /Login is not /login either"],
+    ["https://idp.example/Login", true, "a sign-in segment in any case, as on the app's own origin"],
+    [`${base}/Login`, true, "...where /Login is a sign-in page too"],
+    [`${base}/Account/Login`, true, "an app's sign-in under an account area, in title case"],
+    [`${base}/Account/LoginHistory`, false, "...but not a page whose segment only starts like one"],
+    [`${base}/#/Login`, true, "a hash route in title case"],
+    [`${base}/#/Loginhelp`, false, "...but not one that only starts like one"],
+    [`${base}/SignIn`, true, "/SignIn"],
+    [`${base}/SignInStats`, false, "...but not /SignInStats"],
+    [`${base}/AUTH/callback`, true, "an upper-case /AUTH segment"],
     ["https://shop.example/products/7", false, "an ordinary page of another site"],
     ["about:blank", false, "not a page"],
     ["chrome-error://chromewebdata/", false, "an error page"],
   ];
   for (const [url, want, why] of cases) assert.equal(isSignInPage(url, base), want, why);
   // The action log keeps a provider's address without its query (the sign-in request's state); the app's own as it is.
-  assert.equal(signInLogUrl("https://idp.example/oauth2/authorize?client_id=a&state=s3cr3t", base), "https://idp.example/oauth2/authorize");
-  assert.equal(signInLogUrl(`${base}/login?next=%2Freports`, base), `${base}/login?next=%2Freports`);
+  assert.equal(logAddress("https://idp.example/oauth2/authorize?client_id=a&state=s3cr3t", base), "https://idp.example/oauth2/authorize");
+  assert.equal(logAddress(`${base}/login?next=%2Freports`, base), `${base}/login?next=%2Freports`);
   assert.equal(hashRoute("#/login?next=%2F"), "/login");
   assert.equal(hashRoute("#!/login"), "/login");
   assert.equal(hashRoute("#login"), null);
@@ -1128,8 +1149,62 @@ test("a sweep's re-attach is said at the end of that sweep only", () => {
 test("the login pattern matches a segment, not a substring", () => {
   assert.equal(LOGIN_ROUTE_RE.test("/login"), true);
   assert.equal(LOGIN_ROUTE_RE.test("/auth/callback"), true);
-  assert.equal(LOGIN_ROUTE_RE.test("/login.html"), false, "an extension is not a login route segment");
+  assert.equal(LOGIN_ROUTE_RE.test("/login.html"), true, "a page extension after the segment is the same page");
+  assert.equal(LOGIN_ROUTE_RE.test("/login.json"), false, "an extension that is not a page is not");
+  assert.equal(LOGIN_ROUTE_RE.test("/login.html.bak"), false);
   assert.equal(LOGIN_ROUTE_RE.test("/logindetails"), false, "nor is a longer word starting with it");
+});
+
+test("a sign-in segment in any case is a sign-in page to every caller: a navigation, a crawl, the attach verdict and the later check", () => {
+  const base = "http://app.test";
+  const t = new AuthLossTracker();
+  // Contrastive pairs: each sign-in page beside a page whose segment only starts like one.
+  const pairs: Array<[string, string]> = [
+    ["/Account/Login", "/Account/LoginHistory"],
+    ["/#/Login", "/#/Loginhelp"],
+    ["/SignIn", "/SignInStats"],
+    ["/Login.aspx", "/LoginHelp.aspx"],
+    ["/signin.php", "/signin-help.php"],
+    ["/account/login.html", "/account/login.html.bak"],
+  ];
+  for (const [signIn, nearMiss] of pairs) {
+    // A navigation, a crawl step and the attach verdict all ask isLoginRedirect, with what they asked for and where it landed.
+    assert.equal(t.isLoginRedirect("/reports", `${base}${signIn}`, base), true, `${signIn} is a bounce`);
+    assert.equal(t.isLoginRedirect("/reports", `${base}${nearMiss}`, base), false, `${nearMiss} is not`);
+    assert.equal(t.isLoginRedirect(signIn, `${base}${signIn}`, base), false, `asking for ${signIn} on purpose is not a bounce`);
+    // The check before and after each call asks lateSignInBounce.
+    const late = (now: string) => lateSignInBounce({ watching: true, seen: `${base}/reports`, now, baseUrl: base });
+    assert.equal(late(`${base}${signIn}`), `${base}/reports`, `a page that went to ${signIn} on its own is a bounce`);
+    assert.equal(late(`${base}${nearMiss}`), null, `...and one that went to ${nearMiss} is not`);
+    assert.equal(leftSignIn({ seen: `${base}${signIn}`, now: `${base}/reports`, baseUrl: base }), true, `leaving ${signIn} for the app is a sign-in`);
+  }
+  // Memory re-files an old landing on a sign-in page by the same pattern.
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Account/Login"), true);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Account/LoginHistory"), false);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Login.aspx"), true);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/LoginHelp.aspx"), false);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/signin.php"), true);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/signin-help.php"), false);
+});
+
+test("another site's address is kept by its origin and path only; the app's own as it is", () => {
+  const base = "http://app.test/start";
+  const cases: Array<[string, string | null, string]> = [
+    ["https://idp.example/saml2/idp/SSO?SAMLRequest=fZ&RelayState=r", "https://idp.example/saml2/idp/SSO", "a provider's sign-in, without its request"],
+    ["https://idp.example/oauth2/authorize?client_id=a&state=s3cr3t#frag", "https://idp.example/oauth2/authorize", "...and without the fragment"],
+    ["https://docs.example/help?q=x", "https://docs.example/help", "any other site's page too"],
+    ["http://app.test:8080/x?y=1", "http://app.test:8080/x", "another port is another origin"],
+    [`http://app.test/login?next=%2Freports`, null, "the app's own page is not elsewhere"],
+    ["about:blank", null, "not a page"],
+    ["chrome-error://chromewebdata/", null, "a browser's error page"],
+    ["not a url", null, "an address that cannot be read"],
+  ];
+  for (const [url, want, why] of cases) assert.equal(offOriginPlace(url, base), want, why);
+  assert.equal(logAddress("https://idp.example/oauth2/authorize?client_id=a&state=s3cr3t", base), "https://idp.example/oauth2/authorize");
+  assert.equal(logAddress("http://app.test/reports?tab=2#top", base), "http://app.test/reports?tab=2#top", "the app's own address is kept whole");
+  assert.equal(logAddress("about:blank", base), "about:blank");
+  assert.equal(logAddress("", base), "", "no address stays none");
+  assert.equal(logAddress("not a url", base), "", "an address that cannot be read is written as nothing");
 });
 
 test("the two copies of the login pattern have not drifted apart", () => {
@@ -2358,10 +2433,12 @@ function guardRig(
     leftPageRuleCapMs?: number;
     /** The host's foreign-frame answer as a function of the rule it is asked under (a sign-in page lets one out in read-only, never in observe); else `foreign`. */
     foreignUnder?: (rule: (typeof WRITE_MODES)[number]) => string | null;
+    escape?: boolean;
   } = {},
 ) {
   const calls: GuardCall[] = [];
   const blocked: BlockedRequest[] = [];
+  const logged: string[] = [];
   const owned = new Set<string>();
   const host: RouteGuardHost = {
     appUrl: () => "https://app.example.com",
@@ -2373,11 +2450,11 @@ function guardRig(
       blocked.push(e);
       calls.push(`noteBlocked ${e.sig} answered=${e.answered}${e.why ? ` why=${e.why}` : ""}`);
     },
-    logAction: (e) => void calls.push(`log ${e.action}`),
+    logAction: (e) => void (calls.push(`log ${e.action}`), logged.push(e.target)),
     notePolicyBlock: () => void calls.push("notePolicyBlock"),
     noteSentWrite: () => void calls.push("noteSentWrite"),
     foreignWriteOf: (_req, r) => (opts.foreignUnder ? opts.foreignUnder(r) : (opts.foreign ?? null)),
-    embedEscapeNavigation: () => false,
+    embedEscapeNavigation: () => opts.escape === true,
     frameDocumentKind: () => opts.frameDoc ?? null,
     sentByMainFrame: () => true,
     readPostOf: (r, method, url) =>
@@ -2401,8 +2478,9 @@ function guardRig(
     path: string,
     { type = "xhr", body = null as string | null, created = undefined as string | undefined, answerAfterMs = 0, headers = {} as Record<string, string> } = {},
   ) => {
-    const url = `https://app.example.com${path}`;
+    const url = /^https?:/.test(path) ? path : `https://app.example.com${path}`;
     const request = {
+      isNavigationRequest: () => type === "document",
       method: () => method,
       url: () => url,
       resourceType: () => type,
@@ -2428,8 +2506,18 @@ function guardRig(
     const done = guard.handle(route as unknown as Route).then(() => outcome);
     return { request: request as unknown as Request, done };
   };
-  return { calls, guard, send, blocked };
+  return { calls, logged, guard, send, blocked };
 }
+
+test("RouteGuard: an embed's escape to another site is logged by that site's origin and path, never its query", async () => {
+  const { logged, guard, send } = guardRig("read-only", { escape: true });
+  const escape = send("GET", "https://pay.example.net/checkout/start?session=pay-session-91c2&state=x", { type: "document" });
+  await escape.done;
+  assert.equal(guard.refused(escape.request), true);
+  assert.equal(logged.length, 1);
+  assert.ok(logged[0].startsWith("navigation to https://pay.example.net/checkout/start ("), logged[0]);
+  assert.ok(!logged[0].includes("pay-session-91c2"), logged[0]);
+});
 
 test("RouteGuard: each verdict is applied to the request, and a refusal is recorded and reported", async () => {
   // Read-only: a plain POST goes out; the same POST carrying a destructive command is answered with a refusal (the contrastive pair).
@@ -3142,6 +3230,18 @@ test("fuzz: the strict classifier misses less and flags less than the standard o
   for (const c of cases)
     if (c.destructive && isDestructiveRequest(c.url, c.body, "standard"))
       assert.equal(isDestructiveRequest(c.url, c.body, "strict"), true, `strict misses what standard catches: ${c.url} ${c.body}`);
+});
+
+test("fuzz: the miss and false-alarm rates in the Safety model guide are the fuzz script's output", () => {
+  const guide = fs.readFileSync(new URL("../docs/guide/Safety-model.md", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const a = guide.indexOf(RATES_BEGIN);
+  const b = guide.indexOf(RATES_END);
+  assert.ok(a >= 0 && b > a, "docs/guide/Safety-model.md lost its fuzz-rates markers");
+  assert.equal(
+    guide.slice(a, b + RATES_END.length),
+    ratesMarkdown(),
+    "the published write-classifier rates differ from a fresh seeded fuzz run: a classifier or the fuzz corpus changed. Regenerate them with `npm run fuzz-rates` and commit the guide.",
+  );
 });
 
 test("fuzz: the standard classifier reads joined verbs, and no other form of a verb is among its false alarms (#684)", () => {
@@ -4610,6 +4710,249 @@ test("config: ci and export stop with exit 2 under egress none before any key or
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── redactPageText: personal data in the page's text masked before the agent reads it (issue #537) ──────
+
+test("config: redactPageText is checked like every key, no preset sets it, and a project's file can turn it on and never off", () => {
+  assert.deepEqual([...REDACT_PAGE_TEXT_MODES], ["off", "pii"]);
+  const r = parsePolicy('{"redactPageText": "all"}', "config.json");
+  assert.ok(!r.ok && /"redactPageText" must be one of "off", "pii", not "all"/.test(r.error), r.ok ? "taken" : r.error);
+  assert.ok(!parsePolicy('{"redactPageText": true}', "config.json").ok, "a boolean is not a mode");
+  assert.deepEqual(parsed('{"redactPageText": "pii"}'), { redactPageText: "pii" });
+  assert.deepEqual(parsed('{"redactPageText": "off"}'), { redactPageText: "off" });
+  assert.equal(parsed('{"preset": "strict"}').redactPageText, undefined, "strict changes what the agent may do, not what it reads");
+  assert.equal(tightenPolicy({ redactPageText: "off" }, { redactPageText: "pii" }).redactPageText, "pii", "the project's file turns it on");
+  assert.equal(tightenPolicy({ redactPageText: "pii" }, { redactPageText: "off" }).redactPageText, "pii", "and cannot turn the operator's off");
+  assert.equal(tightenPolicy({}, { redactPageText: "pii" }).redactPageText, "pii");
+  assert.equal(tightenPolicy({ redactPageText: "off" }, {}).redactPageText, "off");
+  assert.equal("redactPageText" in tightenPolicy({}, {}), false);
+});
+
+test("config: which calls' results are masked, each rule beside the case it does not cover", () => {
+  const on: Policy = { redactPageText: "pii" };
+  const off: Policy = { redactPageText: "off" };
+  // The operator's file masks every call.
+  assert.equal(pageTextMaskedFor(on, []), true);
+  assert.equal(pageTextMaskedFor(on, [off]), true);
+  // With the operator's off, any open session's config masks every call, a call naming an unmasked session too: its
+  // result can carry the masking session's page (the session list names each session's address).
+  assert.equal(pageTextMaskedFor({}, [off, on]), true);
+  assert.equal(pageTextMaskedFor(off, [{}, on]), true);
+  assert.equal(pageTextMaskedFor({}, [{}, off]), false, "no open session masks");
+  assert.equal(pageTextMaskedFor({}, []), false, "no file: today's behaviour");
+});
+
+test("config: redactPageText says so on the Config line of an attach, a command and policy explain, and only when on", () => {
+  assert.deepEqual(redactPageTextNote({}), []);
+  assert.deepEqual(redactPageTextNote({ redactPageText: "off" }), []);
+  assert.match(redactPageTextNote({ redactPageText: "pii" }).join(""), /^redactPageText "pii": email addresses, phone numbers and card numbers/);
+  const masked = applyToCommand(loadedOf({ redactPageText: "pii" }), {}, ["http://localhost:3000"], { mode: "observe" });
+  assert.ok(masked.ok && /^Config: \/srv\/\.scenescout\/config\.json; redactPageText "pii": /.test(masked.note), JSON.stringify(masked));
+  const plain = applyToCommand(loadedOf({ redactPageText: "off" }), {}, ["http://localhost:3000"], { mode: "observe" });
+  assert.ok(plain.ok && !plain.note.includes("redactPageText"), JSON.stringify(plain));
+  // policy explain prints the note applyToCommand makes, read from the launch directory's file.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-redact-explain-"));
+  try {
+    fs.mkdirSync(path.join(dir, ".scenescout"));
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), '{"redactPageText": "pii"}');
+    const lines: string[] = [];
+    runPolicyCommand(["explain", "GET", `${EXPLAIN_APP}/things`], {
+      env: {},
+      out: (l: string) => lines.push(l),
+      err: (l: string) => lines.push(l),
+      readBody: () => "",
+      config: { launchDir: dir, reader: fsPolicyReader },
+    });
+    assert.ok(
+      lines.some((l) => /redactPageText "pii"/.test(l)),
+      lines.join("\n"),
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// scenescout config explain: where each resolved value came from.
+const layer = (label: string, file: string, text: string): ConfigLayer => {
+  const parsed = parsePolicy(text, file);
+  assert.ok(parsed.ok, JSON.stringify(parsed));
+  const raw = JSON.parse(text) as Record<string, unknown>;
+  return { label, file, policy: parsed.policy, named: Object.keys(raw) as ConfigLayer["named"], preset: raw.preset as ConfigLayer["preset"] };
+};
+const rowOf = (e: ReturnType<typeof explainConfig>, key: string) => e.rows.find((r) => r.key === key)!;
+
+test("config explain: a value is a default, a preset's, the operator's file's or the project's, and a project value is named only when it tightened", () => {
+  const operator = layer("operator file", "/op/config.json", '{"preset":"strict","maxMode":"read-only","egress":"model-only"}');
+  const project = layer("project file", "/p/.scenescout/config.json", '{"maxMode":"observe","egress":"model-only","uploads":"fixtures"}');
+  const joined = tightenPolicy(operator.policy, project.policy);
+  const e = explainConfig({ operator, project, loaded: { policy: joined, sources: ["/op/config.json", "/p/.scenescout/config.json"] }, env: {} });
+  assert.deepEqual(rowOf(e, "maxMode"), { key: "maxMode", value: "observe", source: "project file, tightening the operator file" });
+  assert.equal(rowOf(e, "egress").source, "operator file", "the project repeats the operator's value: it is the operator's");
+  assert.equal(rowOf(e, "requireGuidedPlan").source, 'operator file\'s preset "strict"');
+  assert.equal(
+    rowOf(e, "uploads").source,
+    'operator file\'s preset "strict"',
+    "the preset set it and the project repeated it, so the operator's preset stays the source",
+  );
+  assert.deepEqual(rowOf(e, "projectsRoot"), { key: "projectsRoot", value: "no limit", source: "default" });
+  assert.equal(rowOf(e, "writeClassifier").value, "standard");
+  assert.equal(rowOf(e, "writeClassifier").source, "default");
+  // No file at all: every row is a default.
+  const none = explainConfig({ loaded: NO_POLICY, env: {} });
+  assert.ok(none.rows.every((r) => r.source === "default"));
+  assert.equal(none.rows.length, 14);
+  assert.match(formatConfigExplanation(none)[0], /^Config files: none/);
+});
+
+test("config explain: the environment is a source only where it changes the value, and only toward stricter", () => {
+  const operator = layer("operator file", "/op/config.json", '{"writeClassifier":"standard","readPosts":["POST /api/search","POST /api/find"],"dedup":"rule"}');
+  const loaded = { policy: operator.policy, sources: ["/op/config.json"] };
+  const env = {
+    SCENESCOUT_STRICT_WRITES: "1",
+    SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1",
+    SCENESCOUT_READ_POSTS: "POST /api/search\nPOST /other",
+    SCENESCOUT_DEDUP: "judge",
+  };
+  const e = explainConfig({ operator, loaded, env });
+  assert.deepEqual(rowOf(e, "writeClassifier"), { key: "writeClassifier", value: "strict", source: "environment SCENESCOUT_STRICT_WRITES" });
+  assert.deepEqual(rowOf(e, "refuseDestructiveGets"), {
+    key: "refuseDestructiveGets",
+    value: "true",
+    source: "environment SCENESCOUT_REFUSE_DESTRUCTIVE_GETS",
+  });
+  assert.deepEqual(rowOf(e, "readPosts"), { key: "readPosts", value: "POST /api/search", source: "operator file, narrowed by SCENESCOUT_READ_POSTS" });
+  assert.ok(
+    e.notes.some((n) => n.includes('"POST /other"')),
+    e.notes.join("\n"),
+  );
+  assert.ok(
+    e.notes.some((n) => n.startsWith('dedup "rule"')),
+    e.notes.join("\n"),
+  );
+  // Contrast: the same file with an empty environment reports the file alone, and no note.
+  const quiet = explainConfig({ operator, loaded, env: {} });
+  assert.equal(rowOf(quiet, "writeClassifier").source, "default".replace("default", "operator file"));
+  assert.deepEqual(quiet.notes, []);
+  // The environment's list alone, with no file list.
+  const alone = explainConfig({ loaded: NO_POLICY, env: { SCENESCOUT_AUTH_POSTS: "POST /api/login", SCENESCOUT_READ_POSTS: "POST /api/search" } });
+  assert.deepEqual(rowOf(alone, "authPosts"), { key: "authPosts", value: "POST /api/login", source: "environment SCENESCOUT_AUTH_POSTS" });
+  assert.equal(rowOf(alone, "readPosts").source, "environment SCENESCOUT_READ_POSTS");
+});
+
+test("config explain: an address in a printed value or message loses its user name, password and token", () => {
+  assert.equal(withoutUserinfo("POST https://user:pw@idp.example.com/token"), "POST https://idp.example.com/token");
+  assert.equal(withoutUserinfo('"POST https://u:p@a.example/x", "POST https://b.example/y"'), '"POST https://a.example/x", "POST https://b.example/y"');
+  assert.equal(withoutUserinfo("POST https://idp.example.com/a@b"), "POST https://idp.example.com/a@b", "an @ in the path is not a user name");
+  assert.doesNotMatch(shown("POST https://u:hunter2pw@idp.example.com/t?access_token=abcdefghij1234567890"), /hunter2pw|abcdefghij1234567890/);
+  const operator = layer("operator file", "/op/config.json", '{"authPosts":["POST https://idp.example.com/token"]}');
+  const lines = formatConfigExplanation(explainConfig({ operator, loaded: { policy: operator.policy, sources: ["/op/config.json"] }, env: {} }));
+  assert.ok(
+    lines.some((l) => /authPosts +POST https:\/\/idp\.example\.com\/token +\(operator file\)/.test(l)),
+    lines.join("\n"),
+  );
+});
+
+test("config explain: every key has a row, in the order of CONFIG_KEYS, and the command line takes only --project", () => {
+  const e = explainConfig({ loaded: NO_POLICY, env: {} });
+  assert.deepEqual(
+    e.rows.map((r) => r.key),
+    [...CONFIG_KEYS],
+  );
+  assert.deepEqual(parseConfigArgs(["explain"]), { ok: true, project: undefined });
+  assert.deepEqual(parseConfigArgs(["explain", "--project", "/p"]), { ok: true, project: "/p" });
+  assert.deepEqual(parseConfigArgs(["explain", "--project=/p"]), { ok: true, project: "/p" });
+  for (const bad of [[], ["explain", "--mode", "x"], ["explain", "x"], ["--project", "x"], ["explain", "--project"]])
+    assert.equal(parseConfigArgs(bad).ok, false, bad.join(" "));
+});
+
+test('config explain: dedup and evidence show the ceiling an attach enforces, egress "none" included', () => {
+  const ask = (loaded: { policy: Policy; sources: string[] }, asked: { dedup?: "rule" | "judge"; evidence?: "off" | "file" | "inline" }) =>
+    resolveSettings(loaded, {}, asked, { mode: "read-only", evidence: () => "inline" }).refused.length === 0;
+  for (const text of ['{"egress":"none"}', '{"egress":"none","evidence":"inline","dedup":"judge"}', '{"egress":"none","evidence":"off"}']) {
+    const operator = layer("operator file", "/op/config.json", text);
+    const loaded = { policy: operator.policy, sources: ["/op/config.json"] };
+    const e = explainConfig({ operator, loaded, env: {} });
+    // What the row says is the most an attach may ask for, and the one above it is refused.
+    const dedup = rowOf(e, "dedup");
+    assert.equal(dedup.value, "rule", text);
+    assert.ok(ask(loaded, { dedup: "rule" }) && !ask(loaded, { dedup: "judge" }));
+    const evidence = rowOf(e, "evidence");
+    const want = operator.policy.evidence === "off" ? "off" : "file";
+    assert.equal(evidence.value, want, text);
+    assert.ok(ask(loaded, { evidence: want }) && !ask(loaded, { evidence: "inline" }));
+    assert.equal(evidence.source, want === "off" ? "operator file" : 'lowered by egress "none" (operator file)', text);
+  }
+  // Contrast: egress "model-only" lowers neither.
+  const open = layer("operator file", "/op/config.json", '{"egress":"model-only"}');
+  const e = explainConfig({ operator: open, loaded: { policy: open.policy, sources: ["/op/config.json"] }, env: {} });
+  assert.deepEqual([rowOf(e, "dedup").value, rowOf(e, "evidence").value], ["no limit", "no limit"]);
+});
+
+test("config explain: a sign-in list only the project's file sets is shown as narrowing the path rule", () => {
+  const project = layer("project file", "/p/.scenescout/config.json", '{"authPosts":["POST /api/signin"]}');
+  const policy = tightenPolicy({}, project.policy);
+  const loaded = { policy, sources: ["/op/config.json", "/p/.scenescout/config.json"] };
+  const narrow = explainConfig({ project, loaded, env: {} });
+  assert.equal(writeRulesSettings(policy, {}, false).authPosts?.andSignInPath, true);
+  assert.equal(rowOf(narrow, "authPosts").value, "POST /api/signin, each only when it also looks like a sign-in by its path");
+  // Contrast: the operator's list replaces the path rule, and so does the project's when SCENESCOUT_AUTH_POSTS lists it too.
+  const operator = layer("operator file", "/op/config.json", '{"authPosts":["POST /api/signin"]}');
+  assert.equal(
+    rowOf(explainConfig({ operator, loaded: { policy: operator.policy, sources: ["/op/config.json"] }, env: {} }), "authPosts").value,
+    "POST /api/signin",
+  );
+  assert.equal(rowOf(explainConfig({ project, loaded, env: { SCENESCOUT_AUTH_POSTS: "POST /api/signin" } }), "authPosts").value, "POST /api/signin");
+});
+
+test("config explain: redactPageText is off by default, the operator's file's, or the project's own file turning it on", () => {
+  // Keyed by resolved path, so the stand-in files are found however the command joins its paths on this platform.
+  const files: Record<string, string> = {};
+  const key = (f: string) => path.resolve(f);
+  const reader = { exists: (f: string) => key(f) in files, read: (f: string) => files[key(f)] ?? "", realpath: (f: string) => f };
+  const run = () => {
+    const out: string[] = [];
+    runConfigCommand(["explain", "--project", path.resolve("/p")], {
+      env: {},
+      launchDir: path.resolve("/launch"),
+      reader,
+      out: (l) => out.push(l),
+      err: (l) => out.push(l),
+    });
+    return out.join("\n");
+  };
+  assert.match(run(), /^ {2}redactPageText +off +\(default\)$/m);
+  files[key("/launch/.scenescout/config.json")] = '{"redactPageText":"pii"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
+  // A project's file that says "off" cannot turn the operator's off: the value stays the operator's.
+  files[key("/p/.scenescout/config.json")] = '{"redactPageText":"off"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
+  // The project's own file turns it on over the operator's "off", and is named as tightening it.
+  files[key("/launch/.scenescout/config.json")] = '{"redactPageText":"off"}';
+  files[key("/p/.scenescout/config.json")] = '{"redactPageText":"pii"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(project file, tightening the operator file\)$/m);
+  // With no operator file, the project's own file is the source.
+  delete files[key("/launch/.scenescout/config.json")];
+  assert.match(run(), /^ {2}redactPageText +pii +\(project file\)$/m);
+});
+
+test("config explain: with no operator file, the project's own file is named as the project's", () => {
+  // Paths are resolved, so the stand-in reader is keyed the way the command joins them on every platform.
+  const projectDir = path.resolve("/p");
+  const launchDir = path.resolve("/launch");
+  const files: Record<string, string> = { [path.join(projectDir, ".scenescout", "config.json")]: '{"maxMode":"observe"}' };
+  const reader = { exists: (f: string) => f in files, read: (f: string) => files[f], realpath: (f: string) => f };
+  const run = () => {
+    const out: string[] = [];
+    runConfigCommand(["explain", "--project", projectDir], { env: {}, launchDir, reader, out: (l) => out.push(l), err: (l) => out.push(l) });
+    return out.join("\n");
+  };
+  const alone = run();
+  assert.match(alone, /^ {2}maxMode +observe +\(project file\)$/m);
+  assert.doesNotMatch(alone, /operator file/);
+  // Contrast: an operator's file in the launch directory is the operator's, and the project's tightening is named as such.
+  files[path.join(launchDir, ".scenescout", "config.json")] = '{"maxMode":"read-only"}';
+  assert.match(run(), /^ {2}maxMode +observe +\(project file, tightening the operator file\)$/m);
 });
 
 // ── the allowlist header and the proxy (#555) ───────────────────────────────

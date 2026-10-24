@@ -66,7 +66,7 @@ This is the answer a guided check gives to that question, word for word: on the 
 
 Over MCP the agent chooses `scout_attach`'s arguments, including the mode, and an argument wins over the server's environment. So nothing above sets a limit the agent cannot pass. The [config file](Configuration-reference.md#the-config-file) does: a JSON file a team commits as `.scenescout/config.json`, which wins over the environment and over every argument.
 
-- **It caps, and the agent can only ask for less.** `maxMode` is the loosest mode any attach, `check`, `ci` or first look may use; an attach above it is refused before a browser starts, with the file named and the reason. `readPosts` and `trustedEmbeds` become the most an attach may name, `dedup: "rule"` keeps the model judge off, `evidence` caps what a finding's picture may do, `uploads: "fixtures"` keeps `scout_upload` to the files it generates, `projectsRoot` names the folder every project folder must sit inside, and `requireGuidedPlan` holds the guided gate (above) from the server's start, so no attach goes above `observe` without the person's confirmation. `egress` sets what SceneScout itself may send off the machine: [What leaves the machine](What-leaves-the-machine.md).
+- **It caps, and the agent can only ask for less.** `maxMode` is the loosest mode any attach, `check`, `ci` or first look may use; an attach above it is refused before a browser starts, with the file named and the reason. `readPosts` and `trustedEmbeds` become the most an attach may name, `dedup: "rule"` keeps the model judge off, `evidence` caps what a finding's picture may do, `uploads: "fixtures"` keeps `scout_upload` to the files it generates, `projectsRoot` names the folder every project folder must sit inside, and `requireGuidedPlan` holds the guided gate (above) from the server's start, so no attach goes above `observe` without the person's confirmation. `egress` sets what SceneScout itself may send off the machine, and `redactPageText: "pii"` masks email addresses, phone numbers and card numbers in what the tools return to the agent: [What leaves the machine](What-leaves-the-machine.md).
 - **The agent cannot choose where it comes from.** The server reads it from the directory it was started in, or from the file `SCENESCOUT_CONFIG` names, once, as it starts. The folder the agent names as `projectPath` may hold a config too, but that one can only tighten: a file the agent could point at is never the lock on its own.
 - **`strict` is the one-line setting** for a team that wants every agent to look only: `{"preset": "strict"}` sets `observe` as the most, requires a guided plan, allows no `readPosts` or `trustedEmbeds` from an argument, uploads generated files only, keeps the dedup judge off and keeps finding pictures out of the conversation.
 - **No file is today's behaviour,** and a file that is not valid stops the server as it starts rather than being half applied.
@@ -166,6 +166,67 @@ Two settings, both off by default, make the best-effort part stricter.
 - `SCENESCOUT_REFUSE_DESTRUCTIVE_GETS=1` refuses, in `observe` and `read-only`, a page load whose address is a destructive command: `/items/3/delete`, `/orders/3/cancel`, `/unsubscribe?…`, `?action=delete`, `/things/9/void`, `/requests/4/reject`, `/approve?token=…`, `/account/close`. `archive` and `trash` count only right after a record's id, so `/blog/archive` and `/mail/trash` still load. `void`, `reject` and `approve` count only as a whole path segment, so `/avoid-list`, `/requests/rejected` and `/orders/approvals` load; `close` counts only as a whole segment after a record's id or after `account`, `subscription` or `membership`, so a sign-in popup's `/close` page and `/help/how-to-close-your-account` load. Frame documents are judged too, and so are the later hops of a redirect in Chromium (Firefox and WebKit follow a redirect without asking). A script's own `GET` is not judged. The engine's own `GET` is judged by this rule in every mode, whether or not the setting is on: when it leaves Chromium's error page after a refused form, or is bounced back from another site, it loads the page before again with a `GET` if a `POST` (or a load the session did not see) loaded that page, and if that page's address reads as a destructive command it sends nothing and leaves for `about:blank` instead, and the action's result says so.
 
 Both are read from the server's environment, which an agent cannot change, and the [config file](Configuration-reference.md#the-config-file) can lock each on: `"writeClassifier": "strict"` and `"refuseDestructiveGets": true` hold whatever the environment says, and the `strict` preset sets `refuseDestructiveGets`. The environment can still turn either on where the file leaves it off.
+
+## Measured miss and false-alarm rates of the write classifiers
+
+The two classifiers above are pattern matching, so how often they are wrong is measured rather than assumed. `scripts/policy-fuzz.ts` generates write requests from the shapes REST, RPC, JSON-RPC and GraphQL APIs commonly use, with made-up resource names, labels each destructive or harmless, and scores both classifiers on the same requests. The tables below are that script's output for a fixed corpus size and seed. A test holds them equal to a fresh run, so they change only when a classifier does; after a change, regenerate them with `npm run fuzz-rates`.
+
+Read these as a floor, not as a forecast:
+
+- **The corpus is synthetic.** The generator was written beside the classifiers it scores and shares their blind spots. Two shapes are written on purpose to be beyond the strict classifier (a verb no list names, and a verb used as a noun), and the corpus is about half destructive, so a real app's share of each shape, and so its rates, will differ.
+- **A miss** is a destructive request judged harmless; **a false alarm** is a harmless request judged destructive. Each row is the share of that shape's requests.
+- The standard classifier's miss rate is high because it reads the path and the first 2,000 characters of a body as text: it does not read a JSON-RPC method, a command in a query or form value, a GraphQL mutation named noun-first, or the verbs cancel, refund, terminate, disable, trash and erase. The strict classifier does. Use `observe` when nothing may change.
+- The corpus holds 4,000 requests so the run takes under a second in CI. The secret-field detector and the redaction have no generated corpus of this kind yet, so no rates are published for them.
+
+<!-- fuzz-rates:begin (generated by `npm run fuzz-rates`; do not edit by hand) -->
+
+Run: 4,000 generated requests, seed 548.
+
+| Classifier | Destructive requests missed | Harmless requests refused |
+| --- | --- | --- |
+| Standard | 1194 of 1963 (60.8%) | 392 of 2037 (19.2%) |
+| Strict | 129 of 1963 (6.6%) | 158 of 2037 (7.8%) |
+
+Destructive shapes (a miss is a destructive request judged harmless):
+
+| Shape | Looks like | Requests | Standard misses | Strict misses |
+| --- | --- | --- | --- | --- |
+| JSON-Patch | `POST /api/patch` with `[{"op":"remove",...}]` | 125 | 0 (0.0%) | 0 (0.0%) |
+| JSON-RPC method | `{"method":"widget.delete"}` to one endpoint | 123 | 123 (100.0%) | 0 (0.0%) |
+| RPC path | `/rpc/WidgetService.DeleteWidget` | 146 | 65 (44.5%) | 0 (0.0%) |
+| bulk path | `/widgets/bulk-delete` | 156 | 68 (43.6%) | 0 (0.0%) |
+| camelCase path | `/api/deleteWidget` | 119 | 52 (43.7%) | 0 (0.0%) |
+| command after 2,000 characters | a body whose command comes after 2,500 characters of filter | 135 | 135 (100.0%) | 0 (0.0%) |
+| form command | a form body `id=7&action=delete` | 132 | 58 (43.9%) | 0 (0.0%) |
+| joined verb segment | `/widgets/deleteAll`, `/bulkPurge` | 126 | 56 (44.4%) | 0 (0.0%) |
+| noun-first GraphQL | `mutation { widgetDelete(id: 7) }` | 149 | 149 (100.0%) | 0 (0.0%) |
+| query action | `/widgets/7?action=delete` | 125 | 125 (100.0%) | 0 (0.0%) |
+| snake_case path | `/widgets/7/delete_all` | 133 | 53 (39.8%) | 0 (0.0%) |
+| verb before its object | `/widgets/7/delete-history` | 129 | 63 (48.8%) | 0 (0.0%) |
+| verb outside every list | `/widgets/7/void`, `/ban`, `/unpublish` | 129 | 129 (100.0%) | 129 (100.0%) |
+| verb segment | `/widgets/7/delete` | 112 | 50 (44.6%) | 0 (0.0%) |
+| verb-first GraphQL | `mutation Go($id: ID!) { deleteWidget(id: $id) }` | 124 | 68 (54.8%) | 0 (0.0%) |
+
+Harmless shapes (a false alarm is a harmless request judged destructive):
+
+| Shape | Looks like | Requests | Standard false alarms | Strict false alarms |
+| --- | --- | --- | --- | --- |
+| GraphQL query naming verbs | a query selecting `deletedAt` and `canDelete` | 145 | 0 (0.0%) | 0 (0.0%) |
+| content mentioning verbs | a document whose text says how to delete a thing | 143 | 0 (0.0%) | 0 (0.0%) |
+| harmless JSON-RPC | `{"method":"widget.create"}` | 129 | 0 (0.0%) | 0 (0.0%) |
+| harmless camelCase path | `/api/saveWidget` | 143 | 0 (0.0%) | 0 (0.0%) |
+| harmless mutation with verbs in strings and fields | `mutation { updateWidget(note: "delete later") { deletedAt } }` | 131 | 131 (100.0%) | 0 (0.0%) |
+| harmless verb segment | `/widgets/7/rename`, `/export` | 156 | 0 (0.0%) | 0 (0.0%) |
+| noun phrase path | `POST /api/delete-requests` | 159 | 60 (37.7%) | 0 (0.0%) |
+| noun phrase segment | `/widgets/7/cancel-reasons` | 144 | 0 (0.0%) | 0 (0.0%) |
+| other form of a verb, joined | `/widgets/deletedAtFilter`, `/purgeable` | 149 | 0 (0.0%) | 0 (0.0%) |
+| plain create | `POST /api/widgets` with a name | 162 | 0 (0.0%) | 0 (0.0%) |
+| prose that looks like a command | a note whose text reads `action: delete the old widget` | 127 | 76 (59.8%) | 0 (0.0%) |
+| search for a verb | `/api/search?q=delete` | 155 | 0 (0.0%) | 0 (0.0%) |
+| verb used as a noun | `/products/trash-can/reviews` | 158 | 125 (79.1%) | 158 (100.0%) |
+| verb words as values | `{"status":"removed-from-sale"}` | 136 | 0 (0.0%) | 0 (0.0%) |
+
+<!-- fuzz-rates:end -->
 
 ## What counts as signing in, in `observe`
 

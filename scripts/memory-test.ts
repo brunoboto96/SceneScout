@@ -109,6 +109,7 @@ import {
 } from "../src/engine/forms.ts";
 import { coverageView, generateReport, runRecordOf } from "../src/engine/report.ts";
 import { maskedValue, maskFillCalls, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
+import { maskingHandler, maskPageText, maskToolResult } from "../src/engine/redact.ts";
 import { MASK_COLOR, MAX_FIELD_MASKS, masksToPaint, SECRET_BY_ATTRIBUTE } from "../src/engine/secret-pixels.ts";
 import { REDACTION_VERSION } from "../src/engine/memory-scrub.ts";
 import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
@@ -4836,3 +4837,196 @@ test(
       }
     }),
 );
+
+test("a finding filed with another site's full request address dedups with the same failure written without its query", () => {
+  const filed = { id: "f1", status: "open" as const, category: "http-error", title: "Token exchange refused", detail: "", state: "/signin" };
+  const old = { ...filed, evidence: "GET https://idp.example/oauth2/token?code=one-time-code&state=s3 → HTTP 500" };
+  const trimmed = { ...filed, evidence: "GET https://idp.example/oauth2/token → HTTP 500" };
+  assert.deepEqual([...endpointSignatures(old.evidence)], [...endpointSignatures(trimmed.evidence)], "one endpoint signature either way");
+  assert.ok(isDuplicateFinding(old, trimmed), "the stored finding and the new one are one defect");
+  assert.ok(isDuplicateFinding(trimmed, old));
+  // The contrast: another path on that site is another request.
+  assert.ok(!isDuplicateFinding(old, { ...filed, evidence: "GET https://idp.example/oauth2/userinfo → HTTP 500" }));
+});
+
+// ---------------------------------------------------------------------------
+// redactPageText "pii": what the tools return to the agent (issue #537)
+// ---------------------------------------------------------------------------
+
+// Built at run time: a real-looking address written out in full would be flagged by the hygiene suite.
+const PAGE_PERSON = ["jo.sample", "contoso-mail.net"].join("@");
+
+test("maskPageText masks an email, a phone after its word and a card number with typed markers, and leaves their near misses", () => {
+  const masked: Array<[string, string]> = [
+    [`Signed in as ${PAGE_PERSON}`, "Signed in as [email redacted]"],
+    ["Phone: +44 20 7946 0958", "Phone: [phone redacted]"],
+    ["Card 4111 1111 1111 1111 on file", "Card [card number redacted] on file"],
+    [`- row "${PAGE_PERSON} 4111-1111-1111-1111 Phone: (555) 123-4567"`, '- row "[email redacted] [card number redacted] Phone: [phone redacted]"'],
+  ];
+  for (const [input, want] of masked) assert.equal(maskPageText(input), want, input);
+  // Each beside the one fact that keeps it: a reserved example domain, a number with no word for a phone before it, an
+  // order id no card network issues, a date after the word for a phone.
+  const kept = ["Write to help@example.com", "Ref +44 20 7946 0958", "Order 1234 5678 9012 3456", "Phone: 2026-10-11", 'button "Save" [ref=e12]'];
+  for (const text of kept) assert.equal(maskPageText(text), text, text);
+  // Unlike the stored form, nothing is counted: a credential is left to the tools' own masking of secret fields.
+  assert.equal(maskPageText("token: abc123def456ghi789"), "token: abc123def456ghi789");
+});
+
+test("maskToolResult masks every text part and every string of structured content, and leaves pictures, keys and numbers", () => {
+  const picture = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+  const said = { type: "text", text: `Contact ${PAGE_PERSON}` };
+  const result = {
+    content: [said, picture],
+    structuredContent: { [PAGE_PERSON]: { phone: "Tel. 030 123 45 67", list: ["4111 1111 1111 1111", 4111111111111111, null, true] } },
+    isError: false,
+  };
+  const out = maskToolResult(result);
+  assert.deepEqual(out.content, [{ type: "text", text: "Contact [email redacted]" }, picture]);
+  assert.deepEqual(out.structuredContent, {
+    [PAGE_PERSON]: { phone: "Tel. [phone redacted]", list: ["[card number redacted]", 4111111111111111, null, true] },
+  });
+  assert.equal(out.isError, false);
+  assert.equal(said.text, `Contact ${PAGE_PERSON}`, "the result the tool built is not changed in place");
+  // An embedded resource's text is masked too; its other fields are kept.
+  const embedded = maskToolResult({ content: [{ type: "resource", resource: { uri: "scenescout://x", text: `Owner ${PAGE_PERSON}` } }] });
+  assert.deepEqual(embedded.content, [{ type: "resource", resource: { uri: "scenescout://x", text: "Owner [email redacted]" } }]);
+  // The contrast: a result with nothing personal comes back equal.
+  const plain = { content: [{ type: "text", text: '- heading "Orders" [ref=e1]' }] };
+  assert.deepEqual(maskToolResult(plain), plain);
+});
+
+test("a title the agent copies from masked page text dedups with the finding an oracle stored from the page as it is", () => {
+  // Oracles read the page before masking and the store redacts what it keeps with the same markers, so the two agree.
+  const store = freshStore();
+  const raw = `Profile shows ${PAGE_PERSON} as owner of every record`;
+  const [stored, isNew] = store.addFinding({ ...base, category: "wrong-data", title: raw, detail: "x", evidence: raw });
+  assert.equal(isNew, true);
+  assert.equal(stored.title, maskPageText(raw), "the stored title is the masked one");
+  const copied = maskPageText(raw);
+  const [, againNew] = store.addFinding({ ...base, category: "wrong-data", title: copied, detail: "y", evidence: copied });
+  assert.equal(againNew, false, "the agent's filing from masked text merged into the oracle's");
+  // The contrast: another person's address is another finding.
+  const other = ["kim.example", "fabrikam-mail.org"].join("@");
+  const [, otherNew] = store.addFinding({
+    ...base,
+    category: "wrong-data",
+    title: `Profile shows ${other} twice in the header`,
+    detail: "z",
+    evidence: `header ${other}`,
+  });
+  assert.equal(otherNew, true);
+});
+
+test("maskPageText keeps quoted JSON valid: an escape is never read into an address, and an encoded @ is still an address", () => {
+  const [local, domain] = PAGE_PERSON.split("@") as [string, string];
+  const body = {
+    bio: `Line one\n${PAGE_PERSON}`,
+    tab: `\t${PAGE_PERSON}`,
+    phone: "\tTel. 030 123 45 67",
+    label: "Phone:\n+44 20 7946 0958",
+    path: `C:\\${PAGE_PERSON}`,
+    quoted: `"${PAGE_PERSON}"`,
+    card: "\n4111 1111 1111 1111",
+    kept: "Write to help@example.com\nThanks",
+  };
+  for (const space of [0, 2]) {
+    const quoted = JSON.stringify(body, null, space);
+    const out = maskPageText(`HTTP 200 application/json\n${quoted}`);
+    const parsed = JSON.parse(out.slice(out.indexOf("{"))) as Record<string, string>;
+    assert.deepEqual(parsed, {
+      bio: "Line one\n[email redacted]",
+      tab: "\t[email redacted]",
+      phone: "\tTel. [phone redacted]",
+      label: "Phone:\n[phone redacted]",
+      path: "C:\\[email redacted]",
+      quoted: '"[email redacted]"',
+      card: "\n[card number redacted]",
+      kept: "Write to help@example.com\nThanks",
+    });
+  }
+  // An address whose @ (or dot) a serializer wrote as an escape is masked; the contrast, an escaped @ of a reserved
+  // example address, is written back exactly as it came.
+  assert.equal(maskPageText(`{"e":"${local}\\u0040${domain}"}`), '{"e":"[email redacted]"}');
+  assert.equal(maskPageText(`{"e":"${local}@contoso-mail\\u002Enet"}`), '{"e":"[email redacted]"}');
+  assert.equal(maskPageText('{"e":"help\\u0040example.com"}'), '{"e":"help\\u0040example.com"}');
+  // A text that holds a character the mask reads an escaped newline as is masked between its escapes, still valid.
+  const holding = JSON.stringify({ a: `\u2028\n${PAGE_PERSON}` });
+  assert.deepEqual(JSON.parse(maskPageText(holding)), { a: "\u2028\n[email redacted]" });
+  // An escaped backslash is one escape, so the letter after it is text: `\\nina@…` is the address `nina@…`.
+  assert.equal(maskPageText(`\\\\n${PAGE_PERSON}`), "\\\\[email redacted]");
+});
+
+test("maskingHandler: whether a result is masked is asked before and after the call, and a thrown error is masked or thrown on", async () => {
+  const said = `Contact ${PAGE_PERSON}`;
+  const result = () => ({ content: [{ type: "text", text: said }], structuredContent: { who: said } });
+  const masked = { content: [{ type: "text", text: "Contact [email redacted]" }], structuredContent: { who: "Contact [email redacted]" } };
+  // [masked before the call, masked after it, masked result]: an attach opens a masking session, a close drops one.
+  const rows: Array<[boolean, boolean, boolean]> = [
+    [false, false, false],
+    [false, true, true],
+    [true, false, true],
+    [true, true, true],
+  ];
+  for (const [before, after, want] of rows) {
+    const answers = [before, after];
+    const handler = maskingHandler(
+      async (_args: { session?: string }) => result(),
+      () => answers.shift() ?? after,
+    );
+    assert.deepEqual(await handler({ session: "a" }), want ? masked : result(), `before ${before}, after ${after}`);
+  }
+  // The arguments and the SDK's extra reach the handler as they were sent.
+  const seen: unknown[] = [];
+  const passing = maskingHandler(
+    async (...args: unknown[]) => (seen.push(...args), result()),
+    () => true,
+  );
+  await passing({ ref: "e1" }, { signal: "s" });
+  assert.deepEqual(seen, [{ ref: "e1" }, { signal: "s" }]);
+  // Something that is not a result passes as it is.
+  assert.equal(
+    await maskingHandler(
+      async () => said,
+      () => true,
+    )(),
+    said,
+  );
+  // A thrown error: masked, it becomes the isError result the SDK would make, and the error object is not changed.
+  const err = new Error(`No row for ${PAGE_PERSON}`);
+  const throwing = () =>
+    maskingHandler(
+      async () => Promise.reject(err),
+      () => true,
+    );
+  assert.deepEqual(await throwing()(), { content: [{ type: "text", text: "No row for [email redacted]" }], isError: true });
+  assert.equal(err.message, `No row for ${PAGE_PERSON}`);
+  assert.deepEqual(
+    await maskingHandler(
+      async () => Promise.reject("plain " + PAGE_PERSON),
+      () => true,
+    )(),
+    {
+      content: [{ type: "text", text: "plain [email redacted]" }],
+      isError: true,
+    },
+  );
+  // The contrast: with masking off before and after, the same error is thrown on, unchanged.
+  await assert.rejects(
+    maskingHandler(
+      async () => Promise.reject(err),
+      () => false,
+    )(),
+    (e) => e === err,
+  );
+  // Off before the call and on after it (an attach that failed after opening its session) still masks the error.
+  const flips = [false, true];
+  assert.equal(
+    (
+      (await maskingHandler(
+        async () => Promise.reject(err),
+        () => flips.shift()!,
+      )()) as { isError: boolean }
+    ).isError,
+    true,
+  );
+});

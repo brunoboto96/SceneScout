@@ -408,6 +408,27 @@ test("a Windows table whose state name has a space still parses: the process is 
   ]);
 });
 
+test("a Windows row with a column after the process keeps its pid; a state with a space falls back to the last field", () => {
+  const rows = parseTcpTable(
+    [
+      "  TCP    127.0.0.1:1    127.0.0.1:2    ESTABLISHED     77     InHost",
+      "  TCP    127.0.0.1:3    0.0.0.0:0      LISTENING       88     Offloaded",
+      "  TCP    127.0.0.1:5    127.0.0.1:6    WARTEN ZEIT     0",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    rows.map((r) => [r.state, r.pid]),
+    [
+      ["ESTABLISHED", 77],
+      ["LISTEN", 88],
+      ["WARTEN ZEIT", 0],
+    ],
+  );
+  // ss with its process column still reads its state and addresses from the front.
+  const ss = parseTcpTable('ESTAB 0 0 127.0.0.1:60002 127.0.0.1:52494 users:(("node",pid=12,fd=3))');
+  assert.deepEqual(ss, [{ state: "ESTABLISHED", local: "127.0.0.1:60002", remote: "127.0.0.1:52494" }]);
+});
+
 test("reading the machine's sockets: the command per platform, and a failure that keeps what was read", async () => {
   const asked: string[] = [];
   const table = "  TCP    127.0.0.1:5    127.0.0.1:6    ESTABLISHED   77";
@@ -422,11 +443,15 @@ test("reading the machine's sockets: the command per platform, and a failure tha
           ? table
           : "tcp4 0 0 127.0.0.1.1 127.0.0.1.2 TIME_WAIT";
     };
-  assert.equal(await readMachineSockets("win32", runner(null)), "1 TCP sockets on this machine: ESTABLISHED 1; most held by chrome.exe (77): 1");
+  const owners = { owners: true };
+  assert.equal(await readMachineSockets("win32", runner(null), owners), "1 TCP sockets on this machine: ESTABLISHED 1; most held by chrome.exe (77): 1");
   assert.deepEqual(asked.splice(0), ["netstat -ano", "tasklist /FO CSV /NH"]);
+  // The line the engine puts in the report names no process and no pid, and does not ask for them.
+  assert.equal(await readMachineSockets("win32", runner(null)), "1 TCP sockets on this machine: ESTABLISHED 1");
+  assert.deepEqual(asked.splice(0), ["netstat -ano"]);
   // A process list that cannot be read leaves the table that was read, not an error in its place.
   assert.equal(
-    await readMachineSockets("win32", runner("tasklist")),
+    await readMachineSockets("win32", runner("tasklist"), owners),
     "1 TCP sockets on this machine: ESTABLISHED 1 (could not name their processes: tasklist failed)",
   );
   assert.equal(await readMachineSockets("win32", runner("netstat")), "(could not read the TCP table: netstat failed)");

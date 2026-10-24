@@ -10,7 +10,7 @@ SceneScout has no telemetry and no update check. The browser it drives talks to 
 
 | Path | What leaves | To whom | How to turn it off |
 |---|---|---|---|
-| **The agent's model** (an interactive run, over MCP) | What the `scout_*` tools return to the agent: the page's text and controls in each snapshot, unredacted; API response bodies `scout_request` reads (the first 2,000 characters, up to 8,000 when the agent asks for a part); a finding's picture, which is returned into the conversation by default (`evidence` `inline`); a picture of the page from `scout_screenshot`; and the cards' pictures when `scout_cards` is asked for them `inline` | The coding agent you use, which sends what it reads to its own model provider. SceneScout does not choose that provider | Pictures: `evidence` `file` or `off`, in an attach, `SCENESCOUT_EVIDENCE` or the [config file](Configuration-reference.md#the-config-file); the config's `egress` `none` holds back every picture. Page text cannot be held back by SceneScout: it is what the agent tests with. Use an agent whose model you are allowed to send the app's data to, or a local one |
+| **The agent's model** (an interactive run, over MCP) | What the `scout_*` tools return to the agent: the page's text and controls in each snapshot, unredacted unless the config's `redactPageText` is `pii` (below); API response bodies `scout_request` reads (the first 2,000 characters, up to 8,000 when the agent asks for a part); a finding's picture, which is returned into the conversation by default (`evidence` `inline`); a picture of the page from `scout_screenshot`; and the cards' pictures when `scout_cards` is asked for them `inline` | The coding agent you use, which sends what it reads to its own model provider. SceneScout does not choose that provider | Pictures: `evidence` `file` or `off`, in an attach, `SCENESCOUT_EVIDENCE` or the [config file](Configuration-reference.md#the-config-file); the config's `egress` `none` holds back every picture. Page text cannot be held back by SceneScout: it is what the agent tests with. The config's `redactPageText: "pii"` masks email addresses, phone numbers and card numbers in it ([below](#masking-personal-data-in-page-text)). Use an agent whose model you are allowed to send the app's data to, or a local one |
 | **The dedup judge** | Two findings at a time: their titles, categories, evidence and the page's path | Over MCP: the model provider whose key is in the server's environment, or `SCENESCOUT_DEDUP_BASE_URL`. In `scenescout ci`: the run's own model | Off by default over MCP (`SCENESCOUT_DEDUP=judge` turns it on, and an agent cannot). On by default in `ci`: `--dedup rule` turns it off. The config's `dedup: "rule"` turns it off everywhere |
 | **`scenescout ci`** | The run's conversation: snapshots, response bodies and tool results as text. No pictures: its model loop is text only. With OpenAI, each call is sent with `store: false`, so the provider keeps no conversation between calls | The Anthropic or OpenAI API, or the endpoint `--base-url` names (one that speaks the same API, such as a gateway or a local model on `127.0.0.1`) | Do not run `ci`; or set the config's `egress` to `none` |
 | **An allowlist header** (`SCENESCOUT_APP_HEADER`) | The header's name and value, on every request to the app's own origin, and on the preflight's request for its start page | The app under test, and whatever the operator's firewall in front of it reads it. Never another host, and not across a redirect | Leave `SCENESCOUT_APP_HEADER` unset (the default) ([Network requirements](Network-requirements.md#an-allowlist-header-for-a-firewall)) |
@@ -51,3 +51,32 @@ Each refusal names the file and the setting, and says what was not run. `ci` and
 - **The app under test.** The browser's requests to the site are the test. The write mode decides which of them go through.
 - **Downloads.** npm, and Playwright's download servers for a browser build, as in the table.
 - **What a workflow does with the files.** The actions' artifact and SARIF uploads, and the job summary, are steps of the workflow, turned off by its inputs. `egress` `none` stops `ci` itself, so a `ci` job has nothing to upload; a `check` job, which sends nothing to any model, still uploads its own report unless `upload-artifact` is `"false"`.
+
+## Masking personal data in page text
+
+A team that may send an app's pages to the agent's model, but not the personal data on them, sets `redactPageText` in the [config file](Configuration-reference.md#the-config-file):
+
+```json
+{ "redactPageText": "pii" }
+```
+
+With `pii`, everything the `scout_*` tools return to the agent passes through one mask on its way out: the snapshot's text and element names, page titles, API response bodies from `scout_request`, the network and console lines, error messages, and the text of findings and cards. Three kinds of personal data are replaced by a marker that names what was there:
+
+| On the page | What the agent reads |
+|---|---|
+| An email address (its @ written out or percent-encoded too) | `[email redacted]` |
+| A phone number written after a word for one (`Phone: +44 20 7946 0958`, `Tel. 030 123 45 67`) | `Phone: [phone redacted]` |
+| A card number a card network issues (its prefix and length) that passes the Luhn check | `[card number redacted]` |
+
+These are the detectors and the markers SceneScout already uses for what it stores and publishes, so a finding's title the agent copies from masked text is the title the store keeps, and the two are counted as one finding. The markers keep the page's structure: the agent still sees that a row has an address, a phone and a card, and where.
+
+`off`, the default and what no file means, returns the page as it is. Only the file sets it: no argument or variable names it, and a project's own file can turn it on but not off. One server that has sessions open on two projects masks every call while either project's file sets `pii`, since a result such as the session list can show both projects' pages. When it is on, the attach's `🔒 CONFIG` line, and the `Config:` line of `check`, `ci` and `scenescout policy explain`, say so. No preset sets it.
+
+What it does not do:
+
+- **It can hide a bug that is about the content.** An email shown on the wrong account, a phone number formatted wrongly, a card number shown in full where it should be masked, or one person's address on another person's page: the agent reads only the marker, so it cannot tell whose address it was or how it was written. The engine's own oracles (a page that contradicts the server, an echoed value, a secret in a page) read the page before it is masked, so they still find what they find; the agent's own judgement of the content does not. Leave it `off` when testing such a feature.
+- **It does not mask pictures.** A finding's picture, `scout_screenshot` and the cards' pictures show the page as it is, except the secret fields the engine paints over. Keep pictures out of the conversation with `evidence` `file` or `off`, or `egress` `none`.
+- **It masks what SceneScout returns, not what the agent reads elsewhere.** An agent that reads the app's database, its source, its logs or the page through another tool sends that to its model unmasked.
+- **It masks only these three kinds.** Names, postal addresses, dates of birth, account numbers and other identifiers pass as written, and a phone number with no word for a phone before it is not recognised (a bare `+44 20 7946 0958` reads the same as an amount or an id).
+- **A value the agent copies back is the marker.** An address in a link, or an option whose value is an address, cannot be followed or chosen by its text once masked, and a run plan's `text=` target or a saved flow's expected text written from masked text matches nothing on the page. The agent acts by element refs, which are not masked.
+- **Reserved example addresses stay** (`@example.com`, `.test`, `.invalid`, `localhost`), as they do in reports.
