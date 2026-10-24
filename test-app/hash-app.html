@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hash-routed app</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="hash-app-heading">Hash-routed app</h1>
+      <p data-testid="hash-app-route"></p>
+    </main>
+    <script>
+      // A single-page app whose router keeps its routes in the fragment: /hash-app.html#/reports. Its auth guard sends a
+      // signed-out visitor to the sign-in route in the fragment as well, so the path never changes and only the fragment
+      // says this is a sign-in page. Signed in (the "smoke-auth" flag a storage state sets), the page stays put.
+      //   ?to=<route>  where the guard sends a signed-out visitor (default "login"; "loginhelp" is the near miss: a route
+      //                that only starts like a sign-in route)
+      //   ?late=1      the guard fires 1.5 s after the route renders rather than at once, later than a navigation watches
+      var params = new URLSearchParams(location.search);
+      var to = params.get("to") || "login";
+      var delay = params.get("late") === "1" ? 1500 : 40;
+      var timer = null;
+      function render() {
+        var route = location.hash.replace(/^#/, "") || "/";
+        document.querySelector('[data-testid="hash-app-route"]').textContent = "Route: " + route;
+        if (timer) clearTimeout(timer);
+        if (route !== "/reports") return;
+        timer = setTimeout(function () {
+          try {
+            if (localStorage.getItem("smoke-auth") === "yes") return;
+          } catch (e) {
+            /* storage unavailable — treat as signed out */
+          }
+          location.replace(location.pathname + location.search + "#/" + to + "?next=%2Freports");
+        }, delay);
+      }
+      addEventListener("hashchange", render);
+      addEventListener("load", render);
+    </script>
+  </body>
+</html>

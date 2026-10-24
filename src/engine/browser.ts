@@ -38,7 +38,18 @@ import {
 } from "./claims.js";
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
-import { AuthLossTracker, lateSignInBounce, lateSignInVerdict, type WatchedCall } from "./authloss.js";
+import {
+  actionSignInCause,
+  AuthLossTracker,
+  isSignInPage,
+  lateSignInBounce,
+  lateSignInVerdict,
+  leftSignIn,
+  signInLogUrl,
+  signInPlace,
+  UNAUTHENTICATED_STATUSES,
+  type WatchedCall,
+} from "./authloss.js";
 import { captureClip, cutByViewport, type Box } from "./capture.js";
 import { maskedScreenshot } from "./secret-pixels.js";
 import { NEXT_FRAME_SCRIPT, NEXT_FRAME_WAIT_MS, STOP_ANIMATIONS_SCRIPT, steadyPicture, unsteadyNote, type PictureSettings } from "./baseline.js";
@@ -1035,6 +1046,15 @@ export class BrowserEngine {
     return authToRemember({ url: req.url(), baseUrl: this.baseUrl, headers: req.headers(), replay: this.replayRequests.has(req), frameUrl });
   }
 
+  /** When the app last answered requests as unauthenticated (authloss.ts actionSignInCause), with a sign-in held. */
+  private unauthenticatedAt: number[] = [];
+
+  private noteUnauthenticated(res: import("playwright").Response): void {
+    if (!this.watchesForBounce || !UNAUTHENTICATED_STATUSES.has(res.status()) || !this.isSameOrigin(res.url())) return;
+    this.unauthenticatedAt.push(Date.now());
+    if (this.unauthenticatedAt.length > 20) this.unauthenticatedAt.splice(0, this.unauthenticatedAt.length - 20);
+  }
+
   /** Note the status of the page's own authorised script request to its origin; a replay's is not the page's. */
   private noteAuthAnswer(res: import("playwright").Response): void {
     const req = res.request();
@@ -1856,6 +1876,7 @@ export class BrowserEngine {
     context.on("response", (res) => {
       cancels.answer(res.request());
       this.noteAuthAnswer(res);
+      this.noteUnauthenticated(res);
       this.noteDocumentLoad(res.request());
       this.watchResponse(res.request(), res.status());
       this.pageRequests.answered(res.request(), res.status(), Date.now(), this.guard.refused(res.request()));
@@ -2134,6 +2155,10 @@ export class BrowserEngine {
   /** Feed the page's navigations to the embed-move tracker and the foreign-frame record. Wired on every page we drive, like the dialog handler. */
   private wireEmbedMoves(page: Page): void {
     page.on("framenavigated", (frame) => {
+      // The first sign-in page the driven page reaches during a watched call (authloss.ts actionSignInCause).
+      if (page === this.page && frame === page.mainFrame() && this.watchesForBounce && this.signInReachedAt === 0 && isSignInPage(frame.url(), this.baseUrl)) {
+        this.signInReachedAt = Date.now();
+      }
       if (frame === page.mainFrame() && this.isSameOrigin(frame.url())) {
         this.lastAppUrls.set(page, frame.url());
         // A load whose response was noted has committed. A same-document move (pushState, a fragment) matches none
@@ -2283,6 +2308,21 @@ export class BrowserEngine {
     return this.watchesForBounce ? await this.stableUrl() : page.url();
   }
 
+  /** Where the page went off the app's origin before the origin fence took it back (afterAction), during this navigation. */
+  private fencedLanding: string | null = null;
+
+  /**
+   * Where a navigation landed, for its sign-in verdict. When the app sent it to a sign-in page on another origin (a
+   * single sign-on provider), the origin fence has taken the page back to the app by now, and the page it is back on
+   * is not where the navigation went: the provider's page is (authloss.ts isSignInPage).
+   */
+  private async navigationLanding(page: Page): Promise<string> {
+    const fenced = this.fencedLanding;
+    this.fencedLanding = null;
+    if (fenced !== null && this.watchesForBounce && isSignInPage(fenced, this.baseUrl)) return fenced;
+    return this.landedUrl(page);
+  }
+
   /** Set at attach: this session was given credentials, so a bounce to a login page is a verdict worth waiting for. */
   private watchesForBounce = false;
 
@@ -2292,6 +2332,11 @@ export class BrowserEngine {
   private signInDepth = 0;
   /** A bounce found before a call whose result carries no text (a capture, a replay): said by the next call's result. */
   private heldSignInNotice = "";
+  /** When the watched call in progress started, and when its page first reached a sign-in page (0: not yet). */
+  private callStartedAt = 0;
+  private signInReachedAt = 0;
+  /** Whether the watched call in progress is a back, which returns to a page the browser holds (authloss.ts leftSignIn). */
+  private callIsBack = false;
 
   /**
    * A tool call, watched for a sign-in page the page went to (authloss.ts lateSignInBounce): before it runs, against the
@@ -2301,8 +2346,8 @@ export class BrowserEngine {
    * is said and not counted; a call that judges its own landing has recorded it. What is found leads the result, or the
    * error when the call throws. Without a sign-in, the call runs as it is.
    */
-  private async watchSignIn(run: () => Promise<string>, call: WatchedCall): Promise<string> {
-    return this.watchedCall(run, call, (notice, out) => notice + out);
+  private async watchSignIn(run: () => Promise<string>, call: WatchedCall, back = false): Promise<string> {
+    return this.watchedCall(run, call, (notice, out) => notice + out, back);
   }
 
   /** watchSignIn for a call whose result is not text: what it finds is held for the next call's result. */
@@ -2313,12 +2358,15 @@ export class BrowserEngine {
     });
   }
 
-  private async watchedCall<T>(run: () => Promise<T>, call: WatchedCall, say: (notice: string, out: T) => T): Promise<T> {
+  private async watchedCall<T>(run: () => Promise<T>, call: WatchedCall, say: (notice: string, out: T) => T, back = false): Promise<T> {
     if (!this.watchesForBounce || this.signInDepth > 0) return run();
     this.signInDepth += 1;
+    this.callIsBack = back;
     try {
       const before = this.heldSignInNotice + (await this.lateSignIn(call, "before"));
       this.heldSignInNotice = "";
+      this.callStartedAt = Date.now();
+      this.signInReachedAt = 0;
       let out: T;
       try {
         out = await run();
@@ -2376,11 +2424,13 @@ export class BrowserEngine {
     this.seenUrl = now;
     const bounced = lateSignInBounce({ watching: this.watchesForBounce, seen, now, baseUrl: this.baseUrl });
     if (bounced === null) return "";
-    this.logAction({ action: "sign-in:late-redirect", target: bounced, url: now });
+    this.logAction({ action: "sign-in:late-redirect", target: bounced, url: signInLogUrl(now, this.baseUrl) });
     this.authLoss.clear();
     this.recordNavigationOutcome(bounced, now, true);
     const lead =
-      `⚠ SIGNED OUT AFTER LOAD: the page at ${normalizePath(bounced)} went to the sign-in page ${new URL(now).pathname} on its own ` +
+      (this.authLoss.signedOut
+        ? `Note: the page at ${normalizePath(bounced)} went to the sign-in page ${signInPlace(now, this.baseUrl)} `
+        : `⚠ SIGNED OUT AFTER LOAD: the page at ${normalizePath(bounced)} went to the sign-in page ${signInPlace(now, this.baseUrl)} on its own `) +
       (when === "before" ? "since the last call.\n" : "while this call ran.\n");
     try {
       return lead + (await this.answerLoss(page, ""));
@@ -2392,6 +2442,8 @@ export class BrowserEngine {
   /**
    * An action that ended on a sign-in page it did not start on: a sign-out, a "Log in" link, or a sign-in that ran out.
    * Said, never counted (authloss.ts lateSignInVerdict), and the address is noted so the next call does not count it.
+   * The session counts as signed out on purpose from then on (AuthLossTracker.signOut) until an action takes it off a
+   * sign-in page into the app again (authloss.ts leftSignIn), as signing in through the app's form does.
    */
   private ownSignInNote(): string {
     const page = this.page;
@@ -2400,12 +2452,39 @@ export class BrowserEngine {
     const seen = this.seenUrl;
     this.seenUrl = now;
     const from = lateSignInBounce({ watching: this.watchesForBounce, seen, now, baseUrl: this.baseUrl });
-    if (from === null) return "";
-    this.logAction({ action: "sign-in:action-landed", target: from, url: now });
+    if (from === null) {
+      if (this.authLoss.signedOut && !this.callIsBack && leftSignIn({ seen, now, baseUrl: this.baseUrl })) {
+        this.authLoss.signInAgain();
+        this.logAction({ action: "sign-in:action-left", target: signInLogUrl(seen, this.baseUrl), url: now });
+      }
+      return "";
+    }
+    this.logAction({ action: "sign-in:action-landed", target: from, url: signInLogUrl(now, this.baseUrl) });
+    const went =
+      `Note: this call went from ${normalizePath(from)} to the sign-in page ${signInPlace(now, this.baseUrl)}. An action can sign out or open sign-in on ` +
+      `purpose, so this is not counted as a lost sign-in and ${normalizePath(from)} is not marked`;
+    const cause = actionSignInCause({
+      callStartedAt: this.callStartedAt,
+      unauthenticatedAt: this.unauthenticatedAt,
+      signInAt: this.signInReachedAt,
+      back: this.callIsBack,
+    });
+    if (cause === "returned") {
+      // A back returned to a sign-in page the browser held: nobody signed out, so later bounces count as before.
+      return `${went}; if it was not meant to, the next navigation to a signed-in page shows whether the sign-in still holds.\n`;
+    }
+    if (cause === "ran-out") {
+      // The app refused the session's sign-in on the way there: not a sign-out, so later bounces count as before.
+      return (
+        `${went}. The app answered a request as unauthenticated during this call before it went there, so the sign-in may have run out: ` +
+        `the next navigation to a signed-in page shows whether it still holds.\n`
+      );
+    }
+    this.authLoss.signOut(normalizePath(from));
     return (
-      `Note: this call went from ${normalizePath(from)} to the sign-in page ${new URL(now).pathname}. An action can sign out or open sign-in on ` +
-      `purpose, so this is not counted as a lost sign-in and ${normalizePath(from)} is not marked; if it was not meant to, the next ` +
-      `navigation to a signed-in page shows whether the sign-in still holds.\n`
+      `${went}. Until the session signs in again (an action from a sign-in page into the app, or a page that bounced since ` +
+      `reached signed in), pages that send it to sign-in are not counted as a lost sign-in either, and a role session is not ` +
+      `signed back in; they are still not covered.\n`
     );
   }
 
@@ -3028,6 +3107,7 @@ export class BrowserEngine {
     let url = page.url();
     if (url !== "about:blank" && !this.isSameOrigin(url)) {
       // A click carried us off the app's origin.
+      this.fencedLanding = url;
       this.logAction({ action, target, url });
       this.logAction({ action: "origin-fence:bounced", target: url.slice(0, 200), url });
       const reload = await this.returnToAppPage(page);
@@ -4331,6 +4411,7 @@ export class BrowserEngine {
     // A notice describes ONE navigation. Clearing up front means a notice left
     // undelivered by a previous throw can never prepend itself to this result.
     this.authLoss.clear();
+    this.fencedLanding = null;
     // A page holding unsent input can ask to confirm leaving. Answered "stay",
     // the navigation is cancelled, which a browser reports as an aborted load
     // (or, in some engines, never reports at all), so the answer itself ends
@@ -4381,13 +4462,13 @@ export class BrowserEngine {
     try {
       settled = await this.afterAction("navigate", url);
     } catch (err) {
-      this.recordNavigationOutcome(url, await this.landedUrl(page));
+      this.recordNavigationOutcome(url, await this.navigationLanding(page));
       const notice = this.authLoss.take();
       if (!notice) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`${notice}${msg}`);
     }
-    this.recordNavigationOutcome(url, await this.landedUrl(page));
+    this.recordNavigationOutcome(url, await this.navigationLanding(page));
     // Only after a navigation that finished: one that threw leaves its verdict standing.
     return this.answerLoss(page, settled);
   }
@@ -4409,15 +4490,16 @@ export class BrowserEngine {
     }
     const returnUrl = plan.returnTo;
     let recovered: string;
+    this.fencedLanding = null;
     try {
       await this.withinLimit("nav", () => this.gotoSettlingFailure(page, returnUrl, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
       recovered = await this.afterAction("navigate", returnUrl);
     } catch (err) {
-      this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
+      this.recordNavigationOutcome(returnUrl, await this.navigationLanding(page));
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`${this.authLoss.take()}${msg}`);
     }
-    this.recordNavigationOutcome(returnUrl, await this.landedUrl(page));
+    this.recordNavigationOutcome(returnUrl, await this.navigationLanding(page));
     return this.authLoss.take() + recovered;
   }
 
@@ -4970,7 +5052,7 @@ export class BrowserEngine {
 
   /** `leave` answers a leave confirmation the page raises (policy.ts dialogResponse); undefined lets the mode decide. */
   async goBack(leave?: boolean): Promise<string> {
-    return this.watchSignIn(() => this.goBackUnwatched(leave), "moves");
+    return this.watchSignIn(() => this.goBackUnwatched(leave), "moves", true);
   }
 
   /** goBack, unwatched: watchSignIn runs it. */
@@ -6425,7 +6507,7 @@ export class BrowserEngine {
     // A sign-in page pictured as the page's baseline would be written by an update and compared from then on.
     const landed = await this.landedUrl(page);
     if (this.authLoss.isLoginRedirect(pathOnApp, landed, this.baseUrl)) {
-      throw new Error(`the page sent the browser to sign-in (${new URL(landed).pathname}): the session is missing or expired`);
+      throw new Error(`the page sent the browser to sign-in (${signInPlace(landed, this.baseUrl)}): the session is missing or expired`);
     }
     // Text drawn in a fallback font, then again when the web font arrives, would differ from one run to the next.
     const fonts = page.waitForFunction("!document.fonts || document.fonts.status === 'loaded'", null, { timeout: this.limits.actionMs });

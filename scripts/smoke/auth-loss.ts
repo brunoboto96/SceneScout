@@ -9,7 +9,7 @@ import { check, type SmokeContext } from "./harness.ts";
 
 export const title = "auth loss";
 
-export async function run({ baseUrl, projectDir }: SmokeContext): Promise<void> {
+export async function run({ baseUrl, foreignBaseUrl, projectDir }: SmokeContext): Promise<void> {
   // ---- Auth loss, driven through a real browser -------------------------
   // Everything below was previously only reachable by hand-writing outcome
   // strings into the store, which cannot pin the DETECTION half: the login
@@ -69,6 +69,8 @@ export async function run({ baseUrl, projectDir }: SmokeContext): Promise<void> 
   }
   try {
     await attachVerdictWaitsForLateSignIn(baseUrl, authProject, deadState);
+    await hashRoutedSignIn(baseUrl, authProject, deadState);
+    await signInOnAnotherOrigin(baseUrl, foreignBaseUrl, authProject, deadState);
   } finally {
     fs.rmSync(authProject, { recursive: true, force: true });
   }
@@ -257,12 +259,204 @@ async function signOutOnPurpose(baseUrl: string, authProject: string, liveState:
     const out = await engine.click(ref);
     check("the click is told it went to the sign-in page", /went from \/signout-link\.html to the sign-in page \/login/.test(out), out);
     check("...and it is not reported as a lost sign-in", !/SIGNED OUT|NOT counted as covered|AUTH LOST/.test(out), out);
-    const nav1 = await engine.navigate(`${baseUrl}/gated.html`);
-    const nav2 = await engine.navigate(`${baseUrl}/gated.html`);
-    check("two bounces after the sign-out are not yet the verdict", !nav1.includes("AUTH LOST") && !nav2.includes("AUTH LOST"), nav2);
-    const nav3 = await engine.navigate(`${baseUrl}/gated.html`);
-    check("...and the third is", nav3.includes("SESSION AUTH LOST"), nav3);
+    // Signed out on purpose, the gated pages it then cannot reach are the sign-out's doing: each is still not covered,
+    // but none counts toward SESSION AUTH LOST, however many there are. (The verdict on the same three bounces without
+    // a sign-out is the first check of this suite.)
+    const navs: string[] = [];
+    for (let i = 0; i < 4; i++) navs.push(await engine.navigate(`${baseUrl}/gated.html`));
+    check(
+      "the gated pages after the sign-out are each reported as not covered",
+      navs.every((n) => n.includes("NOT counted as covered")),
+      navs.join("\n---\n"),
+    );
+    check(
+      "...and say the session signed out on purpose",
+      navs.every((n) => n.includes("signed out on purpose")),
+      navs.join("\n---\n"),
+    );
+    check(
+      "...and none of them, the third included, is SESSION AUTH LOST",
+      navs.every((n) => !n.includes("AUTH LOST")),
+      navs.join("\n---\n"),
+    );
   } finally {
     await engine.close().catch(() => {});
   }
+  await signInRanOutOnClick(baseUrl, authProject, liveState);
+}
+
+/**
+ * The contrast to signOutOnPurpose: a click that lands on the sign-in page because the app answered its request 401
+ * (expired-click.html) is a sign-in that ran out, not a sign-out. The click is still only told, but the gated pages
+ * after it count as before, and the third is the verdict.
+ */
+async function signInRanOutOnClick(baseUrl: string, authProject: string, liveState: string): Promise<void> {
+  console.log("auth loss: a click sent to sign-in after a 401 is a sign-in that ran out, not a sign-out");
+  const engine = new BrowserEngine();
+  try {
+    await engine.attach({ url: `${baseUrl}/expired-click.html`, projectDir: authProject, mode: "read-only", storageStatePath: liveState });
+    const snap = await engine.snapshot();
+    const ref = /(e\d+) button "Load reports"/.exec(snap)?.[1];
+    check("the reports page offers its button", ref !== undefined, snap);
+    if (!ref) return;
+    const out = await engine.click(ref);
+    check("the click is told it went to the sign-in page", /went from \/expired-click\.html to the sign-in page \/login/.test(out), out);
+    check(
+      "...and that the sign-in may have run out, not that the session signed out",
+      out.includes("may have run out") && !out.includes("Until the session signs in again"),
+      out,
+    );
+    const navs: string[] = [];
+    for (let i = 0; i < 3; i++) navs.push(await engine.navigate(`${baseUrl}/gated.html`));
+    check(
+      "the gated pages after it are not taken for a sign-out",
+      navs.every((n) => !n.includes("signed out on purpose")),
+      navs.join("\n---\n"),
+    );
+    check("...and the third is SESSION AUTH LOST", !navs[1].includes("AUTH LOST") && navs[2].includes("SESSION AUTH LOST"), navs.join("\n---\n"));
+  } finally {
+    await engine.close().catch(() => {});
+  }
+}
+
+/**
+ * A hash-routed app (hash-app.html) keeps its routes in the fragment, so its guard sends a signed-out visitor to
+ * /hash-app.html#/login: the path does not change, and only the fragment says this is a sign-in page. Contrastive pairs:
+ * the same route with a sign-in that works stays put, and a guard that sends the visitor to #/loginhelp (a route that
+ * only starts like a sign-in route) is an ordinary redirect. Both the navigation's own check and a later call's are held.
+ */
+async function hashRoutedSignIn(baseUrl: string, authProject: string, deadState: string): Promise<void> {
+  console.log("auth loss: a hash-routed app's sign-in route (#/login) is a sign-in page");
+  const liveState = path.join(authProject, "signed-in-fixture.json");
+  const withEngine = async <T>(state: string, run: (engine: BrowserEngine) => Promise<T>): Promise<T> => {
+    const engine = new BrowserEngine();
+    try {
+      await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: state });
+      return await run(engine);
+    } finally {
+      await engine.close().catch(() => {});
+    }
+  };
+  const stale = await withEngine(deadState, (engine) => engine.navigate(`${baseUrl}/hash-app.html#/reports`));
+  check("a navigation to a hash route that the guard sends to #/login is a bounce", stale.includes("NOT counted as covered"), stale);
+  const fresh = await withEngine(liveState, (engine) => engine.navigate(`${baseUrl}/hash-app.html#/reports`));
+  check("...while the same route signed in stays put", !/REDIRECTED|NOT counted/.test(fresh), fresh);
+  const nearMiss = await withEngine(deadState, (engine) => engine.navigate(`${baseUrl}/hash-app.html?to=loginhelp#/reports`));
+  check(
+    "...and a guard that sends it to #/loginhelp is an ordinary redirect, not a sign-in page",
+    nearMiss.includes("REDIRECTED") && !nearMiss.includes("NOT counted as covered"),
+    nearMiss,
+  );
+  const thrice = await withEngine(deadState, async (engine) => {
+    const out: string[] = [];
+    for (let i = 0; i < 3; i++) out.push(await engine.navigate(`${baseUrl}/hash-app.html#/reports`));
+    return out;
+  });
+  check("three hash-route bounces in a row raise SESSION AUTH LOST", thrice[2].includes("SESSION AUTH LOST"), thrice.join("\n---\n"));
+  const later = async (state: string): Promise<{ nav: string; snap: string }> =>
+    withEngine(state, async (engine) => {
+      const nav = await engine.navigate(`${baseUrl}/hash-app.html?late=1#/reports`);
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      return { nav, snap: await engine.snapshot(true) };
+    });
+  const lateStale = await later(deadState);
+  check("a hash-route guard that fires after the navigation returns is not seen by the navigation", !lateStale.nav.includes("REDIRECTED"), lateStale.nav);
+  check(
+    "...and the next call reports it, naming the sign-in route in the fragment",
+    lateStale.snap.includes("SIGNED OUT AFTER LOAD") && lateStale.snap.includes("/hash-app.html#/login"),
+    lateStale.snap,
+  );
+  const lateFresh = await later(liveState);
+  check("...while signed in, the next call says nothing of sign-in", !/SIGNED OUT|REDIRECTED/.test(lateFresh.snap), lateFresh.snap);
+}
+
+/**
+ * An app that signs in through a single sign-on provider on another origin (sso-gated.html, the provider being the
+ * harness's second origin) sends a signed-out visitor to the provider's authorize endpoint 1.5 s after load. The next
+ * call sees the page has gone to a sign-in page on another origin. Contrastive pairs: the same page sending the visitor
+ * to an ordinary page of that other site is not a sign-in, and the same page signed in stays put.
+ */
+async function signInOnAnotherOrigin(baseUrl: string, foreignBaseUrl: string, authProject: string, deadState: string): Promise<void> {
+  console.log("auth loss: a page that goes to a sign-in provider on another origin is a bounce");
+  const liveState = path.join(authProject, "signed-in-fixture.json");
+  const visit = async (state: string, to: string): Promise<{ nav: string; snap: string; unvisited: string[] }> => {
+    const engine = new BrowserEngine();
+    try {
+      await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: state });
+      engine.knownRoutes = ["/sso-gated.html"];
+      const nav = await engine.navigate(`${baseUrl}/sso-gated.html?idp=${encodeURIComponent(foreignBaseUrl)}&to=${encodeURIComponent(to)}`);
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const snap = await engine.snapshot(true);
+      return { nav, snap, unvisited: engine.unvisitedKnownRoutes() };
+    } finally {
+      await engine.close().catch(() => {});
+    }
+  };
+  const authorize = "/sso-provider/authorize?client_id=smoke-app&state=smoke-state-value&return=x";
+  const stale = await visit(deadState, authorize);
+  check("the navigation returns before the page leaves for the provider", !stale.nav.includes("REDIRECTED"), stale.nav);
+  check(
+    "the next call reports the page went to the provider's sign-in on its own, naming its origin and path",
+    stale.snap.includes("SIGNED OUT AFTER LOAD") && stale.snap.includes(`${foreignBaseUrl}/sso-provider/authorize`),
+    stale.snap,
+  );
+  const notice = stale.snap.split("\n").find((l) => l.includes("SIGNED OUT AFTER LOAD")) ?? "";
+  check("...without the provider's query in the notice (it carries the sign-in's state)", notice !== "" && !notice.includes("smoke-state-value"), stale.snap);
+  check("...and the route it was on is not covered", stale.unvisited.includes("/sso-gated.html"), JSON.stringify(stale.unvisited));
+  const ordinary = await visit(deadState, "/covered.html");
+  check(
+    "the same page going to an ordinary page of another site is not a sign-in, and nothing is said",
+    !/SIGNED OUT|NOT counted|AUTH LOST/.test(ordinary.snap),
+    ordinary.snap,
+  );
+  const noRequest = await visit(deadState, "/sso-provider/authorize?state=smoke-state-value&return=x");
+  check(
+    "...nor is the same endpoint of another site asked no sign-in (a payment step's /authorize)",
+    !/SIGNED OUT|NOT counted|AUTH LOST/.test(noRequest.snap),
+    noRequest.snap,
+  );
+  const fresh = await visit(liveState, authorize);
+  check("...and signed in, the page stays and nothing is said", !/SIGNED OUT|NOT counted|AUTH LOST/.test(fresh.snap), fresh.snap);
+
+  // The same provider reached at once (?soon=1), inside what the navigation watches: the origin fence takes the page
+  // back to the app, and the navigation is judged by where it went, not the app page it was taken back to.
+  // A project of its own: the visits above, in the same project and role, already count /sso-gated.html as covered.
+  const navigations = async (state: string, to: string): Promise<{ navs: string[]; unvisited: string[] }> => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "ft-authsso-"));
+    const engine = new BrowserEngine();
+    try {
+      const copy = path.join(project, path.basename(state));
+      fs.copyFileSync(state, copy);
+      await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: project, mode: "read-only", storageStatePath: copy });
+      engine.knownRoutes = ["/sso-gated.html"];
+      const navs: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        navs.push(await engine.navigate(`${baseUrl}/sso-gated.html?soon=1&idp=${encodeURIComponent(foreignBaseUrl)}&to=${encodeURIComponent(to)}`));
+      }
+      return { navs, unvisited: engine.unvisitedKnownRoutes() };
+    } finally {
+      await engine.close().catch(() => {});
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  };
+  const soon = await navigations(deadState, authorize);
+  check(
+    "a navigation the app sends straight to the provider's sign-in is a bounce, though the fence took the page back",
+    soon.navs.every((n) => n.includes("NOT counted as covered")),
+    soon.navs.join("\n---\n"),
+  );
+  check("...the third in a row raises SESSION AUTH LOST", soon.navs[2].includes("SESSION AUTH LOST"), soon.navs[2]);
+  check("...and the route is not covered", soon.unvisited.includes("/sso-gated.html"), JSON.stringify(soon.unvisited));
+  const soonOrdinary = await navigations(deadState, "/covered.html");
+  check(
+    "the same navigation sent straight to an ordinary page of another site is no bounce",
+    soonOrdinary.navs.every((n) => !/NOT counted|AUTH LOST/.test(n)),
+    soonOrdinary.navs.join("\n---\n"),
+  );
+  const soonFresh = await navigations(liveState, authorize);
+  check(
+    "...and signed in, the navigation reaches the page",
+    soonFresh.navs.every((n) => !/REDIRECTED|NOT counted/.test(n)),
+    soonFresh.navs.join("\n---\n"),
+  );
 }
