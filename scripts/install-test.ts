@@ -2477,8 +2477,10 @@ test("`scenescout config explain`: exit 0 with a line per key, exit 2 with one l
   const run = (args: string[], files: Record<string, string> = {}, env: Record<string, string | undefined> = {}) => {
     const out: string[] = [];
     const err: string[] = [];
-    const reader = { exists: (f: string) => f in files, read: (f: string) => files[f], realpath: (f: string) => f };
-    const code = runConfigCommand(args, { env, launchDir: "/launch", reader, out: (l) => out.push(l), err: (l) => err.push(l) });
+    // Keyed by resolved path, so the stand-in files are found however the command joins its paths on this platform.
+    const byPath = new Map(Object.entries(files).map(([f, text]) => [path.resolve(f), text]));
+    const reader = { exists: (f: string) => byPath.has(path.resolve(f)), read: (f: string) => byPath.get(path.resolve(f)), realpath: (f: string) => f };
+    const code = runConfigCommand(args, { env, launchDir: path.resolve("/launch"), reader, out: (l) => out.push(l), err: (l) => err.push(l) });
     return { code, out: out.join("\n"), err: err.join("\n") };
   };
   const none = run(["explain"]);
