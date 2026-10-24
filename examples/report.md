@@ -368,11 +368,11 @@ Read from HAR-12.md.
 
 ## Page quality scores (worst first)
 
-| Route | Overall | A11y | Craft | Consistency | Task clarity | Audited |
-|---|---|---|---|---|---|---|
-| `/orders-new.html` | **91** | 88 | 100 | 94 | 100 | (run date) |
-| `/` | **97** | 100 | 100 | 94 | 100 | (run date) |
-| `/order.html` | **97** | 100 | 100 | 94 | 100 | (run date) |
+| Route | Overall | A11y | Craft | Consistency | Task clarity | Why | Audited |
+|---|---|---|---|---|---|---|---|
+| `/orders-new.html` | **91** | 88 | 100 | 94 | 100 | -3 contrast failures · -3 paddings off the 4px grid | (run date) |
+| `/` | **97** | 100 | 100 | 94 | 100 | -3 paddings off the 4px grid | (run date) |
+| `/order.html` | **97** | 100 | 100 | 94 | 100 | -3 paddings off the 4px grid | (run date) |
 
 ## Gap ledger — what was NOT tested
 

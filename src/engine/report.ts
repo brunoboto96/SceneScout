@@ -14,6 +14,7 @@ import {
 } from "./memory.js";
 import type { OracleViolation } from "./oracles.js";
 import { sayVerification } from "./verify.js";
+import { formatDeduction, formatSiteConsistency, siteConsistency, siteScore } from "./design.js";
 import { describePicture, readFindingPicture } from "./capture.js";
 import type { WriteMode } from "./policy.js";
 import { feedForSession } from "./live.js";
@@ -918,14 +919,24 @@ export function generateReport(
   return { markdown, path: outPath, summary: summaryLines.join("\n"), ...(htmlWritten ? { html: htmlPath } : {}) };
 }
 
-/** The page quality scores, worst first, with any not re-measured this session marked stale. */
+/** Deductions the score table names in its Why column. */
+const WHY_SHOWN = 2;
+
+/** The page quality scores, worst first, with any not re-measured this session marked stale, and the pages compared with each other. */
 function pageScoreSection(lines: string[], memory: MemoryStore): Array<[string, PageScore]> {
   // ---- Page quality scores, worst first — the cross-page comparator. ----
   // Scores persist across runs, so a table sorted purely by number ranks
   // yesterday's un-fixed measurement above today's re-audit and reports a page
   // as "worst" when it simply wasn't re-measured. Mark anything not refreshed
   // this session so the ranking is read with its age attached.
-  const scores = Object.entries(memory.pageScores).sort((a, b) => a[1].overall - b[1].overall);
+  // Once enough pages carry their design-system values, each is also charged for
+  // a value no other page uses (design.ts siteConsistency). That depends on which
+  // pages were audited, so it is worked out here, when the report is read, and the
+  // page's own score is kept as it was measured.
+  const site = siteConsistency(memory.pageScores);
+  const scores: Array<[string, PageScore]> = Object.entries(memory.pageScores)
+    .map(([route, sc]): [string, PageScore] => [route, site && sc.system ? { ...sc, ...siteScore(sc, site, route) } : sc])
+    .sort((a, b) => a[1].overall - b[1].overall);
   const isFresh = (sc: PageScore): boolean => sc.at >= memory.sessionStart;
   if (scores.length > 0) {
     const staleCount = scores.filter(([, sc]) => !isFresh(sc)).length;
@@ -937,12 +948,34 @@ function pageScoreSection(lines: string[], memory: MemoryStore): Array<[string, 
       );
       lines.push(``);
     }
-    lines.push(`| Route | Overall | A11y | Craft | Consistency | Task clarity | Audited |`);
-    lines.push(`|---|---|---|---|---|---|---|`);
+    if (site) {
+      lines.push(
+        `Scored against the other ${site.pages - 1} audited pages too: a button height, radius, header, tab style or gray that only one page uses costs that page points. Where that changed a score, the page's own is in brackets.`,
+      );
+      lines.push(``);
+    }
+    lines.push(`| Route | Overall | A11y | Craft | Consistency | Task clarity | Why | Audited |`);
+    lines.push(`|---|---|---|---|---|---|---|---|`);
     for (const [route, sc] of scores.slice(0, 15)) {
       const age = isFresh(sc) ? sc.at.slice(0, 10) : `${sc.at.slice(0, 10)} ⏳ stale`;
-      lines.push(`| \`${route}\` | **${sc.overall}** | ${sc.a11y} | ${sc.craft} | ${sc.consistency} | ${sc.clarity} | ${age} |`);
+      const alone = memory.pageScores[route].overall;
+      const overall = alone === sc.overall ? `**${sc.overall}**` : `**${sc.overall}** (${alone})`;
+      // Older scores carry no deductions; their Why is left blank rather than claiming there were none.
+      const why = sc.deductions ? (sc.deductions.length === 0 ? "no deductions" : sc.deductions.slice(0, WHY_SHOWN).map(formatDeduction).join(" · ")) : "";
+      lines.push(
+        `| ${escapeTableCell(codeSpan(route))} | ${overall} | ${sc.a11y} | ${sc.craft} | ${sc.consistency} | ${sc.clarity} | ${escapeTableCell(why)} | ${age} |`,
+      );
     }
+    lines.push(``);
+  }
+  if (site) {
+    lines.push(`## Design consistency across pages`);
+    lines.push(``);
+    lines.push(
+      `The design-system values each audited page uses, set side by side across ${site.pages} pages. → marks a property with a dominant value and a page that alone uses another.`,
+    );
+    lines.push(``);
+    for (const l of formatSiteConsistency(site, codeSpan)) lines.push(`- ${l}`);
     lines.push(``);
   }
   return scores;

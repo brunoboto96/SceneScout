@@ -525,6 +525,19 @@ export interface PageScore {
   clarity: number;
   /** What the points were lost to, largest first (design.ts ScoreDeduction); absent on a score an older engine kept. */
   deductions?: Array<{ dimension: string; label: string; count: number; points: number }>;
+  /**
+   * The design-system values the page uses (design.ts DesignSystemSample), which
+   * the report sets beside the other pages'; absent on a score an older engine kept.
+   */
+  system?: {
+    buttonHeights: number[];
+    buttonRadii: string[];
+    headers: string[];
+    tabs: string[];
+    grays: string[];
+    fontSizes: number[];
+    spacing: number[];
+  };
   at: string;
   url: string;
 }
