@@ -750,8 +750,8 @@ export function registerSessionTools(): void {
       inputSchema: {
         name: z.string().max(40).optional().describe("Session to make the default; omit to list sessions"),
         // Every other session-aware tool spells this `session`. Accepting both
-        // costs nothing and removes a guaranteed first-try rejection, since all
-        // schemas are additionalProperties:false and reject the near-miss hard.
+        // costs nothing, and an unknown argument is dropped rather than refused,
+        // so without the alias the near-miss would silently list sessions instead.
         session: z.string().max(40).optional().describe("Alias for `name`."),
         paceMs: z
           .number()

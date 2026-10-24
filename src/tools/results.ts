@@ -308,8 +308,8 @@ export function registerResultTools(): void {
       inputSchema: {
         findingId: z.string().optional().describe("Finding id, e.g. a1b2c3d4e5"),
         // scout_finding prints "(id a1b2c3d4e5)" and the report renders "**Id:**",
-        // so `id` is the name a caller reaches for first — and every schema here
-        // is additionalProperties:false, so the near-miss was a hard rejection.
+        // so `id` is the name a caller reaches for first. An unknown argument is
+        // dropped, not refused, so without this alias the near-miss would arrive as no id at all.
         id: z.string().optional().describe("Alias for `findingId`."),
         session: sessionParam,
       },
