@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area (single sign-on)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="sso-gated-heading">Gated area</h1>
+      <p>Reports for signed-in members.</p>
+    </main>
+    <script>
+      // An app that signs in through a single sign-on provider on another origin: 1.5 s after load, its token check
+      // sends a signed-out visitor to the provider (later than a navigation watches the address, so only a later call
+      // can see it). Signed in (the "smoke-auth" flag a storage state sets), the page stays put.
+      //   ?idp=<origin>  the provider's origin (the harness's second origin)
+      //   ?to=<path>     where on it: the provider's authorize endpoint, or (the contrast) an ordinary page of that site
+      //   ?soon=1        the token check answers at once (40 ms after load), inside what a navigation watches
+      addEventListener("load", function () {
+        setTimeout(function () {
+          try {
+            if (localStorage.getItem("smoke-auth") === "yes") return;
+          } catch (e) {
+            /* storage unavailable — treat as signed out */
+          }
+          var params = new URLSearchParams(location.search);
+          location.replace(params.get("idp") + params.get("to"));
+        }, new URLSearchParams(location.search).get("soon") === "1" ? 40 : 1500);
+      });
+    </script>
+  </body>
+</html>

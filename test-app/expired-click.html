@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Reports (sign-in ran out)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="expired-click-heading">Reports</h1>
+      <!--
+        The contrast to signout-link.html: the same move to the sign-in page, made by an action, but because the sign-in
+        ran out. The button asks the app's API for the reports; the API answers 401, and the page, as many apps do,
+        drops its sign-in (the "smoke-auth" flag a storage state sets) and goes to the sign-in page.
+      -->
+      <button data-testid="expired-click-load" type="button">Load reports</button>
+    </main>
+    <script>
+      document.querySelector('[data-testid="expired-click-load"]').addEventListener("click", function () {
+        fetch("/api/expired-session").then(function (res) {
+          if (res.status !== 401) return;
+          localStorage.removeItem("smoke-auth");
+          location.assign("/login");
+        });
+      });
+    </script>
+  </body>
+</html>

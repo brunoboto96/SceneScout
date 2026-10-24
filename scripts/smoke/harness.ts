@@ -1139,6 +1139,13 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end(JSON.stringify({ access_token: rotated.access }));
       return;
     }
+    // An API that answers every request as unauthenticated, as an app's does once the session's sign-in has run out
+    // (expired-click.html).
+    if (urlPath === "/api/expired-session") {
+      res.writeHead(401, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
+      return;
+    }
     // Extensionless /login, because the engine's auth heuristic matches a path
     // SEGMENT — "/login.html" is not a login route and would not exercise it.
     // `?slowMs=` holds the answer back (at most 5 s), as a loaded sign-in service does (gated-slow-login.html).

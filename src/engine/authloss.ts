@@ -14,6 +14,65 @@
 /** Paths that look like a login/auth screen — the landing place of a dead session. */
 export const LOGIN_ROUTE_RE = /\/(login|signin|sign-in|auth)(\/|$)/;
 
+/**
+ * Paths an identity provider on another origin signs in at: the app's own shapes above, plus the common single sign-on
+ * endpoints (`/authorize`, `/oauth2/…`, `/saml2/…`, `/sso/…`, `/adfs/…`, `/openid-connect/…`). Whole segments only, as
+ * above. Judged only on another origin: on the app's own, `/authorize` or `/sso` can be an ordinary page of the app.
+ */
+export const IDP_ROUTE_RE = /\/(login|signin|sign-in|auth|authorize|oauth|oauth2|saml|saml2|sso|adfs|openid-connect)(\/|$)/;
+
+/**
+ * The route a hash router keeps in the address's fragment (`#/login`, `#!/login?next=…` gives `/login`), or null for a
+ * fragment that is not a route (an in-page anchor such as `#login`, or none).
+ */
+export function hashRoute(hash: string): string | null {
+  const body = hash.startsWith("#!") ? hash.slice(2) : hash.startsWith("#") ? hash.slice(1) : "";
+  if (!body.startsWith("/")) return null;
+  const q = body.indexOf("?");
+  return q === -1 ? body : body.slice(0, q);
+}
+
+/**
+ * Whether `url` is a sign-in page. On the app's own origin (`baseUrl`'s, or any when it is not given) its path, or the
+ * route its fragment holds (a hash router's `/#/login`), has a sign-in segment (LOGIN_ROUTE_RE). On another origin, it
+ * is an identity provider's sign-in, so the provider shapes count too (IDP_ROUTE_RE). Only http and https pages are.
+ */
+export function isSignInPage(url: string | URL, baseUrl = ""): boolean {
+  let u: URL;
+  try {
+    u = typeof url === "string" ? new URL(url) : url;
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  let own = true;
+  if (baseUrl) {
+    try {
+      own = new URL(baseUrl).origin === u.origin;
+    } catch {
+      own = true;
+    }
+  }
+  const rule = own ? LOGIN_ROUTE_RE : IDP_ROUTE_RE;
+  const route = hashRoute(u.hash);
+  return rule.test(u.pathname) || (route !== null && rule.test(route));
+}
+
+/**
+ * Where a sign-in page is, for a notice: on the app's origin its path (with the fragment's route, for a hash router),
+ * on another origin that origin and path. Never the query, which on a provider's page carries the sign-in's state.
+ */
+export function signInPlace(url: string, baseUrl: string): string {
+  try {
+    const u = new URL(url);
+    const route = hashRoute(u.hash);
+    const here = route === null ? u.pathname : `${u.pathname}#${route}`;
+    return new URL(baseUrl).origin === u.origin ? here : `${u.origin}${here}`;
+  } catch {
+    return url;
+  }
+}
+
 /** Consecutive login bounces before we stop assuming it is a permission wall. */
 export const AUTH_LOSS_STREAK = 3;
 
@@ -41,14 +100,20 @@ export function shouldReattach(opts: { streak: number; signIn: SignInKind; alrea
  * token check that answers after a second or two). The session then reads the
  * sign-in page as if it were still on the route it asked for. So, while a
  * session holds a sign-in (`watching`), every call compares the address it last
- * saw (`seen`) with the address now (`now`): on a sign-in page now, on a page
- * that was not one before, on the app's own origin both times, is a bounce of
- * the page it was on. Returns that page's address, or null.
+ * saw (`seen`) with the address now (`now`): on a sign-in page now (isSignInPage,
+ * a hash router's `/#/login` included), from a page of the app that was not one,
+ * is a bounce of the page it was on. Returns that page's address, or null.
+ *
+ * The sign-in page may be on another origin: an app that signs in through a
+ * single sign-on provider sends a signed-out visitor to the provider's host.
+ * There only an address shaped like a sign-in or a provider's endpoint counts
+ * (IDP_ROUTE_RE), so a page that moved to an ordinary page of another site is
+ * not a bounce.
  *
  * Without a sign-in there is nothing to lose and nothing is judged. A session
  * that was already on a sign-in page (it asked for one, or a bounce was
- * recorded) is not judged again, and neither is a page outside the app (the
- * origin fence answers that) or about:blank.
+ * recorded), or on a page outside the app, is not judged again, and neither is
+ * about:blank.
  */
 export function lateSignInBounce(opts: { watching: boolean; seen: string; now: string; baseUrl: string }): string | null {
   const { watching, seen, now, baseUrl } = opts;
@@ -63,9 +128,44 @@ export function lateSignInBounce(opts: { watching: boolean; seen: string; now: s
   } catch {
     return null;
   }
-  if (seenUrl.origin !== origin || nowUrl.origin !== origin) return null;
-  if (!LOGIN_ROUTE_RE.test(nowUrl.pathname) || LOGIN_ROUTE_RE.test(seenUrl.pathname)) return null;
+  if (seenUrl.origin !== origin) return null;
+  if (!isSignInPage(nowUrl, baseUrl) || isSignInPage(seenUrl, baseUrl)) return null;
   return seen;
+}
+
+/** HTTP statuses an app answers a request with when the session's sign-in is missing or has run out. */
+export const UNAUTHENTICATED_STATUSES: ReadonlySet<number> = new Set([401, 419, 440]);
+
+/**
+ * Why an action of the session's own ended on a sign-in page: the tester signed out (or opened sign-in) on purpose, or
+ * the sign-in had run out and the app sent the session to sign-in when the action used it. Told apart by the app's
+ * answers: a request answered as unauthenticated (UNAUTHENTICATED_STATUSES) during the call (`unauthenticatedAt`, after
+ * `callStartedAt`) and before the page reached the sign-in page (`signInAt`, 0 when not seen) means it ran out. A
+ * sign-out's own requests succeed; the sign-in page asking the app whether anyone is signed in, after it has loaded,
+ * is answered 401 and does not count.
+ */
+export function actionSignInCause(opts: { callStartedAt: number; unauthenticatedAt: readonly number[]; signInAt: number }): "sign-out" | "ran-out" {
+  const { callStartedAt, unauthenticatedAt, signInAt } = opts;
+  const ranOut = unauthenticatedAt.some((t) => t >= callStartedAt && (signInAt === 0 || t <= signInAt));
+  return ranOut ? "ran-out" : "sign-out";
+}
+
+/**
+ * Did an action take the page off a sign-in page, to a page of the app that is not one? That is how a person signs in
+ * through the app's own form (or comes back from a provider's), so a sign-out the session made (AuthLossTracker.signOut)
+ * ends there. A move between two sign-in pages, or to another site, does not; nor does a back, which the caller leaves
+ * out, since it returns to a page the browser already holds.
+ */
+export function leftSignIn(opts: { seen: string; now: string; baseUrl: string }): boolean {
+  const { seen, now, baseUrl } = opts;
+  if (!seen || !now || seen === now) return false;
+  try {
+    const nowUrl = new URL(now);
+    if (nowUrl.origin !== new URL(baseUrl).origin) return false;
+    return isSignInPage(seen, baseUrl) && !isSignInPage(nowUrl, baseUrl);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -127,6 +227,10 @@ export class AuthLossTracker {
   private batchNotes: string[] = [];
   /** The last navigation recorded, when it did not bounce, with the streak as it stood before it ended it. */
   private lastClear: { route: string; streak: number; targets: string[] } | null = null;
+  /** Where an action of the session's own went to a sign-in page from (a sign-out), until it signs in again. */
+  private signedOutFrom: string | null = null;
+  /** The routes that bounced while signed out: one of them reached signed in shows the sign-in is back. */
+  private signedOutBounces = new Set<string>();
 
   /**
    * Start tracking a newly attached session. An explicit attach is new
@@ -145,6 +249,40 @@ export class AuthLossTracker {
     this.outcome = null;
     this.batchNotes = [];
     this.lastClear = null;
+    this.signedOutFrom = null;
+    this.signedOutBounces.clear();
+  }
+
+  /**
+   * An action of the session's own landed on a sign-in page (a click on "Sign out", or a "Log in" link). From then on,
+   * a page that sends the session to sign-in is what signing out does, not a sign-in that ran out: each such bounce is
+   * still recorded and its route is not covered, but none counts toward SESSION AUTH LOST, so the verdict is not raised
+   * and a role session is not signed back in behind the tester's back. It lasts until the session signs in again: an
+   * action takes it from a sign-in page into the app (signInAgain), or a route that bounced while signed out is reached
+   * signed in (record). A new attach ends it too.
+   */
+  signOut(from: string): void {
+    this.signedOutFrom = from;
+    this.signedOutBounces.clear();
+    this.streak = 0;
+    this.streakTargets = [];
+    this.lastClear = null;
+    this.due = null;
+  }
+
+  /** An action took the session off a sign-in page into the app (authloss.ts leftSignIn): bounces count again. */
+  signInAgain(): void {
+    if (this.signedOutFrom === null) return;
+    this.signedOutFrom = null;
+    this.signedOutBounces.clear();
+    this.streak = 0;
+    this.streakTargets = [];
+    this.lastClear = null;
+  }
+
+  /** Whether the session signed out on purpose and has not signed in again (signOut). */
+  get signedOut(): boolean {
+    return this.signedOutFrom !== null;
   }
 
   /**
@@ -154,17 +292,24 @@ export class AuthLossTracker {
    * raw targets and tolerates slash-less paths, so an explicit crawl of
    * "login" — the anonymous auth-surface pass — was scored as a bounce and fed
    * the streak. Deliberately does not fire when the caller ASKED for the login
-   * page, whatever shape they asked in.
+   * page, whatever shape they asked in. A landing counts by isSignInPage: a
+   * hash router's `/#/login`, and a provider's sign-in on another origin.
    */
   isLoginRedirect(requested: string, landedUrl: string, baseUrl: string): boolean {
-    let landedPath: string;
+    let landed: URL;
     try {
-      landedPath = new URL(landedUrl, baseUrl || "http://x").pathname;
+      landed = new URL(landedUrl, baseUrl || "http://x");
     } catch {
       return false;
     }
     const wanted = requested.startsWith("/") ? requested : `/${requested}`;
-    return LOGIN_ROUTE_RE.test(landedPath) && !LOGIN_ROUTE_RE.test(wanted);
+    let asked: URL;
+    try {
+      asked = new URL(wanted, "http://x");
+    } catch {
+      return false;
+    }
+    return isSignInPage(landed, baseUrl) && !isSignInPage(asked);
   }
 
   /**
@@ -191,6 +336,16 @@ export class AuthLossTracker {
           `\n`;
     if (this.awaiting) {
       this.settleReattach(requestedRoute, target, bounced, divergence);
+      return;
+    }
+    if (!bounced && this.signedOutBounces.has(requestedRoute)) this.signInAgain();
+    if (bounced && this.signedOutFrom !== null) {
+      // Signed out on purpose: the bounce is the sign-out's doing. Not covered, and not counted toward the verdict.
+      this.signedOutBounces.add(requestedRoute);
+      this.pending =
+        divergence +
+        `This session signed out on purpose (from ${this.signedOutFrom}), so this is not counted as a lost sign-in and it is not ` +
+        `signed back in. Re-attach to test signed in again.\n`;
       return;
     }
     if (bounced) {
