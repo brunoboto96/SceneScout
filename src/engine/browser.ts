@@ -113,7 +113,7 @@ import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
 import {
-  AnsweredCancels,
+  AnsweredEnds,
   ATTACH_URL_QUIET_MS,
   CRAWL_URL_HELD_MS,
   describePace,
@@ -1857,7 +1857,7 @@ export class BrowserEngine {
     // event, so a frame that commits a navigation, is removed, or closes with
     // its page drops what it left in flight (the rule is in settle.ts).
     const requests = (this.requests = new InFlightRequests<Request, Frame>());
-    const cancels = (this.cancels = new AnsweredCancels<Request>());
+    const answered = (this.answered = new AnsweredEnds<Request>());
     const watchFrames = (p: Page): void => {
       p.on("framenavigated", (frame) => requests.navigated(frame));
       p.on("framedetached", (detached) => requests.gone((frame) => frame === detached));
@@ -1872,10 +1872,13 @@ export class BrowserEngine {
     // The first page already exists by now; later ones (popups) arrive as events.
     if (this.page) watchPage(this.page);
     context.on("page", watchPage);
-    context.on("requestfinished", (req) => requests.ended(req));
+    context.on("requestfinished", (req) => {
+      requests.ended(req);
+      answered.finished(req, this.guard.refused(req));
+    });
     context.on("requestfailed", (req) => {
       requests.ended(req, true);
-      cancels.failed(req, requestCancelled(this.engineName, req.failure()?.errorText ?? ""), this.guard.refused(req));
+      answered.failed(req, requestCancelled(this.engineName, req.failure()?.errorText ?? ""), this.guard.refused(req));
       this.watchResponse(req, null);
       this.pageRequests.failed(req, req.failure()?.errorText ?? "", Date.now(), this.guard.refused(req));
       if (req.isNavigationRequest() && this.guard.refused(req)) {
@@ -1887,7 +1890,7 @@ export class BrowserEngine {
       }
     });
     context.on("response", (res) => {
-      cancels.answer(res.request());
+      answered.answer(res.request(), res.status());
       this.noteAuthAnswer(res);
       this.noteUnauthenticated(res);
       this.noteDocumentLoad(res.request());
@@ -2273,7 +2276,7 @@ export class BrowserEngine {
       {
         inFlight: () => this.inFlight,
         lastRequestStart: () => this.lastRequestStart,
-        lastRequestCancel: () => this.cancels.last,
+        lastAnsweredEnd: () => this.answered.last,
         paceMs: () => this.paceMs,
         current: () => this.page,
       },
@@ -2509,8 +2512,8 @@ export class BrowserEngine {
   }
   /** When the most recent request started, so a page that fires one late is not read too early. */
   private lastRequestStart = 0;
-  /** When the browser last cancelled a request after its answer arrived, the write policy's refusals aside (settle.ts). */
-  private cancels = new AnsweredCancels<Request>();
+  /** When a request whose answer had arrived was last cancelled, or finished on an answer a page may move on (settle.ts). */
+  private answered = new AnsweredEnds<Request>();
   /**
    * A floor between actions this session was asked for, so a person watching
    * can follow along. Zero means as fast as the page allows, which is the

@@ -95,7 +95,7 @@ flowchart TD
     C -->|yes| R[read the page]
     C -->|no| D{requests in flight?}
     D -->|yes| W
-    D -->|no| X{a request cancelled<br/>after its answer<br/>in the last 120ms?}
+    D -->|no| X{a request cancelled after<br/>its answer, or answered with<br/>a redirect or 401/403,<br/>ended in the last 120ms?}
     X -->|yes| W
     X -->|no| E{quiet for 120ms<br/>since the last request<br/>AND since the action?}
     E -->|no| W
@@ -110,15 +110,22 @@ request. A snapshot is a read, not an action: it sends nothing, so before
 it the window runs from the last request only, and a snapshot right after an
 action that has already settled does not wait 120 ms again.
 
-A request the browser **cancelled after its answer arrived** starts the window
-again, before an action's read and a snapshot's alike. WebKit and Firefox cancel
-a page's open requests as soon as the page starts to navigate and report the
-navigation's own request only after that, so for a moment nothing is in flight
-while the page is on its way elsewhere: a redirect started on a request's
-answer, with that request still open, was read as a page that stayed put. A
-request the page aborts before its answer, such as a search box cancelling the
-previous search or a status check giving up on its timeout, does not count, so
-a page that does that all the time is not held to the 2 s cap.
+A request that **ended after its answer arrived** starts the window again,
+before an action's read and a snapshot's alike, when the browser cancelled it
+or its answer is one a page leaves on: a redirect (301, 302, 303, 307 or 308),
+or a 401, 403, 419 or 440 that a guard sends the visitor to sign-in on. A page
+acts on an answer once it has arrived, and by then the request is over: a
+small answer finishes as it arrives, WebKit on Linux hands the page an answer
+only once its whole body has arrived, and WebKit and Firefox cancel a page's
+open requests as soon as the page starts to navigate and report the
+navigation's own request only after that. So for a moment nothing is in flight
+while the page is on its way elsewhere, and a page read then was taken to have
+stayed put. Any other answer finishing, such as a status poll, an analytics
+beacon or a lazy image, does not count, so a page polling every 250 ms is not
+held to the 2 s cap; a page whose 401s keep ending less than 120 ms before its
+next request starts is. A request the page aborts before its answer, such as a
+search box cancelling the previous search or a status check giving up on its
+timeout, does not count either.
 
 A snapshot then reads the page's controls more than once, because a
 single-page app can show an empty shell, or its navigation alone, while the
