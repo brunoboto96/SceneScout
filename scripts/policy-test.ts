@@ -4682,25 +4682,33 @@ test("config explain: a sign-in list only the project's file sets is shown as na
 });
 
 test("config explain: redactPageText is off by default, the operator's file's, or the project's own file turning it on", () => {
+  // Keyed by resolved path, so the stand-in files are found however the command joins its paths on this platform.
   const files: Record<string, string> = {};
-  const reader = { exists: (f: string) => f in files, read: (f: string) => files[f], realpath: (f: string) => f };
+  const key = (f: string) => path.resolve(f);
+  const reader = { exists: (f: string) => key(f) in files, read: (f: string) => files[key(f)] ?? "", realpath: (f: string) => f };
   const run = () => {
     const out: string[] = [];
-    runConfigCommand(["explain", "--project", "/p"], { env: {}, launchDir: "/launch", reader, out: (l) => out.push(l), err: (l) => out.push(l) });
+    runConfigCommand(["explain", "--project", path.resolve("/p")], {
+      env: {},
+      launchDir: path.resolve("/launch"),
+      reader,
+      out: (l) => out.push(l),
+      err: (l) => out.push(l),
+    });
     return out.join("\n");
   };
   assert.match(run(), /^ {2}redactPageText +off +\(default\)$/m);
-  files["/launch/.scenescout/config.json"] = '{"redactPageText":"pii"}';
+  files[key("/launch/.scenescout/config.json")] = '{"redactPageText":"pii"}';
   assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
   // A project's file that says "off" cannot turn the operator's off: the value stays the operator's.
-  files["/p/.scenescout/config.json"] = '{"redactPageText":"off"}';
+  files[key("/p/.scenescout/config.json")] = '{"redactPageText":"off"}';
   assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
   // The project's own file turns it on over the operator's "off", and is named as tightening it.
-  files["/launch/.scenescout/config.json"] = '{"redactPageText":"off"}';
-  files["/p/.scenescout/config.json"] = '{"redactPageText":"pii"}';
+  files[key("/launch/.scenescout/config.json")] = '{"redactPageText":"off"}';
+  files[key("/p/.scenescout/config.json")] = '{"redactPageText":"pii"}';
   assert.match(run(), /^ {2}redactPageText +pii +\(project file, tightening the operator file\)$/m);
   // With no operator file, the project's own file is the source.
-  delete files["/launch/.scenescout/config.json"];
+  delete files[key("/launch/.scenescout/config.json")];
   assert.match(run(), /^ {2}redactPageText +pii +\(project file\)$/m);
 });
 
