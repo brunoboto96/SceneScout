@@ -573,6 +573,8 @@ export interface BlockedWrite {
   answered?: boolean;
   /** A reason beyond the mode's rule: a foreign embed, or ESCAPE_REFUSAL. */
   why?: string;
+  /** The rule that refused it, where it may differ from the session's (a page a flow left still holds the flow's). */
+  rule?: WriteMode;
 }
 
 /** The `why` of a page move refused as a possible escape from a foreign frame's sandbox. */
@@ -619,6 +621,21 @@ export class BlockNotices {
    * were none. `createdCount` is how many records this run has created, which
    * the safe-write advice names.
    */
+  /**
+   * The notice for refusals that may have been judged under different rules: one notice per rule, each named by the
+   * rule that refused its writes, strictest first; `fallback` names a refusal that does not say which rule refused it.
+   */
+  noticeByRule(fallback: WriteMode, blocked: readonly BlockedWrite[], createdCount = 0): string {
+    const byRule = new Map<WriteMode, BlockedWrite[]>();
+    for (const b of blocked) {
+      const rule = b.rule ?? fallback;
+      byRule.set(rule, [...(byRule.get(rule) ?? []), b]);
+    }
+    return WRITE_MODES.filter((rule) => byRule.has(rule))
+      .map((rule) => this.notice(rule, byRule.get(rule)!, createdCount))
+      .join("");
+  }
+
   notice(rule: WriteMode, blocked: readonly BlockedWrite[], createdCount = 0): string {
     if (blocked.length === 0) return "";
     type Group = { first: BlockedWrite; count: number; allLate: boolean; answered: boolean; whys: Set<string> };

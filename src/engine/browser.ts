@@ -1350,9 +1350,9 @@ export class BrowserEngine {
     noteSentWrite: (entry) => {
       if (this.mutationRequests.length < 20) this.mutationRequests.push(entry);
     },
-    foreignWriteOf: (req) => this.foreignWriteOf(req),
+    foreignWriteOf: (req, rule) => this.foreignWriteOf(req, rule),
     embedEscapeNavigation: (req) => this.embedEscapeNavigation(req),
-    frameDocumentKind: (req) => this.frameDocumentKind(req),
+    frameDocumentKind: (req, rule) => this.frameDocumentKind(req, rule),
     sentByMainFrame: (req) => this.sentByMainFrame(req),
     readPostOf: (rule, method, url, body, destructiveWire) => this.readPostOf(rule, method, url, body, destructiveWire),
     noteObserveRefusedPost: (url, body, referer) => this.noteObserveRefusedPost(url, body, referer),
@@ -1973,7 +1973,9 @@ export class BrowserEngine {
       if (method === "GET" || method === "HEAD" || method === "OPTIONS") return;
       // A POST the user named as a read is not state the tester mutated, nor a form exercised.
       const destructiveWire = isDestructiveRequest(req.url(), req.postData(), this.writeClassifier);
-      if (this.readPostOf(this.writeRule.at(), method, req.url(), req.postData(), destructiveWire)) return;
+      // The rule the route handler judges this by (RouteGuard rule): a page a flow left may still hold a stricter one.
+      const rule = this.guard.rule();
+      if (this.readPostOf(rule, method, req.url(), req.postData(), destructiveWire)) return;
       // Infrastructure POSTs (token refresh, telemetry) are not state the
       // tester mutated — reporting them trains the driver to ignore the notice.
       if (BENIGN_MUTATION_RE.test(req.url())) return;
@@ -1990,11 +1992,11 @@ export class BrowserEngine {
       // definition nothing is.
       if (
         !marksRouteExercised({
-          rule: this.writeRule.at(),
+          rule,
           method,
           pathname: pathnameOf(req.url()),
           destructiveWire,
-          foreign: () => this.foreignWriteOf(req),
+          foreign: () => this.foreignWriteOf(req, rule),
           offApp: () => offAppPageWrite(this.baseUrl, this.page?.url(), req.url(), this.embedMoves.movedTo),
           authList: this.guard.authListFor(req.url()),
         })
@@ -3341,7 +3343,7 @@ export class BrowserEngine {
    * neither (null). On the app's own sign-in pages frames are left alone: a
    * "sign in with" button is a foreign frame that has to open its popup.
    */
-  private frameDocumentKind(req: Request): "foreign" | "app" | null {
+  private frameDocumentKind(req: Request, rule: WriteMode): "foreign" | "app" | null {
     let frame: Frame;
     try {
       frame = req.frame();
@@ -3349,7 +3351,7 @@ export class BrowserEngine {
       return null;
     }
     if (frame === frame.page().mainFrame()) return null;
-    if (allowsForeignWriteOnSignIn(this.writeRule.at(), this.page?.url() ?? "", this.baseUrl)) return null;
+    if (allowsForeignWriteOnSignIn(rule, this.page?.url() ?? "", this.baseUrl)) return null;
     let url: URL;
     try {
       url = new URL(req.url());
@@ -3365,7 +3367,7 @@ export class BrowserEngine {
    * foreignWrite), or null — also null on the app's own sign-in page, where a
    * captcha frame's writes must go out for a login to work.
    */
-  private foreignWriteOf(req: Request): string | null {
+  private foreignWriteOf(req: Request, rule: WriteMode): string | null {
     let unadoptedPageUrl: string | null = null;
     try {
       const from = req.frame().page();
@@ -3378,10 +3380,9 @@ export class BrowserEngine {
     const source = requestSource(req);
     const originHeader = req.headers()["origin"];
     const foreign = foreignWrite(this.baseUrl, { url: req.url(), originHeader, unadoptedPageUrl, pageHasForeignFrame, ...source });
-    if (foreign && allowsForeignWriteOnSignIn(this.writeRule.at(), this.page?.url() ?? "", this.baseUrl)) return null;
+    if (foreign && allowsForeignWriteOnSignIn(rule, this.page?.url() ?? "", this.baseUrl)) return null;
     // Frames of origins the user named as trusted, in safe-write, every one involved: the ordinary rules.
-    if (foreign && trustsForeignWrite(this.writeRule.at(), this.trustedEmbeds, this.baseUrl, { frameChain: source.frameChain, originHeader, unadoptedPageUrl }))
-      return null;
+    if (foreign && trustsForeignWrite(rule, this.trustedEmbeds, this.baseUrl, { frameChain: source.frameChain, originHeader, unadoptedPageUrl })) return null;
     return foreign;
   }
 
@@ -3400,10 +3401,10 @@ export class BrowserEngine {
   private drainBlocked(): string {
     this.lastActionBlocked = this.blockedRequests.length;
     if (this.blockedRequests.length === 0) return "";
-    const blocked = this.blockedRequests.map((e) => ({ sig: e.sig, late: e.at < this.actionStartedAt, answered: e.answered, why: e.why }));
+    const blocked = this.blockedRequests.map((e) => ({ sig: e.sig, late: e.at < this.actionStartedAt, answered: e.answered, why: e.why, rule: e.rule }));
     this.blockedRequests = [];
-    // The rule that judged them, which just after a flow hands back is still the flow's (WriteRule).
-    return this.blockNotices.notice(this.writeRule.at(), blocked, this.createdResources.length);
+    // Named by the rule that refused each, which after a flow hands back can still be the flow's (RouteGuard rule).
+    return this.blockNotices.noticeByRule(this.writeRule.at(), blocked, this.createdResources.length);
   }
 
   /** Once per session, in observe mode only: say that socket frames are outside the policy. */
@@ -6971,7 +6972,8 @@ export class BrowserEngine {
    * round trip to the page is not ordered with that report. Bounded: a page whose content policy stops the marker, or
    * that cannot be armed, costs the bound once, and a page with nothing to leave is not armed. Only the page's own
    * document is armed: a frame's leaving writes are heard in no fixed order with it, and one heard late is still refused
-   * under the flow's rule (WriteRule), but may be missing from the flow's list.
+   * under the flow's rule (WriteRule), but may be missing from the flow's list. Until the marker is heard, however long
+   * after this wait has given up, the rule in force now keeps judging what the browser level hears (RouteGuard `rule`).
    */
   private async armLeaveMarker(page: Page): Promise<() => Promise<void>> {
     const none = async (): Promise<void> => {};
@@ -7001,7 +7003,7 @@ export class BrowserEngine {
       LEAVE_MARKER_WAIT_MS,
     );
     if (!armed) {
-      await marker.heard(0);
+      marker.unarmed();
       return none;
     }
     return () => marker.heard(LEAVE_MARKER_WAIT_MS);

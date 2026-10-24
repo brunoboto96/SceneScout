@@ -26,6 +26,7 @@ import {
   offAppPageWrite,
   policyRefusal,
   sandboxedRedirectPage,
+  stricterMode,
   withForeignFrameSandbox,
   writeMethod,
   writeMethodLabel,
@@ -38,6 +39,7 @@ import {
   isReadMethod,
   judgeUnseenWrite,
   LEAVE_MARKER_PATH,
+  LeftPageRules,
   leaveMarkerToken,
   leaveMarkerUrl,
   pausedRequestBytes,
@@ -76,6 +78,8 @@ export interface BlockedRequest {
   answered: boolean;
   why?: string;
   type?: string;
+  /** The rule that refused it, which a page a flow left may hold after the session's own has loosened (RouteGuard `rule`). */
+  rule?: WriteMode;
 }
 
 /** What the guard needs from the engine that drives the session. */
@@ -98,12 +102,12 @@ export interface RouteGuardHost {
   notePolicyBlock(): void;
   /** Record a write that went out without passing the route handler (Chromium's browser-level interception). */
   noteSentWrite(entry: { at: number; sig: string }): void;
-  /** The foreign origin behind a write headed outside the app, or null. */
-  foreignWriteOf(req: Request): string | null;
+  /** The foreign origin behind a write headed outside the app under `rule`, or null. */
+  foreignWriteOf(req: Request, rule: WriteMode): string | null;
   /** Whether a document request is a frame's escape out of the app (WebKit's dropped sandbox). */
   embedEscapeNavigation(req: Request): boolean;
-  /** What a document request loads into: a frame of another origin, a frame of the app's, or neither. */
-  frameDocumentKind(req: Request): "foreign" | "app" | null;
+  /** What a document request loads into under `rule`: a frame of another origin, a frame of the app's, or neither. */
+  frameDocumentKind(req: Request, rule: WriteMode): "foreign" | "app" | null;
   /** Whether the driven page sent `req` from its top document. */
   sentByMainFrame(req: Request): boolean;
   /** The read-POST entry that lets this request out under `rule`, or null. */
@@ -211,6 +215,8 @@ export class RouteGuard {
    * one (a content policy's report of it), is still the engine's own and is failed rather than judged or sent.
    */
   private readonly issuedMarkers = new Set<string>();
+  /** The rule each page left with a marker is still judged under, until its marker is heard (unload.ts LeftPageRules). */
+  private readonly leftPages: LeftPageRules;
   /** Writes refused at the browser level, so the driver's own report of them (a redirect hop failing) is known as the policy's doing. */
   private readonly unseenRefusals = new UnseenRefusals();
   /**
@@ -237,7 +243,22 @@ export class RouteGuard {
   /** Page loads refused as destructive commands, by URL, until the navigation that asked for one reads it (tookRefusedLoad). */
   private readonly refusedLoads = new Set<string>();
 
-  constructor(private readonly host: RouteGuardHost) {}
+  constructor(
+    private readonly host: RouteGuardHost,
+    leftPageRuleCapMs?: number,
+  ) {
+    this.leftPages = new LeftPageRules(leftPageRuleCapMs);
+  }
+
+  /**
+   * The rule a request heard of now is judged under: the session's (WriteRule), or a stricter one a page left with a
+   * marker still holds, since a write that page sent as it was left may be reported after the session's rule has loosened.
+   */
+  rule(now = Date.now()): WriteMode {
+    const session = this.host.rule();
+    const left = this.leftPages.at(now);
+    return left === null ? session : stricterMode(session, left);
+  }
 
   /** Whether a page load of `url` was refused as a destructive command; forgotten once asked. */
   tookRefusedLoad(url: string): boolean {
@@ -273,14 +294,17 @@ export class RouteGuard {
 
   /**
    * A leave marker for a page at `pageUrl` (unload.ts LEAVE_MARKER_PATH): the URL the page is to beacon last as it is
-   * left, and the wait, bounded by `ms`, for the browser-level interception to hear it. Null where the page has no
-   * origin to send one to.
+   * left, the wait, bounded by `ms`, for the browser-level interception to hear it, and `unarmed`, for a page the marker
+   * could not be put on. Null where the page has no origin to send one to. From now until the marker is heard (or
+   * LEFT_PAGE_RULE_CAP_MS passes), the rule in force now is the strictest a request is judged under (`rule`), however
+   * late it is heard and whatever the session's rule has become: the wait ending does not end that.
    */
-  leaveMarker(pageUrl: string): { url: string; heard: (ms: number) => Promise<void> } | null {
+  leaveMarker(pageUrl: string): { url: string; heard: (ms: number) => Promise<void>; unarmed: () => void } | null {
     const token = randomUUID();
     const url = leaveMarkerUrl(pageUrl, token);
     if (!url) return null;
     this.issuedMarkers.add(url);
+    this.leftPages.left(token, this.rule());
     let resolve!: () => void;
     const heard = new Promise<void>((r) => (resolve = r));
     this.leaveMarkers.set(token, resolve);
@@ -290,7 +314,20 @@ export class RouteGuard {
         await settleWithin(heard, ms);
         this.leaveMarkers.delete(token);
       },
+      unarmed: () => {
+        this.leaveMarkers.delete(token);
+        this.leftPages.heard(token);
+      },
     };
+  }
+
+  /**
+   * A page's leave marker was heard: what the page sent before it has been heard too. Its rule is let go once those
+   * requests' judgements, all pending now, have settled, so none of them reads the looser rule.
+   */
+  private markerHeard(token: string): void {
+    this.leaveMarkers.get(token)?.();
+    void Promise.allSettled([...this.unseenJudging]).then(() => this.leftPages.heard(token));
   }
 
   /**
@@ -315,6 +352,11 @@ export class RouteGuard {
   clear(): void {
     this.routedWrites.clear();
     this.unseenRefusals.clear();
+    this.leftPages.clear();
+    // The closed browser's pages send no more markers: a wait still on one ends, and none is kept.
+    for (const resolve of this.leaveMarkers.values()) resolve();
+    this.leaveMarkers.clear();
+    this.issuedMarkers.clear();
   }
 
   /** The route handler: judge one request, recorded against the page that sent it until it is answered. */
@@ -355,7 +397,7 @@ export class RouteGuard {
       });
     const sent = req.method();
     // Read once, as the request arrives: the rule the page sent it under (policy.ts WriteRule), not whatever holds after an await below.
-    const rule = this.host.rule();
+    const rule = this.rule();
     // A redirect is followed by the browser without asking, so its target
     // would load unsandboxed: a frame's redirect is answered with a
     // sandboxed page that navigates there itself, and the next hop comes
@@ -377,7 +419,7 @@ export class RouteGuard {
     if (sent === "GET" && req.resourceType() === "document" && this.host.embedEscapeNavigation(req)) {
       const why = ESCAPE_REFUSAL;
       // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
-      this.host.noteBlocked({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType() });
+      this.host.noteBlocked({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType(), rule });
       this.host.logAction({
         action: "write-policy:blocked",
         // Another site's address is logged without its query, as every address the engine keeps is (authloss.ts logAddress).
@@ -400,7 +442,7 @@ export class RouteGuard {
       const answered = answersWithRefusal(req.resourceType());
       if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url))
         this.host.noteObserveRefusedPost(url, req.postData(), this.host.sentByMainFrame(req) ? req.headers()["referer"] : undefined);
-      this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
+      this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered, why, type: req.resourceType(), rule });
       this.host.logAction({
         action: "write-policy:blocked",
         target: `${label} ${pathname}${judged.via ? ` (${judged.via})` : ""}${why ? ` (${why})` : ""}`,
@@ -424,7 +466,7 @@ export class RouteGuard {
       }
     }
     // A frame document carrying an override that names a write is judged below as that write, not loaded as a frame.
-    const frameDoc = sent === "GET" && isReadMethod(method) && req.resourceType() === "document" ? this.host.frameDocumentKind(req) : null;
+    const frameDoc = sent === "GET" && isReadMethod(method) && req.resourceType() === "document" ? this.host.frameDocumentKind(req, rule) : null;
     // A document loading into a frame of another origin gets the sandbox
     // that forbids popups and top-window navigation (policy.ts says why).
     if (frameDoc === "foreign") {
@@ -481,7 +523,7 @@ export class RouteGuard {
       pathname,
       destructiveWire,
       // An embedded widget from another site writes to that site, not to the app under test.
-      foreign: this.host.foreignWriteOf(req),
+      foreign: this.host.foreignWriteOf(req, rule),
       // An embed moved the session's page off the app: its writes out are not the app's, a sign-in excepted.
       offApp: offAppPageWrite(this.host.appUrl(), this.host.pageUrl(), url, this.host.movedByEmbed()),
       readPost: readPost !== null,
@@ -590,11 +632,12 @@ export class RouteGuard {
       // A leave marker: everything the page sent before it has now been heard. Failed unjudged, so it never leaves the browser.
       const marker = this.ownLeaveMarker(url, pausedRequestBytes(event.request)?.toString("utf8"));
       if (marker !== null) {
-        if (marker) this.leaveMarkers.get(marker)?.();
+        if (marker) this.markerHeard(marker);
         return await answer(false);
       }
-      // A request paused here was sent a moment ago, possibly by a page a flow has just left: WriteRule still holds the flow's rule.
-      const rule = this.host.rule();
+      // A request paused here may have been sent by a page a flow has left, however long ago: until that page's marker is
+      // heard, the flow's rule still holds (rule).
+      const rule = this.rule();
       // Reads, and everything in destructive, go on. A later hop of a redirect is judged like any write: the route handler never sees one.
       if (rule === "destructive") return await answer(true);
       const bytes = pausedRequestBytes(event.request);
@@ -612,7 +655,7 @@ export class RouteGuard {
         if (!refuseLoad) return await answer(true);
         this.unseenRefusals.note(sent, url);
         await answer(false);
-        this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered: false, why: DESTRUCTIVE_GET_REFUSAL, type: "document" });
+        this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered: false, why: DESTRUCTIVE_GET_REFUSAL, type: "document", rule });
         this.host.logAction({
           action: "write-policy:blocked",
           target: `${label} ${pathnameOf(url)} (${DESTRUCTIVE_GET_REFUSAL})`,
@@ -678,6 +721,7 @@ export class RouteGuard {
         answered: false,
         why: verdict.why,
         type: (event.resourceType ?? "other").toLowerCase(),
+        rule,
       });
       this.host.logAction({
         action: "write-policy:blocked",
