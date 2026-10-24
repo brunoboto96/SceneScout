@@ -32,6 +32,7 @@
     "masked pictures": 3,
     "unload writes": 14,
     "time limits": 46,
+    "network: proxy, allowlist header, retry": 25,
     "first run (scenescout <url>)": 36,
     "ci (unattended run)": 31
   }

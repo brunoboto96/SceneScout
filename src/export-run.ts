@@ -56,6 +56,7 @@ import {
   type PlanEntry,
 } from "./engine/export.js";
 import { MEMORY_DIRNAME, type ActionLogEntry, type Finding } from "./engine/memory.js";
+import { fetchFailureCause } from "./engine/network-failure.js";
 import { egressRefusal, forCommand, type LoadedPolicy } from "./engine/project-config.js";
 import { backoffMs } from "./engine/provider.js";
 import { frameOnDisk } from "./engine/replay.js";
@@ -161,10 +162,7 @@ const REFUSAL_HINT: Record<number, string> = {
 /** Why a request got no usable answer, as one line: Node's fetch says only "fetch failed" and keeps the reason in `cause`. */
 function failureOf(err: unknown, timeoutMs: number): string {
   if (err instanceof Error && err.name === "TimeoutError") return `no answer within ${timeoutMs / 1000} s`;
-  if (!(err instanceof Error)) return oneLine(err, 200);
-  const cause = err.cause instanceof Error ? err.cause : null;
-  const code = cause && typeof (cause as NodeJS.ErrnoException).code === "string" ? `${(cause as NodeJS.ErrnoException).code} ` : "";
-  return oneLine(cause ? `${err.message}: ${code}${cause.message}` : err.message, 300);
+  return oneLine(fetchFailureCause(err), err instanceof Error ? 300 : 200);
 }
 
 /**

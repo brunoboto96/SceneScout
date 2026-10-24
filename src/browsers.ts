@@ -340,6 +340,30 @@ export function writeRedirectHopsJudged(engine: BrowserEngineName): boolean {
 }
 
 /**
+ * Whether a route handler can hand the browser a redirect (route.fulfill with
+ * a 3xx), which the browser then follows itself. WebKit refuses one. The
+ * allowlist header (app-header.ts) needs it, so that a redirect away from the
+ * app is followed without the header, and is not available on WebKit.
+ */
+export function fulfilsRedirects(engine: BrowserEngineName): boolean {
+  return engine !== "webkit";
+}
+
+/**
+ * Permissions the app's own origin is granted in a session with the allowlist
+ * header. A page the route handler hands Chromium has no network address of
+ * its own, so Chromium's Local Network Access checks treat it as public and
+ * block its requests to a private or loopback address (a staging host's other
+ * services, a local fixture) with ERR_FAILED. Granting the app's origin the
+ * local-network-access permission lets its pages make them, as they could
+ * before; every other origin's pages and frames keep the checks. Firefox has
+ * no such check.
+ */
+export function appHeaderPermissions(engine: BrowserEngineName): string[] {
+  return engine === "chromium" ? ["local-network-access"] : [];
+}
+
+/**
  * Run in every page before its own scripts: takes shared workers away.
  *
  * A request issued by a shared worker cannot be intercepted in any browser, so

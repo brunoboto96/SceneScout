@@ -29,7 +29,8 @@ import { isNonPageResource } from "./crawl.js";
 import type { DesignDefect } from "./design.js";
 import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
 import { fromJs } from "./js-regex.js";
-import { parseLimitFlag } from "./limits.js";
+import { formatLoadRetries, NETWORK_RETRY_ENV, parseLimitFlag, type LoadRetry } from "./limits.js";
+import { browserNetworkCause, CAUSE_WORDS, type NetworkCause } from "./network-failure.js";
 import { redactRoute, redactSecrets } from "./memory.js";
 import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifFileFor, sarifLocation, type SarifFiles } from "./sarif.js";
 import { httpErrorDetail, httpStatusOf, withoutFragment, type OracleViolation } from "./oracles.js";
@@ -269,6 +270,84 @@ export interface CheckIssue {
 
 export const SEVERITY_RANK: Record<CheckSeverity, number> = { high: 0, medium: 1, low: 2 };
 
+/**
+ * A page load or a request that failed on the network (network-failure.ts:
+ * DNS, a refused or dropped connection, a network timeout, TLS) rather than
+ * with an answer from the app (#554). Never an issue: a failure reaching the
+ * app's site (sameSite) at the gate's severity leaves the verdict incomplete
+ * (exit 3), and one reaching another host is listed as the environment's.
+ */
+export interface NetworkFailure {
+  /** "page": a route that did not load. "request": a request a page made. */
+  kind: "page" | "request";
+  cause: NetworkCause;
+  /** The browser's code: net::ERR_NAME_NOT_RESOLVED, NS_ERROR_UNKNOWN_HOST, or WebKit's sentence. */
+  code: string;
+  /** The route that did not load; a request to the app as its method and path; a request elsewhere as its host. */
+  what: string;
+  /** Whether it was the app's own site (sameSite): a page load always is. */
+  app: boolean;
+  /**
+   * The severity the issue it replaces would have had (route-load-failed's or request-failed's): one reaching the app
+   * leaves the verdict incomplete only at the gate's severity or worse, so a check that passed before still passes.
+   */
+  severity: CheckSeverity;
+  /** Every route it was seen on, first first. */
+  routes: string[];
+}
+
+/**
+ * Whether a request's address is the app's own site: the app's host on any port (an API on another port), or a
+ * sibling under the same parent domain when the app's host has one (`api.example.com` beside `app.example.com`).
+ * A failure there is counted as the app's, not the environment's: a backend that refuses connections is a reason
+ * the check is incomplete, wherever it is served from.
+ */
+export function sameSite(u: URL, origin: string): boolean {
+  let app: URL;
+  try {
+    app = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (u.hostname === app.hostname) return true;
+  const labels = app.hostname.split(".");
+  // A bare name, an address, or a two-label domain has no parent to share.
+  if (labels.length < 3 || labels.every((l) => l !== "" && [...l].every((c) => c >= "0" && c <= "9"))) return false;
+  const parent = labels.slice(1).join(".");
+  return u.hostname.endsWith(`.${parent}`);
+}
+
+/** A request_failed oracle line ("GET <url> → <browser error>") read as a network failure, or null when it is not one. */
+export function requestNetworkFailure(detail: string, origin: string): Omit<NetworkFailure, "routes" | "severity"> | null {
+  const arrow = detail.lastIndexOf(" → ");
+  if (arrow === -1) return null;
+  const failure = browserNetworkCause(detail.slice(arrow + 3));
+  if (!failure) return null;
+  const request = detail.slice(0, arrow);
+  const space = request.indexOf(" ");
+  const method = space === -1 ? "" : request.slice(0, space);
+  const url = space === -1 ? request : request.slice(space + 1);
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return { kind: "request", ...failure, what: request, app: false };
+  }
+  const app = sameSite(u, origin);
+  const what = u.origin === origin ? `${method} ${u.pathname}` : app ? `${method} ${u.host}${u.pathname}` : u.host;
+  return { kind: "request", ...failure, what: what.trim(), app };
+}
+
+/**
+ * Whether a console line is the browser's own echo of a request that failed on
+ * the network ("Failed to load resource: net::ERR_NAME_NOT_RESOLVED"): the
+ * request is listed already, so its echo is not counted a second time.
+ */
+export function consoleEchoOfNetworkFailure(detail: string): boolean {
+  const prefix = "Failed to load resource: ";
+  return detail.startsWith(prefix) && browserNetworkCause(detail.slice(prefix.length)) !== null;
+}
+
 /** The route a defect of the app's shared shell is charged to: one fix, however many pages show it. */
 export const SHARED_CHROME_ROUTE = "(shared chrome)";
 
@@ -377,8 +456,9 @@ export function checkFindings(
   baselines: BaselineRun | null = null,
   ignorePaths: readonly IgnoredPath[] = [],
   signedIn = true,
-): { issues: CheckIssue[]; worthALook: CheckObservation[]; needsSignIn: string[]; blocked: string[] } {
+): { issues: CheckIssue[]; worthALook: CheckObservation[]; needsSignIn: string[]; blocked: string[]; network: NetworkFailure[] } {
   const needsSignIn: string[] = [];
+  const network = new Map<string, NetworkFailure>();
   const blocked: string[] = [];
   const byKey = new Map<string, CheckIssue>();
   const looks = new Map<string, CheckObservation>();
@@ -413,13 +493,37 @@ export function checkFindings(
       fingerprint,
     });
   };
+  /** A network failure, listed once with every route it was seen on; --ignore-path exempts it as it would the rule it replaces. */
+  const addNetwork = (failure: Omit<NetworkFailure, "routes" | "severity">, route: string, rule: CheckRule, severity: CheckSeverity): void => {
+    if (ignore.includes(rule) || exempt(rule, route)) return;
+    const what = cleanEvidence(failure.what);
+    const key = `${failure.kind}\u0000${failure.code}\u0000${what}`;
+    const known = network.get(key);
+    if (known) {
+      if (!known.routes.includes(route)) known.routes.push(route);
+      return;
+    }
+    network.set(key, { ...failure, what, routes: [route], severity });
+  };
+  /** A violation that is a network failure, or its console echo, goes to the network list; true when it did. */
+  const networkViolation = (v: RouteHealth["violations"][number], route: string): boolean => {
+    if (v.kind === "console_error") return consoleEchoOfNetworkFailure(v.detail);
+    if (v.kind !== "request_failed") return false;
+    const failure = requestNetworkFailure(v.detail, origin);
+    if (!failure) return false;
+    // As add() would have filed it: a request from an embed is medium.
+    addNetwork(failure, route, "request-failed", v.embed ? "medium" : CHECK_RULES["request-failed"].severity);
+    return true;
+  };
   for (const r of routes) {
     const route = r.path;
     // A feed, a text file or an image is not a page: it has no controls to judge. Only one that answered without an
     // error is one (crawl.ts isNonPageResource), so a feed that fails reaches the route's own error below.
     if (isNonPageResource(r)) continue;
     if (r.loadError !== undefined) {
-      add("route-load-failed", `${route}: ${r.loadError}`, route);
+      const failure = browserNetworkCause(r.loadError);
+      if (failure) addNetwork({ kind: "page", ...failure, what: route, app: true }, route, "route-load-failed", CHECK_RULES["route-load-failed"].severity);
+      else add("route-load-failed", `${route}: ${r.loadError}`, route);
       continue;
     }
     // The protection's status, controls and design are the vendor's page, not the app's.
@@ -434,7 +538,7 @@ export function checkFindings(
       if (!exempt("auth-redirect", route) && !needsSignIn.includes(route)) needsSignIn.push(route);
     } else if (r.loginRedirect) add("auth-redirect", `${route} → ${withoutOrigin(r.url, origin) || "/"}`, route);
     else if (r.elements === 0 && (r.status === null || r.status < 400)) add("dead-end", `${route}: 0 controls`, route);
-    for (const v of r.violations) add(violationRule(v), v.detail, route, { embed: v.embed, severity: violationSeverity(v) });
+    for (const v of r.violations) if (!networkViolation(v, route)) add(violationRule(v), v.detail, route, { embed: v.embed, severity: violationSeverity(v) });
     for (const line of r.geometry) {
       const rule = geometryRule(line);
       if (rule) add(rule, stripRefs(line), route);
@@ -446,7 +550,8 @@ export function checkFindings(
   }
   for (const f of flows) {
     for (const { path, violation } of f.violations)
-      add(violationRule(violation), violation.detail, path, { embed: violation.embed, flow: f.file, severity: violationSeverity(violation) });
+      if (!networkViolation(violation, path))
+        add(violationRule(violation), violation.detail, path, { embed: violation.embed, flow: f.file, severity: violationSeverity(violation) });
     // A refused step is not the app's defect: the check reports it as "could not run" (refusedFlowReason).
     if (f.outcome.status === "failed") add("flow-step-failed", flowStepEvidence(f), f.outcome.path, { flow: f.file });
   }
@@ -470,6 +575,8 @@ export function checkFindings(
     worthALook: [...looks.values()].sort((a, b) => a.rule.localeCompare(b.rule)),
     needsSignIn,
     blocked,
+    // The app's own first, then by what failed.
+    network: [...network.values()].sort((a, b) => Number(b.app) - Number(a.app) || a.what.localeCompare(b.what)),
   };
 }
 
@@ -618,7 +725,7 @@ export function gateFailures(issues: readonly CheckIssue[], failOn: FailOn): Che
 }
 
 /** Exit codes, stable for scripts: a gate failure is distinguishable from the check not running. */
-export const EXIT = { pass: 0, gateFailed: 1, error: 2 } as const;
+export const EXIT = { pass: 0, gateFailed: 1, error: 2, network: 3 } as const;
 
 /**
  * The settings a project chooses for what a check may do beyond visiting
@@ -965,6 +1072,10 @@ export interface CheckResult {
   needsSignIn?: string[];
   /** Routes a bot protection answered in the app's place: not measured, and not issues. Absent when there were none. */
   blocked?: string[];
+  /** Page loads and requests that failed on the network, not in the app: never issues. Absent when there were none. */
+  network?: NetworkFailure[];
+  /** Page loads this check retried (limits.ts loadRetryCause). Absent when there were none. */
+  loadRetries?: LoadRetry[];
   /** Routes the engine knew of but did not reach within --max-routes (or, for a first run, its time budget). */
   unvisited: string[];
   /** Present only when the options gave a time budget: how long it was, and whether it ran out with routes still to visit. */
@@ -1026,18 +1137,36 @@ export function summarise(result: CheckResult): {
   retestsFailing: number;
   /** Flows a refused step kept from running: the check has no verdict on them, so it exits 2 whatever the rest did. */
   couldNotRun: number;
+  /** Network failures reaching the app's site (sameSite), at any severity. */
+  networkApp: number;
+  /** Of networkApp, those at the gate's severity or worse (as the issue each replaces): a gate that passed exits 3 on one. */
+  networkGated: number;
+  /** Network failures reaching other hosts: the environment's, listed and never counted. */
+  networkOther: number;
 } {
   const retestsFailing = retestGateFailures(result).length;
   const failing = gateFailures(result.issues, result.failOn).length + retestsFailing;
   const couldNotRun = result.flows.filter((f) => f.outcome.status === "refused").length;
-  return { passed: failing === 0, counts: countBySeverity(result.issues), failing, retestsFailing, couldNotRun };
+  const app = (result.network ?? []).filter((n) => n.app);
+  const networkApp = app.length;
+  // Only what would have been an issue at the gate's severity: a check that passed before this listing existed still passes.
+  const failOn = result.failOn;
+  const networkGated = failOn === "never" ? 0 : app.filter((n) => SEVERITY_RANK[n.severity] <= SEVERITY_RANK[failOn]).length;
+  const networkOther = (result.network ?? []).length - networkApp;
+  return { passed: failing === 0, counts: countBySeverity(result.issues), failing, retestsFailing, couldNotRun, networkApp, networkGated, networkOther };
 }
 
-/** The exit code a finished check ends with. A flow that could not run outranks the gate: the verdict is incomplete. */
+/**
+ * The exit code a finished check ends with. A flow that could not run outranks the gate: the verdict is incomplete.
+ * A failed gate outranks a network failure, since running again would not pass it. A gate that passed while the
+ * network kept part of the app from loading exits 3, so a job can tell it from a pass and from a failure, and run again:
+ * only for a failure at the gate's severity (as the issue it replaces), so a check that passed before still exits 0.
+ */
 export function exitCodeOf(result: CheckResult): number {
-  const { passed, couldNotRun } = summarise(result);
+  const { passed, couldNotRun, networkGated } = summarise(result);
   if (couldNotRun > 0) return EXIT.error;
-  return passed ? EXIT.pass : EXIT.gateFailed;
+  if (!passed) return EXIT.gateFailed;
+  return networkGated > 0 ? EXIT.network : EXIT.pass;
 }
 
 /** One line of the settings, for the report and the job summary. */
@@ -1353,6 +1482,25 @@ function needsSignInSection(result: Pick<CheckResult, "url" | "needsSignIn">): s
 }
 
 /** The routes a bot protection answered in the app's place, as their own section; nothing when there were none. */
+/** The network failures, the app's first; nothing when there were none. */
+export function networkSection(network: readonly NetworkFailure[] | undefined): string[] {
+  if (!network?.length) return [];
+  const line = (n: NetworkFailure): string =>
+    `- ${n.kind === "page" ? "page " : ""}${code(n.what)}${n.app ? "" : " (another host)"}: ${CAUSE_WORDS[n.cause]} (${code(n.code)}) — on ${n.routes
+      .slice(0, 5)
+      .map(code)
+      .join(", ")}${n.routes.length > 5 ? " …" : ""}`;
+  return [
+    "",
+    `## Network failures (${network.length})`,
+    "",
+    `These failed on the network (a name that did not resolve, a refused or dropped connection, a network timeout, a failed TLS handshake) before the app could answer, so they are not issues. One reaching the app's site (its host on any port, or a sibling subdomain such as its API's) leaves what it kept from loading unmeasured: a check that otherwise passed exits 3. One reaching another host is this machine's environment, and is listed only. ${NETWORK_RETRY_ENV}=on retries a failed page load once.`,
+    "",
+    ...network.slice(0, 50).map(line),
+    ...(network.length > 50 ? [`- …and ${network.length - 50} more`] : []),
+  ];
+}
+
 function blockedSection(blocked: readonly string[] | undefined): string[] {
   if (!blocked?.length) return [];
   return [
@@ -1373,7 +1521,7 @@ export function unvisitedLine(unvisited: readonly string[], why: string): string
 
 /** The human report: the verdict first, then what failed it, then everything else. */
 export function formatCheck(result: CheckResult): string {
-  const { passed, counts, failing, retestsFailing, couldNotRun } = summarise(result);
+  const { passed, counts, failing, retestsFailing, couldNotRun, networkApp, networkGated, networkOther } = summarise(result);
   const lines: string[] = [];
   lines.push(`# SceneScout check`);
   lines.push("");
@@ -1388,16 +1536,22 @@ export function formatCheck(result: CheckResult): string {
     retestsFailing > 0
       ? `${failing} failing the gate (${failing - retestsFailing} issue(s), ${retestsFailing} re-tested finding(s))`
       : `${failing} issue(s) at the gate's severity`;
+  const incomplete = couldNotRun === 0 && passed && networkGated > 0;
   lines.push(
     (couldNotRun > 0 ? `**COULD NOT RUN** — ${couldNotRun} flow(s) had a step refused (see Flows); the rest ` : "") +
+      (incomplete
+        ? `**NETWORK FAILURES** — ${networkGated} failure(s) reaching the app on the network, not in the app (see Network failures); the rest `
+        : "") +
       (passed
-        ? `${couldNotRun > 0 ? "passed" : "**PASSED**"} — ${counts.high} high · ${counts.medium} medium · ${counts.low} low`
+        ? `${couldNotRun > 0 || incomplete ? "passed" : "**PASSED**"} — ${counts.high} high · ${counts.medium} medium · ${counts.low} low`
         : `${couldNotRun > 0 ? "failed" : "**FAILED**"} — ${failingText} · ${counts.high} high · ${counts.medium} medium · ${counts.low} low`) +
       (unaudited > 0 ? ` · design not measured on ${unaudited} route(s)` : "") +
       (uncompared > 0 ? ` · ${uncompared} visual target(s) not compared: no baseline yet` : "") +
       (result.worthALook.length > 0 ? ` · ${result.worthALook.length} worth a look, never gated` : "") +
       (result.needsSignIn?.length ? ` · ${result.needsSignIn.length} route(s) need sign-in, not covered` : "") +
-      (result.blocked?.length ? ` · ${result.blocked.length} route(s) answered by bot protection, not measured` : ""),
+      (result.blocked?.length ? ` · ${result.blocked.length} route(s) answered by bot protection, not measured` : "") +
+      (!incomplete && networkApp > 0 ? ` · ${networkApp} failure(s) reaching the app on the network, not counted` : "") +
+      (networkOther > 0 ? ` · ${networkOther} host(s) or request(s) elsewhere unreachable, not counted` : ""),
   );
   // Right under the verdict: what a green check was allowed to do is part of what it means.
   lines.push("", `Settings — ${describeSettings(result)}`);
@@ -1405,6 +1559,8 @@ export function formatCheck(result: CheckResult): string {
   lines.push(...worthALookSection(result.worthALook));
   lines.push(...needsSignInSection(result));
   lines.push(...blockedSection(result.blocked));
+  lines.push(...networkSection(result.network));
+  if (result.loadRetries?.length) lines.push("", ...formatLoadRetries(result.loadRetries));
   lines.push(...routesTable(result));
   lines.push(...resourcesTable(result.resources));
   lines.push(...unvisitedLine(result.unvisited, "over --max-routes"));
@@ -1480,14 +1636,14 @@ export function formatCheck(result: CheckResult): string {
 
 /** The machine summary: stable keys for scripts and follow-up jobs. */
 export function toSummaryJson(result: CheckResult, toolVersion: string): object {
-  const { passed, counts, failing, retestsFailing, couldNotRun } = summarise(result);
+  const { passed, counts, failing, retestsFailing, couldNotRun, networkGated } = summarise(result);
   return {
     tool: "scenescout-check",
     version: toolVersion,
     url: result.url,
     generatedAt: result.generatedAt,
     mode: result.mode,
-    gate: { failOn: result.failOn, passed, failing, retestsFailing, couldNotRun },
+    gate: { failOn: result.failOn, passed, failing, retestsFailing, couldNotRun, ...(networkGated > 0 ? { networkFailures: networkGated } : {}) },
     settings: result.settings,
     counts,
     routes: result.routes.map((r) => ({
@@ -1523,6 +1679,9 @@ export function toSummaryJson(result: CheckResult, toolVersion: string): object 
     ...(result.needsSignIn ? { needsSignIn: result.needsSignIn } : {}),
     // Routes a bot protection answered in the app's place: a coverage gap. Absent when there were none.
     ...(result.blocked?.length ? { blocked: result.blocked } : {}),
+    // Page loads and requests that failed on the network, not in the app: never issues. Absent when there were none.
+    ...(result.network?.length ? { network: result.network } : {}),
+    ...(result.loadRetries?.length ? { loadRetries: result.loadRetries.map(({ at, url, cause }) => ({ at, url, cause })) } : {}),
     ...(result.testReport ? { testReport: result.testReport } : {}),
   };
 }
