@@ -21,6 +21,12 @@
  * The copy-paste launch lines in the README, the guide's client setups and the
  * skill's by-hand line carry the same pin and move with it; install-test holds
  * them equal to the package version.
+ *
+ * The marketplace reads both plugins from the major tag (`v3`), which the
+ * release workflow moves only after npm has the version, so a plugin update
+ * never starts a pin npm lacks. A new major moves that ref to the new major's
+ * tag; a pre-release leaves it, because the workflow never moves a major tag
+ * for one.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -55,4 +61,21 @@ for (const relative of ["README.md", path.join("docs", "guide", "Start-here.md")
   if (next === text) continue;
   fs.writeFileSync(file, next);
   console.log(`${relative} → ${pkg.version}`);
+}
+
+// The tag the marketplace reads its plugins from. Only a stable version names
+// one: the release workflow creates or moves `v<major>` for it after publish.
+const stableMajor = /^(\d+)\.\d+\.\d+$/.exec(pkg.version)?.[1];
+if (stableMajor) {
+  const relative = path.join(".claude-plugin", "marketplace.json");
+  const file = path.join(root, relative);
+  const marketplace = JSON.parse(fs.readFileSync(file, "utf8"));
+  const before = JSON.stringify(marketplace);
+  for (const plugin of marketplace.plugins) {
+    if (typeof plugin.source === "object" && /^v\d+$/.test(plugin.source.ref ?? "")) plugin.source.ref = `v${stableMajor}`;
+  }
+  if (JSON.stringify(marketplace) !== before) {
+    fs.writeFileSync(file, `${JSON.stringify(marketplace, null, 2)}\n`);
+    console.log(`${relative} → v${stableMajor}`);
+  }
 }

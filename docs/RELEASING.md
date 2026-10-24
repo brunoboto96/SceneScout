@@ -10,14 +10,16 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
    into a pull request titled **Version Packages**: version bump,
    `CHANGELOG.md`, and the matching version in `.claude-plugin/plugin.json`
    and `desktop-extension/manifest.json`, and in the copy-paste launch lines
-   of the README, the guide and the skill.
+   of the README, the guide and the skill. On a new major version it also
+   moves the tag the marketplace reads (`.claude-plugin/marketplace.json`).
 3. Approve and merge that pull request. It is opened with the Actions token,
    and GitHub does not run `pull_request` workflows for pull requests opened
    that way, so the release workflow starts the `test` workflow on the version
    branch itself. The checks appear on the pull request once that run starts. Its author is the Actions bot, so the maintainer's
    approval counts as the code-owner review. Its diff is generated and limited
    to the version, the changelog, `plugin.json`, the extension manifest, the
-   launch lines named above and the deleted changeset files.
+   launch lines named above, the marketplace's tag on a new major and the
+   deleted changeset files.
 4. The workflow runs again on that merge and finds no pending changesets. Its
    `build` job asks npm whether it has the version in `package.json`. When npm
    does not, it builds the package from a clean `dist` and packs the tarball
@@ -30,19 +32,24 @@ edit the version or `CHANGELOG.md` (see [.changeset/README.md](../.changeset/REA
    next run on `main` that finds no pending changesets, whatever tags exist. [ADR 27](adr/0027-the-job-that-publishes-to-npm-runs-no-repository-code.md)
    records why.
 
-   **The plugin pins the version, and its marketplace entry tracks `main`.**
-   The marketplace entry's source is this repository (`./`), so a plugin
-   update reads `main`. The Version Packages merge puts the new pin
-   (`scenescout@X.Y.Z`) in `plugin.json` on `main` before `publish` has put
-   that version on npm. Until it has, a plugin update starts a server that
-   `npx` cannot fetch. The window is the run's length, and a run that fails
-   (or a repository with `NPM_PUBLISH` off) extends it until the next run on
-   `main` publishes. The tag and the GitHub Release come only after publish,
-   so those never name a missing version; the marketplace is the one reader of
-   `main`. `scenescout doctor` reports a registration whose pinned version npm
-   does not have, with the fix. A marketplace source that names the `v3` tag
-   would close the window, at the cost of tying the marketplace to the major
-   version.
+   **The plugins are read from the major tag, not from `main`.** The plugin
+   pins the version it starts (`scenescout@X.Y.Z` in `plugin.json`), and the
+   Version Packages merge puts that pin on `main` before `publish` has put the
+   version on npm. The marketplace entries therefore name the `v3` tag
+   (`.claude-plugin/marketplace.json`: a `github` source for the plugin, a
+   `git-subdir` source for the mod, both with `ref: "v3"`), which this job
+   moves only after npm has the version. A plugin update in the meantime, or
+   after a failed run, or with `NPM_PUBLISH` off, finds the previous release
+   and its pin. A plugin update is offered when the version in `plugin.json`
+   at the tag changes, so moving the tag is what releases the plugin.
+
+   On a new major version the versioning step points both entries at the new
+   major's tag (`v4`), which this job creates once npm has 4.0.0. Until it
+   does, installing the plugin fails with the tag not found, and an installed
+   plugin's update fails and leaves the installed version in place; it never
+   starts a version npm lacks. A pre-release leaves the entries on the last
+   stable major. If moving the tag fails (the job warns rather than fails), the plugins stay
+   on the previous release until a later release moves it.
 5. After the release, it builds the Claude Desktop extension bundle from that tag
    (`npm run build && npm run mcpb`, which writes `.mcpb-build/scenescout-X.Y.Z.mcpb`),
    checks its manifest against the MCPB schema, and attaches it to the release

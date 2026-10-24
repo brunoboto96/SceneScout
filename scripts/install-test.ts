@@ -471,13 +471,36 @@ test("diagnose compares the registration by real path, not by spelling", () => {
   );
 });
 
+/** `owner/name` of the GitHub repository package.json names. */
+function githubRepo(pkg: { repository?: { url?: string } }): string {
+  const match = /github\.com\/([^/]+\/[^/.]+)(?:\.git)?$/.exec(pkg.repository?.url ?? "");
+  assert.ok(match, "package.json names its GitHub repository");
+  return match[1];
+}
+
+/** The marketplace reads the major tag of a stable version; a pre-release leaves it on the last stable major, which release.yml never moves for a pre-release. */
+function assertMajorTag(ref: unknown, version: string): void {
+  const [, major] = /^(\d+)\.\d+\.\d+(-.*)?$/.exec(version) ?? [];
+  if (/^\d+\.\d+\.\d+$/.test(version)) assert.equal(ref, `v${major}`, "the marketplace reads the major tag of this version");
+  else
+    assert.ok(
+      typeof ref === "string" && /^v\d+$/.test(ref) && Number(ref.slice(1)) <= Number(major),
+      `a major tag no later than the pre-release's: ${String(ref)}`,
+    );
+}
+
 test("the plugin manifest ships the same version and starts the published server", () => {
   // Claude Code offers a plugin update only when plugin.json's own version
   // changes, so a release that bumps package.json alone never reaches plugin
   // users. `npm run version-packages` keeps them together; this pins it.
   // fileURLToPath, not URL.pathname: on Windows the latter is "/D:/…", which resolves to "D:\\D:\\…".
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as { version: string; name: string; bin: Record<string, string> };
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as {
+    version: string;
+    name: string;
+    bin: Record<string, string>;
+    repository?: { url?: string };
+  };
   const plugin = JSON.parse(fs.readFileSync(path.join(root, ".claude-plugin", "plugin.json"), "utf8")) as {
     version: string;
     name: string;
@@ -485,7 +508,7 @@ test("the plugin manifest ships the same version and starts the published server
   };
   const marketplace = JSON.parse(fs.readFileSync(path.join(root, ".claude-plugin", "marketplace.json"), "utf8")) as {
     name: string;
-    plugins: Array<{ name: string; source: string }>;
+    plugins: Array<{ name: string; source: unknown }>;
   };
 
   assert.equal(plugin.version, pkg.version);
@@ -500,7 +523,12 @@ test("the plugin manifest ships the same version and starts the published server
     marketplace.plugins.map((p) => p.name),
     [plugin.name, "scenescout-mod"],
   );
-  assert.equal(marketplace.plugins[0].source, "./");
+  // The plugin is read from the major tag, which release.yml moves only after
+  // npm has the version: a source of `./` would read main, whose plugin.json
+  // pins the new version from the Version Packages merge until publish ends.
+  const { ref, ...source } = marketplace.plugins[0].source as { ref: unknown };
+  assert.deepEqual(source, { source: "github", repo: githubRepo(pkg) });
+  assertMajorTag(ref, pkg.version);
   assert.notEqual(marketplace.name, plugin.name, "a marketplace may not share its plugin's name");
   assert.ok(fs.existsSync(path.join(root, "skills", "scenescout", "SKILL.md")), "plugins load skills from skills/<name>/SKILL.md");
 });
@@ -511,13 +539,18 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const read = (relative: string) => JSON.parse(fs.readFileSync(path.join(root, relative), "utf8"));
   const pkg = read("package.json") as { version: string };
-  const marketplace = read(".claude-plugin/marketplace.json") as { plugins: Array<{ name: string; source: string; description: string }> };
+  const marketplace = read(".claude-plugin/marketplace.json") as {
+    plugins: Array<{ name: string; source: { source: string; url: string; path: string; ref: string }; description: string }>;
+  };
   const entry = marketplace.plugins.find((p) => p.name === "scenescout-mod");
   assert.ok(entry, "the marketplace lists the mod");
-  assert.equal(entry.source, "./mods/scenescout-mod");
+  // Read from the same major tag as the server it drives, so the two move together.
+  const { ref, ...source } = entry.source;
+  assert.deepEqual(source, { source: "git-subdir", url: `https://github.com/${githubRepo(read("package.json"))}.git`, path: "mods/scenescout-mod" });
+  assert.equal(ref, marketplace.plugins[0].source.ref, "the mod is read from the same tag as the server it drives");
   assert.match(entry.description, /optional/i, "the listing says the mod is optional");
-  const dir = path.join(root, entry.source);
-  const mod = read(path.join(entry.source, ".claude-plugin", "plugin.json")) as {
+  const dir = path.join(root, entry.source.path);
+  const mod = read(path.join(entry.source.path, ".claude-plugin", "plugin.json")) as {
     name: string;
     version: string;
     mcpServers?: unknown;
@@ -541,7 +574,7 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
     else assert.equal(option.default, "", `${key}: empty by default, so the mod does nothing until it is set`);
   }
   // hooks.json names one module, inside the plugin, and that module exists.
-  const hooks = read(path.join(entry.source, "hooks", "hooks.json")) as { modules: string[]; hooks?: unknown };
+  const hooks = read(path.join(entry.source.path, "hooks", "hooks.json")) as { modules: string[]; hooks?: unknown };
   assert.deepEqual(hooks.modules, ["./register.js"]);
   assert.equal(hooks.hooks, undefined, "no settings hooks: everything is in the module");
   const register = fs.readFileSync(path.join(dir, "hooks", "register.js"), "utf8");
@@ -549,7 +582,7 @@ test("the optional mod is a plugin of its own: listed, versioned with the packag
   const imports = [...register.matchAll(/^import[^"']*["']([^"']+)["']/gm)].map((m) => m[1]);
   assert.deepEqual(imports, ["./pane.js", "./guided.js", "./run.js", "./game.js"], "register.js imports only its own rules, by relative path");
   // The mod presents itself in plain words, with somewhere to ask for help and to read what it reaches.
-  const shown = read(path.join(entry.source, ".claude-plugin", "plugin.json")) as Record<string, unknown>;
+  const shown = read(path.join(entry.source.path, ".claude-plugin", "plugin.json")) as Record<string, unknown>;
   assert.equal(typeof shown.displayName, "string");
   assert.match(String(shown.description), /\/scenescout-guided/);
   assert.ok(fs.existsSync(path.join(dir, String(shown.icon))), "the icon the manifest names is in the mod");
@@ -627,6 +660,7 @@ test("the versioning step formats the files it rewrites", () => {
   assert.ok(format > sync, "version-packages must run Prettier over plugin.json and package.json after the sync");
   assert.ok(steps[format].includes("desktop-extension/manifest.json"), "and over the desktop extension's manifest, which the sync rewrites too");
   assert.ok(steps[format].includes("mods/scenescout-mod/.claude-plugin/plugin.json"), "and over the mod's manifest, which the sync rewrites too");
+  assert.ok(steps[format].includes(".claude-plugin/marketplace.json"), "and over the marketplace, whose tag the sync moves on a new major");
   const syncScript = fs.readFileSync(path.join(root, "scripts", "sync-plugin-version.mjs"), "utf8");
   assert.match(syncScript, /path\.join\("desktop-extension", "manifest\.json"\)/, "the sync moves the desktop extension's version with the package");
   assert.match(syncScript, /path\.join\("mods", "scenescout-mod", "\.claude-plugin", "plugin\.json"\)/, "the sync moves the mod's version with the package");
@@ -634,6 +668,7 @@ test("the versioning step formats the files it rewrites", () => {
 
 const LAUNCH_COPIES = ["README.md", path.join("docs", "guide", "Start-here.md"), path.join("skills", "scenescout", "SKILL.md")];
 const LAUNCH_LINE = /scenescout(@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)?(?="?,? ?"?serve)/g;
+const FOLLOW_LATEST = "To follow the latest npm release instead";
 
 test("the versioning step moves the plugin's pinned server with the package version", () => {
   // Run the real sync script over a copy of the three manifests with a new
@@ -646,6 +681,7 @@ test("the versioning step moves the plugin's pinned server with the package vers
     path.join("mods", "scenescout-mod", ".claude-plugin", "plugin.json"),
     path.join("desktop-extension", "manifest.json"),
     path.join("scripts", "sync-plugin-version.mjs"),
+    path.join(".claude-plugin", "marketplace.json"),
     ...LAUNCH_COPIES,
   ];
   for (const relative of files) {
@@ -661,25 +697,59 @@ test("the versioning step moves the plugin's pinned server with the package vers
   assert.deepEqual(plugin.mcpServers[pkg.name].args, ["-y", `${pkg.name}@99.1.2`, "serve"], "the launch line moves with the version");
   assert.equal(read(files[1]).version, "99.1.2");
   assert.equal(read(files[2]).version, "99.1.2");
+  // A new major moves the tag the marketplace reads both plugins from.
+  const marketplace = read(path.join(".claude-plugin", "marketplace.json")) as { plugins: Array<{ source: { ref?: string } }> };
+  assert.deepEqual(
+    marketplace.plugins.map((p) => p.source.ref),
+    ["v99", "v99"],
+  );
 });
 
 test("every copy-paste launch line is pinned to the package version", () => {
   // An unpinned `npx -y scenescout serve` runs whatever npm calls latest on
   // each launch. The README, the guide's client setups and the skill's by-hand
-  // line carry the release's own version, as the plugin does.
+  // line carry the release's own version, as the plugin does. The one unpinned
+  // line is the guide's opt-in to follow the latest release, which must stay
+  // unpinned for that sentence to mean what it says.
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as { version: string };
   let seen = 0;
+  const optIns: string[] = [];
   for (const relative of LAUNCH_COPIES) {
     const text = fs.readFileSync(path.join(root, relative), "utf8");
-    const lines = [...text.matchAll(LAUNCH_LINE)].map((m) => m[0]);
-    assert.ok(lines.length > 0, `${relative} has a launch line`);
-    for (const line of lines) {
+    const matches = [...text.matchAll(LAUNCH_LINE)];
+    assert.ok(matches.length > 0, `${relative} has a launch line`);
+    for (const match of matches) {
+      const line = text.slice(text.lastIndexOf("\n", match.index) + 1, text.indexOf("\n", match.index));
+      if (match[0] === "scenescout" && line.includes(FOLLOW_LATEST)) {
+        optIns.push(relative);
+        continue;
+      }
       seen++;
-      assert.equal(line, `scenescout@${pkg.version}`, `${relative}: a launch line must name the package version`);
+      assert.equal(match[0], `scenescout@${pkg.version}`, `${relative}: a launch line must name the package version: ${line.trim()}`);
     }
   }
   assert.ok(seen >= 7, `README, three JSON setups, Codex, Zed and the skill: found ${seen}`);
+  assert.deepEqual(optIns, [path.join("docs", "guide", "Start-here.md")], "the guide's opt-in to follow the latest release names the unpinned launcher");
+});
+
+test("every npx launch line in the repository's documents is one the versioning step moves", () => {
+  // A launch line in a file the sync does not rewrite would keep the version it
+  // was written with, and drift from the release on the next version bump.
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tracked = execFileSync("git", ["ls-files", "-z", "--", "*.md", "*.json", "*.toml", "*.yml", "*.yaml", "*.html"], { cwd: root, encoding: "utf8" })
+    .split("\0")
+    .filter(Boolean);
+  // A placeholder such as `scenescout@<version>` is prose, not a line to copy.
+  const npxLaunch = /(?:-y|--yes)"?,? ?"?scenescout(?:@[0-9A-Za-z.-]+)?"?,? ?"?serve\b/;
+  const holders = tracked.filter((relative) => npxLaunch.test(fs.readFileSync(path.join(root, relative), "utf8")));
+  // CHANGELOG.md is history; plugin.json's launch line is written by the sync as JSON.
+  const moved = new Set([...LAUNCH_COPIES, path.join(".claude-plugin", "plugin.json"), "CHANGELOG.md"].map((p) => p.split(path.sep).join("/")));
+  assert.deepEqual(
+    holders.filter((relative) => !moved.has(relative)),
+    [],
+    "add the file to the sync's list and to LAUNCH_COPIES",
+  );
 });
 
 test("the versioning step moves the copy-paste launch lines with the package version", () => {
@@ -690,6 +760,7 @@ test("the versioning step moves the copy-paste launch lines with the package ver
     path.join("mods", "scenescout-mod", ".claude-plugin", "plugin.json"),
     path.join("desktop-extension", "manifest.json"),
     path.join("scripts", "sync-plugin-version.mjs"),
+    path.join(".claude-plugin", "marketplace.json"),
     ...LAUNCH_COPIES,
   ];
   for (const relative of files) {
@@ -699,6 +770,16 @@ test("the versioning step moves the copy-paste launch lines with the package ver
   const pkg = JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8")) as { version: string };
   fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "scenescout", version: "99.1.2-beta.1" }));
   execFileSync(process.execPath, [path.join(work, "scripts", "sync-plugin-version.mjs")], { stdio: "pipe" });
+  const first = files.map((relative) => fs.readFileSync(path.join(work, relative), "utf8"));
+  execFileSync(process.execPath, [path.join(work, "scripts", "sync-plugin-version.mjs")], { stdio: "pipe" });
+  assert.deepEqual(
+    files.map((relative) => fs.readFileSync(path.join(work, relative), "utf8")),
+    first,
+    "a second run changes nothing",
+  );
+  // release.yml never moves a major tag for a pre-release, so the marketplace stays on the one it reads.
+  const marketplace = (relative: string) => JSON.parse(fs.readFileSync(path.join(relative, ".claude-plugin", "marketplace.json"), "utf8"));
+  assert.deepEqual(marketplace(work), marketplace(repo), "a pre-release leaves the marketplace's tag where it is");
   for (const relative of LAUNCH_COPIES) {
     const before = fs.readFileSync(path.join(repo, relative), "utf8");
     const after = fs.readFileSync(path.join(work, relative), "utf8");
