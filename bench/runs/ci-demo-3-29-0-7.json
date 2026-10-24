@@ -1,0 +1,53 @@
+{
+  "app": "demo",
+  "run": "ci-demo-3-29-0-7",
+  "date": "2026-10-24",
+  "note": "Unattended scenescout ci run (dispatched) of v3.29.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard weekly chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Export CSV crashes on reports page",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv: Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "Dashboard action links overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard All orders link overlaps New: bulk import badge 85%"
+    },
+    {
+      "title": "Scheduled reports page has no way to proceed or return",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables after clicking Reports > Scheduled reports"
+    },
+    {
+      "title": "Confirmation email field has no persistent accessible label",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new input new-order-email accessible label from placeholder only"
+    },
+    {
+      "title": "New-order explanatory text fails contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new explanatory text contrast 1.73:1 rgba(184,192,202,1) on rgb(246,248,250)"
+    },
+    {
+      "title": "Inventory lacks a visually clear primary action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory page design audit: no visually dominant action; sort controls only",
+      "tier": "worth_a_look",
+      "convention": "a register page should visually emphasize its primary task"
+    }
+  ],
+  "decisions": []
+}

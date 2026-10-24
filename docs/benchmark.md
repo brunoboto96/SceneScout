@@ -1229,6 +1229,16 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-12 | holdout | 3.25.0 | scheduled | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 2/10 | 2/4 (40%–60%) | — | done | 52 | 1,386,223 (1,348,552) / 2,962 | 1m 11s | $0.019 |
 | 2026-10-19 | demo | 3.28.0 | scheduled | openai · gpt-6-luna · low · 2 lanes | judge | 6daa97e78d | 7/13 | 7/7 (100%) | — | done | 62 | 1,756,569 (1,716,380) / 3,254 | 1m 48s | $0.023 |
 | 2026-10-19 | holdout | 3.28.0 | scheduled | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 6/10 | 6/8 (75%) | — | done | 75 | 2,252,661 (2,207,062) / 5,294 | 2m 00s | $0.029 |
+| 2026-10-24 | demo | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 6daa97e78d | 5/13 | 6/7 (86%) | — | done | 75 | 2,196,746 (2,153,132) / 3,951 | 1m 39s | $0.028 |
+| 2026-10-24 | holdout | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 4/10 | 4/5 (80%) | — | done | 59 | 1,731,825 (1,687,428) / 4,559 | 1m 26s | $0.024 |
+| 2026-10-24 | demo | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 6daa97e78d | 6/13 | 6/6 (100%) | — | done | 69 | 2,031,607 (2,011,617) / 4,332 | 1m 53s | $0.024 |
+| 2026-10-24 | holdout | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 3/10 | 4/8 (50%) | — | done | 80 | 2,396,893 (2,350,318) / 4,412 | 1m 32s | $0.030 |
+| 2026-10-24 | demo | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 6daa97e78d | 7/13 | 7/7 (100%) | — | turns | 80 | 2,388,190 (2,365,762) / 4,125 | 1m 48s | $0.028 |
+| 2026-10-24 | holdout | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 4/10 | 4/6 (67%) | — | done | 67 | 1,955,291 (1,912,070) / 2,959 | 1m 19s | $0.025 |
+| 2026-10-24 | demo | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 6daa97e78d | 6/13 | 7/7 (100%) | — | turns | 80 | 2,394,935 (2,373,253) / 4,583 | 2m 05s | $0.028 |
+| 2026-10-24 | holdout | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 1/10 | 1/3 (25%–50%) | — | done | 52 | 1,494,553 (1,479,290) / 2,900 | 1m 07s | $0.018 |
+| 2026-10-24 | demo | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 6daa97e78d | 8/13 | 8/9 (89%) | — | done | 76 | 2,271,595 (2,251,567) / 4,007 | 1m 25s | $0.027 |
+| 2026-10-24 | holdout | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 4/10 | 4/6 (67%) | — | done | 57 | 1,673,966 (1,655,671) / 4,483 | 1m 15s | $0.021 |
 
 <!-- ci-results:end -->
 
