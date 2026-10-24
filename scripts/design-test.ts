@@ -12,12 +12,15 @@ import test from "node:test";
 import {
   analyzeDesign,
   aspectDistortion,
+  bgStack,
   contrastRatio,
+  contrastVerdict,
   distinguishingLayer,
   elevationKey,
   focusedControl,
   grayCensus,
   formatDeduction,
+  gradientColours,
   namesFilter,
   paintsEdge,
   scoreFrom,
@@ -104,6 +107,119 @@ test("contrastRatio is symmetric and handles alpha compositing", () => {
 
 test("contrastRatio declines to guess at an unparseable colour", () => {
   assert.equal(contrastRatio("unknown", "rgb(255,255,255)"), null);
+});
+
+// ---------------------------------------------------------------------------
+// The background text is read against: gradients, layers that may be under it, and the verdict
+// ---------------------------------------------------------------------------
+
+test("gradientColours reads every stop of every gradient layer, and refuses anything that is not one", () => {
+  assert.deepEqual(gradientColours("linear-gradient(to right, oklch(0.2 0.03 260), rgb(17, 17, 17) 50%, rgba(0, 0, 0, 0.5))"), [
+    "oklch(0.2 0.03 260)",
+    "rgb(17, 17, 17)",
+    "rgba(0, 0, 0, 0.5)",
+  ]);
+  assert.deepEqual(
+    gradientColours(
+      "radial-gradient(circle at 50% 50%, #0f172a 0%, transparent 70%), repeating-linear-gradient(45deg, lab(2 0 -5), color(display-p3 0.1 0.2 0.3))",
+    ),
+    ["#0f172a", "transparent", "lab(2 0 -5)", "color(display-p3 0.1 0.2 0.3)"],
+  );
+  assert.deepEqual(gradientColours("conic-gradient(from 90deg, color-mix(in srgb, red 50%, blue), rgb(0, 0, 0))"), [
+    "color-mix(in srgb, red 50%, blue)",
+    "rgb(0, 0, 0)",
+  ]);
+  // A picture in any layer is a picture: no colour stands for it.
+  assert.equal(gradientColours('linear-gradient(rgb(0, 0, 0), rgb(17, 17, 17)), url("hero.png")'), null);
+  assert.equal(gradientColours('url("hero.png")'), null);
+  assert.equal(gradientColours('image-set("a.png" 1x)'), null);
+  assert.equal(gradientColours("linear-gradient(to right)"), null);
+});
+
+const DARK: [number, number, number, number] = [15, 23, 42, 1];
+const WHITE: [number, number, number, number] = [255, 255, 255, 1];
+
+test("bgStack composites certain layers to one colour, over the white page when nothing opaque is found", () => {
+  assert.deepEqual(bgStack([]), { bg: "rgb(255, 255, 255)" });
+  assert.deepEqual(bgStack([{ cs: [DARK], maybe: false }]), { bg: "rgb(15, 23, 42)" });
+  // A 12% tint over the dark panel stays dark; the same tint over the page stays nearly white.
+  assert.deepEqual(
+    bgStack([
+      { cs: [[255, 255, 255, 0.12]], maybe: false },
+      { cs: [DARK], maybe: false },
+    ]),
+    { bg: "rgb(44, 51, 68)" },
+  );
+  assert.deepEqual(bgStack([{ cs: [[0, 0, 0, 0.12]], maybe: false }]), { bg: "rgb(224, 224, 224)" });
+});
+
+test("bgStack keeps every colour a text may sit on: a gradient's stops, and what lies under a layer that may not be there", () => {
+  assert.deepEqual(bgStack([{ cs: [DARK, [30, 41, 59, 1]], maybe: false }]), { bg: "varies", bgRange: ["rgb(15, 23, 42)", "rgb(30, 41, 59)"] });
+  // A positioned panel that may be under the text: the page beneath it stays a possibility.
+  assert.deepEqual(bgStack([{ cs: [DARK], maybe: true }]), { bg: "varies", bgRange: ["rgb(255, 255, 255)", "rgb(15, 23, 42)"] });
+  // A gradient whose stops are the same colour is one colour.
+  assert.deepEqual(bgStack([{ cs: [DARK, DARK], maybe: false }]), { bg: "rgb(15, 23, 42)" });
+  // Past the cap the list is not worth reading: unknown.
+  const many = Array.from({ length: 13 }, (_, i): [number, number, number, number] => [i * 10, 0, 0, 1]);
+  assert.deepEqual(bgStack([{ cs: many, maybe: false }]), { bg: "unknown" });
+});
+
+const text = (over: Partial<Rec>): Rec => rec({ text: "Read me", color: "rgb(248, 250, 252)", ...over });
+
+test("contrastVerdict: light text over a dark panel passes, and over the white page it fails", () => {
+  assert.equal(contrastVerdict(text({ bg: "rgb(15, 23, 42)" })).kind, "pass");
+  const v = contrastVerdict(text({ bg: "rgb(255, 255, 255)" }));
+  assert.equal(v.kind, "fail");
+  assert.equal(v.kind === "fail" && v.ratio.toFixed(2), "1.05");
+});
+
+test("contrastVerdict over a background that varies: fails only when every colour fails, passes only when every one passes", () => {
+  const dark = contrastVerdict(text({ bg: "varies", bgRange: ["rgb(15, 23, 42)", "rgb(30, 41, 59)"] }));
+  assert.equal(dark.kind, "pass");
+  const pale = contrastVerdict(text({ color: "rgb(229, 231, 235)", bg: "varies", bgRange: ["rgb(255, 255, 255)", "rgb(243, 244, 246)"] }));
+  assert.equal(pale.kind, "fail");
+  // The most favourable colour is quoted, so the failure holds wherever the text sits.
+  assert.equal(pale.kind === "fail" && pale.on, "rgb(255, 255, 255)");
+  const mixed = contrastVerdict(text({ bg: "varies", bgRange: ["rgb(255, 255, 255)", "rgb(15, 23, 42)"] }));
+  assert.equal(mixed.kind, "varies");
+  assert.ok(mixed.kind === "varies" && mixed.low < 1.1 && mixed.high > 15);
+});
+
+test("contrastVerdict: mid-grey text passing over black and over white is still unsure on a gradient between them", () => {
+  // #767676 passes 4.5:1 against both ends, but a black-to-white gradient passes through its own lightness.
+  const grey = contrastVerdict(text({ color: "rgb(118, 118, 118)", bg: "varies", bgRange: ["rgb(0, 0, 0)", "rgb(255, 255, 255)"] }));
+  assert.equal(grey.kind, "varies");
+  // It quotes the ratios it measured at the ends, and says the gradient goes lower between them.
+  assert.ok(grey.kind === "varies" && grey.crosses && grey.low > 4.5);
+  const report = analyzeDesign(
+    payload([text({ testid: "grey", color: "rgb(118, 118, 118)", bg: "varies", bgRange: ["rgb(0, 0, 0)", "rgb(255, 255, 255)"] })]),
+    VIEWPORT,
+  ).report;
+  assert.match(report, /\[grey\] — between 4\.\d\d:1 and 4\.\d\d:1 \(needs 4\.5:1\), and lower where a gradient passes through the text's own lightness/);
+  // The contrast: the same grey over one end only passes.
+  assert.equal(contrastVerdict(text({ color: "rgb(118, 118, 118)", bg: "rgb(255, 255, 255)" })).kind, "pass");
+});
+
+test("contrastVerdict measures nothing it cannot read: an image, an unknown background or colour, transparent text", () => {
+  for (const over of [{ bg: "image" }, { bg: "unknown" }, { color: "unknown" }, { color: "rgba(0, 0, 0, 0)" }, { bg: "varies" }, { text: "" }]) {
+    assert.equal(contrastVerdict(text(over)).kind, "unmeasured", JSON.stringify(over));
+  }
+});
+
+test("text over a background that varies is listed as unsure and costs nothing; a pale twin over a pale gradient is a failure", () => {
+  const unsure = analyzeDesign(payload([text({ testid: "over-mixed", bg: "varies", bgRange: ["rgb(255, 255, 255)", "rgb(15, 23, 42)"] })]), VIEWPORT);
+  assert.match(unsure.report, /CONTRAST unsure \(1, not scored; check by eye\):\n {2}→ \[over-mixed\] — between 1\.05:1 and 17\.\d\d:1 \(needs 4\.5:1\)/);
+  assert.deepEqual(unsure.defects, []);
+  assert.ok(!unsure.score?.deductions.some((d) => d.label === "contrast failures"));
+  const pale = analyzeDesign(
+    payload([text({ testid: "over-pale", color: "rgb(229, 231, 235)", bg: "varies", bgRange: ["rgb(255, 255, 255)", "rgb(243, 244, 246)"] })]),
+    VIEWPORT,
+  );
+  assert.deepEqual(
+    pale.defects.map((d) => d.detail),
+    ["[over-pale] — 1.24:1 (needs 4.5:1) rgb(229, 231, 235) on rgb(255, 255, 255) at best, over a background that varies"],
+  );
+  assert.ok(!pale.report.includes("CONTRAST unsure"));
 });
 
 // ---------------------------------------------------------------------------

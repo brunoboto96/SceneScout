@@ -42,7 +42,14 @@ export interface StyleRecord {
   /** Whether the text decoration includes an underline (link affordance). */
   underline: boolean;
   color: string;
-  bg: string; // effective (ancestor-resolved) background, or "image"/"unknown"
+  /**
+   * The background the text is read against: one colour when one is known, "varies" when it may be any of
+   * `bgRange` (a gradient's stops, or a layer that may or may not lie under it), "image" when a picture
+   * paints behind it, and "unknown" when the read could not tell.
+   */
+  bg: string;
+  /** Every colour the text may sit on, when `bg` is "varies" (BG_STACK_SRC). */
+  bgRange?: string[];
   padding: [number, number, number, number]; // t r b l
   /** Vertical margins [top, bottom] — the other half of spacing rhythm. */
   marginV: [number, number];
@@ -211,18 +218,120 @@ export function namesFilter(text: string): boolean {
 }
 
 /**
+ * The colours a computed `background-image` paints, as page-side source: every
+ * colour stop of every layer when each layer is a gradient, or null when any
+ * layer is something else (a url(), an image-set()), or names no colour the
+ * rule can read. A computed value writes each colour as a function or a hex
+ * word, whatever the stylesheet wrote.
+ */
+const GRADIENT_COLOURS_SRC = `(img) => {
+  const split = (s) => {
+    const parts = [];
+    let depth = 0, start = 0;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      else if (ch === "," && depth === 0) { parts.push(s.slice(start, i).trim()); start = i + 1; }
+    }
+    parts.push(s.slice(start).trim());
+    return parts;
+  };
+  const colourFns = ["rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color", "color-mix"];
+  const out = [];
+  for (const layer of split(img || "")) {
+    const open = layer.indexOf("(");
+    if (open < 0 || !layer.endsWith(")") || !/^(repeating-)?(linear|radial|conic)-gradient$/.test(layer.slice(0, open).trim())) return null;
+    const body = layer.slice(open + 1, -1);
+    let depth = 0, word = "", fnStart = -1, fnName = "";
+    for (let i = 0; i <= body.length; i++) {
+      const ch = i < body.length ? body[i] : " ";
+      if (ch === "(") {
+        if (depth === 0) { fnName = word.trim().toLowerCase(); fnStart = i - word.trim().length; }
+        depth++; word = "";
+      } else if (ch === ")") {
+        depth--;
+        if (depth === 0 && colourFns.includes(fnName)) out.push(body.slice(fnStart, i + 1));
+        word = "";
+      } else if (depth === 0 && (ch === " " || ch === ",")) {
+        const w = word.trim();
+        if (w.startsWith("#") || w.toLowerCase() === "transparent") out.push(w);
+        word = "";
+      } else if (depth === 0) word += ch;
+    }
+  }
+  return out.length > 0 ? out : null;
+}`;
+
+/** GRADIENT_COLOURS_SRC run outside a page, from the same source, so a table test exercises the rule the collector ships. */
+export function gradientColours(img: string): string[] | null {
+  return (new Function(`return (${GRADIENT_COLOURS_SRC});`)() as (s: string) => string[] | null)(img);
+}
+
+/** One layer behind the text, topmost first: the colours it may paint there, and whether it may not lie under the text at all. */
+export interface BgLayer {
+  cs: Array<[number, number, number, number]>;
+  maybe: boolean;
+}
+
+/** Past this many colours a text may sit on, its background is "unknown" rather than a list nobody reads. */
+const BG_RANGE_CAP = 12;
+
+/**
+ * Composite the layers behind a text over the white page canvas, as page-side
+ * source: one colour when every layer is certain and paints one colour there,
+ * else every colour the text may sit on. A layer that may not be under the
+ * text (a pseudo-element or a positioned box whose extent is not known) keeps
+ * what lies beneath it as a possibility; a gradient paints one of its stops,
+ * or something between them.
+ */
+const BG_STACK_SRC = `(layers) => {
+  let set = [[255, 255, 255]];
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const layer = layers[i];
+    const next = layer.maybe ? set.slice() : [];
+    for (const b of set) {
+      for (const c of layer.cs) {
+        const a = c[3];
+        next.push([c[0] * a + b[0] * (1 - a), c[1] * a + b[1] * (1 - a), c[2] * a + b[2] * (1 - a)]);
+      }
+    }
+    const seen = new Map();
+    for (const c of next) {
+      const key = c.map(Math.round).join(",");
+      if (!seen.has(key)) seen.set(key, c);
+    }
+    set = Array.from(seen.values());
+    if (set.length > ${BG_RANGE_CAP}) return { bg: "unknown" };
+  }
+  const fmt = (c) => "rgb(" + Math.round(c[0]) + ", " + Math.round(c[1]) + ", " + Math.round(c[2]) + ")";
+  return set.length === 1 ? { bg: fmt(set[0]) } : { bg: "varies", bgRange: set.map(fmt) };
+}`;
+
+/** BG_STACK_SRC run outside a page, from the same source. */
+export function bgStack(layers: BgLayer[]): { bg: string; bgRange?: string[] } {
+  return (new Function(`return (${BG_STACK_SRC});`)() as (l: BgLayer[]) => { bg: string; bgRange?: string[] })(layers);
+}
+
+/**
  * In-page collector, shipped as a string expression (immune to loader
  * transforms — same rationale as the interactables collector).
  */
 export const DESIGN_COLLECT_SCRIPT = `(() => {
   const out = [];
   const px = (v) => { const n = parseFloat(v); return isNaN(n) ? 0 : Math.round(n * 10) / 10; };
-  // Canvas fillStyle normalizes ANY CSS color (oklch, lab, color(), named) to
-  // #rrggbb or rgba() — Tailwind v4 palettes compute to oklch and would
-  // otherwise read as unparseable (and wrongly composite to white).
-  const cctx = document.createElement("canvas").getContext("2d");
+  // Any CSS colour (oklch, lab, color(), named) to [r, g, b, a] in sRGB. A
+  // computed colour in rgb() is read as written; Firefox's canvas fillStyle
+  // turns the rest into #rrggbb or rgba(), while Chromium's and WebKit's keep
+  // lab() and oklch() as written, so those are painted on one pixel and read
+  // back. Unreadable is null, and the background read then says "unknown"
+  // rather than composite the colour as nothing, over white.
+  const cctx = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  const colours = new Map();
   const parseColor = (c) => {
     if (!c || c === "transparent") return null;
+    if (colours.has(c)) return colours.get(c);
+    let out = null;
     let m = c.match(/rgba?\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)(?:\\s*,\\s*([0-9.]+))?/);
     if (!m && cctx) {
       try {
@@ -230,16 +339,46 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
         cctx.fillStyle = c;
         const norm = cctx.fillStyle;
         const hex = norm.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
-        if (hex) return [parseInt(hex[1], 16), parseInt(hex[2], 16), parseInt(hex[3], 16), 1];
         m = norm.match(/rgba?\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)(?:\\s*,\\s*([0-9.]+))?/);
-      } catch (e) { /* unparseable — treated as absent */ }
+        if (hex && (norm !== "#010203" || c === "#010203")) out = [parseInt(hex[1], 16), parseInt(hex[2], 16), parseInt(hex[3], 16), 1];
+        else if (!m && norm !== "#010203") {
+          // A colour the canvas keeps in its own space (lab(), oklch(), color()), as Chromium and WebKit
+          // do: paint one pixel of it and read that back as sRGB. A dark lab() panel read as no colour
+          // at all used to leave the text over it measured against the white page.
+          cctx.clearRect(0, 0, 1, 1);
+          cctx.fillRect(0, 0, 1, 1);
+          const d = cctx.getImageData(0, 0, 1, 1).data;
+          out = [d[0], d[1], d[2], Math.round((d[3] / 255) * 1000) / 1000];
+        }
+      } catch (e) { /* unreadable — "unknown" to the caller */ }
     }
-    if (!m) return null;
-    return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])];
+    if (m) out = [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])];
+    colours.set(c, out);
+    return out;
   };
+  // A colour the page set that the read cannot turn into one: not the same as no colour.
+  const unreadable = (c) => !!c && c !== "transparent" && parseColor(c) === null;
   const normColor = (c) => {
     const p = parseColor(c);
     return p ? "rgba(" + p[0] + ", " + p[1] + ", " + p[2] + ", " + p[3] + ")" : "unknown";
+  };
+  const gradientColours = ${GRADIENT_COLOURS_SRC};
+  const bgStack = ${BG_STACK_SRC};
+  // The parent in the tree that is painted: a slotted element renders inside its slot, and a shadow tree's top inside its host.
+  const paintParent = (n) => n.assignedSlot || n.parentElement || (n.parentNode && n.parentNode.host) || null;
+  // Whether an element starts a stacking context, so a child with a negative z-index paints over its background, not under it.
+  const startsStacking = (n, s) => {
+    if (s.isolation === "isolate" || s.opacity !== "1" || s.transform !== "none" || s.position === "fixed" || s.position === "sticky") return true;
+    if (s.zIndex !== "auto") {
+      if (s.position !== "static") return true;
+      const parent = paintParent(n);
+      if (parent && parent.nodeType === 1 && /flex|grid/.test(window.getComputedStyle(parent).display)) return true;
+    }
+    if ((s.filter && s.filter !== "none") || (s.backdropFilter && s.backdropFilter !== "none")) return true;
+    if ((s.mixBlendMode && s.mixBlendMode !== "normal") || (s.clipPath && s.clipPath !== "none")) return true;
+    if ((s.maskImage && s.maskImage !== "none") || (s.webkitMaskImage && s.webkitMaskImage !== "none")) return true;
+    if (/paint|layout|strict|content/.test(s.contain || "") || /opacity|transform|filter|isolation|z-index/.test(s.willChange || "")) return true;
+    return false;
   };
   // Replaced content that paints pixels the audit cannot read: an <img>,
   // <picture>, <video> or <canvas>, often absolutely positioned under a hero
@@ -252,8 +391,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     for (const m of media) {
       // The text's own subtree holds inline icons, not its background; and an
       // image outside the opaque ancestor the text sits on is treated as hidden
-      // behind it. An opaque overlay that is NOT an ancestor (a sibling scrim)
-      // is not seen, so text on it over an image is skipped, not measured.
+      // behind it.
       if (el.contains(m) || (within && !within.contains(m))) continue;
       const mr = m.getBoundingClientRect();
       if (mr.width === 0 || mr.height === 0 || cx < mr.left || cx > mr.right || cy < mr.top || cy > mr.bottom) continue;
@@ -263,32 +401,171 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     }
     return false;
   };
-  // Effective background: COMPOSITE translucent ancestor layers (a chip with
-  // rgba(...,0.12) over white is nearly white — treating it as opaque produces
-  // false WCAG failures). Stops at the first opaque layer; white fallback.
-  // "image" when an ancestor's background-image or a media element under the
-  // text's centre paints behind it: no single colour stands for that, so the
-  // contrast check skips it rather than report a ratio against the page.
-  const effBg = (el) => {
-    const layers = [];
-    let node = el;
-    let opaque = null;
-    for (let i = 0; node && i < 20; i++, node = node.parentElement) {
-      const s = window.getComputedStyle(node);
-      if (s.backgroundImage && s.backgroundImage !== "none") return "image";
-      const c = parseColor(s.backgroundColor);
-      if (!c || c[3] === 0) continue;
-      layers.push(c);
-      if (c[3] >= 1) { opaque = node; break; }
+  // What one element paints behind its content, read once per element: its
+  // background colour, its background image (a gradient's colours, or
+  // "image"), and its positioned pseudo-elements that paint a panel, each
+  // with its box on the page where the computed style gives one.
+  const paints = new Map();
+  const paintOf = (node) => {
+    const known = paints.get(node);
+    if (known) return known;
+    const s = window.getComputedStyle(node);
+    const img = s.backgroundImage && s.backgroundImage !== "none" ? s.backgroundImage : "";
+    const stops = img ? gradientColours(img) : null;
+    const stopColours = stops ? stops.map(parseColor) : null;
+    const clip = ((s.webkitBackgroundClip || "") + " " + (s.backgroundClip || "")).includes("text");
+    // A gradient covers the box only when it is drawn at full size; one sized or placed
+    // as a strip (an underline drawn as a gradient) may or may not be under the text.
+    const fullSize = /^(auto|auto auto|100% 100%|cover)$/.test((s.backgroundSize || "auto").trim());
+    const p = {
+      color: unreadable(s.backgroundColor) ? "unknown" : parseColor(s.backgroundColor),
+      image: !img ? null : stopColours && stopColours.every((c) => c !== null) ? stopColours : stopColours ? "unknown" : "image",
+      imageMaybe: !fullSize,
+      // Background clipped to the text paints the glyphs, not what is behind them: gradient text.
+      clipText: clip,
+      pseudos: [],
+    };
+    for (const which of ["::after", "::before"]) {
+      const ps = window.getComputedStyle(node, which);
+      if (!ps || ps.content === "none" || ps.content === "normal" || ps.display === "none") continue;
+      if (ps.position !== "absolute" && ps.position !== "fixed") continue;
+      if (ps.visibility === "hidden" || ps.opacity === "0") continue;
+      const pImg = ps.backgroundImage && ps.backgroundImage !== "none" ? ps.backgroundImage : "";
+      const pStops = pImg ? gradientColours(pImg) : null;
+      const pColours = pStops ? pStops.map(parseColor) : null;
+      const pc = parseColor(ps.backgroundColor);
+      let cs = null;
+      if (pImg) cs = pColours && pColours.every((c) => c !== null) ? pColours : "image";
+      else if (unreadable(ps.backgroundColor)) cs = "unknown";
+      else if (pc && pc[3] > 0) cs = [pc];
+      if (!cs) continue;
+      // A translucent pseudo-element paints its colours at its opacity.
+      const o = parseFloat(ps.opacity);
+      if (Array.isArray(cs) && o < 1) cs = cs.map((c) => [c[0], c[1], c[2], c[3] * o]);
+      // A negative z-index puts it under the element's own background unless the element starts a stacking context.
+      const under = parseInt(ps.zIndex, 10) < 0 && !startsStacking(node, s);
+      // Moved or clipped (a hover fill scaled to nothing at rest), its box is not where its offsets say.
+      const moved = (ps.transform && ps.transform !== "none") || (ps.clipPath && ps.clipPath !== "none");
+      const w = px(ps.width) + px(ps.paddingLeft) + px(ps.paddingRight) + px(ps.borderLeftWidth) + px(ps.borderRightWidth);
+      const h = px(ps.height) + px(ps.paddingTop) + px(ps.paddingBottom) + px(ps.borderTopWidth) + px(ps.borderBottomWidth);
+      const left = parseFloat(ps.left), top = parseFloat(ps.top);
+      let box = null;
+      // Its offsets are from its containing block: the viewport when fixed, the element itself when the element is positioned.
+      if (moved) box = null;
+      else if (ps.position === "fixed" && isFinite(left) && isFinite(top)) box = { l: left, t: top, r: left + w, b: top + h };
+      else if (s.position !== "static" && isFinite(left) && isFinite(top)) {
+        const r = node.getBoundingClientRect();
+        const ox = r.left + px(s.borderLeftWidth), oy = r.top + px(s.borderTopWidth);
+        box = { l: ox + left, t: oy + top, r: ox + left + w, b: oy + top + h };
+      } else if (w < 48 && h < 48) continue; // an icon or a dot of unknown position, not a panel
+      p.pseudos.push({ cs, box, under });
     }
-    if (mediaUnder(el, opaque)) return "image";
-    let base = [255, 255, 255];
-    for (let i = layers.length - 1; i >= 0; i--) {
-      const [r, g, b, a] = layers[i];
-      base = [r * a + base[0] * (1 - a), g * a + base[1] * (1 - a), b * a + base[2] * (1 - a)];
-    }
-    return "rgb(" + Math.round(base[0]) + ", " + Math.round(base[1]) + ", " + Math.round(base[2]) + ")";
+    paints.set(node, p);
+    return p;
   };
+  // Boxes positioned out of the flow that paint a colour or a gradient of
+  // their own: a panel laid behind text as its sibling or cousin, not its
+  // ancestor. One that paints a picture (a tiled grain or a photo) or blends
+  // into what is under it is not read, as before: no colour stands for it.
+  let panels = null;
+  const panelsAt = (cx, cy) => {
+    if (panels === null) {
+      panels = [];
+      for (const n of document.querySelectorAll("body *")) {
+        if (panels.length >= 400) break;
+        const s = window.getComputedStyle(n);
+        if ((s.position !== "absolute" && s.position !== "fixed") || s.visibility === "hidden" || s.display === "none" || s.opacity === "0") continue;
+        if (s.mixBlendMode && s.mixBlendMode !== "normal") continue;
+        const p = paintOf(n);
+        if (p.image === "image" || p.image === "unknown" || p.color === "unknown") continue;
+        const cs = [...(p.image || []), ...(p.color && p.color[3] > 0 ? [p.color] : [])];
+        if (cs.length === 0) continue;
+        const r = n.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8) continue;
+        // A translucent panel paints its colours at its opacity.
+        const o = parseFloat(s.opacity);
+        panels.push({ n, r, cs: o < 1 ? cs.map((c) => [c[0], c[1], c[2], c[3] * o]) : cs, sunk: parseInt(s.zIndex, 10) < 0 });
+      }
+    }
+    return panels.filter(({ r }) => cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom);
+  };
+  // A panel with a negative z-index paints beneath every background in its
+  // stacking context, so under the opaque box the text sits on unless that box,
+  // or a box between them, starts a stacking context of its own. The root's
+  // background, or the body's when the root sets none, is the page canvas,
+  // which every panel paints over.
+  const stackedWithin = (n, top) => {
+    const root = document.documentElement;
+    if (top === root) return true;
+    if (top === document.body) {
+      const rs = window.getComputedStyle(root);
+      const rc = parseColor(rs.backgroundColor);
+      if ((!rc || rc[3] === 0) && rs.backgroundImage === "none") return true;
+    }
+    for (let a = paintParent(n); a; a = paintParent(a)) {
+      if (a.nodeType === 1 && startsStacking(a, window.getComputedStyle(a))) return true;
+      if (a === top) return false;
+    }
+    return false;
+  };
+  // Effective background: COMPOSITE the layers behind the text (a chip with
+  // rgba(...,0.12) over white is nearly white — treating it as opaque produces
+  // false WCAG failures), up the painted tree to the first opaque layer, over
+  // the white page canvas. Each element contributes its pseudo-element panels
+  // under the text's centre, then its background image, then its colour. A
+  // gradient is every colour of its stops; a pseudo-element or a positioned
+  // box whose extent is not known, or which is not the text's ancestor, may
+  // or may not lie under it, so the text may sit on either: "varies", with
+  // every possibility in bgRange. "image" when a picture paints behind it,
+  // "unknown" when the read cannot tell: the contrast check measures neither,
+  // rather than report a ratio against the page.
+  const effBgInfo = (el) => {
+    const er = el.getBoundingClientRect();
+    const cx = er.left + er.width / 2, cy = er.top + er.height / 2;
+    const layers = [];
+    const walked = new Set();
+    let opaque = null;
+    let node = el;
+    for (let i = 0; node; i++, node = paintParent(node)) {
+      if (i >= 60) return { bg: "unknown" };
+      walked.add(node);
+      const p = paintOf(node);
+      if (p.clipText) return { bg: "unknown" };
+      // Its pseudo-element panels over its own background, then the image, then the colour, then any panel under them.
+      const pseudoLayers = (under) => {
+        for (const ps of p.pseudos) {
+          if (ps.under !== under || (ps.box && (cx < ps.box.l || cx > ps.box.r || cy < ps.box.t || cy > ps.box.b))) continue;
+          if (ps.cs === "image" || ps.cs === "unknown") return ps.box ? ps.cs : "unknown";
+          layers.push({ cs: ps.cs, maybe: !ps.box });
+        }
+        return null;
+      };
+      const over = pseudoLayers(false);
+      if (over) return { bg: over };
+      if (p.image === "image" || p.image === "unknown") return { bg: p.image };
+      if (p.color === "unknown") return { bg: "unknown" };
+      if (p.image) {
+        layers.push({ cs: p.image, maybe: p.imageMaybe });
+        if (!p.imageMaybe && p.image.every((c) => c[3] >= 1)) { opaque = node; break; }
+      }
+      if (p.color && p.color[3] > 0) {
+        layers.push({ cs: [p.color], maybe: false });
+        if (p.color[3] >= 1) { opaque = node; break; }
+      }
+      const below = pseudoLayers(true);
+      if (below) return { bg: below };
+    }
+    if (mediaUnder(el, opaque)) return { bg: "image" };
+    // A positioned panel that is neither the text's ancestor nor inside it may
+    // lie under it. One outside the opaque ancestor is treated as behind that.
+    for (const { n, cs, sunk } of panelsAt(cx, cy)) {
+      if (walked.has(n) || el.contains(n) || (opaque && !opaque.contains(n))) continue;
+      if (sunk && opaque && !stackedWithin(n, opaque)) continue;
+      layers.unshift({ cs, maybe: true });
+    }
+    return bgStack(layers);
+  };
+  const effBg = (el) => effBgInfo(el).bg;
   const hasOwnText = (el) => {
     for (const n of el.childNodes) {
       if (n.nodeType === 3 && n.textContent.trim().length > 0) return true;
@@ -429,7 +706,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
       textAlign: s.textAlign || "",
       underline: ((s.textDecorationLine || s.textDecoration || "") + "").includes("underline"),
       color: normColor(s.color),
-      bg: effBg(el),
+      ...effBgInfo(el),
       padding: [px(s.paddingTop), px(s.paddingRight), px(s.paddingBottom), px(s.paddingLeft)],
       marginV: [px(s.marginTop), px(s.marginBottom)],
       radius: px(s.borderTopLeftRadius),
@@ -647,6 +924,56 @@ const SIGNATURE_TEXT_LEN = 40;
 /** Shell issues listed individually before the reader stops reading. */
 const CHROME_ISSUE_CAP = 6;
 
+/** What the contrast rule makes of one text: below its threshold, at or above it, or not decidable from what was read. */
+export type ContrastVerdict =
+  | { kind: "fail"; ratio: number; threshold: number; on: string; varies: boolean }
+  | { kind: "pass" }
+  | { kind: "varies"; low: number; high: number; threshold: number; crosses: boolean }
+  | { kind: "unmeasured" };
+
+/**
+ * The contrast verdict for one text. Over one known colour it is the WCAG
+ * ratio against the threshold. Over a background that varies (a gradient, or
+ * a layer that may or may not be under the text) it fails only when every
+ * colour the text may sit on fails, quoting the most favourable, and passes
+ * only when every one passes and the text's own lightness is not between
+ * theirs, where a gradient would pass through it. Anything else is "varies",
+ * which costs nothing: a false failure costs more trust than a miss.
+ */
+export function contrastVerdict(r: Pick<StyleRecord, "text" | "color" | "bg" | "bgRange" | "fontSize" | "fontWeight">): ContrastVerdict {
+  if (!r.text || r.color === "unknown") return { kind: "unmeasured" };
+  // Text whose own colour is fully transparent is not painted: a selectable text layer laid over a rendered
+  // document (a PDF viewer's), or text hidden for screen readers. Its 1:1 ratio is not what anyone sees.
+  const fg = parseRgb(r.color);
+  if (!fg || fg[3] === 0) return { kind: "unmeasured" };
+  const range = r.bg === "varies" ? (r.bgRange ?? []) : [r.bg];
+  const measured = range.map((bg) => ({ bg, ratio: contrastRatio(r.color, bg) }));
+  if (measured.length === 0 || measured.some((m) => m.ratio === null)) return { kind: "unmeasured" };
+  const isLarge = r.fontSize >= 24 || (r.fontSize >= 18.7 && r.fontWeight >= 700);
+  const threshold = isLarge ? 3 : 4.5;
+  const ratios = measured.map((m) => m.ratio as number);
+  const low = Math.min(...ratios);
+  const high = Math.max(...ratios);
+  if (high < threshold) {
+    const best = measured[ratios.indexOf(high)];
+    return { kind: "fail", ratio: high, threshold, on: best.bg, varies: measured.length > 1 };
+  }
+  if (low >= threshold) {
+    if (measured.length === 1) return { kind: "pass" };
+    // The text's lightness, composited as it is painted, against the range of backgrounds it may sit on.
+    const textLum = (bg: string): number => {
+      const b = parseRgb(bg) as [number, number, number, number];
+      const a = fg[3];
+      return luminance([fg[0] * a + b[0] * (1 - a), fg[1] * a + b[1] * (1 - a), fg[2] * a + b[2] * (1 - a)]);
+    };
+    const lums = range.map((bg) => luminance((parseRgb(bg) as [number, number, number, number]).slice(0, 3) as [number, number, number]));
+    const t = textLum(range[0]);
+    if (t > Math.min(...lums) && t < Math.max(...lums)) return { kind: "varies", low, high, threshold, crosses: true };
+    return { kind: "pass" };
+  }
+  return { kind: "varies", low, high, threshold, crosses: false };
+}
+
 /**
  * WCAG contrast check over a record set. Shared by the page pass and the
  * shared-chrome pass so the thresholds (and the message shape a reader learns
@@ -655,15 +982,23 @@ const CHROME_ISSUE_CAP = 6;
 function contrastFailures(records: StyleRecord[]): string[] {
   const out: string[] = [];
   for (const r of records) {
-    if (!r.text || r.bg === "image" || r.bg === "unknown" || r.color === "unknown") continue;
-    // Text whose own colour is fully transparent is not painted: a selectable text layer laid over a rendered
-    // document (a PDF viewer's), or text hidden for screen readers. Its 1:1 ratio is not what anyone sees.
-    if (parseRgb(r.color)?.[3] === 0) continue;
-    const ratio = contrastRatio(r.color, r.bg);
-    if (ratio === null) continue;
-    const isLarge = r.fontSize >= 24 || (r.fontSize >= 18.7 && r.fontWeight >= 700);
-    const threshold = isLarge ? 3 : 4.5;
-    if (ratio < threshold) out.push(`${label(r)} — ${ratio.toFixed(2)}:1 (needs ${threshold}:1) ${r.color} on ${r.bg}`);
+    const v = contrastVerdict(r);
+    if (v.kind !== "fail") continue;
+    out.push(
+      `${label(r)} — ${v.ratio.toFixed(2)}:1 (needs ${v.threshold}:1) ${r.color} on ${v.on}${v.varies ? " at best, over a background that varies" : ""}`,
+    );
+  }
+  return out;
+}
+
+/** Texts over a background that varies whose contrast passes on part of it and fails on the rest: worth a look, never a deduction. */
+function contrastUnsure(records: StyleRecord[]): string[] {
+  const out: string[] = [];
+  for (const r of records) {
+    const v = contrastVerdict(r);
+    if (v.kind !== "varies") continue;
+    const where = v.crosses ? ", and lower where a gradient passes through the text's own lightness" : " depending on what lies under it";
+    out.push(`${label(r)} — between ${v.low.toFixed(2)}:1 and ${v.high.toFixed(2)}:1 (needs ${v.threshold}:1)${where}`);
   }
   return out;
 }
@@ -1321,6 +1656,17 @@ function contrastSection(records: StyleRecord[], sections: string[]): string[] {
         contrastFails
           .slice(0, 8)
           .map((s) => `  ⚠ ${s}`)
+          .join("\n"),
+    );
+  }
+  // Text over a gradient, or over a panel the read cannot place, that passes on part of it: no score, a look by eye.
+  const unsure = contrastUnsure(records);
+  if (unsure.length > 0) {
+    sections.push(
+      `CONTRAST unsure (${unsure.length}, not scored; check by eye):\n` +
+        unsure
+          .slice(0, 4)
+          .map((s) => `  → ${s}`)
           .join("\n"),
     );
   }
