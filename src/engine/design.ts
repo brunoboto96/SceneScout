@@ -1300,7 +1300,7 @@ export interface DesignScore {
 export interface DesignSystemSample {
   /** Button heights, px, rounded to 2px as the CONSISTENCY line counts them. */
   buttonHeights: number[];
-  /** Button corner radii: "6px", or "pill" for one at least half the height. */
+  /** Corner radii of buttons 12–80px tall: "6px", or "pill" for one at least half the height. */
   buttonRadii: string[];
   /** The h1's treatment: "28px 700". */
   headers: string[];
@@ -1950,7 +1950,9 @@ export function analyzeDesign(
 function systemSample(records: readonly StyleRecord[]): DesignSystemSample {
   const CAP = 16;
   const distinct = (values: string[]): string[] => [...new Set(values)].sort((a, b) => a.localeCompare(b, "en", { numeric: true })).slice(0, CAP);
-  const { buttonHeights, buttonRadii } = buttonSystem(records);
+  // Radii of control-sized buttons only, the 12–80px the heights are counted over: a button drawn as a card (a
+  // sign-in page's role tiles) carries the card's radius, and is not a control whose radius one page alone uses.
+  const { buttonHeights, buttonRadii } = buttonSystem(records.filter((r) => r.tag !== "button" || (r.rect.h >= 12 && r.rect.h <= 80)));
   const padUse = new Map<number, number>();
   for (const v of records.flatMap((r) => r.padding)) if (v > 0) padUse.set(Math.round(v), (padUse.get(Math.round(v)) ?? 0) + 1);
   const sizes = [...new Set(records.filter((r) => r.text).map((r) => Math.round(r.fontSize * 10) / 10))].sort((a, b) => a - b);

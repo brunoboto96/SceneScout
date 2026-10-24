@@ -1272,3 +1272,10 @@ test("the audit keeps the page's design-system values with its score, the shell'
     spacing: [8],
   });
 });
+
+test("a button drawn as a card (a sign-in page's role tiles) keeps its radius out of the page's values; the same radius on a control-sized button is kept", () => {
+  const save = rec({ tag: "button", text: "Save", interactive: true, rect: { x: 0, y: 0, w: 80, h: 36 }, radius: 8 });
+  const tile = (h: number) => rec({ tag: "button", text: "Clerk", interactive: true, rect: { x: 0, y: 60, w: 240, h }, radius: 10 });
+  assert.deepEqual(analyzeDesign(payload([save, tile(104)]), VIEWPORT).score?.system?.buttonRadii, ["8px"]);
+  assert.deepEqual(analyzeDesign(payload([save, tile(40)]), VIEWPORT).score?.system?.buttonRadii, ["8px", "10px"]);
+});

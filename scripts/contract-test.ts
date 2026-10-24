@@ -2376,3 +2376,13 @@ test("the report ranks pages against each other once four carry their values, an
   // The page's own score, as measured, is kept as it was.
   assert.equal(store.pageScores["/d"].overall, 97);
 });
+
+test("a route holding a pipe stays in its own cell of the score table", () => {
+  const store = freshStore();
+  const at = new Date().toISOString();
+  const route = "/files/a|b";
+  store.setPageScore(route, { overall: 97, a11y: 100, craft: 100, consistency: 94, clarity: 100, deductions: [], at, url: `http://app.test${route}` });
+  const md = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1 }, { write: false }).markdown;
+  const row = md.split("\n").find((l) => l.includes("/files/a")) ?? "";
+  assert.deepEqual(tableCells(row).slice(0, 2), ["`/files/a|b`", "**97**"], row);
+});

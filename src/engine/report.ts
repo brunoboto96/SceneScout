@@ -962,7 +962,9 @@ function pageScoreSection(lines: string[], memory: MemoryStore): Array<[string, 
       const overall = alone === sc.overall ? `**${sc.overall}**` : `**${sc.overall}** (${alone})`;
       // Older scores carry no deductions; their Why is left blank rather than claiming there were none.
       const why = sc.deductions ? (sc.deductions.length === 0 ? "no deductions" : sc.deductions.slice(0, WHY_SHOWN).map(formatDeduction).join(" · ")) : "";
-      lines.push(`| ${codeSpan(route)} | ${overall} | ${sc.a11y} | ${sc.craft} | ${sc.consistency} | ${sc.clarity} | ${escapeTableCell(why)} | ${age} |`);
+      lines.push(
+        `| ${escapeTableCell(codeSpan(route))} | ${overall} | ${sc.a11y} | ${sc.craft} | ${sc.consistency} | ${sc.clarity} | ${escapeTableCell(why)} | ${age} |`,
+      );
     }
     lines.push(``);
   }
