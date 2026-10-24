@@ -247,6 +247,20 @@ export class InFlightRequests<R, F> {
     for (const [request, held] of this.open) if (held.frame === frame && held.order < navigation) this.open.delete(request);
   }
 
+  /**
+   * A download started. A navigation answered with a file never commits, but Firefox keeps its request open until the
+   * whole file has arrived, so without this the frame counted as navigating for as long as the file took, holding a
+   * URL watch to URL_NAVIGATING_CAP_MS. `isDownload` says whether a request is the one the file came from; the frame
+   * whose pending navigation it is stops counting as navigating. A download from any other request changes nothing.
+   */
+  downloaded(isDownload: (request: R) => boolean): void {
+    for (const [request, held] of this.open) {
+      if (held.frame === undefined || this.pendingNavigation.get(held.frame) !== held.order || !isDownload(request)) continue;
+      this.pendingNavigation.delete(held.frame);
+      this.finishedNavigation.delete(held.frame);
+    }
+  }
+
   /** Frames that are gone (detached, or their page closed): every request they sent is dropped. */
   gone(isGone: (frame: F) => boolean): void {
     for (const [request, held] of this.open) if (held.frame !== undefined && isGone(held.frame)) this.open.delete(request);

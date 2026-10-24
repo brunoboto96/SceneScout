@@ -5,11 +5,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
-import { check, type SmokeContext } from "./harness.ts";
+import { URL_NAVIGATING_CAP_MS } from "../../dist/engine/settle.js";
+import { check, type ServerStats, type SmokeContext } from "./harness.ts";
 
 export const title = "auth loss";
 
-export async function run({ baseUrl, foreignBaseUrl, projectDir }: SmokeContext): Promise<void> {
+export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeContext): Promise<void> {
   // ---- Auth loss, driven through a real browser -------------------------
   // Everything below was previously only reachable by hand-writing outcome
   // strings into the store, which cannot pin the DETECTION half: the login
@@ -70,9 +71,33 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir }: SmokeContext)
   try {
     await attachVerdictWaitsForLateSignIn(baseUrl, authProject, deadState);
     await hashRoutedSignIn(baseUrl, authProject, deadState);
+    await navigationToAFileIsNotWaitedFor(baseUrl, stats, authProject, deadState);
     await signInOnAnotherOrigin(baseUrl, foreignBaseUrl, authProject, deadState);
   } finally {
     fs.rmSync(authProject, { recursive: true, force: true });
+  }
+}
+
+/**
+ * With a saved sign-in, a navigation's verdict waits for a navigation the page has on its way, up to
+ * URL_NAVIGATING_CAP_MS. A page that moves itself to a file is answered with a download, which never commits; Firefox
+ * keeps that request open until the whole file has arrived, and counted as on its way it held the navigation to that
+ * cap. The file takes longer than the cap to send (SLOW_FILE_MS), and is still arriving when the navigation returns.
+ */
+async function navigationToAFileIsNotWaitedFor(baseUrl: string, stats: ServerStats, authProject: string, deadState: string): Promise<void> {
+  console.log("auth loss: a page that moves itself to a file the browser downloads is not waited for as a navigation on its way");
+  const engine = new BrowserEngine();
+  try {
+    await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: deadState });
+    const started = Date.now();
+    const out = await engine.navigate(`${baseUrl}/file-on-load.html`);
+    const ms = Date.now() - started;
+    const stillSending = stats.slowFilesOpen;
+    console.log(`  (navigation to a page that moves itself to a file: ${ms} ms)`);
+    check("a navigation whose page moves itself to a file returns before the cap for a navigation on its way", ms < URL_NAVIGATING_CAP_MS, `${ms} ms\n${out}`);
+    check("...while that file was still arriving", stillSending > 0, `files still sending: ${stillSending}`);
+  } finally {
+    await engine.close().catch(() => {});
   }
 }
 

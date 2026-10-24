@@ -616,6 +616,26 @@ test("a navigation request is on its way from its start until its frame commits 
   assert.equal(t.navigating("main", 8000 + NAVIGATION_COMMIT_GRACE_MS * 10), true);
 });
 
+test("a navigation answered with a download is not on its way, while its file is still arriving", () => {
+  // Firefox keeps a navigation's request open until the whole file has arrived, so counted as on its way it held every
+  // URL watch to URL_NAVIGATING_CAP_MS. Contrastive pair: the same open navigation, and a download from another request.
+  const t = tracker();
+  t.started("to-file", "main", true);
+  t.downloaded((request) => request === "an-earlier-file");
+  assert.equal(t.navigating("main"), true, "a download from another request leaves this navigation on its way");
+  t.downloaded((request) => request === "to-file");
+  assert.equal(t.navigating("main"), false, "the navigation that became a download never commits");
+  // Its request is still open; when the file ends, nothing about the frame changes.
+  t.ended("to-file", false, 9000);
+  assert.equal(t.navigating("main", 9001), false);
+  // Only the frame whose navigation became the download stops navigating: the main frame's own is still on its way.
+  t.started("frame-file", "child", true);
+  t.started("next-page", "main", true);
+  t.downloaded((request) => request === "frame-file");
+  assert.equal(t.navigating("main"), true);
+  assert.equal(t.navigating("child"), false);
+});
+
 test("stableUrlOf stops at its cap on a URL that never holds still", async () => {
   const page = standInPage("http://app.test/0");
   const started = page.clock;

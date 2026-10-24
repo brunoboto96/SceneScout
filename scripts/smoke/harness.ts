@@ -37,9 +37,14 @@ export interface ServerStats {
   writes: Record<string, number>;
   /** Requests for /api/held-body, whose body the server never finishes sending. */
   heldBodies: number;
+  /** Responses to /slow-file still sending their file (SLOW_FILE_MS). */
+  slowFilesOpen: number;
   /** Page loads that reached the server, as "GET /path" → count, for the paths under /things/ only: a refused destructive load must never arrive. */
   loads: Record<string, number>;
 }
+
+/** How long the fixture server takes to send /slow-file, a download. */
+export const SLOW_FILE_MS = 15_000;
 
 /** How long the fixture server holds /slow-page back. */
 export const SLOW_PAGE_MS = 2500;
@@ -323,7 +328,7 @@ function loopbackOrigin(value: string | null): string {
 
 /** Start the fixture server: static pages from test-app/ plus a minimal items API for write-policy testing. */
 export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBaseUrl: string; stats: ServerStats; close: () => Promise<void> }> {
-  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {}, heldBodies: 0, loads: {} };
+  const stats: ServerStats = { uploadLog: [], itemPosts: 0, workerDeletes: 0, sharedWorkerDeletes: 0, writes: {}, heldBodies: 0, slowFilesOpen: 0, loads: {} };
   const board: string[] = [];
   let codeCounter = 0;
   const usedCodes = new Set<string>();
@@ -383,6 +388,24 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
         res.writeHead(200, { "content-type": "text/html" });
         res.end(fs.readFileSync(path.join(appDir, "slow.html")));
       }, SLOW_PAGE_MS);
+      return;
+    }
+    // A file the server says to save, sent a chunk at a time over SLOW_FILE_MS (file-on-load.html): a navigation
+    // answered with it never commits, while its request stays open until the file has arrived.
+    if (urlPath === "/slow-file") {
+      stats.slowFilesOpen += 1;
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="report.bin"' });
+      const chunks = 50;
+      let sent = 0;
+      const timer = setInterval(() => {
+        if (!res.destroyed && ++sent < chunks) return void res.write(Buffer.alloc(1024));
+        clearInterval(timer);
+        res.end();
+      }, SLOW_FILE_MS / chunks);
+      res.on("close", () => {
+        clearInterval(timer);
+        stats.slowFilesOpen -= 1;
+      });
       return;
     }
     // A response whose headers arrive at once and whose body is held open until the client goes away: a request a
