@@ -171,6 +171,8 @@ import {
   errorPageExit,
   DROPPED_NAVIGATION_WAIT_MS,
   requestCancelled,
+  fulfilsRedirects,
+  appHeaderLaunchArgs,
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
@@ -194,17 +196,32 @@ import {
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import {
+  abortCodeFor,
+  APP_HEADER_ENV,
+  APP_HEADER_MAX_HOPS,
+  appHeaderApplies,
+  appRedirectPlan,
+  redirectStandIn,
+  appHeaderCarried,
+  readAppHeader,
+  withAppHeader,
+  type AppHeader,
+} from "./app-header.js";
+import { startLoadHint } from "./network-failure.js";
+import { browserProxy, readProxy, type BrowserProxy } from "./proxy.js";
+import {
   DEFAULT_TIME_LIMITS,
   explainTimeout,
   firstLineOf,
   isTimeoutMessage,
   limitHint,
-  LOAD_RETRY_PAUSE_MS,
   loadRetryCause,
+  loadRetryPauseMs,
   loadRetryNote,
   loadRetryTimeoutMs,
   retriedLoadFailure,
   pageTimeouts,
+  readNetworkRetry,
   resolveTimeLimits,
   SCREENSHOT_TIMEOUT_MS,
   TARGET_READ_MS,
@@ -812,6 +829,8 @@ export class BrowserEngine {
   private browser: Browser | null = null;
   /** How long an action and a page load may take; set at attach (limits.ts). */
   private limits: TimeLimits = DEFAULT_TIME_LIMITS;
+  /** The network settings from the environment, read at attach: the retry of a load that failed on the network, the proxy and the allowlist header. */
+  private network: { retry: boolean; proxy: BrowserProxy | null; appHeader: AppHeader | null } = { retry: false, proxy: null, appHeader: null };
   /** The limits this session runs with, so the server can size its watchdogs to them. */
   get timeLimits(): TimeLimits {
     return this.limits;
@@ -1605,6 +1624,11 @@ export class BrowserEngine {
     // Resolved before anything is closed, so a bad role, a missing profile or
     // a time limit out of bounds leaves a live session as it was.
     const limits = resolveTimeLimits(opts, process.env);
+    const network = { retry: readNetworkRetry(process.env), proxy: browserProxy(readProxy(process.env), opts.url), appHeader: readAppHeader(process.env) };
+    if (network.appHeader && !fulfilsRedirects(opts.browser ?? defaultEngine(process.env)))
+      throw new Error(
+        `${APP_HEADER_ENV} is not available on WebKit: it cannot be handed a redirect, which keeps the header from following one away from the app. Use Chromium or Firefox.`,
+      );
     const auth = resolveAttachAuth({
       projectDir: opts.projectDir,
       url: opts.url,
@@ -1635,6 +1659,7 @@ export class BrowserEngine {
     await this.close();
     opts.onSessionBegins?.();
     this.limits = limits;
+    this.network = network;
     this.auth = auth;
     this.role = roleLabel(auth);
     this.authLoss.beginSession(auth.kind, this.role);
@@ -1818,6 +1843,7 @@ export class BrowserEngine {
         viewport: opts.viewport ?? { width: 1280, height: 900 },
         ...(opts.deviceScaleFactor !== undefined ? { deviceScaleFactor: opts.deviceScaleFactor } : {}),
         serviceWorkers: serviceWorkerPolicy(this.engineName),
+        ...(this.network.proxy ? { proxy: this.network.proxy } : {}),
       });
       const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
       if (restoreSession) await this.context.addInitScript(restoreSession);
@@ -1969,6 +1995,16 @@ export class BrowserEngine {
 
   /** Wire the context, part 2: the refresh broker and the write policy on the wire. */
   private async routeRequests(context: BrowserContext): Promise<void> {
+    // The allowlist header, part 1 (app-header.ts): registered first, so it runs last, after the write policy let the
+    // request out. SceneScout sends it with the header and hands the answer to the browser (sendWithAppHeader).
+    const header = this.network.appHeader;
+    const app = this.baseUrl;
+    if (header)
+      await context.route(
+        (url) => appHeaderApplies(url.href, app),
+        (route) => this.sendWithAppHeader(route, header),
+      );
+
     // The refresh broker. Registered before the write policy, so it runs after
     // it: the policy judges each request as the page sent it and hands on
     // (route.fallback) only what it lets out, and the broker sees only those.
@@ -1992,6 +2028,15 @@ export class BrowserEngine {
         }
       }
     }
+
+    // The allowlist header, part 2 (app-header.ts): registered last, so it runs first, and the handlers above, and
+    // any request they send themselves (route.fetch, with no redirect followed), carry it.
+    if (header)
+      await context.route(
+        (url) => appHeaderApplies(url.href, app),
+        (route) =>
+          this.passOn(route, appHeaderCarried(route.request().resourceType()) ? { headers: withAppHeader(route.request().headers(), header) } : undefined),
+      );
   }
 
   /** A wait on the page that names no timeout gets the session's limits rather than Playwright's 30 s (limits.ts pageTimeouts). */
@@ -2048,9 +2093,8 @@ export class BrowserEngine {
       await this.close();
       const explained = explainTimeout(err, "nav", this.limits.navMs);
       // A load that was retried and loaded before the attach failed is said here, not in a later attach's result.
-      throw new Error(
-        `Could not load ${url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})${this.drainLoadRetries()}`,
-      );
+      const first = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
+      throw new Error(`Could not load ${url} — ${startLoadHint(first)} (${first})${this.drainLoadRetries()}`);
     }
     await this.settle();
     this.logAction({ action: "attach", url: this.page!.url() });
@@ -4742,6 +4786,47 @@ export class BrowserEngine {
     return jar.length > 0 ? { ...headers, cookie: jar.map((c) => `${c.name}=${c.value}`).join("; ") } : headers;
   }
 
+  /**
+   * A request to the app's origin, sent by SceneScout with the allowlist header and no redirect followed, its answer
+   * handed to the browser. A redirect within the app is followed with the header (appRedirectPlan); one away from it
+   * is handed to the browser, which follows it without the header. A send that fails aborts with the network's code.
+   */
+  private async sendWithAppHeader(route: Route, header: AppHeader): Promise<void> {
+    const req = route.request();
+    if (!appHeaderCarried(req.resourceType())) return this.passOn(route);
+    let response: APIResponse;
+    try {
+      // No time limit of SceneScout's own: a slow answer is the app's, as it would be without the header.
+      response = await route.fetch({ headers: withAppHeader(req.headers(), header), maxRedirects: 0, timeout: 0 });
+      // A redirect within the app: the browser would follow it unrouted, without the header (appRedirectPlan).
+      let at = req.url();
+      for (let hop = 0; hop < APP_HEADER_MAX_HOPS; hop++) {
+        const plan = appRedirectPlan({
+          status: response.status(),
+          location: response.headers()["location"],
+          requestUrl: at,
+          appUrl: this.baseUrl,
+          method: hop === 0 ? req.method() : "GET",
+          resourceType: req.resourceType(),
+        });
+        if (!plan || plan.kind === "hand-over") break;
+        if (plan.kind === "stand-in") {
+          await route.fulfill({ status: 200, contentType: "text/html", body: redirectStandIn(plan.url) }).catch(() => {});
+          return;
+        }
+        at = plan.url;
+        // The context's own client, so the cookies the redirect set are sent with the next hop.
+        response = await this.context!.request.fetch(at, { method: plan.method, headers: withAppHeader(req.headers(), header), maxRedirects: 0, timeout: 0 });
+      }
+    } catch (err) {
+      await route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
+      return;
+    }
+    await route.fulfill({ response }).catch(() => {
+      /* the page went away before its answer */
+    });
+  }
+
   /** Hand a request on as it is, or with overrides. A request the page has already cancelled rejects this; nothing is left to send then. */
   private async passOn(route: Route, overrides?: Parameters<Route["fallback"]>[0]): Promise<void> {
     await route.fallback(overrides).catch(() => {});
@@ -6351,14 +6436,14 @@ export class BrowserEngine {
     try {
       return await page.goto(url, options);
     } catch (err) {
-      const cause = loadRetryCause(err instanceof Error ? err.message : String(err), 0);
+      const cause = loadRetryCause(err instanceof Error ? err.message : String(err), 0, this.network.retry);
       if (!cause) throw err;
       await this.errorPageCommitted(page);
       const sockets = await readMachineSockets();
       const shown = redactSecrets(url);
-      console.error(`[scenescout] loading ${shown} failed with net::${cause}; trying once more. Sockets: ${sockets}`);
+      console.error(`[scenescout] loading ${shown} failed with ${cause}; trying once more. Sockets: ${sockets}`);
       this.memory?.loadRetries.push({ at: new Date().toISOString(), url: shown, session: this.sessionKey, cause, sockets });
-      await new Promise((resolve) => setTimeout(resolve, LOAD_RETRY_PAUSE_MS));
+      await new Promise((resolve) => setTimeout(resolve, loadRetryPauseMs(cause)));
       // A retry that fails is thrown as the load's failure, saying so; only one that loaded leaves a note for the result.
       const timeout = loadRetryTimeoutMs(options?.timeout, Date.now() - startedAt);
       let resp: Response | null;
@@ -6724,7 +6809,7 @@ export class BrowserEngine {
       // so a leaked one of those is not reaped and has to be closed by hand.
       const launch = types[engine].launch({
         headless: !headed,
-        args: engine === "chromium" ? [`--enable-features=${BROWSER_MARKER}`] : [],
+        args: [...(engine === "chromium" ? [`--enable-features=${BROWSER_MARKER}`] : []), ...(this.network.appHeader ? appHeaderLaunchArgs(engine) : [])],
       });
       let timer: NodeJS.Timeout | undefined;
       try {

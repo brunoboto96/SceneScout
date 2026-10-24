@@ -265,7 +265,7 @@ The policy sits on the network, so a blocked request never reaches your server. 
 | [What it checks](docs/guide/What-it-checks.md) | Every check and every `scout_*` tool |
 | [Signing in](docs/guide/Signing-in.md) · [Safety model](docs/guide/Safety-model.md) | Roles and saved logins; what each mode refuses and why |
 | [What leaves the machine](docs/guide/What-leaves-the-machine.md) | Every path data leaves by, to whom, and the `egress` setting |
-| [Network requirements](docs/guide/Network-requirements.md) | Every host each command needs, `scenescout preflight` to check a runner reaches them, caches, mirrors and self-hosted runners |
+| [Network requirements](docs/guide/Network-requirements.md) | Every host each command needs, `scenescout preflight` to check a runner reaches them, how a failure on the network is told from the app's (with an optional retry), running behind a proxy or a firewall's allowlist header, caches, mirrors and self-hosted runners |
 | [Recipes](docs/guide/Recipes.md) | Setups for seven kinds of project |
 | [Configuration reference](docs/guide/Configuration-reference.md) | Every option, environment variable and action input |
 | [Troubleshooting](docs/guide/Troubleshooting.md) | Symptoms and fixes, upgrading and uninstalling |

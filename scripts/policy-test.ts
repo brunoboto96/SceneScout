@@ -144,6 +144,20 @@ import {
 } from "../src/engine/strict-writes.ts";
 import { fuzzCases, fuzzRates } from "./policy-fuzz.ts";
 import {
+  abortCodeFor,
+  APP_HEADER_ENV,
+  appHeaderApplies,
+  appHeaderCarried,
+  appHeaderLine,
+  appRedirectPlan,
+  readAppHeader,
+  redirectStandIn,
+  withAppHeader,
+} from "../src/engine/app-header.ts";
+import { browserProxy, fetchProxyOptions, proxyLine, readProxy, shownProxy } from "../src/engine/proxy.ts";
+import { redactKeys, secretValues } from "../src/engine/ci.ts";
+import { appHeaderLaunchArgs, fulfilsRedirects } from "../src/browsers.ts";
+import {
   DEFAULT_POLICY_SETTINGS,
   explainRequest,
   formatExplanation,
@@ -4179,4 +4193,166 @@ test("config: ci and export stop with exit 2 under egress none before any key or
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── the allowlist header and the proxy (#555) ───────────────────────────────
+
+test("allowlist header: read from SCENESCOUT_APP_HEADER as Name: value; a name that changes who the request is, or a malformed one, is refused without repeating the value", () => {
+  assert.equal(readAppHeader({}), null);
+  assert.equal(readAppHeader({ [APP_HEADER_ENV]: "  " }), null);
+  assert.deepEqual(readAppHeader({ [APP_HEADER_ENV]: "X-CI-Allow: abc:def " }), { name: "x-ci-allow", value: "abc:def" });
+  const refused: Array<[string, RegExp]> = [
+    ["no colon here", /must be "Name: value"/],
+    [": value", /must be "Name: value"/],
+    ["Bad Name: v", /must be a header name/],
+    ["Cookie: sid=1", /cannot set Cookie/],
+    ["Authorization: Bearer x", /cannot set Authorization/],
+    ["host: evil.example", /cannot set host/],
+    ["X-HTTP-Method-Override: DELETE", /cannot set X-HTTP-Method-Override/],
+    ["Sec-Fetch-Site: none", /cannot set Sec-Fetch-Site/],
+    ["Proxy-Connection: x", /cannot set Proxy-Connection/],
+    ["X-CI-Allow:", /empty value/],
+    ["X-CI-Allow: a\r\nX-Other: b", /control character/],
+    [`X-CI-Allow: ${"v".repeat(1025)}`, /longer than 1024/],
+  ];
+  for (const [raw, error] of refused) {
+    assert.throws(
+      () => readAppHeader({ [APP_HEADER_ENV]: raw }),
+      (e: unknown) => e instanceof Error && error.test(e.message) && !(raw.includes("sid=1") && e.message.includes("sid=1")),
+      raw,
+    );
+  }
+});
+
+test("allowlist header: only a request for the app's own scheme, host and port gets it; an event stream never does", () => {
+  const app = "https://app.example.com/start";
+  assert.ok(appHeaderApplies("https://app.example.com/api/things?x=1", app));
+  for (const other of [
+    "https://cdn.example.com/lib.js",
+    "http://app.example.com/api",
+    "https://app.example.com:8443/api",
+    "https://app.example.com.evil.example/",
+    "https://evil.example/?u=https://app.example.com/",
+    "data:text/plain,app.example.com",
+    "not a url",
+  ])
+    assert.ok(!appHeaderApplies(other, app), other);
+  assert.ok(!appHeaderApplies("https://app.example.com/", "not a url"));
+  const header = { name: "x-ci-allow", value: "token-123" };
+  assert.deepEqual(withAppHeader({ accept: "*/*", "X-CI-Allow": "old" }, header), { accept: "*/*", "x-ci-allow": "token-123" });
+  for (const type of ["document", "fetch", "xhr", "script", "image", "stylesheet", "font"]) assert.ok(appHeaderCarried(type), type);
+  assert.ok(!appHeaderCarried("eventsource"));
+  assert.ok(!appHeaderCarried("websocket"));
+  const line = appHeaderLine(header, app);
+  assert.equal(line, "Allowlist header (SCENESCOUT_APP_HEADER): x-ci-allow is sent to https://app.example.com only; its value is never printed.");
+  assert.ok(!line.includes("token-123"));
+  // A browser that cannot be handed a redirect would copy the header to wherever the app redirects.
+  assert.equal(fulfilsRedirects("chromium"), true);
+  assert.equal(fulfilsRedirects("firefox"), true);
+  assert.equal(fulfilsRedirects("webkit"), false);
+  // A page handed to Chromium has no address, so its Local Network Access checks would block the page's private requests.
+  assert.deepEqual(appHeaderLaunchArgs("chromium"), ["--disable-features=LocalNetworkAccessChecks"]);
+  assert.deepEqual(appHeaderLaunchArgs("firefox"), []);
+});
+
+test("allowlist header: a send that failed aborts with the network's code, so the oracles see a network failure", () => {
+  const cases: Array<[string, string]> = [
+    ["apiRequestContext.fetch: getaddrinfo ENOTFOUND app.example.com", "namenotresolved"],
+    ["apiRequestContext.fetch: connect ECONNREFUSED 127.0.0.1:443", "connectionrefused"],
+    ["apiRequestContext.fetch: read ECONNRESET", "connectionreset"],
+    ["apiRequestContext.fetch: socket hang up", "connectionclosed"],
+    ["apiRequestContext.fetch: connect ETIMEDOUT 10.0.0.1:443", "timedout"],
+    ["apiRequestContext.fetch: Timeout 20000ms exceeded.", "timedout"],
+    ["apiRequestContext.fetch: certificate has expired", "failed"],
+    ["Target page, context or browser has been closed", "failed"],
+  ];
+  for (const [message, code] of cases) assert.equal(abortCodeFor(message), code, message);
+});
+
+test("allowlist header: its value is among the secrets a ci run's lines are redacted of", () => {
+  const secrets = secretValues({ [APP_HEADER_ENV]: "X-CI-Allow: ci-allow-0123456789" });
+  assert.ok(secrets.includes("ci-allow-0123456789"));
+  assert.equal(redactKeys("sent x-ci-allow: ci-allow-0123456789", secrets).includes("ci-allow-0123456789"), false);
+  assert.deepEqual(secretValues({ [APP_HEADER_ENV]: "malformed" }), []);
+});
+
+test("proxy: the standard variables, lower case first, or SCENESCOUT_PROXY over them; off and NO_PROXY=* mean direct", () => {
+  assert.equal(readProxy({}), null);
+  assert.deepEqual(readProxy({ HTTPS_PROXY: "http://proxy.example.com:3128", NO_PROXY: "localhost, .internal ,10.0.0.0/8" }), {
+    httpsProxy: "http://proxy.example.com:3128",
+    noProxy: ["localhost", ".internal", "10.0.0.0/8"],
+    source: "environment",
+  });
+  assert.equal(readProxy({ https_proxy: "http://lower:1", HTTPS_PROXY: "http://upper:2" })?.httpsProxy, "http://lower:1");
+  assert.equal(readProxy({ HTTP_PROXY: "proxy.example.com:3128" })?.httpProxy, "http://proxy.example.com:3128", "no scheme is read as http");
+  assert.deepEqual(readProxy({ SCENESCOUT_PROXY: "http://own:8080", HTTPS_PROXY: "http://std:1" }), {
+    httpProxy: "http://own:8080",
+    httpsProxy: "http://own:8080",
+    noProxy: [],
+    source: "SCENESCOUT_PROXY",
+  });
+  assert.equal(readProxy({ SCENESCOUT_PROXY: "off", HTTPS_PROXY: "http://std:1" }), null);
+  assert.equal(readProxy({ HTTPS_PROXY: "http://std:1", NO_PROXY: "*" }), null);
+  for (const [env, error] of [
+    [{ HTTPS_PROXY: "socks5://p:1080" }, /HTTPS_PROXY must be an http or https proxy URL/],
+    [{ https_proxy: "http://p:1/path" }, /https_proxy must be a proxy's address only/],
+    [{ SCENESCOUT_PROXY: "http://user:hunter2@p:1/x" }, /SCENESCOUT_PROXY must be a proxy's address only/],
+  ] as Array<[Record<string, string>, RegExp]>)
+    assert.throws(
+      () => readProxy(env),
+      (e: unknown) => e instanceof Error && error.test(e.message) && !e.message.includes("hunter2"),
+    );
+});
+
+test("proxy: the browser takes the proxy for the app's scheme, its credentials as their own fields; no line prints them", () => {
+  const settings = readProxy({
+    HTTPS_PROXY: "http://ci:s3cret@proxy.example.com:3128",
+    HTTP_PROXY: "http://plain.example.com:80",
+    NO_PROXY: "localhost,.internal",
+  })!;
+  assert.deepEqual(browserProxy(settings, "https://app.example.com/"), {
+    server: "http://proxy.example.com:3128",
+    bypass: "localhost,.internal",
+    username: "ci",
+    password: "s3cret",
+  });
+  assert.deepEqual(browserProxy(settings, "http://app.example.com/"), { server: "http://plain.example.com", bypass: "localhost,.internal" });
+  // An https app with only HTTP_PROXY falls back to it, as undici does; an http app with only HTTPS_PROXY goes direct.
+  assert.equal(browserProxy(readProxy({ HTTP_PROXY: "http://p:1" }), "https://app.example.com/")?.server, "http://p:1");
+  assert.equal(browserProxy(readProxy({ HTTPS_PROXY: "http://p:1" }), "http://app.example.com/"), null);
+  assert.equal(browserProxy(null, "https://app.example.com/"), null);
+  const line = proxyLine(settings);
+  assert.equal(
+    line,
+    "Proxy (HTTPS_PROXY / HTTP_PROXY / NO_PROXY): https through http://proxy.example.com:3128; http through http://plain.example.com; direct for localhost, .internal.",
+  );
+  assert.ok(!line.includes("s3cret"));
+  assert.equal(shownProxy("http://ci:s3cret@proxy.example.com:3128"), "http://proxy.example.com:3128");
+  assert.deepEqual(fetchProxyOptions(settings), {
+    httpProxy: "http://plain.example.com",
+    httpsProxy: "http://ci:s3cret@proxy.example.com:3128",
+    noProxy: "localhost,.internal",
+  });
+});
+
+test("allowlist header: a redirect within the app is followed with it, a page load by a stand-in page; one away from the app, or one that would resend a body, goes to the browser without it", () => {
+  const app = "https://app.example.com";
+  const plan = (status: number, location: string | undefined, method = "GET", resourceType = "document") =>
+    appRedirectPlan({ status, location, requestUrl: `${app}/start`, appUrl: app, method, resourceType });
+  assert.equal(plan(200, undefined), null);
+  assert.equal(plan(302, undefined), null);
+  assert.deepEqual(plan(302, "/login"), { kind: "stand-in", url: `${app}/login`, method: "GET" });
+  assert.deepEqual(plan(301, "/data", "GET", "fetch"), { kind: "follow", url: `${app}/data`, method: "GET" });
+  // A form's POST answered 303, or 302, continues as a GET, as browsers do.
+  assert.deepEqual(plan(303, "/done", "POST"), { kind: "stand-in", url: `${app}/done`, method: "GET" });
+  assert.deepEqual(plan(302, "/done", "POST", "xhr"), { kind: "follow", url: `${app}/done`, method: "GET" });
+  // 307 and 308 keep the method and body: the browser resends it, without the header.
+  assert.deepEqual(plan(307, "/again", "POST", "fetch"), { kind: "hand-over" });
+  assert.deepEqual(plan(308, "/again", "GET", "fetch"), { kind: "follow", url: `${app}/again`, method: "GET" });
+  // Away from the app's origin: never with the header.
+  for (const away of ["https://idp.example.net/authorize", "http://app.example.com/login", "https://app.example.com:8443/", "//evil.example/x"])
+    assert.deepEqual(plan(302, away), { kind: "hand-over" }, away);
+  const page = redirectStandIn(`${app}/a?b=</script><script>alert(1)</script>`);
+  assert.ok(page.includes("location.replace("));
+  assert.ok(!page.includes("</script><script>alert"), "the address stays a string inside the script");
 });

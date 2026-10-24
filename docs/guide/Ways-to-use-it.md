@@ -239,7 +239,7 @@ flowchart LR
   V -- Yes --> E1["exit 1"]
 ```
 
-Visual baselines, when asked for, are compared too ([below](#visual-baselines)). A check that could not run, or not all of it, exits 2.
+Visual baselines, when asked for, are compared too ([below](#visual-baselines)). A check that could not run, or not all of it, exits 2. A request or page load that failed on the network rather than in the app (a name that did not resolve, a refused or dropped connection, a timeout, TLS) is not an issue: one reaching the app makes a check that otherwise passed exit 3, and one reaching another host is listed only ([Network requirements](Network-requirements.md#failures-on-the-network-are-not-the-apps)).
 
 ### What it measures
 

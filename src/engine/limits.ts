@@ -13,6 +13,7 @@
  * It lives apart from browser.ts so the precedence, the bounds and the
  * parsing are table-tested (scripts/limits-test.ts) without a browser.
  */
+import { browserNetworkCause, CAUSE_WORDS } from "./network-failure.js";
 
 export type LimitKind = "action" | "nav";
 
@@ -209,20 +210,45 @@ export function explainTimeout(err: unknown, kind: LimitKind, ms: number): unkno
 }
 
 /**
- * The page-load failures that are tried again, once. net::ERR_NO_BUFFER_SPACE
+ * The page-load failures that are always tried again, once. net::ERR_NO_BUFFER_SPACE
  * is the machine refusing the browser a socket (on Windows, WSAENOBUFS), a
  * transient condition of the machine and not an answer from the app: the
- * hosted Windows runners raised it with as few as 150 sockets open. Every
- * other failure is reported as it is.
+ * hosted Windows runners raised it with as few as 150 sockets open.
+ *
+ * A network failure (network-failure.ts: a name that did not resolve, a
+ * connection refused or dropped, a network timeout, a failed TLS handshake) is
+ * tried again once only when NETWORK_RETRY_ENV is `on` (#554): off by default,
+ * because a retry that hides a server that drops connections would hide a
+ * defect. Every other failure, and every HTTP answer, is reported as it is.
  */
 export const RETRIED_LOAD_ERRORS = ["ERR_NO_BUFFER_SPACE"] as const;
-export type RetriedLoadError = (typeof RETRIED_LOAD_ERRORS)[number];
+/** The code a load was retried after: ERR_NO_BUFFER_SPACE, or the browser's code for a network failure (ERR_CONNECTION_RESET, NS_ERROR_NET_RESET, a WebKit sentence). */
+export type RetriedLoadError = string;
+
+/** Turns on the one retry of a page load that failed on the network: `on` or `off` (the default). */
+export const NETWORK_RETRY_ENV = "SCENESCOUT_RETRY_NETWORK";
+
+/** Whether a page load that failed on the network is tried again, from the environment. Any value but on, off or empty is refused rather than guessed at. */
+export function readNetworkRetry(env: Record<string, string | undefined>): boolean {
+  const raw = (env[NETWORK_RETRY_ENV] ?? "").trim().toLowerCase();
+  if (raw === "" || raw === "off") return false;
+  if (raw === "on") return true;
+  throw new Error(`${NETWORK_RETRY_ENV} must be on or off (got "${env[NETWORK_RETRY_ENV]}").`);
+}
 
 /** How many times one page load is tried again after a retried error. */
 export const LOAD_RETRIES = 1;
 
 /** The pause before the retry, so a machine short of socket buffers has a moment to free one. */
 export const LOAD_RETRY_PAUSE_MS = 500;
+
+/** The pause before a network failure's retry: long enough for a dropped connection or a resolver's hiccup to pass. */
+export const NETWORK_RETRY_PAUSE_MS = 2000;
+
+/** The pause before the retry of a load that failed with `cause`. */
+export function loadRetryPauseMs(cause: RetriedLoadError): number {
+  return cause === "ERR_NO_BUFFER_SPACE" ? LOAD_RETRY_PAUSE_MS : NETWORK_RETRY_PAUSE_MS;
+}
 
 /**
  * The least time a retried load is given. The retry has what is left of the
@@ -250,18 +276,34 @@ export function retriedLoadFailure(err: unknown, cause: RetriedLoadError): unkno
   return out;
 }
 
-/** The error to retry a failed page load for, given how many times it was already retried; null when it is not retried. */
-export function loadRetryCause(message: string, retriesSoFar: number): RetriedLoadError | null {
+/**
+ * The error to retry a failed page load for, given how many times it was
+ * already retried and whether network failures are retried (readNetworkRetry);
+ * null when it is not retried.
+ */
+export function loadRetryCause(message: string, retriesSoFar: number, retryNetwork = false): RetriedLoadError | null {
   if (retriesSoFar >= LOAD_RETRIES) return null;
   // Only the code the browser leads its error with ("page.goto: net::ERR_… at <url>"): the same text inside the
   // address a failure names, or in its call log, is the app's and not the browser's error.
   const code = /^(?:[a-z]+\.[a-zA-Z]+: )?net::([A-Z_]+)(?: at |$)/.exec(message.split("\n")[0])?.[1];
-  return RETRIED_LOAD_ERRORS.find((retried) => retried === code) ?? null;
+  const always = RETRIED_LOAD_ERRORS.find((retried) => retried === code);
+  if (always) return always;
+  if (!retryNetwork) return null;
+  const failure = browserNetworkCause(message);
+  if (!failure) return null;
+  return failure.code.startsWith("net::") ? failure.code.slice("net::".length) : failure.code;
+}
+
+/** What a retried cause was, in a few words. */
+function retryWhy(cause: RetriedLoadError): string {
+  if (cause === "ERR_NO_BUFFER_SPACE") return "the machine refused the browser a socket";
+  const failure = browserNetworkCause(cause.startsWith("ERR_") ? `net::${cause}` : cause);
+  return `${failure ? CAUSE_WORDS[failure.cause] : "a network failure"}: the network's, not an answer from the app; ${NETWORK_RETRY_ENV}=on`;
 }
 
 /** The line an action's result carries for a load that was retried, so a flaky machine stays visible. */
 export function loadRetryNote(url: string, cause: RetriedLoadError): string {
-  return `Note: loading ${url} was retried after ${cause} (the machine refused the browser a socket; it was loaded once more).`;
+  return `Note: loading ${url} was retried after ${cause} (${retryWhy(cause)}; it was loaded once more).`;
 }
 
 /** One load the engine retried, for the report. */
@@ -280,9 +322,9 @@ export function formatLoadRetries(retries: readonly LoadRetry[]): string[] {
   return [
     `## Page loads retried`,
     ``,
-    `A page load the machine refused a socket for is loaded once more. Each was retried once; a load that failed again is reported where it failed.`,
+    `A page load the machine refused a socket for is loaded once more, and so is one that failed on the network when ${NETWORK_RETRY_ENV} is on. Each was retried once; a load that failed again is reported where it failed.`,
     ``,
-    ...retries.map((r) => `- \`${r.url}\` (session ${r.session}): retried after ${r.cause}, at ${r.at}. Sockets then: ${r.sockets}`),
+    ...retries.map((r) => `- \`${r.url}\` (session ${r.session}): retried after ${r.cause} (${retryWhy(r.cause)}), at ${r.at}. Sockets then: ${r.sockets}`),
     ``,
   ];
 }

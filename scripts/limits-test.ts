@@ -25,6 +25,11 @@ import {
   loadRetryCause,
   loadRetryNote,
   loadRetryTimeoutMs,
+  loadRetryPauseMs,
+  LOAD_RETRY_PAUSE_MS,
+  NETWORK_RETRY_ENV,
+  NETWORK_RETRY_PAUSE_MS,
+  readNetworkRetry,
   retriedLoadFailure,
   NAV_TIMEOUT_ENV,
   pageTimeouts,
@@ -228,6 +233,56 @@ test("a page load is retried only after net::ERR_NO_BUFFER_SPACE, and only once"
   ]) {
     assert.equal(loadRetryCause(other, 0), null, other);
   }
+});
+
+test("with SCENESCOUT_RETRY_NETWORK=on, a page load that failed on the network is retried once; never an HTTP answer, a cancel or a timeout", () => {
+  assert.equal(NETWORK_RETRY_ENV, "SCENESCOUT_RETRY_NETWORK");
+  assert.equal(readNetworkRetry({}), false, "off by default");
+  assert.equal(readNetworkRetry({ [NETWORK_RETRY_ENV]: "" }), false);
+  assert.equal(readNetworkRetry({ [NETWORK_RETRY_ENV]: "off" }), false);
+  assert.equal(readNetworkRetry({ [NETWORK_RETRY_ENV]: " ON " }), true);
+  for (const bad of ["1", "true", "yes", "twice"]) assert.throws(() => readNetworkRetry({ [NETWORK_RETRY_ENV]: bad }), /must be on or off/, bad);
+  const retried: Array<[string, string]> = [
+    ["page.goto: net::ERR_EMPTY_RESPONSE at http://127.0.0.1:1/", "ERR_EMPTY_RESPONSE"],
+    ["page.goto: net::ERR_CONNECTION_RESET at http://127.0.0.1:1/", "ERR_CONNECTION_RESET"],
+    ["page.goto: net::ERR_NAME_NOT_RESOLVED at http://app.invalid/", "ERR_NAME_NOT_RESOLVED"],
+    ["page.goto: net::ERR_CERT_DATE_INVALID at https://app.example/", "ERR_CERT_DATE_INVALID"],
+    ["page.goto: net::ERR_TIMED_OUT at http://127.0.0.1:1/search?q=net::ERR_ABORTED", "ERR_TIMED_OUT"],
+    ["page.goto: NS_ERROR_NET_RESET", "NS_ERROR_NET_RESET"],
+    ["page.goto: Could not connect to server", "Could not connect to server"],
+  ];
+  for (const [message, cause] of retried) {
+    assert.equal(loadRetryCause(message, 0, true), cause, message);
+    // Off, as by default: reported as it is.
+    assert.equal(loadRetryCause(message, 0, false), null, message);
+    // Once only.
+    assert.equal(loadRetryCause(message, 1, true), null, message);
+  }
+  for (const other of [
+    "page.goto: net::ERR_ABORTED at http://127.0.0.1:1/",
+    "page.goto: net::ERR_BLOCKED_BY_CLIENT at http://127.0.0.1:1/",
+    "page.goto: net::ERR_TOO_MANY_REDIRECTS at http://127.0.0.1:1/",
+    "page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at http://127.0.0.1:1/",
+    "page.goto: Timeout 20000ms exceeded.",
+    // A code inside the address or the call log is the app's text.
+    'page.goto: Navigation to "http://127.0.0.1:1/net::ERR_CONNECTION_RESET" is interrupted by another navigation to "http://127.0.0.1:1/"',
+    'page.goto: Timeout 20000ms exceeded.\nCall log:\n  - navigating to "http://127.0.0.1:1/?e=net::ERR_CONNECTION_RESET"',
+  ]) {
+    assert.equal(loadRetryCause(other, 0, true), null, other);
+  }
+  // The socket the machine refused is retried whatever the setting.
+  assert.equal(loadRetryCause("page.goto: net::ERR_NO_BUFFER_SPACE at http://127.0.0.1:1/", 0, true), "ERR_NO_BUFFER_SPACE");
+  assert.equal(loadRetryPauseMs("ERR_NO_BUFFER_SPACE"), LOAD_RETRY_PAUSE_MS);
+  assert.equal(loadRetryPauseMs("ERR_CONNECTION_RESET"), NETWORK_RETRY_PAUSE_MS);
+  const note = loadRetryNote("http://127.0.0.1:8080/things", "ERR_CONNECTION_RESET");
+  assert.match(
+    note,
+    /retried after ERR_CONNECTION_RESET \(the connection was refused or dropped: the network's, not an answer from the app; SCENESCOUT_RETRY_NETWORK=on; it was loaded once more\)/,
+  );
+  const [entry] = formatLoadRetries([
+    { at: "2026-10-17T10:00:00.000Z", url: "http://127.0.0.1:8080/things", session: "check", cause: "NS_ERROR_UNKNOWN_HOST", sockets: "12 TCP sockets" },
+  ]).filter((l) => l.startsWith("- "));
+  assert.match(entry, /retried after NS_ERROR_UNKNOWN_HOST \(the host name did not resolve: the network's/);
 });
 
 test("a retried load is said in the action's result and in the report", () => {

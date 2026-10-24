@@ -36,7 +36,7 @@ What it does not do:
 - **It does not sign in.** It reads a profile's dates and sends nothing from it. A session the server has ended early still reads as unexpired.
 - **It does not follow the model API's redirects.** The key is not sent to another address, so an API that redirects fails with exit 17, and the line names where it pointed. `scenescout ci` follows no redirect either. The app's own redirects are followed, up to 20; more than that is a redirect loop and fails with exit 14.
 - **It does not judge the key's model.** An API that does not list models (404 or 405) is reported as reachable with the key unchecked, and a 429 is reported as reachable but rate-limited. The request carries the key and nothing of the app, and it spends no tokens.
-- **Node's own trust store and settings apply.** A certificate signed by your own authority needs `NODE_EXTRA_CA_CERTS` for this check. Proxy settings are not read yet, so behind a proxy it reports what a run that bypasses the proxy would see.
+- **Node's own trust store applies.** A certificate signed by your own authority needs `NODE_EXTRA_CA_CERTS` for this check. It goes through the proxy the environment names ([Behind a proxy](#behind-a-proxy)), and its first line says which. With an [allowlist header](#an-allowlist-header-for-a-firewall) set, its request for the start page carries it, and its first lines name the header but never its value.
 
 The [check action](Configuration-reference.md#action-check) runs it with `preflight: "true"`, using the action's `url` and `storage-state`, before it installs the browser. Every option is in the [configuration reference](Configuration-reference.md#scenescout-preflight).
 
@@ -44,7 +44,7 @@ The [check action](Configuration-reference.md#action-check) runs it with `prefli
 
 | What runs | Hosts it reaches | When |
 |---|---|---|
-| Any browser run: `scenescout <url>`, `check`, `ci`, `login`, and an agent's session over MCP | The app under test, and every host its pages load from: fonts, scripts, images, analytics, a sign-in provider | Every run. A third-party host the runner cannot reach makes a page's requests fail, and `check` reports them as findings (`request-failed`, `console-error`) |
+| Any browser run: `scenescout <url>`, `check`, `ci`, `login`, and an agent's session over MCP | The app under test, and every host its pages load from: fonts, scripts, images, analytics, a sign-in provider | Every run. A third-party host the runner cannot reach makes a page's requests fail, and `check` lists them as network failures, not findings |
 | `npx scenescout` | The npm registry (`registry.npmjs.org`, or the registry your npm config names) | The first time a version is fetched; npm caches it |
 | The [check action](Configuration-reference.md#action-check) and the [ci action](Configuration-reference.md#action-ci) | The npm registry, for `npm view` (the release's integrity) and `npm ci` (its locked dependencies). `actions/setup-node`'s download, only when the runner has no Node 20 or newer. GitHub's Actions cache, artifact and code-scanning services, for the browser cache, the results and `upload-sarif` | Every job, before the check runs |
 | The browser download: `scenescout install --browser-only`, the first run, and an attach that finds no build | Playwright's download servers: `cdn.playwright.dev` and `playwright.download.prss.microsoft.com`, or the mirror `PLAYWRIGHT_DOWNLOAD_HOST` names | Once per build; the headless Chromium build is about 200 MB. An attach downloads only when `SCENESCOUT_BROWSER_DOWNLOAD` allows it, and in CI only when it is `on` |
@@ -61,12 +61,55 @@ SceneScout has no telemetry and no update check, so nothing else is reached. The
 | Host | What you see |
 |---|---|
 | The app | `check` and the first run exit 2 ("could not run"); `ci` stops with `could-not-start`. The preflight names the cause (exit 10 to 15) |
-| A host the app's pages load from | Findings on the pages that use it (`request-failed`, `console-error`), not a failed run |
+| A host the app's pages load from | Not findings: `check` lists it under "Network failures" as another host's, and its exit code is unchanged ([below](#failures-on-the-network-are-not-the-apps)) |
 | The npm registry | `npx` or the action's "Get SceneScout" step fails before SceneScout starts |
 | Playwright's download servers | `scenescout install` prints `Browser download failed` with the command to retry; an attach refuses with the build it needs |
 | Package mirrors | The action's step that installs the browser's system libraries fails; the browser then cannot start |
 | The model's API | `ci` exits 2 when the API fails; the preflight exits 17 |
 | GitHub or Jira | `export` exits 2 and lists what it filed before it stopped |
+
+## Failures on the network are not the app's
+
+A request that gets no HTTP answer at all failed on the network: the name did not resolve, the connection was refused or dropped, nothing answered in time, or the TLS handshake failed. SceneScout reads which from the browser's own error (Chromium's `net::ERR_NAME_NOT_RESOLVED`, Firefox's `NS_ERROR_UNKNOWN_HOST`, WebKit's sentences). An HTTP status, however bad, is an answer from the server and is never counted as one, and neither is a request the page or the write policy cancelled, a redirect loop, or a page that took longer than the page-load limit.
+
+`scenescout check` files none of them as issues. Each is listed once under "Network failures" in `report.md` and under `network` in `check.json`, with its cause, the browser's code and the routes it was seen on:
+
+- **One reaching the app's site** (a route that did not load, or a request to the app's host on any port or to a sibling subdomain such as `api.example.com` beside `app.example.com`) leaves what it kept from loading unmeasured. A check whose gate otherwise passed exits **3**, and its verdict line starts **NETWORK FAILURES**. A check that failed its gate still exits 1, since running it again would not pass it. The [check action](Configuration-reference.md#action-check) ends its step with 3 and an annotation saying so.
+- **One reaching another host** (a CDN, a font, analytics the runner cannot reach) is the environment's: listed, and the exit code is unchanged. The browser's console line repeating the same failure ("Failed to load resource: net::ERR_NAME_NOT_RESOLVED") is not counted a second time.
+
+The first page of a run names the cause too: a name that does not resolve, a certificate the browser refuses or a network timeout says so, instead of asking whether the app is running.
+
+**One bounded retry.** With `SCENESCOUT_RETRY_NETWORK=on`, a page load that failed on the network is tried once more, after 2 seconds, within what is left of the load's own limit. It is off by default, because a retry would also hide a server that drops connections. Each retried load is listed under "Page loads retried" in the report, with the code it was retried after, and in `check.json` under `loadRetries`; a load that failed again says it was retried. A request a page makes (an API call, an image) is not retried. A load the machine refused a socket for (`net::ERR_NO_BUFFER_SPACE`) is always retried once, as before.
+
+`scenescout ci` names the cause of a failed request to the model's API (for example `fetch failed: ECONNREFUSED`) rather than only "fetch failed".
+
+## Behind a proxy
+
+SceneScout reads the standard variables, `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` (lower case first, as curl and Node read them), or `SCENESCOUT_PROXY`, which replaces them for SceneScout alone. `SCENESCOUT_PROXY=off` reaches everything directly whatever the standard variables say.
+
+- **The browser** gets the proxy for the app's scheme on each session: `HTTPS_PROXY` for an https app (falling back to `HTTP_PROXY`), `HTTP_PROXY` for an http app. It uses that one proxy for every host its pages load from, with `NO_PROXY`'s entries as the hosts it reaches directly. A browser never sends its own machine's addresses (`localhost`, `127.0.0.1`) through a proxy.
+- **SceneScout's own requests**: the preflight, the model's API for `ci` and the dedup judge, GitHub and Jira. They go through the proxy whenever one is set, with `NO_PROXY` honoured, by undici's `EnvHttpProxyAgent`. With no proxy set nothing changes.
+- **Credentials** in the proxy URL (`http://user:password@proxy:3128`) are passed to the browser and the HTTP client and never printed: `scenescout preflight` names the proxy it used without them.
+- **What may be sent is unchanged.** The [`egress` setting](What-leaves-the-machine.md#the-egress-setting) is applied before any request, and a proxy only changes the route a permitted request takes.
+- **Browser downloads** are Playwright's: its installer reads `HTTPS_PROXY` itself.
+
+## An allowlist header for a firewall
+
+A team whose web application firewall lets CI traffic through by a shared header sets `SCENESCOUT_APP_HEADER` to `Name: value`, from a secret:
+
+```yaml
+      - uses: brunoboto96/SceneScout@v3
+        with:
+          url: https://staging.example.com
+        env:
+          SCENESCOUT_APP_HEADER: ${{ secrets.WAF_ALLOW_HEADER }}   # e.g. "X-CI-Allow: <token>"
+```
+
+- **Only the app's own origin gets it**, the scheme, host and port the run attached to: every page, script, image and API call there. No other host does, not a font, a CDN, a sign-in provider, the model's API or a tracker.
+- **A redirect does not carry it away.** SceneScout sends each of the app's requests itself and hands the answer to the browser. A redirect within the app is followed with the header: a page load by a page that loads the next address itself, any other request by SceneScout. A redirect to another origin, or a 307 or 308 that would resend a body, is followed by the browser without the header. An event stream (`EventSource`) and a WebSocket go as the page sent them, without it. Each request is handed to the page once its answer has been read whole, so a streamed response arrives all at once.
+- **Chromium and Firefox only.** WebKit cannot be handed a redirect that way, so an attach on WebKit with the header set stops with a message. In Chromium, a page handed over that way has no address of its own, so the session turns off Chromium's Local Network Access checks, which would otherwise block the page's requests to private addresses.
+- **Never printed.** No line names its value, and `ci` redacts it from every line it writes. A name that would change who the request is or how the write policy reads it (`Cookie`, `Authorization`, `Host`, `Origin`, `X-HTTP-Method-Override`, any `Sec-` or `Proxy-` header) is refused.
+- **The preflight sends it too**, on its request for the start page, and follows redirects itself so that only the app's origin gets it.
 
 ## Removing downloads
 

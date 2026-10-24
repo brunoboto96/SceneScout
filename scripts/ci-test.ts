@@ -732,6 +732,19 @@ test("http client: a malformed 200 is retried, never run; a network error too", 
   assert.equal(f.calls, 4);
 });
 
+test('http client: a request that failed on the network says why, not only "fetch failed" (#554)', async () => {
+  const refused = (async () => {
+    throw Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), { code: "ECONNREFUSED" }),
+    });
+  }) as unknown as typeof fetch;
+  const client = new HttpModelClient(new OpenAIConversation(O, "K"), OPENAI_KEY, { fetch: refused, sleep: async () => {}, random: () => 0 });
+  await assert.rejects(
+    client.next(600_000),
+    (e: unknown) => e instanceof ProviderError && e.message.includes("the request failed (fetch failed: ECONNREFUSED connect ECONNREFUSED 127.0.0.1:443)"),
+  );
+});
+
 test("http client: a redirect is never followed, and the key is sent once", async () => {
   const inits: RequestInit[] = [];
   const redirecting = (async (_url: string, init: RequestInit) => {

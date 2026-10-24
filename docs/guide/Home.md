@@ -49,7 +49,7 @@ Before you point it at anything with real data, read the [safety model](Safety-m
 | [Signing in](Signing-in.md) | Saved logins per role, expiry, the refresh broker, and scripted sign-in for CI |
 | [Safety model](Safety-model.md) | The four write modes, what is refused and why, and keys and forks in CI |
 | [What leaves the machine](What-leaves-the-machine.md) | Every path by which data leaves the machine, what it carries and to whom, how to turn each off, and the `egress` setting |
-| [Network requirements](Network-requirements.md) | Every host each command needs, `scenescout preflight` to check a runner reaches them, caches and mirrors, and a self-hosted runner inside your network |
+| [Network requirements](Network-requirements.md) | Every host each command needs, `scenescout preflight` to check a runner reaches them, network failures told from the app's, a proxy and a firewall's allowlist header, caches and mirrors, and a self-hosted runner inside your network |
 | [Recipes](Recipes.md) | Setups for seven kinds of project, from a server-rendered app to a monorepo with preview deployments |
 | [Configuration reference](Configuration-reference.md) | Every CLI option, environment variable, GitHub Action input, repository variable and MCP prompt, with defaults |
 | [Measuring it](Measuring-it.md) | The benchmark, answer keys, the held-out app and how to read a scorecard |
