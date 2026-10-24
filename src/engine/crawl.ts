@@ -5,7 +5,7 @@
  */
 import { isNonPageRoute } from "./fingerprint.js";
 import { fromJs } from "./js-regex.js";
-import { isTimeoutMessage } from "./limits.js";
+import { isTimeoutMessage, loadInterrupted } from "./limits.js";
 
 /** One crawled route, as the summary line needs it. */
 export interface CrawlOutcome {
@@ -131,7 +131,6 @@ export interface MainDocumentAnswer {
 const DOWNLOAD_STARTED = fromJs(String.raw`\bDownload is starting\b`);
 /** A fragment: `#` to the end of the line. */
 const FRAGMENT_RE = fromJs(String.raw`#.*$`);
-const INTERRUPTED_RE = fromJs(String.raw`\bis interrupted by another navigation\b`);
 
 /**
  * Whether a navigation that failed may leave the browser about to show an
@@ -206,7 +205,7 @@ export function awaitsLateAnswer(message: string, answered: boolean): boolean {
  * reason.
  */
 export function answeredNavigationFailure(message: string, answer: Pick<MainDocumentAnswer, "status" | "contentType"> | null): string | null {
-  if (!answer || isTimeoutMessage(message) || INTERRUPTED_RE.test(message)) return null;
+  if (!answer || isTimeoutMessage(message) || loadInterrupted(message)) return null;
   const said = answeredStatus(answer);
   if (answer.status >= 400) return said;
   // A navigate step cannot open a file, so the reason says what checks one: the request the click that downloads it makes.

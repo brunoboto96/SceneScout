@@ -13,6 +13,7 @@
  * It lives apart from browser.ts so the precedence, the bounds and the
  * parsing are table-tested (scripts/limits-test.ts) without a browser.
  */
+import { fromJs } from "./js-regex.js";
 import { browserNetworkCause, CAUSE_WORDS } from "./network-failure.js";
 
 export type LimitKind = "action" | "nav";
@@ -176,6 +177,46 @@ export function isTimeoutMessage(message: string): boolean {
   return /\bTimeout \d+ms exceeded/i.test(message);
 }
 
+/** How a browser fails page.goto when the page started another navigation before the asked-for load finished. */
+const INTERRUPTED_RE = fromJs(String.raw`^(?:[a-z]+\.[a-zA-Z]+: )?Navigation to ".*" is interrupted by another navigation to "`);
+
+/**
+ * Whether a page load failed only because another navigation took its place ("page.goto: Navigation to "/a" is
+ * interrupted by another navigation to "/b""). Read from the error's first line, the browser's own: the same words in an
+ * address further down are the app's. When the session's own load is the only one it started, the other navigation is
+ * the page's: its script or a redirect moved it on before the asked-for load finished (Firefox under load does this to
+ * a page that redirects as it loads). The page moved on rather than failing, so where it landed is what is reported.
+ */
+export function loadInterrupted(message: string): boolean {
+  return INTERRUPTED_RE.test(message.split("\n")[0]);
+}
+
+/** The address an interrupted load names as the navigation that took its place; null for any other error. */
+const INTERRUPTED_BY_RE = fromJs(String.raw`^(?:[a-z]+\.[a-zA-Z]+: )?Navigation to ".*" is interrupted by another navigation to "(.*)"$`);
+
+export function interruptedBy(message: string): string | null {
+  return INTERRUPTED_BY_RE.exec(message.split("\n")[0])?.groups[1] ?? null;
+}
+
+/** How long an interrupted load waits for the request of the navigation that took its place, when it has not been seen yet. */
+export const INTERRUPTION_GRACE_MS = 1000;
+
+/** A main-frame navigation's first request: where it went and when it started. */
+export interface NavigationStart {
+  url: string;
+  at: number;
+}
+
+/**
+ * Whether an interrupted load (interruptedBy) is the page moving itself on: the navigation that took its place started
+ * at or after the load did. One that started before is a navigation from earlier (the previous load committing late),
+ * and the page has not moved on from the asked-for load at all, so the load's error stands. Fragments are not compared.
+ */
+export function interruptedByOwnNavigation(target: string, starts: readonly NavigationStart[], loadStartedAt: number): boolean {
+  const bare = (u: string): string => u.split("#")[0];
+  return starts.some((s) => s.at >= loadStartedAt && bare(s.url) === bare(target));
+}
+
 const HINT_MARK = "ran out. If the machine is loaded";
 
 /** What to say when a limit ran out: which one, how long it was, and how to raise it. */
@@ -185,6 +226,14 @@ export function limitHint(kind: LimitKind, ms: number): string {
     `the ${n.what} (${ms} ms) ${HINT_MARK} rather than the app slow, raise it: ` +
     `${n.option} on scout_attach, ${n.flag} on scenescout check or ci, or ${n.env} in the environment`
   );
+}
+
+/**
+ * What a load is reported as when the page moved itself on to `url` (a script's redirect, or one that interrupted the
+ * load) and that navigation was still on its way when the limit ran out: the page cannot be read until it lands.
+ */
+export function stillNavigating(url: string, kind: LimitKind, ms: number): string {
+  return `the page moved itself on to ${url}, which had not loaded when ${limitHint(kind, ms)}`;
 }
 
 /**

@@ -1,0 +1,5 @@
+---
+"scenescout": patch
+---
+
+Three navigation edge cases. A crawled route, or a snapshot, whose page moved itself on to an address that never answered no longer hangs: the navigation is waited for within the page-load limit, and one still on its way then is reported as `NAVIGATION PENDING`, naming the address, and the crawl goes on (Chromium held the read past 40 s). A page that lands and at once moves on again is waited for in the same way, and the checks an action runs on the page afterwards are skipped while it is on its way. A load the page's own redirect interrupts (seen on Firefox under load, "interrupted by another navigation") is now reported where the page landed, by `scout_navigate` with the usual redirect and sign-in checks and by a crawl, instead of failing; a load interrupted by an earlier navigation, and a load that really failed, are still reported as failures. On Firefox, a file the browser downloads no longer holds the wait after an action or before a snapshot to its 2 s cap.

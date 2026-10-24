@@ -119,7 +119,9 @@ import {
   describePace,
   InFlightRequests,
   normalizePace,
+  ownNavigationLanded,
   RECHECK_OPEN_MS,
+  seenWithin,
   settlePage,
   stableUrlOf,
 } from "./settle.js";
@@ -222,6 +224,10 @@ import {
   firstLineOf,
   isTimeoutMessage,
   limitHint,
+  INTERRUPTION_GRACE_MS,
+  interruptedBy,
+  interruptedByOwnNavigation,
+  type NavigationStart,
   loadRetryCause,
   loadRetryPauseMs,
   loadRetryNote,
@@ -231,6 +237,7 @@ import {
   readNetworkRetry,
   resolveTimeLimits,
   SCREENSHOT_TIMEOUT_MS,
+  stillNavigating,
   TARGET_READ_MS,
   type LimitKind,
   type RetriedLoadError,
@@ -1525,6 +1532,8 @@ export class BrowserEngine {
     const page = this.page;
     if (!page || page.isClosed() || requests.length === 0) return;
     if (!requests.some((r) => r.status === null || r.status >= 400)) return;
+    // A page on its way elsewhere has no DOM worth asking, and Chromium holds the question until it lands (#674).
+    if (this.requests.navigating(page.mainFrame())) return;
     const url = page.url();
     let state: PageState;
     try {
@@ -1596,6 +1605,8 @@ export class BrowserEngine {
     // indices the hits are matched back to.
     const probes = this.probes;
     if (!page || page.isClosed() || probes.length === 0) return;
+    // On its way elsewhere: Chromium would hold the question until the page lands (#674); the next drain looks again.
+    if (this.requests.navigating(page.mainFrame())) return;
     const url = page.url();
     let hits: RawHit[];
     try {
@@ -1941,6 +1952,8 @@ export class BrowserEngine {
           if (this.page && req.frame() === this.page.mainFrame()) {
             this.embedMoves.navigationStarted(req.url(), req.headers()["referer"], this.embeddedSites());
             this.pageRequests.loaded(req.url(), Date.now());
+            this.mainNavigationStarts.push({ url: req.url(), at: Date.now() });
+            if (this.mainNavigationStarts.length > 20) this.mainNavigationStarts.shift();
             // The current input moved the page to a new document: what is sent from here on is not its own write.
             if (this.inputSince !== null && this.documentLoadSince === null && this.inputSince >= this.actionStartedAt) this.documentLoadSince = Date.now();
           }
@@ -2369,6 +2382,30 @@ export class BrowserEngine {
   }
 
   /**
+   * Wait for a navigation the page started on its own to land, within `limitMs` of `startedAt` (settle.ts
+   * ownNavigationLanded). Null once nothing is on its way; otherwise the address it was still loading, redacted.
+   */
+  private async ownNavigationPending(page: Page, limitMs: number, startedAt: number): Promise<string | null> {
+    const frame = page.mainFrame();
+    // A navigation the page started after the load or action is given its own limit, from when it started.
+    const since = Math.max(startedAt, this.requests.navigationOf(frame)?.at ?? 0);
+    const landed = await ownNavigationLanded(page, () => !page.isClosed() && this.requests.navigating(frame), limitMs, since);
+    return landed ? null : redactSecrets(this.requests.navigationOf(frame)?.request.url() ?? page.url());
+  }
+
+  /**
+   * Whether a load that threw was interrupted by the page moving itself on (limits.ts interruptedByOwnNavigation): the
+   * navigation that took its place started after the load did. Its request is waited for, up to INTERRUPTION_GRACE_MS,
+   * when the browser reported the interruption first. A navigation from earlier that committed late is not the page
+   * moving on, and the load's error stands.
+   */
+  private async movedOnByItself(page: Page, err: unknown, loadStartedAt: number): Promise<boolean> {
+    const target = interruptedBy(err instanceof Error ? err.message : String(err));
+    if (target === null) return false;
+    return seenWithin(page, () => interruptedByOwnNavigation(target, this.mainNavigationStarts, loadStartedAt), INTERRUPTION_GRACE_MS);
+  }
+
+  /**
    * Where a navigation landed. Watched for a late client-side guard only when
    * this session has credentials to lose. The page is passed in rather than
    * read off the engine so a session torn down mid-navigation still reports
@@ -2566,6 +2603,8 @@ export class BrowserEngine {
   }
   /** When the most recent request started, so a page that fires one late is not read too early. */
   private lastRequestStart = 0;
+  /** The driven page's latest navigations, by their first request (limits.ts interruptedByOwnNavigation). */
+  private mainNavigationStarts: NavigationStart[] = [];
   /** When a request whose answer had arrived was last cancelled, or finished on an answer a page may move on (settle.ts). */
   private answered = new AnsweredEnds<Request>();
   /**
@@ -2712,6 +2751,12 @@ export class BrowserEngine {
     const page = this.requirePage();
     const memory = this.memory!;
     await this.settle(true);
+    // A page moving itself on cannot be read until that navigation lands (crawlStep says why): waited for within the
+    // page-load limit since the last action, and reported rather than read when it has not landed by then.
+    const pending = await this.ownNavigationPending(page, this.limits.navMs, this.actionStartedAt);
+    if (pending !== null) {
+      return `NAVIGATION PENDING: ${stillNavigating(pending, "nav", this.limits.navMs)}. Nothing on the page can be read until that navigation lands; navigate elsewhere, or take scout_snapshot again later.`;
+    }
 
     const { elements, truncated, forms, cut, prev: prevSnap, matched, aliases } = await this.snapshots.collect();
     const url = page.url();
@@ -5423,6 +5468,33 @@ export class BrowserEngine {
     );
   }
 
+  /** A crawled route that could not be read: it failed to load, or its page was still moving on at the limit. */
+  private crawlRouteUnloaded(run: CrawlRun, path: string, url: string, reason: string, verdict: "LOAD FAILED" | "NAVIGATION PENDING"): CrawlStepOutcome {
+    // Not retried by later crawls in this process (a check would otherwise try it
+    // on every discovery round). Deliberately not written to memory: one outage
+    // must not count a route as covered in every later run's gap ledger.
+    if (!run.opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
+    run.summary.push(`${path} — ${verdict}`);
+    // The page a re-attach went back to never loaded, so nothing says whether it worked.
+    if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
+    run.problems.push(`${path}: ${reason}`);
+    this.crawlHealth.push({
+      path,
+      url,
+      status: null,
+      loadError: reason,
+      loginRedirect: false,
+      elements: 0,
+      unnamed: [],
+      placeholderOnly: [],
+      violations: [],
+      geometry: [],
+      brokenImages: [],
+      design: [],
+    });
+    return "load-failed";
+  }
+
   /** One route of a crawl: load it, record what it is, and add its line to the summary (and to the problems, if any). */
   private async crawlStep(run: CrawlRun, path: string): Promise<CrawlStepOutcome> {
     const { page, memory, opts, explicit, summary, problems } = run;
@@ -5459,33 +5531,14 @@ export class BrowserEngine {
         resource = { url: seen.url, status: seen.status, contentType: seen.contentType! };
         // Unless it downloaded, the browser may still commit an error page for it, which would interrupt the next route's load.
         await this.afterFailedNavigation(page, err, answered);
+      } else if (await this.movedOnByItself(page, err, this.actionStartedAt)) {
+        // The page moved itself on before its load finished: read where it lands, as for a redirect (the wait below).
+        status = "moved on by the page";
       } else {
         const explained = explainTimeout(err, "nav", this.limits.crawlNavMs);
         const reason = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
-        // Not retried by later crawls in this process (a check would otherwise try it
-        // on every discovery round). Deliberately not written to memory: one outage
-        // must not count a route as covered in every later run's gap ledger.
-        if (!opts.measureOnly) this.loadFailedRoutes.add(normalizePath(url));
         await this.errorPageCommitted(page);
-        summary.push(`${path} — LOAD FAILED`);
-        // The page a re-attach went back to never loaded, so nothing says whether it worked.
-        if (this.authLoss.reattaching) this.authLoss.abortReattach(`the page it went back to, ${path}, did not load (${reason})`);
-        problems.push(`${path}: ${reason}`);
-        this.crawlHealth.push({
-          path,
-          url,
-          status: null,
-          loadError: reason,
-          loginRedirect: false,
-          elements: 0,
-          unnamed: [],
-          placeholderOnly: [],
-          violations: [],
-          geometry: [],
-          brokenImages: [],
-          design: [],
-        });
-        return "load-failed";
+        return this.crawlRouteUnloaded(run, path, url, reason, "LOAD FAILED");
       }
     } finally {
       answered.stop();
@@ -5521,6 +5574,14 @@ export class BrowserEngine {
       return "resource";
     }
     await this.settle();
+    // A route whose page moved itself on is read once that navigation lands: read while it is on its way, Chromium held
+    // the read until it did, however long that took. One still on its way at the page-load limit is not read.
+    const pending = await this.ownNavigationPending(page, this.limits.crawlNavMs, this.actionStartedAt);
+    if (pending !== null) {
+      // Stopped, so the page the crawl leaves is not one a later read would hang on.
+      await bestEffort(page.goto("about:blank", { timeout: this.limits.backNavMs }));
+      return this.crawlRouteUnloaded(run, path, url, stillNavigating(pending, "nav", this.limits.crawlNavMs), "NAVIGATION PENDING");
+    }
     // With a saved sign-in, the address is watched until it has held still since the route's document arrived before
     // the route is read: a guard that sends a signed-out visitor to sign-in from its scripts a moment after load would
     // otherwise pass as a healthy route. Without one, there is no sign-in to lose and nothing is waited for.
@@ -6566,9 +6627,18 @@ export class BrowserEngine {
    */
   private async gotoSettlingFailure(page: Page, url: string, options: Parameters<Page["goto"]>[1]): Promise<Response | null> {
     const answered = BrowserEngine.watchMainDocument(page, url);
+    const startedAt = Date.now();
     try {
       return await this.loadPage(page, url, options);
     } catch (err) {
+      // The page moved itself on before the load finished (movedOnByItself): not a failure of the load. Where it went is
+      // waited for, within the load's limit, and is what the caller then reads and judges.
+      if (await this.movedOnByItself(page, err, startedAt)) {
+        const limitMs = options?.timeout ?? this.limits.navMs;
+        const pending = await this.ownNavigationPending(page, limitMs, startedAt);
+        if (pending === null) return null;
+        throw new Error(stillNavigating(pending, "nav", limitMs), { cause: err });
+      }
       const answer = await answered.afterThrow(err);
       await this.afterFailedNavigation(page, err, answered);
       const reason = answeredNavigationFailure(err instanceof Error ? err.message : String(err), answer);

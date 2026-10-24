@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Report (file by fetch)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="file-by-fetch-heading">Report</h1>
+    </main>
+    <script>
+      // Fetches the file the server sends slowly (/slow-file) from script, so it is the page's own request, not a
+      // download. Its twin, file-on-load.html, moves the page to the same file, which the browser downloads.
+      setTimeout(function () {
+        fetch("/slow-file").then(function (r) {
+          return r.arrayBuffer();
+        });
+      }, 40);
+    </script>
+  </body>
+</html>

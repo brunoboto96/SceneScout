@@ -275,12 +275,16 @@ export class InFlightRequests<R, F> {
   /**
    * A download started. A navigation answered with a file never commits, but Firefox keeps its request open until the
    * whole file has arrived, so without this the frame counted as navigating for as long as the file took, holding a
-   * URL watch to URL_NAVIGATING_CAP_MS. `isDownload` says whether a request is the one the file came from; the frame
-   * whose pending navigation it is stops counting as navigating. A download from any other request changes nothing.
+   * URL watch to URL_NAVIGATING_CAP_MS, and the request counted as in flight, holding every settle wait to
+   * SETTLE_CAP_MS. `isDownload` says whether a request is the one the file came from: it is dropped (the file is the
+   * browser's to save, not content the page is waiting on), and the frame whose pending navigation it is stops counting
+   * as navigating. Any other request, still arriving or not, is left as it was.
    */
   downloaded(isDownload: (request: R) => boolean): void {
     for (const [request, held] of this.open) {
-      if (held.frame === undefined || this.pendingNavigation.get(held.frame) !== held.order || !isDownload(request)) continue;
+      if (!isDownload(request)) continue;
+      this.open.delete(request);
+      if (held.frame === undefined || this.pendingNavigation.get(held.frame) !== held.order) continue;
       this.pendingNavigation.delete(held.frame);
       this.finishedNavigation.delete(held.frame);
     }
@@ -298,6 +302,14 @@ export class InFlightRequests<R, F> {
 
   get count(): number {
     return this.open.size;
+  }
+
+  /** The request of `frame`'s navigation while it is still open (navigating), and when it started, for saying where the page was going. */
+  navigationOf(frame: F): { request: R; at: number } | undefined {
+    const order = this.pendingNavigation.get(frame);
+    if (order === undefined) return undefined;
+    for (const [request, held] of this.open) if (held.frame === frame && held.order === order) return { request, at: held.at };
+    return undefined;
   }
 
   /**
@@ -506,5 +518,72 @@ export async function stableUrlOf(
       url = at;
       changedAt = now();
     }
+  }
+}
+
+/**
+ * A navigation the page started on its own, before it is read.
+ *
+ * A page can move itself on just after it loads (a script's `location.href`), to an address that answers slowly or
+ * never. Chromium holds a read of the page (page.evaluate) until that navigation commits or fails, with no limit of
+ * its own, so a crawl that read the route then hung for as long as the address took: past 40 s on one that never
+ * answered. Before the read, such a navigation is waited for until it lands or the page-load limit runs out, counted
+ * from when the load began, so the route's whole load keeps to that limit; a navigation still on its way then is
+ * reported as a navigation pending rather than read.
+ */
+export interface OwnNavigationWait {
+  /** Whether the page's own navigation is on its way (InFlightRequests.navigating). */
+  navigating: boolean;
+  /** Since the load being judged began. */
+  elapsedMs: number;
+  /** The page-load limit for that load. */
+  limitMs: number;
+}
+
+/** Whether to keep waiting for a navigation the page started on its own: while one is on its way, within the page-load limit. */
+export function keepWaitingForNavigation(w: OwnNavigationWait): boolean {
+  return w.navigating && w.elapsedMs < w.limitMs;
+}
+
+/**
+ * Wait for a navigation the page started on its own to land (keepWaitingForNavigation). `startedAt` is when the load
+ * began, on `now`'s clock. Answers whether the page can be read: true once nothing is on its way, or the page is closed;
+ * false when a navigation was still on its way at the limit. Once a navigation has been waited for, the page it landed
+ * on must then go QUIET_MS without starting another before it is read: a page that lands on a script that moves it on
+ * again (A to B to C) would otherwise be read while C is on its way. A page with nothing on its way is read at once.
+ */
+export async function ownNavigationLanded(
+  page: SettlingPage,
+  navigating: () => boolean,
+  limitMs: number,
+  startedAt: number,
+  now: () => number = Date.now,
+): Promise<boolean> {
+  let waited = false;
+  let landedAt: number | null = null;
+  for (;;) {
+    if (page.isClosed()) return true;
+    const on = navigating();
+    if (!keepWaitingForNavigation({ navigating: on, elapsedMs: now() - startedAt, limitMs })) {
+      if (on) return false;
+      if (!waited) return true;
+      landedAt ??= now();
+      // Past the limit, a page that has landed is read without the quiet window.
+      if (now() - landedAt >= QUIET_MS || now() - startedAt >= limitMs) return true;
+    } else {
+      waited = true;
+      landedAt = null;
+    }
+    await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
+  }
+}
+
+/** Wait up to `ms` for `seen` to hold, ticking on the page. Answers whether it did. */
+export async function seenWithin(page: SettlingPage, seen: () => boolean, ms: number, now: () => number = Date.now): Promise<boolean> {
+  const started = now();
+  for (;;) {
+    if (seen()) return true;
+    if (page.isClosed() || now() - started >= ms) return false;
+    await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
   }
 }

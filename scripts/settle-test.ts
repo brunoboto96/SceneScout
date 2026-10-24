@@ -18,9 +18,11 @@ import {
   CRAWL_URL_HELD_MS,
   describePace,
   InFlightRequests,
+  keepWaitingForNavigation,
   keepWatchingUrl,
   NAVIGATION_COMMIT_GRACE_MS,
   normalizePace,
+  ownNavigationLanded,
   PACE_MAX_MS,
   QUIET_MS,
   RECHECK_BUSY_CAP_MS,
@@ -30,6 +32,7 @@ import {
   RECHECK_OPEN_MS,
   RECHECK_WAITS_MS,
   recheckWait,
+  seenWithin,
   SETTLE_CAP_MS,
   SETTLE_TICK_MS,
   settlePage,
@@ -687,6 +690,115 @@ test("a navigation answered with a download is not on its way, while its file is
   t.downloaded((request) => request === "frame-file");
   assert.equal(t.navigating("main"), true);
   assert.equal(t.navigating("child"), false);
+});
+
+test("a download's request is not waited for by the settle, while the same file fetched by the page is (#674)", () => {
+  // Firefox keeps the request a download came from open until the whole file has arrived, so counted in flight it held
+  // every settle wait to SETTLE_CAP_MS. Contrastive pair: the same file, still arriving, fetched by the page's script.
+  const t = tracker();
+  t.started("file-download", "main", true);
+  t.started("file-fetch", "main", false);
+  assert.equal(t.count, 2);
+  t.downloaded((request) => request === "file-download");
+  assert.equal(t.count, 1, "the download's request is out of the count; the fetch of the same file is still in it");
+  assert.equal(t.openWithin(RECHECK_OPEN_MS, Date.now()), 1);
+  // Its end, when the file has arrived, is not counted out a second time.
+  t.ended("file-download", false);
+  assert.equal(t.count, 1);
+  t.ended("file-fetch", false);
+  assert.equal(t.count, 0);
+  // A download that is not a navigation (a frame's or a worker's request) leaves the count too.
+  t.started("worker-file", undefined, false);
+  t.downloaded((request) => request === "worker-file");
+  assert.equal(t.count, 0);
+});
+
+test("the request of a frame's navigation is named while it is open, with when it started, and not once it has committed or failed", () => {
+  const t = tracker();
+  assert.equal(t.navigationOf("main"), undefined);
+  t.started("fetch", "main", false, 100);
+  t.started("to-next", "main", true, 200);
+  assert.deepEqual(t.navigationOf("main"), { request: "to-next", at: 200 });
+  assert.equal(t.navigationOf("child"), undefined, "only the frame that sent it");
+  t.navigated("main");
+  assert.equal(t.navigationOf("main"), undefined, "committed");
+  t.started("refused", "main", true);
+  t.ended("refused", true);
+  assert.equal(t.navigationOf("main"), undefined, "failed");
+});
+
+test("a navigation the page started on its own is waited for within the page-load limit, and only while it is on its way (#674)", () => {
+  // Contrastive pairs: the same elapsed time with and without a navigation on its way, and the same navigation either
+  // side of the limit.
+  assert.equal(keepWaitingForNavigation({ navigating: true, elapsedMs: 0, limitMs: 15_000 }), true);
+  assert.equal(keepWaitingForNavigation({ navigating: false, elapsedMs: 0, limitMs: 15_000 }), false, "nothing on its way: read at once");
+  assert.equal(keepWaitingForNavigation({ navigating: true, elapsedMs: 14_999, limitMs: 15_000 }), true);
+  assert.equal(keepWaitingForNavigation({ navigating: true, elapsedMs: 15_000, limitMs: 15_000 }), false, "never past the limit");
+});
+
+test("ownNavigationLanded ends at the page-load limit on a navigation that never answers, counted from when the load began (#674)", async () => {
+  // Read while such a navigation was on its way, Chromium held a crawl past 40 s. The load began 2 s before the wait
+  // (the settle after it), so the wait itself is the limit less those 2 s.
+  const page = standInPage();
+  const startedAt = page.clock - 2000;
+  assert.equal(await ownNavigationLanded(page, () => true, 5000, startedAt, page.now), false, "still on its way at the limit: not read");
+  assert.equal(page.clock - startedAt, 5000);
+});
+
+test("ownNavigationLanded reads at once when nothing is on its way, and a page that landed once it has gone QUIET_MS without moving on", async () => {
+  const page = standInPage();
+  const quiet = page.clock;
+  assert.equal(await ownNavigationLanded(page, () => false, 5000, quiet, page.now), true);
+  assert.equal(page.clock, quiet, "nothing waited for");
+  let on = true;
+  page.onTick = () => {
+    if (page.ticks === 10) on = false;
+  };
+  const started = page.clock;
+  assert.equal(await ownNavigationLanded(page, () => on, 5000, started, page.now), true);
+  assert.equal(page.clock - started, 10 * SETTLE_TICK_MS + Math.ceil(QUIET_MS / SETTLE_TICK_MS) * SETTLE_TICK_MS, "read QUIET_MS after it landed");
+  // A page that closes ends the wait: there is nothing left to read on it.
+  const closing = standInPage();
+  closing.onTick = () => {
+    closing.closed = true;
+  };
+  assert.equal(await ownNavigationLanded(closing, () => true, 5000, closing.clock, closing.now), true);
+  assert.equal(closing.ticks, 1);
+});
+
+test("ownNavigationLanded does not read a page that lands and at once moves on again to an address that never answers (#674)", async () => {
+  // A to B to C: B's script starts C a moment after B lands. Read in that moment, Chromium held the read while C was on
+  // its way. Contrastive pair: the same landing on B with nothing after it, read QUIET_MS later.
+  const hops = standInPage();
+  let on = true;
+  hops.onTick = () => {
+    if (hops.ticks === 5) on = false; // B lands
+    if (hops.ticks === 7) on = true; // B's script moves on to C, which never answers
+  };
+  const started = hops.clock;
+  assert.equal(await ownNavigationLanded(hops, () => on, 3000, started, hops.now), false, "C still on its way at the limit");
+  assert.equal(hops.clock - started, 3000);
+  const settled = standInPage();
+  let settledOn = true;
+  settled.onTick = () => {
+    if (settled.ticks === 5) settledOn = false;
+  };
+  assert.equal(await ownNavigationLanded(settled, () => settledOn, 3000, settled.clock, settled.now), true);
+});
+
+test("seenWithin answers as soon as its condition holds, and false at its bound", async () => {
+  const page = standInPage();
+  let seen = false;
+  page.onTick = () => {
+    if (page.ticks === 3) seen = true;
+  };
+  const started = page.clock;
+  assert.equal(await seenWithin(page, () => seen, 1000, page.now), true);
+  assert.equal(page.clock - started, 3 * SETTLE_TICK_MS);
+  const never = standInPage();
+  const from = never.clock;
+  assert.equal(await seenWithin(never, () => false, 1000, never.now), false);
+  assert.equal(never.clock - from, 1000);
 });
 
 test("stableUrlOf stops at its cap on a URL that never holds still", async () => {
