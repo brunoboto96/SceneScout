@@ -618,6 +618,44 @@ ${late.slice(0, 400)}`);
   }
 }
 
+/**
+ * A lane folded while its page is on another site (a sign-in provider's, say) logs that page by origin and path: the
+ * query the site added (a sign-in state) is not kept in the run's log.
+ */
+async function laneOffSiteCheck(client: Client): Promise<void> {
+  const fixture = await startFixtureServer();
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-mcp-lane-offsite-"));
+  const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
+  try {
+    await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "away", mode: "read-only", objective: "away lane" });
+    // 1.5 s after load (later than the navigation watches), the page sends a signed-out visitor to an ordinary page of
+    // the other origin, adding a state of its own to the query.
+    await call("scout_navigate", {
+      session: "away",
+      task: "Opening the gated area",
+      target: `/sso-gated.html?secret=1&idp=${encodeURIComponent(fixture.foreignBaseUrl)}&to=${encodeURIComponent("/covered.html")}`,
+    });
+    await settle(2500);
+    const reply = JSON.stringify({ lane: "away", status: "complete", decisions: [], routes: ["/sso-gated.html"], blocked_by: null });
+    const folded = await call("scout_lane_report", { lane: "away", reply });
+    if (!/Lane report accepted/.test(folded)) fail(`the off-site lane's report was not accepted:\n${folded}`);
+    const dir = path.join(projectDir, ".scenescout");
+    const marks = fs
+      .readdirSync(dir)
+      .filter((f) => f.startsWith("session-") && f.endsWith(".jsonl"))
+      .flatMap((f) => fs.readFileSync(path.join(dir, f), "utf8").split("\n"))
+      .filter((l) => l.includes('"action":"lane-report"') && l.includes('"session":"away"'));
+    if (marks.length !== 1) fail(`folding the off-site lane left ${marks.length} lane-report markers`);
+    const url = (JSON.parse(marks[0]) as { url?: string }).url ?? "";
+    if (url !== `${fixture.foreignBaseUrl}/covered.html`) fail(`the lane-report marker kept more than the other site's origin and path: ${url}`);
+    console.log("✓ a lane folded on another site's page is logged by that page's origin and path");
+    assertClosedAll(await call("scout_close", { all: true }));
+  } finally {
+    await fixture.close();
+    fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+}
+
 /** Every file under a directory with its size and modification time, as one string to compare. */
 function treeState(dir: string): string {
   return (fs.readdirSync(dir, { recursive: true }) as string[])
@@ -2178,6 +2216,7 @@ async function main(): Promise<void> {
   await expiryBriefCheck(client);
   await findingPictureCheck(client);
   await laneCheck(client);
+  await laneOffSiteCheck(client);
   await reattachLaneCheck(client);
   await ticketsCheck(client);
   const liveProject = await liveViewCheck(client);
