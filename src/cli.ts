@@ -66,6 +66,7 @@ import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
 import { runConfigCommand } from "./engine/config-explain.js";
 import { MAX_EXPLAIN_BODY, runPolicyCommand } from "./engine/policy-explain.js";
 import { runPreflight } from "./engine/preflight.js";
+import { installFetchProxy } from "./engine/proxy.js";
 import { VISUAL_DIRNAME } from "./engine/baseline.js";
 import { openOrSay } from "./engine/open.js";
 import {
@@ -1038,6 +1039,8 @@ const [, , command, ...args] = process.argv;
 // one line the user needs. `serve` is deliberately outside this: it hands off
 // to the MCP server, whose own transport owns error reporting from then on.
 try {
+  // SceneScout's own requests (the preflight, the model's API, GitHub, Jira) go through the proxy the environment names (proxy.ts).
+  await installFetchProxy(process.env);
   await dispatch(command, args, {
     usage,
     version: () => console.log(packageVersion()),

@@ -113,7 +113,7 @@ import { framePath, RECORD_MAX_FRAMES } from "./replay.js";
 import { writeDocument } from "./owner-file.js";
 import { film, type Filmed } from "./film.js";
 import {
-  AnsweredCancels,
+  AnsweredEnds,
   ATTACH_URL_QUIET_MS,
   CRAWL_URL_HELD_MS,
   describePace,
@@ -171,6 +171,8 @@ import {
   errorPageExit,
   DROPPED_NAVIGATION_WAIT_MS,
   requestCancelled,
+  fulfilsRedirects,
+  appHeaderPermissions,
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
@@ -194,17 +196,39 @@ import {
 } from "./forms.js";
 import { explainLaunchFailure, isMissingBrowser } from "./launch.js";
 import {
+  abortCodeFor,
+  APP_HEADER_ENV,
+  APP_HEADER_MAX_HOPS,
+  appHeaderApplies,
+  appRedirectPlan,
+  redirectStandIn,
+  appHeaderCarried,
+  readAppHeader,
+  withAppHeader,
+  withoutAppHeader,
+  forOwnSend,
+  headVerdict,
+  cookieLineAfter,
+  cookieLineFor,
+  crossSite,
+  APP_HEADER_HEAD_MS,
+  type AppHeader,
+} from "./app-header.js";
+import { startLoadHint } from "./network-failure.js";
+import { browserProxy, readProxy, type BrowserProxy } from "./proxy.js";
+import {
   DEFAULT_TIME_LIMITS,
   explainTimeout,
   firstLineOf,
   isTimeoutMessage,
   limitHint,
-  LOAD_RETRY_PAUSE_MS,
   loadRetryCause,
+  loadRetryPauseMs,
   loadRetryNote,
   loadRetryTimeoutMs,
   retriedLoadFailure,
   pageTimeouts,
+  readNetworkRetry,
   resolveTimeLimits,
   SCREENSHOT_TIMEOUT_MS,
   TARGET_READ_MS,
@@ -814,6 +838,8 @@ export class BrowserEngine {
   private browser: Browser | null = null;
   /** How long an action and a page load may take; set at attach (limits.ts). */
   private limits: TimeLimits = DEFAULT_TIME_LIMITS;
+  /** The network settings from the environment, read at attach: the retry of a load that failed on the network, the proxy and the allowlist header. */
+  private network: { retry: boolean; proxy: BrowserProxy | null; appHeader: AppHeader | null } = { retry: false, proxy: null, appHeader: null };
   /** The limits this session runs with, so the server can size its watchdogs to them. */
   get timeLimits(): TimeLimits {
     return this.limits;
@@ -1607,6 +1633,11 @@ export class BrowserEngine {
     // Resolved before anything is closed, so a bad role, a missing profile or
     // a time limit out of bounds leaves a live session as it was.
     const limits = resolveTimeLimits(opts, process.env);
+    const network = { retry: readNetworkRetry(process.env), proxy: browserProxy(readProxy(process.env), opts.url), appHeader: readAppHeader(process.env) };
+    if (network.appHeader && !fulfilsRedirects(opts.browser ?? defaultEngine(process.env)))
+      throw new Error(
+        `${APP_HEADER_ENV} is not available on WebKit: it cannot be handed a redirect, which keeps the header from following one away from the app. Use Chromium or Firefox.`,
+      );
     const auth = resolveAttachAuth({
       projectDir: opts.projectDir,
       url: opts.url,
@@ -1637,6 +1668,7 @@ export class BrowserEngine {
     await this.close();
     opts.onSessionBegins?.();
     this.limits = limits;
+    this.network = network;
     this.auth = auth;
     this.role = roleLabel(auth);
     this.authLoss.beginSession(auth.kind, this.role);
@@ -1820,7 +1852,11 @@ export class BrowserEngine {
         viewport: opts.viewport ?? { width: 1280, height: 900 },
         ...(opts.deviceScaleFactor !== undefined ? { deviceScaleFactor: opts.deviceScaleFactor } : {}),
         serviceWorkers: serviceWorkerPolicy(this.engineName),
+        ...(this.network.proxy ? { proxy: this.network.proxy } : {}),
       });
+      // The pages the allowlist header hands over have no address of their own: the app's origin alone may still reach private addresses.
+      const permissions = this.network.appHeader ? appHeaderPermissions(this.engineName) : [];
+      if (permissions.length > 0) await this.context.grantPermissions(permissions, { origin: new URL(opts.url).origin });
       const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
       if (restoreSession) await this.context.addInitScript(restoreSession);
       if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
@@ -1857,7 +1893,7 @@ export class BrowserEngine {
     // event, so a frame that commits a navigation, is removed, or closes with
     // its page drops what it left in flight (the rule is in settle.ts).
     const requests = (this.requests = new InFlightRequests<Request, Frame>());
-    const cancels = (this.cancels = new AnsweredCancels<Request>());
+    const answered = (this.answered = new AnsweredEnds<Request>());
     const watchFrames = (p: Page): void => {
       p.on("framenavigated", (frame) => requests.navigated(frame));
       p.on("framedetached", (detached) => requests.gone((frame) => frame === detached));
@@ -1872,10 +1908,13 @@ export class BrowserEngine {
     // The first page already exists by now; later ones (popups) arrive as events.
     if (this.page) watchPage(this.page);
     context.on("page", watchPage);
-    context.on("requestfinished", (req) => requests.ended(req));
+    context.on("requestfinished", (req) => {
+      requests.ended(req);
+      answered.finished(req, this.guard.refused(req));
+    });
     context.on("requestfailed", (req) => {
       requests.ended(req, true);
-      cancels.failed(req, requestCancelled(this.engineName, req.failure()?.errorText ?? ""), this.guard.refused(req));
+      answered.failed(req, requestCancelled(this.engineName, req.failure()?.errorText ?? ""), this.guard.refused(req));
       this.watchResponse(req, null);
       this.pageRequests.failed(req, req.failure()?.errorText ?? "", Date.now(), this.guard.refused(req));
       if (req.isNavigationRequest() && this.guard.refused(req)) {
@@ -1887,7 +1926,7 @@ export class BrowserEngine {
       }
     });
     context.on("response", (res) => {
-      cancels.answer(res.request());
+      answered.answer(res.request(), res.status());
       this.noteAuthAnswer(res);
       this.noteUnauthenticated(res);
       this.noteDocumentLoad(res.request());
@@ -1971,6 +2010,16 @@ export class BrowserEngine {
 
   /** Wire the context, part 2: the refresh broker and the write policy on the wire. */
   private async routeRequests(context: BrowserContext): Promise<void> {
+    // The allowlist header, part 1 (app-header.ts): registered first, so it runs last, after the write policy let the
+    // request out. SceneScout sends it with the header and hands the answer to the browser (sendWithAppHeader).
+    const header = this.network.appHeader;
+    const app = this.baseUrl;
+    if (header)
+      await context.route(
+        (url) => appHeaderApplies(url.href, app),
+        (route) => this.sendWithAppHeader(route, header),
+      );
+
     // The refresh broker. Registered before the write policy, so it runs after
     // it: the policy judges each request as the page sent it and hands on
     // (route.fallback) only what it lets out, and the broker sees only those.
@@ -1994,6 +2043,15 @@ export class BrowserEngine {
         }
       }
     }
+
+    // The allowlist header, part 2 (app-header.ts): registered last, so it runs first, and the handlers above, and
+    // any request they send themselves (route.fetch, with no redirect followed), carry it.
+    if (header)
+      await context.route(
+        (url) => appHeaderApplies(url.href, app),
+        (route) =>
+          this.passOn(route, appHeaderCarried(route.request().resourceType()) ? { headers: withAppHeader(route.request().headers(), header) } : undefined),
+      );
   }
 
   /** A wait on the page that names no timeout gets the session's limits rather than Playwright's 30 s (limits.ts pageTimeouts). */
@@ -2050,9 +2108,8 @@ export class BrowserEngine {
       await this.close();
       const explained = explainTimeout(err, "nav", this.limits.navMs);
       // A load that was retried and loaded before the attach failed is said here, not in a later attach's result.
-      throw new Error(
-        `Could not load ${url} — is the app running? (${explained instanceof Error ? explained.message.split("\n")[0] : explained})${this.drainLoadRetries()}`,
-      );
+      const first = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
+      throw new Error(`Could not load ${url} — ${startLoadHint(first)} (${first})${this.drainLoadRetries()}`);
     }
     await this.settle();
     this.logAction({ action: "attach", url: this.page!.url() });
@@ -2273,7 +2330,7 @@ export class BrowserEngine {
       {
         inFlight: () => this.inFlight,
         lastRequestStart: () => this.lastRequestStart,
-        lastRequestCancel: () => this.cancels.last,
+        lastAnsweredEnd: () => this.answered.last,
         paceMs: () => this.paceMs,
         current: () => this.page,
       },
@@ -2509,8 +2566,8 @@ export class BrowserEngine {
   }
   /** When the most recent request started, so a page that fires one late is not read too early. */
   private lastRequestStart = 0;
-  /** When the browser last cancelled a request after its answer arrived, the write policy's refusals aside (settle.ts). */
-  private cancels = new AnsweredCancels<Request>();
+  /** When a request whose answer had arrived was last cancelled, or finished on an answer a page may move on (settle.ts). */
+  private answered = new AnsweredEnds<Request>();
   /**
    * A floor between actions this session was asked for, so a person watching
    * can follow along. Zero means as fast as the page allows, which is the
@@ -4744,6 +4801,106 @@ export class BrowserEngine {
     return jar.length > 0 ? { ...headers, cookie: jar.map((c) => `${c.name}=${c.value}`).join("; ") } : headers;
   }
 
+  /**
+   * A request to the app's origin, sent by SceneScout with the allowlist header and no redirect followed, its answer
+   * handed to the browser. A redirect within the app is followed with the header (appRedirectPlan); one away from it
+   * is handed to the browser, which follows it without the header. A send that fails aborts with the network's code.
+   */
+  private async sendWithAppHeader(route: Route, header: AppHeader): Promise<void> {
+    const req = route.request();
+    if (!appHeaderCarried(req.resourceType())) return this.passOn(route);
+    let response: APIResponse;
+    // Bounded by the page-load limit, as the load it serves is; running out is the app's slowness (abortCodeFor).
+    const timeout = this.limits.navMs;
+    try {
+      // A page load that answers with a file goes back to the browser without the header, so a download or a file
+      // shown as it is behaves as with no header, and is never read whole first (headVerdict).
+      if (req.resourceType() === "document" && req.method() === "GET" && (await this.appDocumentKind(req, header, timeout)) === "file")
+        return this.passOn(route, { headers: withoutAppHeader(req.headers(), header) });
+      // The cookies as the browser sends them: Playwright's send would otherwise add every cookie the jar holds, a
+      // SameSite one the browser withholds from another site's request included (an empty line stops that).
+      const sent = req.headers();
+      const own = Object.keys(sent).some((name) => name.toLowerCase() === "cookie") ? sent : { ...sent, cookie: await this.sentCookieLine(req) };
+      response = await route.fetch({ headers: withAppHeader(own, header), maxRedirects: 0, timeout });
+      // A redirect within the app: the browser would follow it unrouted, without the header (appRedirectPlan).
+      let at = req.url();
+      for (let hop = 0; hop < APP_HEADER_MAX_HOPS; hop++) {
+        const plan = appRedirectPlan({
+          status: response.status(),
+          location: response.headers()["location"],
+          requestUrl: at,
+          appUrl: this.baseUrl,
+          method: hop === 0 ? req.method() : "GET",
+          resourceType: req.resourceType(),
+        });
+        if (!plan || plan.kind === "hand-over") break;
+        if (plan.kind === "stand-in") {
+          await route.fulfill({ status: 200, contentType: "text/html", body: redirectStandIn(plan.url) }).catch(() => {});
+          return;
+        }
+        at = plan.url;
+        // The context's own client, so the cookies the redirect set are sent with the next hop.
+        response = await this.context!.request.fetch(at, { method: plan.method, headers: withAppHeader(req.headers(), header), maxRedirects: 0, timeout });
+      }
+    } catch (err) {
+      await route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
+      return;
+    }
+    this.appHeaderAnswers.set(req, response);
+    await route.fulfill({ response }).catch(() => {
+      /* the page went away before its answer */
+    });
+  }
+
+  /** The Cookie line the browser sends with this request of the app's: its own, or else the jar's as cookieLineFor reads it. */
+  private async sentCookieLine(req: Request): Promise<string> {
+    const own = Object.entries(await req.allHeaders()).find(([name]) => name.toLowerCase() === "cookie");
+    if (own) return own[1];
+    let topLevel = false;
+    try {
+      topLevel = req.isNavigationRequest() && req.frame().parentFrame() === null;
+    } catch {
+      /* a service worker's request has no frame: not a page load */
+    }
+    return cookieLineFor(await this.context!.cookies(req.url()), crossSite(req.headers()["referer"], req.url()), topLevel);
+  }
+
+  /**
+   * What a page load carrying the header answers with, asked by HEAD through its redirects within the app (headVerdict).
+   * Node's fetch, which settles on the answer's headers: a server that holds a HEAD open as it would the file's GET
+   * does not hold the load. The first HEAD carries the Cookie line the browser sends with the load itself (sentCookieLine,
+   * so never a SameSite cookie it withholds); each later hop the context's cookies for its address, with those the earlier hops
+   * set over them (cookieLineAfter). A HEAD that fails, or a chain that does not answer within the bound, says nothing
+   * ("unknown"): the load is then sent with the header as any other request.
+   */
+  private async appDocumentKind(req: Request, header: AppHeader, timeout: number): Promise<"page" | "file" | "unknown"> {
+    let at = req.url();
+    const base = forOwnSend(withAppHeader(req.headers(), header));
+    // One bound for the whole chain, not one per hop.
+    const signal = AbortSignal.timeout(Math.min(timeout, APP_HEADER_HEAD_MS));
+    const set: string[] = [];
+    for (let hop = 0; hop <= APP_HEADER_MAX_HOPS; hop++) {
+      let verdict: ReturnType<typeof headVerdict>;
+      try {
+        const jar =
+          hop === 0
+            ? await this.sentCookieLine(req)
+            : cookieLineAfter((await this.context!.cookies(at)).map((c) => `${c.name}=${c.value}`).join("; "), set, new URL(at).pathname);
+        const head = await fetch(at, { method: "HEAD", headers: jar ? { ...base, cookie: jar } : base, redirect: "manual", signal });
+        const headers: Record<string, string> = {};
+        head.headers.forEach((value, name) => (headers[name] = value));
+        set.push(...head.headers.getSetCookie());
+        await head.body?.cancel().catch(() => {});
+        verdict = headVerdict({ status: head.status, headers, requestUrl: at, appUrl: this.baseUrl });
+      } catch {
+        return "unknown";
+      }
+      if (verdict.kind !== "next") return verdict.kind;
+      at = verdict.url;
+    }
+    return "unknown";
+  }
+
   /** Hand a request on as it is, or with overrides. A request the page has already cancelled rejects this; nothing is left to send then. */
   private async passOn(route: Route, overrides?: Parameters<Route["fallback"]>[0]): Promise<void> {
     await route.fallback(overrides).catch(() => {});
@@ -4775,7 +4932,7 @@ export class BrowserEngine {
     const answered = req
       .response()
       .then((res): RefreshAnswer | null =>
-        res ? { ok: res.ok(), status: res.status(), text: () => res.text(), setCookies: () => res.headerValues("set-cookie") } : null,
+        res ? { ok: res.ok(), status: res.status(), text: () => res.text(), setCookies: () => this.setCookiesOf(res) } : null,
       )
       .finally(() => clearTimeout(timer));
     return Promise.race([answered, new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), 30000)))]);
@@ -4787,12 +4944,28 @@ export class BrowserEngine {
       ok: res.ok(),
       status: res.status(),
       text: () => res.text(),
-      setCookies: async () =>
-        res
-          .headersArray()
-          .filter((h) => h.name.toLowerCase() === "set-cookie")
-          .map((h) => h.value),
+      setCookies: async () => BrowserEngine.fetchedSetCookies(res),
     };
+  }
+
+  private static fetchedSetCookies(res: APIResponse): string[] {
+    return res
+      .headersArray()
+      .filter((h) => h.name.toLowerCase() === "set-cookie")
+      .map((h) => h.value);
+  }
+
+  /**
+   * The answers SceneScout fetched itself with the allowlist header and handed to the page (sendWithAppHeader).
+   * Chromium leaves Set-Cookie out of the headers it reports for a handed-over answer, so the refresh broker reads
+   * a rotation from the answer that was fetched.
+   */
+  private readonly appHeaderAnswers = new WeakMap<Request, APIResponse>();
+
+  /** A response's Set-Cookie lines, from the answer fetched with the allowlist header when it was one. */
+  private async setCookiesOf(res: Response): Promise<string[]> {
+    const fetched = this.appHeaderAnswers.get(res.request());
+    return fetched ? BrowserEngine.fetchedSetCookies(fetched) : res.headerValues("set-cookie");
   }
 
   /**
@@ -4844,7 +5017,7 @@ export class BrowserEngine {
     if (this.brokeredRequests.has(req) || !res.ok() || !learnableEndpoint(req.url())) return;
     this.trackRefreshTask(
       (async () => {
-        const rotated = rotatedCookies(await res.headerValues("set-cookie"), broker.known);
+        const rotated = rotatedCookies(await this.setCookiesOf(res), broker.known);
         if (rotated.length > 0) await this.adoptRotation(endpointKey(req.method(), req.url()), rotated);
       })().catch((err: unknown) => {
         this.logAction({
@@ -6365,14 +6538,14 @@ export class BrowserEngine {
     try {
       return await page.goto(url, options);
     } catch (err) {
-      const cause = loadRetryCause(err instanceof Error ? err.message : String(err), 0);
+      const cause = loadRetryCause(err instanceof Error ? err.message : String(err), 0, this.network.retry);
       if (!cause) throw err;
       await this.errorPageCommitted(page);
       const sockets = await readMachineSockets();
       const shown = redactSecrets(url);
-      console.error(`[scenescout] loading ${shown} failed with net::${cause}; trying once more. Sockets: ${sockets}`);
+      console.error(`[scenescout] loading ${shown} failed with ${cause}; trying once more. Sockets: ${sockets}`);
       this.memory?.loadRetries.push({ at: new Date().toISOString(), url: shown, session: this.sessionKey, cause, sockets });
-      await new Promise((resolve) => setTimeout(resolve, LOAD_RETRY_PAUSE_MS));
+      await new Promise((resolve) => setTimeout(resolve, loadRetryPauseMs(cause)));
       // A retry that fails is thrown as the load's failure, saying so; only one that loaded leaves a note for the result.
       const timeout = loadRetryTimeoutMs(options?.timeout, Date.now() - startedAt);
       let resp: Response | null;

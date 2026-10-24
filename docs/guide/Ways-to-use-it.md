@@ -226,6 +226,7 @@ npx -y scenescout check http://127.0.0.1:3000 --fail-on high
 | 0 | Passed the gate |
 | 1 | Failed it: something at the `--fail-on` severity or worse |
 | 2 | Could not run, or not all of it: a bad argument, an app that never answered, only the sign-in page reached, a saved flow that is not valid, or a flow step the write policy refused |
+| 3 | Passed the gate on what loaded, but a request or page load reaching the app failed on the network at the gate's severity: worth running again |
 
 It writes `report.md`, `check.json` and `check.sarif` to `.scenescout/check/` (or `--out`), and on GitHub Actions appends the report to the job summary.
 
@@ -239,7 +240,7 @@ flowchart LR
   V -- Yes --> E1["exit 1"]
 ```
 
-Visual baselines, when asked for, are compared too ([below](#visual-baselines)). A check that could not run, or not all of it, exits 2.
+Visual baselines, when asked for, are compared too ([below](#visual-baselines)). A check that could not run, or not all of it, exits 2. A request or page load that failed on the network rather than in the app (a name that did not resolve, a refused or dropped connection, a timeout, TLS) is not an issue: one reaching the app at the gate's severity makes a check that otherwise passed exit 3, and one reaching another host is listed only ([Network requirements](Network-requirements.md#failures-on-the-network-are-not-the-apps)).
 
 ### What it measures
 

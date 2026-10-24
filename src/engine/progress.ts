@@ -133,7 +133,7 @@ export type Trouble = "address-unreachable" | "browser-download-failed" | "sign-
  */
 const TROUBLE_PATTERNS: ReadonlyArray<[Trouble, RegExp]> = [
   // browser.ts, when the first page of an attach does not load.
-  ["address-unreachable", /^Could not load \S+ — is the app running\?/],
+  ["address-unreachable", /^Could not load \S+ — /],
   // A later navigation to a site that stopped answering, as Playwright words it.
   [
     "address-unreachable",

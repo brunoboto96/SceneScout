@@ -26,7 +26,10 @@ import { checkBaseUrl, detectProvider, KEY_ENV, PROVIDERS, redactKeys, secretVal
 import { describeLifetime, judgeLifetime, readLifetime } from "./expiry.js";
 import { egressAllows, readCommandPolicy, refusalText, type PolicyReader } from "./project-config.js";
 import { loginCommand, profilePath, validateRoleName } from "./profiles.js";
+import { BLOCKED_PORT, errorParts, networkCause, type NetworkCause } from "./network-failure.js";
 import { redactRoute } from "./redact.js";
+import { appHeaderApplies, appHeaderLine, readAppHeader, withAppHeader, type AppHeader } from "./app-header.js";
+import { proxyLine, readProxy, type ProxySettings } from "./proxy.js";
 
 /** The options `scenescout preflight` takes. `model-api` is the one switch. */
 export const PREFLIGHT_OPTION_NAMES = ["role", "storage-state", "project", "model-api", "provider", "base-url", "timeout-ms"] as const;
@@ -156,71 +159,8 @@ export function parsePreflightArgs(
 
 // ── what a failed request means ─────────────────────────────────────────────
 
-/** The network causes a request can fail with before any HTTP answer. */
-export type NetworkCause = "dns" | "connection" | "timeout" | "tls";
-
-const DNS_CODES = new Set(["ENOTFOUND", "EAI_AGAIN", "EAI_NODATA", "EAI_NONAME", "EAI_FAIL"]);
-const TIMEOUT_CODES = new Set(["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
-const TLS_CODES = new Set([
-  "CERT_HAS_EXPIRED",
-  "CERT_NOT_YET_VALID",
-  "CERT_REVOKED",
-  "CERT_UNTRUSTED",
-  "DEPTH_ZERO_SELF_SIGNED_CERT",
-  "SELF_SIGNED_CERT_IN_CHAIN",
-  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
-  "UNABLE_TO_GET_ISSUER_CERT",
-  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
-  "HOSTNAME_MISMATCH",
-  "EPROTO",
-]);
-
-/** The code given to a port the Fetch standard blocks (6000, 6667 and others), which no browser will load either. */
-export const BLOCKED_PORT = "blocked port";
-
-/** An error's code, its name, and the errors behind it (`cause`, and an AggregateError's `errors`, which a connection tried on several addresses throws). */
-function errorParts(err: unknown): { code?: string; name?: string; message?: string; inner: unknown[] } {
-  if (!err || typeof err !== "object") return { inner: [] };
-  const e = err as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
-  return {
-    code: typeof e.code === "string" ? e.code : undefined,
-    name: typeof e.name === "string" ? e.name : undefined,
-    message: typeof e.message === "string" ? e.message : undefined,
-    inner: [...(e.cause !== undefined ? [e.cause] : []), ...(Array.isArray(e.errors) ? e.errors : [])],
-  };
-}
-
-/** The cause one code or name stands for, or null when it names none. */
-function causeOf(code: string | undefined, name: string | undefined): NetworkCause | null {
-  // AbortSignal.timeout ends the request with a TimeoutError; the only abort here is that one.
-  if (name === "TimeoutError" || name === "AbortError") return "timeout";
-  if (!code) return null;
-  if (DNS_CODES.has(code)) return "dns";
-  if (TIMEOUT_CODES.has(code)) return "timeout";
-  if (TLS_CODES.has(code) || code.startsWith("ERR_TLS_") || code.startsWith("ERR_SSL_")) return "tls";
-  return null;
-}
-
-/**
- * Why a request got no HTTP answer: the first cause found walking the error and
- * the errors behind it (Node's fetch says only "fetch failed" and keeps the
- * reason in `cause`). A failure that names no known cause is a connection that
- * failed, with whatever code it carried.
- */
-export function networkCause(err: unknown): { cause: NetworkCause; code: string } {
-  const queue: unknown[] = [err];
-  let firstCode: string | undefined;
-  for (let seen = 0; queue.length > 0 && seen < 20; seen++) {
-    const parts = errorParts(queue.shift());
-    // Fetch, as a browser does, refuses a port on the Fetch standard's blocked list before connecting, and names no code.
-    if (parts.message === "bad port") return { cause: "connection", code: BLOCKED_PORT };
-    const cause = causeOf(parts.code, parts.name);
-    if (cause) return { cause, code: parts.code ?? parts.name ?? "" };
-    if (parts.code && !firstCode) firstCode = parts.code;
-    queue.push(...parts.inner);
-  }
-  return { cause: "connection", code: firstCode ?? "no code" };
-}
+// The causes, and how a Node error is read into one, are shared with the run's own classification (network-failure.ts).
+export { BLOCKED_PORT, networkCause, type NetworkCause } from "./network-failure.js";
 
 /** The most redirects fetch follows (the Fetch standard's limit, and a browser's): past it the request fails with no HTTP answer. */
 export const MAX_REDIRECTS = 20;
@@ -409,16 +349,32 @@ async function bodyStart(res: Response, limit: number): Promise<string> {
   return text.slice(0, limit);
 }
 
-async function checkPage(o: PreflightOptions, io: PreflightIo): Promise<Verdict> {
+/**
+ * The start page's answer. With an allowlist header (app-header.ts), redirects are followed here rather than by fetch,
+ * which would copy the header to wherever the app redirects: each hop carries it only when it is to the app's origin.
+ */
+async function fetchStartPage(o: PreflightOptions, io: PreflightIo, header: AppHeader | null): Promise<Response> {
+  const base = { "user-agent": PREFLIGHT_USER_AGENT, accept: "text/html,application/xhtml+xml,*/*;q=0.8" };
+  const signal = AbortSignal.timeout(o.timeoutMs);
+  if (!header) return io.fetch(o.url, { method: "GET", headers: base, redirect: "follow", signal });
+  let at = o.url;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    const headers = appHeaderApplies(at, o.url) ? withAppHeader(base, header) : base;
+    const res = await io.fetch(at, { method: "GET", headers, redirect: "manual", signal });
+    const to = res.headers.get("location");
+    if (res.status < 300 || res.status >= 400 || !to) return res;
+    await res.body?.cancel().catch(() => undefined);
+    at = new URL(to, at).href;
+  }
+  // Worded as fetch words its own, so the loop is told apart the same way (redirectLoop).
+  throw new TypeError("fetch failed", { cause: new Error("redirect count exceeded") });
+}
+
+async function checkPage(o: PreflightOptions, io: PreflightIo, header: AppHeader | null): Promise<Verdict> {
   const started = io.now();
   let res: Response;
   try {
-    res = await io.fetch(o.url, {
-      method: "GET",
-      headers: { "user-agent": PREFLIGHT_USER_AGENT, accept: "text/html,application/xhtml+xml,*/*;q=0.8" },
-      redirect: "follow",
-      signal: AbortSignal.timeout(o.timeoutMs),
-    });
+    res = await fetchStartPage(o, io, header);
   } catch (err) {
     if (redirectLoop(err))
       return {
@@ -529,7 +485,24 @@ export async function runPreflight(args: readonly string[], io: PreflightIo): Pr
     if (v.kind === "fail") complain(`✗ ${what}: ${v.line}`);
     else say(`${v.kind === "ok" ? "✓" : "!"} ${what}: ${v.line}`);
   };
-  show("App", await checkPage(o, io));
+  let header: AppHeader | null;
+  try {
+    header = readAppHeader(io.env);
+  } catch (err) {
+    complain(`scenescout preflight: ${(err as Error).message}`);
+    return EXIT_PREFLIGHT.couldNotRun;
+  }
+  let proxy: ProxySettings | null;
+  try {
+    proxy = readProxy(io.env);
+  } catch (err) {
+    complain(`scenescout preflight: ${(err as Error).message}`);
+    return EXIT_PREFLIGHT.couldNotRun;
+  }
+  // Said first, so a reader knows which route the answers below took and what went with them.
+  if (proxy) say(`· ${proxyLine(proxy)}`);
+  if (header) say(`· ${appHeaderLine(header, o.url)}`);
+  show("App", await checkPage(o, io, header));
   const signIn = checkSignIn(o, io);
   if (signIn) show("Sign-in", signIn);
   if (o.modelApi) show("Model API", await checkModelApi(o, io));

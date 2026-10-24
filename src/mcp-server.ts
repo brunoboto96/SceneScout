@@ -49,6 +49,7 @@ import { registerExploreTools } from "./tools/explore.js";
 import { registerStatusTools } from "./tools/status.js";
 import { registerResultTools } from "./tools/results.js";
 import { registerTicketTools } from "./tools/tickets.js";
+import { installFetchProxy } from "./engine/proxy.js";
 
 registerGuideTools();
 registerLaneTools();
@@ -64,6 +65,15 @@ async function main(): Promise<void> {
   const ticketDirs = ticketDirsFrom(process.env);
   if ("error" in ticketDirs) {
     console.error(`SceneScout MCP server not started: ${ticketDirs.error}. Fix it where the server is configured and start it again.`);
+    process.exit(1);
+  }
+  // The dedup judge's and the ticket tools' requests go through the proxy the environment names (proxy.ts).
+  try {
+    await installFetchProxy(process.env);
+  } catch (err) {
+    console.error(
+      `SceneScout MCP server not started: ${err instanceof Error ? err.message : String(err)} Fix it where the server is configured and start it again.`,
+    );
     process.exit(1);
   }
   for (const warning of ticketDirWarnings(ticketDirs.dirs)) console.error(`[scenescout] ${warning}.`);

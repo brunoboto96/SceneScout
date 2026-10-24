@@ -65,6 +65,7 @@ import {
   type PreflightIo,
 } from "../src/engine/preflight.ts";
 import { fsPolicyReader } from "../src/engine/project-config.ts";
+import { browserNetworkCause, fetchFailureCause, startLoadHint } from "../src/engine/network-failure.ts";
 import { brokenImageIssues, geometryIssues } from "../src/engine/collector.ts";
 import { analyzeDesign, type DesignPayload, type StyleRecord } from "../src/engine/design.ts";
 import {
@@ -208,6 +209,11 @@ import {
   refusedFlowReason,
   withoutOwnResponse,
   summarise,
+  networkSection,
+  requestNetworkFailure,
+  consoleEchoOfNetworkFailure,
+  sameSite,
+  EXIT,
   SHARED_CHROME_ROUTE,
   splitResources,
   toSarif,
@@ -3714,15 +3720,17 @@ test("first look: the browser's console line about a failed load takes no slot w
     "client-error",
     "console-error",
   ]);
-  // A request that failed at the network level, and the browser's line naming the same error, or another one.
+  // A request that failed without an HTTP answer, for a reason that is not the network's (a malformed answer), and the
+  // browser's line naming the same error, or another one. A failure on the network itself (DNS, a refused connection)
+  // is not an issue at all: it is listed apart, its echo with it (the network-failures tests below).
   const refused = {
     kind: "request_failed" as const,
     severity: "medium" as const,
-    detail: `GET ${ORIGIN}/api/feed → net::ERR_CONNECTION_REFUSED`,
+    detail: `GET ${ORIGIN}/api/feed → net::ERR_INVALID_RESPONSE`,
     url: `${ORIGIN}/`,
   };
-  assert.deepEqual(pick([route({ violations: [refused, loadEcho("Failed to load resource: net::ERR_CONNECTION_REFUSED")] })]), ["request-failed"]);
-  assert.deepEqual(pick([route({ violations: [refused, loadEcho("Failed to load resource: net::ERR_NAME_NOT_RESOLVED")] })]), [
+  assert.deepEqual(pick([route({ violations: [refused, loadEcho("Failed to load resource: net::ERR_INVALID_RESPONSE")] })]), ["request-failed"]);
+  assert.deepEqual(pick([route({ violations: [refused, loadEcho("Failed to load resource: net::ERR_HTTP2_PROTOCOL_ERROR")] })]), [
     "request-failed",
     "console-error",
   ]);
@@ -5077,4 +5085,274 @@ test("action: the preflight input runs `scenescout preflight` on the url and the
   for (const later of ["Restore the browser cache", "Install the browser's system libraries", "Install the browser", "Run the check"])
     assert.ok(names.indexOf("Preflight") < names.indexOf(later), `before ${later}`);
   assert.equal(action.inputs.preflight.default, "false");
+});
+
+// ── network failures, told from the app's (#554) ────────────────────────────
+
+test("network failures: a browser's code is read as DNS, connection, timeout or TLS from the start of its error only; anything else is the app's", () => {
+  const cases: Array<[string, string | null, string?]> = [
+    ["net::ERR_NAME_NOT_RESOLVED", "dns"],
+    ["page.goto: net::ERR_NAME_NOT_RESOLVED at https://app.invalid/", "dns", "net::ERR_NAME_NOT_RESOLVED"],
+    ["net::ERR_CONNECTION_REFUSED", "connection"],
+    ["net::ERR_EMPTY_RESPONSE", "connection"],
+    ["net::ERR_CONNECTION_RESET", "connection"],
+    ["net::ERR_TIMED_OUT", "timeout"],
+    ["net::ERR_CONNECTION_TIMED_OUT", "timeout"],
+    ["net::ERR_CERT_AUTHORITY_INVALID", "tls"],
+    ["net::ERR_SSL_PROTOCOL_ERROR", "tls"],
+    ["NS_ERROR_UNKNOWN_HOST", "dns"],
+    ["page.goto: NS_ERROR_CONNECTION_REFUSED", "connection", "NS_ERROR_CONNECTION_REFUSED"],
+    ["NS_ERROR_NET_TIMEOUT", "timeout"],
+    ["SEC_ERROR_UNKNOWN_ISSUER", "tls"],
+    ["A server with the specified hostname could not be found.", "dns", "A server with the specified hostname could not be found"],
+    ["Could not connect to server", "connection"],
+    ["The request timed out.", "timeout", "The request timed out"],
+    ["The certificate for this server is invalid.", "tls", "The certificate for this server is invalid"],
+    // Not the network's: a cancel, the write policy's refusal, a redirect loop, an HTTP answer, a Playwright timeout.
+    ["net::ERR_ABORTED", null],
+    ["net::ERR_BLOCKED_BY_CLIENT", null],
+    ["net::ERR_TOO_MANY_REDIRECTS", null],
+    ["net::ERR_HTTP_RESPONSE_CODE_FAILURE", null],
+    ["NS_BINDING_ABORTED", null],
+    ["page.goto: Timeout 15000ms exceeded.", null],
+    ["Failed to load resource: the server responded with a status of 500 (Internal Server Error)", null],
+    // A code inside an address, or on a later line, is the app's text.
+    ['page.goto: Navigation to "http://x/net::ERR_NAME_NOT_RESOLVED" is interrupted', null],
+    ["page.goto: Timeout 15000ms exceeded.\nCall log:\n  - net::ERR_CONNECTION_RESET", null],
+  ];
+  for (const [text, cause, code] of cases) {
+    const got = browserNetworkCause(text);
+    if (cause === null) assert.equal(got, null, text);
+    else assert.deepEqual(got, { cause, code: code ?? text }, text);
+  }
+});
+
+test("network failures: the first page's failure names its cause; a refused connection still asks whether the app is running", () => {
+  assert.match(startLoadHint("page.goto: net::ERR_NAME_NOT_RESOLVED at https://app.invalid/"), /^the host name does not resolve/);
+  assert.match(startLoadHint("page.goto: net::ERR_CERT_DATE_INVALID at https://app.example/"), /refused the site's certificate/);
+  assert.match(startLoadHint("page.goto: net::ERR_TIMED_OUT at https://app.example/"), /^nothing answered in time/);
+  assert.match(startLoadHint("page.goto: net::ERR_CONNECTION_REFUSED at http://127.0.0.1:1/"), /^is the app running\? The connection was refused/);
+  assert.equal(startLoadHint("page.goto: Timeout 20000ms exceeded."), "is the app running?");
+});
+
+test('network failures: a failed fetch of SceneScout\'s own names the cause Node keeps behind "fetch failed"', () => {
+  const err = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:443"), { code: "ECONNREFUSED" }) });
+  assert.equal(fetchFailureCause(err), "fetch failed: ECONNREFUSED connect ECONNREFUSED 127.0.0.1:443");
+  assert.equal(fetchFailureCause(new Error("plain")), "plain");
+  assert.equal(fetchFailureCause("text"), "text");
+});
+
+test("network failures: a request line is read for its origin; the app's keeps its method and path, another host is named by its host", () => {
+  assert.deepEqual(requestNetworkFailure(`GET ${ORIGIN}/api/things?x=1 → net::ERR_CONNECTION_RESET`, ORIGIN), {
+    kind: "request",
+    cause: "connection",
+    code: "net::ERR_CONNECTION_RESET",
+    what: "GET /api/things",
+    app: true,
+  });
+  assert.deepEqual(requestNetworkFailure("GET https://cdn.example.net/lib.js → net::ERR_NAME_NOT_RESOLVED", ORIGIN), {
+    kind: "request",
+    cause: "dns",
+    code: "net::ERR_NAME_NOT_RESOLVED",
+    what: "cdn.example.net",
+    app: false,
+  });
+  assert.equal(requestNetworkFailure(`GET ${ORIGIN}/api → net::ERR_ABORTED`, ORIGIN), null);
+  assert.equal(requestNetworkFailure(`POST ${ORIGIN}/api → net::ERR_BLOCKED_BY_CLIENT`, ORIGIN), null);
+  assert.ok(consoleEchoOfNetworkFailure("Failed to load resource: net::ERR_NAME_NOT_RESOLVED"));
+  assert.ok(!consoleEchoOfNetworkFailure("Failed to load resource: the server responded with a status of 404 (Not Found)"));
+  assert.ok(!consoleEchoOfNetworkFailure("Uncaught TypeError: net::ERR_NAME_NOT_RESOLVED"));
+});
+
+const requestFailed = (detail: string): RouteHealth["violations"][number] => ({ kind: "request_failed", severity: "medium", detail, url: `${ORIGIN}/` });
+
+test("network failures: a route that did not load on the network is not route-load-failed; the same route timing out still is", () => {
+  const dropped = checkFindings([route({ path: "/a", status: null, loadError: `page.goto: net::ERR_EMPTY_RESPONSE at ${ORIGIN}/a` })], ORIGIN);
+  assert.deepEqual(dropped.issues, []);
+  assert.deepEqual(dropped.network, [
+    { kind: "page", cause: "connection", code: "net::ERR_EMPTY_RESPONSE", what: "/a", app: true, routes: ["/a"], severity: "high" },
+  ]);
+  // The contrast: the same route, failed by a Playwright timeout, which the app's slowness can cause.
+  const slow = checkFindings([route({ path: "/a", status: null, loadError: "page.goto: Timeout 15000ms exceeded." })], ORIGIN);
+  assert.deepEqual(rules(slow.issues), ["route-load-failed"]);
+  assert.deepEqual(slow.network, []);
+  // --ignore-path exempts it as it would the rule it replaces.
+  assert.deepEqual(
+    checkFindings([route({ path: "/a", status: null, loadError: `page.goto: net::ERR_EMPTY_RESPONSE at ${ORIGIN}/a` })], ORIGIN, [], [], null, [{ path: "/a" }])
+      .network,
+    [],
+  );
+});
+
+test("network failures: an unreachable third-party host is one environment entry, not request-failed and console-error; an app's 5xx is still an issue", () => {
+  const cdn = "GET https://cdn.example.net/lib.js → net::ERR_NAME_NOT_RESOLVED";
+  const font = "GET https://cdn.example.net/font.woff2 → net::ERR_NAME_NOT_RESOLVED";
+  const echo = loadEcho("Failed to load resource: net::ERR_NAME_NOT_RESOLVED");
+  const found = checkFindings(
+    [
+      route({ path: "/", violations: [requestFailed(cdn), requestFailed(font), echo, httpError(`${ORIGIN}/api/x`, 500)] }),
+      route({ path: "/b", url: `${ORIGIN}/b`, violations: [requestFailed(cdn), echo] }),
+    ],
+    ORIGIN,
+  );
+  assert.deepEqual(rules(found.issues), ["server-error"], "the app's own 5xx is an answer from the app");
+  assert.equal(found.network.length, 1, JSON.stringify(found.network));
+  assert.deepEqual(found.network[0], {
+    kind: "request",
+    cause: "dns",
+    code: "net::ERR_NAME_NOT_RESOLVED",
+    what: "cdn.example.net",
+    app: false,
+    routes: ["/", "/b"],
+    severity: "medium",
+  });
+  // The contrast: the same request refused by the CDN with a status is the app's issue, and its console echo stays one too.
+  const answered = checkFindings([route({ violations: [httpError("https://cdn.example.net/lib.js", 403), loadEcho(ECHO_404)] })], ORIGIN);
+  assert.ok(answered.issues.length > 0);
+  assert.deepEqual(answered.network, []);
+});
+
+test("network failures: exit 3 only at the gate's severity, so a check that passed before still exits 0", () => {
+  // As the issues they replace: a request that failed was medium, a page that did not load high.
+  const found = checkFindings(
+    [
+      route({ path: "/", violations: [requestFailed(`GET ${ORIGIN}/api/items → net::ERR_CONNECTION_REFUSED`)] }),
+      route({ path: "/a", status: null, loadError: `page.goto: net::ERR_CONNECTION_RESET at ${ORIGIN}/a` }),
+    ],
+    ORIGIN,
+  );
+  const request = found.network.filter((n) => n.kind === "request");
+  const page = found.network.filter((n) => n.kind === "page");
+  assert.deepEqual([request.map((n) => n.severity), page.map((n) => n.severity)], [["medium"], ["high"]]);
+  // A medium request below a high gate: listed, and the exit code is the pass it was before.
+  assert.equal(exitCodeOf({ ...result([], "high"), network: request }), EXIT.pass);
+  assert.doesNotMatch(formatCheck({ ...result([], "high"), network: request }), /NETWORK FAILURES/);
+  assert.match(formatCheck({ ...result([], "high"), network: request }), /\*\*PASSED\*\* — .* · 1 failure\(s\) reaching the app on the network, not counted/);
+  assert.equal((toSummaryJson({ ...result([], "high"), network: request }, "0.0.0") as { gate: { networkFailures?: number } }).gate.networkFailures, undefined);
+  // The same request at a medium gate, and a page that did not load at a high one: the verdict is incomplete.
+  assert.equal(exitCodeOf({ ...result([], "medium"), network: request }), EXIT.network);
+  assert.equal(exitCodeOf({ ...result([], "high"), network: page }), EXIT.network);
+  // Report only: nothing gates, so nothing is incomplete.
+  assert.equal(exitCodeOf({ ...result([], "never"), network: [...page, ...request] }), EXIT.pass);
+  assert.doesNotMatch(formatCheck({ ...result([], "never"), network: page }), /NETWORK FAILURES/);
+});
+
+test("network failures: one reaching the app leaves a passing gate incomplete (exit 3); a failed gate still exits 1; another host's changes nothing", () => {
+  const appFailure = {
+    kind: "request" as const,
+    cause: "connection" as const,
+    code: "net::ERR_CONNECTION_RESET",
+    what: "GET /api",
+    app: true,
+    routes: ["/"],
+    severity: "medium" as const,
+  };
+  const elsewhere = {
+    kind: "request" as const,
+    cause: "dns" as const,
+    code: "net::ERR_NAME_NOT_RESOLVED",
+    what: "cdn.example.net",
+    app: false,
+    routes: ["/"],
+    severity: "medium" as const,
+  };
+  assert.equal(EXIT.network, 3);
+  assert.equal(exitCodeOf({ ...result([], "medium"), network: [appFailure] }), EXIT.network);
+  assert.equal(exitCodeOf({ ...result([]), network: [elsewhere] }), EXIT.pass);
+  assert.equal(exitCodeOf({ ...result([issue("high")]), network: [appFailure] }), EXIT.gateFailed, "running again would not pass it");
+  assert.equal(exitCodeOf(result([])), EXIT.pass);
+  const report = formatCheck({ ...result([], "medium"), network: [appFailure, elsewhere] });
+  assert.match(report, /\*\*NETWORK FAILURES\*\* — 1 failure\(s\) reaching the app on the network, not in the app \(see Network failures\); the rest passed/);
+  assert.match(report, /1 host\(s\) or request\(s\) elsewhere unreachable, not counted/);
+  assert.match(report, /## Network failures \(2\)/);
+  assert.match(report, /- `GET \/api`: the connection was refused or dropped \(`net::ERR_CONNECTION_RESET`\) — on `\/`/);
+  assert.match(report, /- `cdn\.example\.net` \(another host\): the host name did not resolve/);
+  assert.match(report, /SCENESCOUT_RETRY_NETWORK=on retries a failed page load once/);
+  // Only another host's: the verdict stays PASSED, with the count beside it.
+  assert.match(formatCheck({ ...result([]), network: [elsewhere] }), /\*\*PASSED\*\* — .* · 1 host\(s\) or request\(s\) elsewhere unreachable, not counted/);
+  assert.deepEqual(networkSection(undefined), []);
+  const json = toSummaryJson(
+    { ...result([], "medium"), network: [appFailure], loadRetries: [{ at: "t", url: "u", session: "s", cause: "ERR_CONNECTION_RESET", sockets: "x" }] },
+    "0.0.0",
+  ) as {
+    gate: { networkFailures?: number };
+    network?: unknown[];
+    loadRetries?: Array<Record<string, string>>;
+  };
+  assert.equal(json.gate.networkFailures, 1);
+  assert.equal(json.network?.length, 1);
+  assert.deepEqual(json.loadRetries, [{ at: "t", url: "u", cause: "ERR_CONNECTION_RESET" }], "the socket table stays in the report");
+  assert.match(
+    formatCheck({ ...result([]), loadRetries: [{ at: "t", url: "u", session: "check", cause: "ERR_CONNECTION_RESET", sockets: "x" }] }),
+    /## Page loads retried/,
+  );
+});
+
+test("action: a check that met network failures ends its step with 3 and says so, not as a failing app or a setup problem", () => {
+  const v = verdict({ exitCode: "3", failOn: "high", url: "http://x" });
+  assert.equal(v.exit, 3);
+  assert.match(v.annotation ?? "", /^::error title=SceneScout check met network failures::On http:\/\/x: the gate passed on what loaded/);
+});
+
+test("preflight with an allowlist header: the app's origin gets it, a redirect elsewhere does not, and its value is never printed", async () => {
+  const elsewhere = await standIn((_req, res) => res.end("<p>sign in</p>"));
+  const app = await standIn((req, res) => {
+    if (req.url === "/") {
+      res.writeHead(302, { location: "/home" });
+      return res.end();
+    }
+    if (req.url === "/home") {
+      res.writeHead(302, { location: `${elsewhere.base}/login` });
+      return res.end();
+    }
+    res.end("?");
+  });
+  try {
+    const secret = "ci-allow-0123456789";
+    const run = await preflightRun([`${app.base}/`], { SCENESCOUT_APP_HEADER: `X-CI-Allow: ${secret}` });
+    assert.equal(run.code, 0, run.err.join("\n"));
+    assert.deepEqual(
+      app.seen.map((s) => [s.url, s.headers["x-ci-allow"]]),
+      [
+        ["/", secret],
+        ["/home", secret],
+      ],
+    );
+    assert.deepEqual(
+      elsewhere.seen.map((s) => [s.url, s.headers["x-ci-allow"]]),
+      [["/login", undefined]],
+      "the header never follows a redirect to another origin",
+    );
+    const printed = [...run.out, ...run.err].join("\n");
+    assert.match(printed, /Allowlist header \(SCENESCOUT_APP_HEADER\): x-ci-allow is sent to http:\/\/127\.0\.0\.1:\d+ only/);
+    assert.ok(!printed.includes(secret));
+    assert.match(printed, /after redirects, at http:\/\/127\.0\.0\.1:\d+\/login/);
+    // A malformed one stops the preflight before any request.
+    const before = app.seen.length;
+    const bad = await preflightRun([`${app.base}/`], { SCENESCOUT_APP_HEADER: "Cookie: sid=1" });
+    assert.equal(bad.code, EXIT_PREFLIGHT.couldNotRun);
+    assert.match(bad.err.join("\n"), /cannot set Cookie/);
+    assert.equal(app.seen.length, before);
+  } finally {
+    await app.close();
+    await elsewhere.close();
+  }
+});
+
+test("network failures: the app's site is its host on any port and its sibling subdomains, so a backend that refuses connections is never the environment's", () => {
+  const at = (url: string, origin: string) => sameSite(new URL(url), origin);
+  assert.ok(at("http://127.0.0.1:5000/api", "http://127.0.0.1:4173"), "an API on another port");
+  assert.ok(at("https://api.example.com/v1", "https://app.example.com"), "a sibling subdomain");
+  assert.ok(at("https://a.b.example.com/", "https://app.b.example.com"));
+  assert.ok(!at("https://cdn.example.net/lib.js", "https://app.example.com"));
+  assert.ok(!at("https://other.com/", "https://example.com"), "a two-label host has no parent to share");
+  assert.ok(!at("http://10.0.0.6/", "http://10.0.0.5"), "an address has no parent domain");
+  assert.ok(!at("https://evilexample.com/", "https://app.example.com"));
+  assert.deepEqual(requestNetworkFailure("GET https://api.example.com/v1/items → net::ERR_CONNECTION_REFUSED", "https://app.example.com"), {
+    kind: "request",
+    cause: "connection",
+    code: "net::ERR_CONNECTION_REFUSED",
+    what: "GET api.example.com/v1/items",
+    app: true,
+  });
 });
