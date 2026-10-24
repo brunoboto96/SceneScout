@@ -1851,6 +1851,8 @@ export class BrowserEngine {
       p.on("framenavigated", (frame) => requests.navigated(frame));
       p.on("framedetached", (detached) => requests.gone((frame) => frame === detached));
       p.on("close", () => requests.gone((frame) => frame.page() === p));
+      // A navigation answered with a file never commits (settle.ts InFlightRequests.downloaded).
+      p.on("download", (d) => requests.downloaded((req) => req.url() === d.url()));
     };
     const watchPage = (p: Page): void => {
       watchSockets(p);

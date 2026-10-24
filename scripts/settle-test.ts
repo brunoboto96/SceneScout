@@ -35,6 +35,7 @@ import {
   shouldKeepWaiting,
   stableUrlOf,
   URL_CAP_MS,
+  URL_NAVIGATING_CAP_MS,
   URL_QUIET_MS,
 } from "../src/engine/settle.ts";
 
@@ -160,8 +161,15 @@ test("a bounce verdict waits while the page's own navigation is still on its way
   // read from the address alone ends before it does. Contrastive pair: the same quiet time, navigating or not.
   assert.equal(keepWatchingUrl({ sinceChangeMs: URL_QUIET_MS * 2, elapsedMs: 1000, navigating: true }), true);
   assert.equal(keepWatchingUrl({ sinceChangeMs: URL_QUIET_MS * 2, elapsedMs: 1000, navigating: false }), false);
-  // Still bounded: a navigation that never answers does not hold the run past the cap.
-  assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_CAP_MS, navigating: true }), false);
+  // Past the cap for an address that keeps moving, a navigation on its way is still waited for: whether the sign-in
+  // page's request started in the settle before the watch or just after it must not decide the verdict. Contrastive
+  // pair at the same moment, navigating or not.
+  assert.equal(keepWatchingUrl({ sinceChangeMs: URL_CAP_MS, elapsedMs: URL_CAP_MS, navigating: true }), true);
+  assert.equal(keepWatchingUrl({ sinceChangeMs: URL_CAP_MS, elapsedMs: URL_CAP_MS, navigating: false }), false);
+  // Still bounded: a navigation that never answers does not hold the run past its own cap.
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_NAVIGATING_CAP_MS - 1, navigating: true }), true);
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_NAVIGATING_CAP_MS, navigating: true }), false);
+  assert.ok(URL_CAP_MS < URL_NAVIGATING_CAP_MS, "a navigation on its way is given longer than an address that keeps moving");
 });
 
 test("the attach's sign-in verdict watches the address for a longer quiet window", () => {
@@ -491,6 +499,39 @@ test("stableUrlOf waits out a navigation in flight and returns where it committe
   assert.equal(still.clock - started, URL_QUIET_MS);
 });
 
+test("stableUrlOf waits for a navigation that starts just after the watch began and answers after the 3 s cap", async () => {
+  // The flake this pins (Firefox, a loaded runner): the guard's request to a slow sign-in page started a few
+  // milliseconds after the settle before the watch had gone quiet, so the watch began with nothing on its way, and its
+  // 3 s cap ended it while the sign-in page (answering in 3.5 s) was still on its way. The stale profile passed as
+  // signed in. Contrastive pair: the same page and timing with nothing on its way is read at the cap as it was.
+  const tick = (ms: number) => Math.round(ms / SETTLE_TICK_MS);
+  const page = standInPage("http://app.test/private");
+  let navigating = false;
+  page.onTick = () => {
+    if (page.ticks === 1) navigating = true;
+    if (page.ticks === tick(3500) + 1) {
+      navigating = false;
+      page.href = "http://app.test/login";
+    }
+  };
+  const started = page.clock;
+  assert.equal(await stableUrlOf(() => page, page.now, { navigating: () => navigating, quietMs: ATTACH_URL_QUIET_MS }), "http://app.test/login");
+  assert.ok(page.clock - started > URL_CAP_MS, "the watch ran past the 3 s cap while the navigation was on its way");
+  // A sign-in page that never answers holds the watch no longer than its own cap.
+  const hung = standInPage("http://app.test/private");
+  const hungStart = hung.clock;
+  assert.equal(await stableUrlOf(() => hung, hung.now, { navigating: () => hung.ticks >= 1 }), "http://app.test/private");
+  assert.equal(hung.clock - hungStart, URL_NAVIGATING_CAP_MS);
+  // The contrast: nothing on its way, and an address that keeps moving, ends at the 3 s cap.
+  const moving = standInPage("http://app.test/a");
+  const movingStart = moving.clock;
+  moving.onTick = () => {
+    moving.href = `http://app.test/hop-${moving.ticks}`;
+  };
+  await stableUrlOf(() => moving, moving.now, { navigating: () => false });
+  assert.equal(moving.clock - movingStart, URL_CAP_MS);
+});
+
 test("stableUrlOf takes the quiet window it is given", async () => {
   const page = standInPage("http://app.test/private");
   page.onTick = () => {
@@ -573,6 +614,26 @@ test("a navigation request is on its way from its start until its frame commits 
   t.ended("hop-1", false, 8000);
   t.started("hop-2", "main", true);
   assert.equal(t.navigating("main", 8000 + NAVIGATION_COMMIT_GRACE_MS * 10), true);
+});
+
+test("a navigation answered with a download is not on its way, while its file is still arriving", () => {
+  // Firefox keeps a navigation's request open until the whole file has arrived, so counted as on its way it held every
+  // URL watch to URL_NAVIGATING_CAP_MS. Contrastive pair: the same open navigation, and a download from another request.
+  const t = tracker();
+  t.started("to-file", "main", true);
+  t.downloaded((request) => request === "an-earlier-file");
+  assert.equal(t.navigating("main"), true, "a download from another request leaves this navigation on its way");
+  t.downloaded((request) => request === "to-file");
+  assert.equal(t.navigating("main"), false, "the navigation that became a download never commits");
+  // Its request is still open; when the file ends, nothing about the frame changes.
+  t.ended("to-file", false, 9000);
+  assert.equal(t.navigating("main", 9001), false);
+  // Only the frame whose navigation became the download stops navigating: the main frame's own is still on its way.
+  t.started("frame-file", "child", true);
+  t.started("next-page", "main", true);
+  t.downloaded((request) => request === "frame-file");
+  assert.equal(t.navigating("main"), true);
+  assert.equal(t.navigating("child"), false);
 });
 
 test("stableUrlOf stops at its cap on a URL that never holds still", async () => {

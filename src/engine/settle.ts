@@ -247,6 +247,20 @@ export class InFlightRequests<R, F> {
     for (const [request, held] of this.open) if (held.frame === frame && held.order < navigation) this.open.delete(request);
   }
 
+  /**
+   * A download started. A navigation answered with a file never commits, but Firefox keeps its request open until the
+   * whole file has arrived, so without this the frame counted as navigating for as long as the file took, holding a
+   * URL watch to URL_NAVIGATING_CAP_MS. `isDownload` says whether a request is the one the file came from; the frame
+   * whose pending navigation it is stops counting as navigating. A download from any other request changes nothing.
+   */
+  downloaded(isDownload: (request: R) => boolean): void {
+    for (const [request, held] of this.open) {
+      if (held.frame === undefined || this.pendingNavigation.get(held.frame) !== held.order || !isDownload(request)) continue;
+      this.pendingNavigation.delete(held.frame);
+      this.finishedNavigation.delete(held.frame);
+    }
+  }
+
   /** Frames that are gone (detached, or their page closed): every request they sent is dropped. */
   gone(isGone: (frame: F) => boolean): void {
     for (const [request, held] of this.open) if (held.frame !== undefined && isGone(held.frame)) this.open.delete(request);
@@ -328,8 +342,18 @@ export function describePace(paceMs: number): string {
  * project's own CI fail intermittently on a 40 ms timer.
  */
 export const URL_QUIET_MS = 400;
-/** Longest to watch. A page redirecting in a loop must not hold up the run. */
+/** Longest to watch an address that keeps moving with no navigation open: a page redirecting in a loop must not hold up the run. */
 export const URL_CAP_MS = 3000;
+/**
+ * Longest to watch while the page's own navigation is on its way (UrlWatch.navigating). A guard that has fired sends
+ * its sign-in page's request at once, but a loaded sign-in service can take seconds to answer, and the address only
+ * changes when it does. Whether that request started during the settle before the watch or a few milliseconds after
+ * it depends on the machine; with URL_CAP_MS as the bound for both, the same page was AUTH FAILED when it started
+ * during the settle and signed in when it started after. The longer bound only applies while a navigation is open, so
+ * a page with nothing on its way pays nothing for it, and one that never answers, or a loop whose hops overlap so a
+ * navigation is always open, still returns.
+ */
+export const URL_NAVIGATING_CAP_MS = 10_000;
 /**
  * The quiet window the attach's sign-in verdict watches with, when the session
  * carries a saved sign-in. An app whose scripts send a signed-out visitor to
@@ -358,10 +382,13 @@ export interface UrlWatch {
   quietMs?: number;
 }
 
-/** Whether to keep watching the URL before judging where the page landed. */
+/**
+ * Whether to keep watching the URL before judging where the page landed. A navigation on its way is waited for until it
+ * commits or fails, to URL_NAVIGATING_CAP_MS; otherwise the address must hold still, to URL_CAP_MS.
+ */
 export function keepWatchingUrl(w: UrlWatch): boolean {
+  if (w.navigating) return w.elapsedMs < URL_NAVIGATING_CAP_MS;
   if (w.elapsedMs >= URL_CAP_MS) return false;
-  if (w.navigating) return true;
   return w.sinceChangeMs < (w.quietMs ?? URL_QUIET_MS);
 }
 
@@ -428,8 +455,9 @@ export async function settlePage(page: SettlingPage, src: SettleSource, now: () 
  * request-based settle has nothing to wait on and the page is read while it
  * is still, briefly, the page it was asked for. `now` is the clock it measures by, as for settlePage.
  * `navigating` says whether the page's own navigation is on its way (InFlightRequests.navigating): a guard that has
- * fired, whose sign-in page has not answered yet, has not changed the address, so the watch waits for it (to the
- * cap). `quietMs` replaces URL_QUIET_MS (the attach's verdict uses ATTACH_URL_QUIET_MS). `heldMs` is how long the
+ * fired, whose sign-in page has not answered yet, has not changed the address, so the watch waits for it, to
+ * URL_NAVIGATING_CAP_MS, whether it started before the watch or during it. `quietMs` replaces URL_QUIET_MS (the
+ * attach's verdict uses ATTACH_URL_QUIET_MS). `heldMs` is how long the
  * address had already held still when the watch began (a crawl passes its document's age, CRAWL_URL_HELD_MS); by
  * default none, so the window runs from the watch's start.
  */

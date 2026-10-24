@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Report (file on load)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="file-on-load-heading">Report</h1>
+    </main>
+    <script>
+      // Moves the page to a file the server sends slowly (/slow-file). The browser takes it as a download, so the page
+      // stays where it is, while the file is still arriving.
+      setTimeout(function () {
+        location.href = "/slow-file";
+      }, 40);
+    </script>
+  </body>
+</html>
