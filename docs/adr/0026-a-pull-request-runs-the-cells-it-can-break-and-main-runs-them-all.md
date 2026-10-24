@@ -125,8 +125,11 @@ each kind of run and holds each line, beside the near miss that stays alone.
 | Dispatch on `changeset-release/main` (the release's) | One for the version branch | Cancels the run going or waiting |
 | Any other dispatch (by hand, the weekly benchmark's results branch) | Its own | Nothing |
 
-**Main** keeps the rule this record set: a `main` run in progress is the
-release gate and is never cancelled. What changes is that `main` runs no
+**Main** keeps the rule this record set: a `main` run in progress is never
+cancelled, so every run that starts gives its commit a verdict. Nothing waits
+on a `main` run: the release workflow runs on the push without reading it, and
+the release's gate is the required `test` on the Version Packages pull
+request, which the version branch's own run reports. What changes is that `main` runs no
 longer queue behind each other one per merge. The queue holds the run going
 and the newest push's run waiting; a push in between has its waiting run
 replaced. Its code is still tested, because the newest commit contains it, but

@@ -24,8 +24,9 @@ on:
 #   newest head of that branch can be merged. The older run tested an older
 #   commit, so cancelling it can never leave a green check on the head; the
 #   head's own `test` comes from the newest run.
-# - A push to main: one group, NOT cancelling. A main run already going is the
-#   release gate and always finishes. A main run still waiting is replaced by a
+# - A push to main: one group, NOT cancelling. A main run already going always
+#   finishes, so it gives its commit a verdict (the release's own gate is the
+#   version branch's run). A main run still waiting is replaced by a
 #   newer push's run, whose commit holds all of its code, so the queue keeps
 #   one running and the newest waiting instead of every merge. The skipped
 #   commit's run shows as cancelled; it is never tested on its own.

@@ -2278,7 +2278,8 @@ test("test plan: test.yml runs each job when the plan says, and the required che
 
 /**
  * Evaluates the part of GitHub's expression language a concurrency block uses: context lookups, string and boolean
- * literals, `==`, `!=`, `!`, `&&`, `||` (each returning an operand, as GitHub's do) and parentheses. A value is either
+ * literals, `==`, `!=` (strings compared ignoring case, as GitHub's are), `!`, `&&`, `||` (each returning an operand, as
+ * GitHub's do) and parentheses. A value is either
  * one `${{ }}` (its result) or text with `${{ }}` spliced in (a string). Anything else throws, so a block that grows
  * past this subset fails the test rather than being read wrongly.
  */
@@ -2308,7 +2309,9 @@ function evalGithubValue(value: string, context: Record<string, string>): string
       while (tokens[i] === "==" || tokens[i] === "!=") {
         const op = tokens[i++];
         const w = primary();
-        v = op === "==" ? v === w : v !== w;
+        // GitHub compares two strings ignoring case; any other pair of types this subset meets must match exactly.
+        const same = typeof v === "string" && typeof w === "string" ? v.toLowerCase() === w.toLowerCase() : v === w;
+        v = op === "==" ? same : !same;
       }
       return v;
     };
@@ -2383,6 +2386,22 @@ test("test.yml: a pull request's and the version branch's runs cancel older ones
   const old = { "github.event_name": "push", "github.ref": "refs/heads/main", "github.run_id": "9" };
   assert.equal(evalGithubValue("test-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}", old), "test-9");
   assert.equal(evalGithubValue("${{ github.event_name == 'pull_request' }}", old), false);
+  // GitHub's `==` ignores case on strings, and `&&` / `||` return an operand rather than a boolean.
+  assert.equal(evalGithubValue("${{ 'Refs/Heads/Main' == 'refs/heads/main' }}", old), true);
+  assert.equal(evalGithubValue("${{ 'a' != 'A' }}", old), false);
+  assert.equal(evalGithubValue("${{ 'x' && 'y' }}", old), "y");
+  assert.equal(evalGithubValue("${{ '' || github.run_id }}", old), "9");
+
+  // The exact expressions, so an edit to the block is a deliberate edit here too, not only a change the cases above
+  // happen not to reach.
+  assert.equal(
+    workflow.concurrency.group,
+    "test-${{ (github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/changeset-release/main')) && github.ref || github.run_id }}",
+  );
+  assert.equal(
+    workflow.concurrency["cancel-in-progress"],
+    "${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/changeset-release/main') }}",
+  );
 });
 
 test("release.yml and the other workflows keep their concurrency: the version branch's group is test.yml's alone", () => {
