@@ -20,6 +20,11 @@ import { confirmVerdict, GuidedPlans, guidedAttachVerdict, guidedPlan, holdGuide
 import {
   applyToCommand,
   configureCommand,
+  EGRESS_MODES,
+  EGRESS_PATHS,
+  egressAllows,
+  egressRefusal,
+  readCommandPolicy,
   fsPolicyReader,
   NO_POLICY,
   parsePolicy,
@@ -3718,4 +3723,116 @@ test("policy explain: a URL's fragment is not read, since a browser never sends 
   }
   const parsed = parsePolicyArgs(["explain", "GET", `${EXPLAIN_APP}/things#x?_method=DELETE`]);
   assert.ok(parsed.ok && parsed.options.url === `${EXPLAIN_APP}/things`, "the command line drops it too");
+});
+
+// ── egress: what SceneScout itself may send off the machine (issue #537) ──────
+
+test("config: egress is checked like every key, a preset sets none, and the project's file can only lower it", () => {
+  assert.deepEqual([...EGRESS_MODES], ["none", "model-only", "all"]);
+  const r = parsePolicy('{"egress": "local"}', "config.json");
+  assert.ok(!r.ok && /"egress" must be one of "none", "model-only", "all", not "local"/.test(r.error), r.ok ? "taken" : r.error);
+  assert.ok(!parsePolicy('{"egress": null}', "config.json").ok, "null is not a mode");
+  assert.deepEqual(parsed('{"egress": "model-only"}'), { egress: "model-only" });
+  assert.equal(parsed('{"preset": "strict"}').egress, undefined, "strict leaves every path as it was, so adopting it stops no export");
+  assert.equal(parsed('{"preset": "strict", "egress": "none"}').egress, "none");
+  // Tighten: the lower of the two, whichever file sets it.
+  assert.equal(tightenPolicy({ egress: "all" }, { egress: "none" }).egress, "none");
+  assert.equal(tightenPolicy({ egress: "none" }, { egress: "all" }).egress, "none");
+  assert.equal(tightenPolicy({ egress: "model-only" }, { egress: "all" }).egress, "model-only");
+  assert.equal(tightenPolicy({}, { egress: "model-only" }).egress, "model-only");
+  assert.equal(tightenPolicy({ egress: "model-only" }, {}).egress, "model-only");
+  assert.equal("egress" in tightenPolicy({}, {}), false);
+});
+
+test("config: egress allows each path exactly as its table says, and no setting is every path", () => {
+  const table: Record<string, Record<(typeof EGRESS_PATHS)[number], boolean>> = {
+    unset: { model: true, tracker: true, "pull-request": true },
+    all: { model: true, tracker: true, "pull-request": true },
+    "model-only": { model: true, tracker: false, "pull-request": false },
+    none: { model: false, tracker: false, "pull-request": false },
+  };
+  for (const [mode, row] of Object.entries(table))
+    for (const via of EGRESS_PATHS)
+      assert.equal(egressAllows(mode === "unset" ? undefined : (mode as (typeof EGRESS_MODES)[number]), via), row[via], `${mode} / ${via}`);
+  // The refusal names the file, the setting and what was not run; a path it allows has none.
+  const none = egressRefusal(loadedOf({ egress: "none" }), "tracker", "scenescout export");
+  assert.match(
+    none ?? "",
+    /^refused by the SceneScout config \(\/srv\/\.scenescout\/config\.json\): egress "none" lets SceneScout send nothing off this machine, so scenescout export is not run/,
+  );
+  assert.match(
+    egressRefusal(loadedOf({ egress: "model-only" }), "pull-request", "the QA reply") ?? "",
+    /egress "model-only" lets SceneScout send pages to a model and nothing else/,
+  );
+  assert.equal(egressRefusal(loadedOf({ egress: "model-only" }), "model", "scenescout ci"), null);
+  assert.equal(egressRefusal(NO_POLICY, "tracker", "scenescout export"), null);
+});
+
+test("config: egress none turns the dedup judge off and keeps pictures out of the conversation; model-only leaves both", () => {
+  const none = loadedOf({ egress: "none" });
+  const asked = resolveSettings(none, {}, { dedup: "judge", evidence: "inline" }, DEFAULTS);
+  assert.deepEqual(
+    asked.refused.map((r) => r.why),
+    ['dedup "judge" is above the config\'s egress "none": the model judge is off for this project', 'evidence "inline" is above the config\'s egress "none"'],
+  );
+  const defaults = resolveSettings(none, { SCENESCOUT_DEDUP: "judge" }, {}, DEFAULTS);
+  assert.deepEqual(defaults.refused, []);
+  assert.deepEqual([defaults.settings.dedup, defaults.settings.evidence], ["rule", "file"]);
+  assert.match(defaults.notes.join(" "), /SCENESCOUT_DEDUP=judge is above the config's egress "none"/);
+  assert.match(defaults.notes.join(" "), /evidence "file": "inline" is above the config's egress "none"/);
+  // What egress none still allows: no picture, and pictures kept to files.
+  assert.deepEqual(resolveSettings(none, {}, { dedup: "rule", evidence: "off" }, DEFAULTS).refused, []);
+  assert.deepEqual(resolveSettings(none, {}, { evidence: "file" }, DEFAULTS).refused, []);
+  // A stricter evidence key beside it is the one named.
+  assert.match(
+    resolveSettings(loadedOf({ egress: "none", evidence: "off" }), {}, { evidence: "file" }, DEFAULTS).refused[0]?.why ?? "",
+    /above the config's evidence "off"/,
+  );
+  // The contrast: model-only lets the model path through, as without a file.
+  const modelOnly = resolveSettings(loadedOf({ egress: "model-only" }), {}, { dedup: "judge", evidence: "inline" }, DEFAULTS);
+  assert.deepEqual(modelOnly.refused, []);
+  assert.deepEqual([modelOnly.settings.dedup, modelOnly.settings.evidence], ["judge", "inline"]);
+});
+
+test("config: a command that sends to a model is refused under egress none and runs under model-only", () => {
+  const ci = { mode: "read-only" as const, dedup: "judge" as const, sends: { via: "model" as const, what: "scenescout ci" } };
+  const none = applyToCommand(loadedOf({ egress: "none" }), {}, [], ci);
+  assert.ok(!none.ok && /egress "none" .* so scenescout ci is not run/.test(none.error), JSON.stringify(none));
+  assert.ok(!none.ok && !/Do not retry/.test(none.error), "a person reads a command's refusal");
+  const modelOnly = applyToCommand(loadedOf({ egress: "model-only" }), {}, [], ci);
+  assert.ok(modelOnly.ok && modelOnly.dedup === "judge", JSON.stringify(modelOnly));
+  // A command that sends nothing (check, a first look) runs under none.
+  assert.ok(applyToCommand(loadedOf({ egress: "none" }), {}, [], { mode: "read-only" }).ok);
+});
+
+test("config: ci and export stop with exit 2 under egress none before any key or tracker is needed; a project file can set it", () => {
+  const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-cli-egress-"));
+  try {
+    const project = path.join(dir, "project");
+    fs.mkdirSync(path.join(project, ".scenescout"), { recursive: true });
+    fs.writeFileSync(path.join(project, ".scenescout", "config.json"), '{"egress": "none"}');
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !/^(SCENESCOUT_|ANTHROPIC_|OPENAI_|GH_|GITHUB_|JIRA_)/.test(k)) env[k] = v;
+    const run = (args: string[]) =>
+      spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), cli, ...args], { cwd: dir, env, encoding: "utf8", timeout: 60_000 });
+    const ci = run(["ci", "http://127.0.0.1:9", "--project", project]);
+    assert.equal(ci.status, 2, ci.stderr);
+    assert.match(ci.stderr, /scenescout ci: refused by the SceneScout config \(.*config\.json\): egress "none" .* so scenescout ci is not run/);
+    const exp = run(["export", "--to", "github", "--repo", "owner/app", "--project", project, "--yes"]);
+    assert.equal(exp.status, 2, exp.stderr);
+    assert.match(exp.stderr, /scenescout export: refused by the SceneScout config \(.*config\.json\): egress "none" .* so scenescout export is not run/);
+    // The contrast: model-only lets ci reach its next check (the missing key), and still refuses the export.
+    fs.writeFileSync(path.join(project, ".scenescout", "config.json"), '{"egress": "model-only"}');
+    const ciModel = run(["ci", "http://127.0.0.1:9", "--project", project]);
+    assert.equal(ciModel.status, 2);
+    assert.doesNotMatch(ciModel.stderr, /refused by the SceneScout config/);
+    assert.match(ciModel.stderr, /set ANTHROPIC_API_KEY or OPENAI_API_KEY/);
+    assert.match(run(["export", "--to", "github", "--repo", "owner/app", "--project", project]).stderr, /egress "model-only"/);
+    // And readCommandPolicy is what both read: the project's file joined to the launch directory's (none here).
+    const read = readCommandPolicy({}, dir, project, fsPolicyReader);
+    assert.ok(read.ok && read.loaded.policy.egress === "model-only", JSON.stringify(read));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

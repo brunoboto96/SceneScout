@@ -60,7 +60,7 @@ import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
-import { configureCommand, fsPolicyReader } from "./engine/project-config.js";
+import { configureCommand, fsPolicyReader, readCommandPolicy, type EgressPath } from "./engine/project-config.js";
 import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
 import { MAX_EXPLAIN_BODY, runPolicyCommand } from "./engine/policy-explain.js";
 import { VISUAL_DIRNAME } from "./engine/baseline.js";
@@ -648,7 +648,7 @@ async function doctor(flags: string[]): Promise<void> {
  */
 function commandConfig(
   args: string[],
-  options: { mode: WriteMode; dedup?: DedupMode; projectDir: string },
+  options: { mode: WriteMode; dedup?: DedupMode; projectDir: string; sends?: { via: EgressPath; what: string } },
   command: string,
   exitCode: number,
 ): { mode: WriteMode; dedup?: DedupMode } {
@@ -865,7 +865,8 @@ async function ci(args: string[]): Promise<never> {
   };
   const parsed = parseCiArgs(args, process.cwd(), process.env);
   if (!parsed.ok) return fail(parsed.error);
-  const capped = commandConfig(args, parsed.options, "ci", EXIT_CI.couldNotRun);
+  // Before a key is read or a browser starts: the config's egress may refuse every call to a model.
+  const capped = commandConfig(args, { ...parsed.options, sends: { via: "model", what: "scenescout ci" } }, "ci", EXIT_CI.couldNotRun);
   const options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode, dedup: capped.dedup ?? parsed.options.dedup };
   const provider = detectProvider(process.env, options);
   if (!provider.ok) return fail(provider.error);
@@ -945,8 +946,15 @@ async function exportFindings(args: string[]): Promise<never> {
     console.error(redactKeys(`scenescout export: ${parsed.error}`, credentialSecrets(process.env)));
     process.exit(EXIT_EXPORT.couldNotExport);
   }
+  // The operator's config, joined with the project's own: its egress may refuse every call to the tracker.
+  const config = readCommandPolicy(process.env, process.cwd(), parsed.options.projectDir, fsPolicyReader);
+  if (!config.ok) {
+    console.error(redactKeys(`scenescout export: ${config.error}`, credentialSecrets(process.env)));
+    process.exit(EXIT_EXPORT.couldNotExport);
+  }
   const outcome = await runExport(parsed.options, {
     env: process.env,
+    config: config.loaded,
     log: (line) => console.log(line),
     error: (line) => console.error(line),
   });

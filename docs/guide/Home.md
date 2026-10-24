@@ -37,7 +37,7 @@ The report lands in `.scenescout/report.md`.
 | **In QA or product** | Ask for a test in plain words, read each problem with a picture, and hand over evidence: replays, videos and a test report laid out by your template | [Reading the report](Start-here.md#reading-the-report), the [Claude Desktop extension](Start-here.md#as-a-claude-desktop-extension) (no terminal), then [what it checks](What-it-checks.md) |
 | **Looking after CI** | Gate pull requests with no model, run unattended exploration on a schedule, answer `/scenescout qa` comments, and file findings as issues | [Ways to use it](Ways-to-use-it.md#scenescout-check-a-gate-in-ci), the [safety model](Safety-model.md#keys-and-forks-in-ci), then the [configuration reference](Configuration-reference.md) |
 
-Before you point it at anything with real data, read the [safety model](Safety-model.md). If your app needs a sign-in, read [Signing in](Signing-in.md).
+Before you point it at anything with real data, read the [safety model](Safety-model.md) and [what leaves the machine](What-leaves-the-machine.md). If your app needs a sign-in, read [Signing in](Signing-in.md).
 
 ## Every page
 
@@ -48,6 +48,7 @@ Before you point it at anything with real data, read the [safety model](Safety-m
 | [What it checks](What-it-checks.md) | The checks that run after every action, and every `scout_*` tool |
 | [Signing in](Signing-in.md) | Saved logins per role, expiry, the refresh broker, and scripted sign-in for CI |
 | [Safety model](Safety-model.md) | The four write modes, what is refused and why, and keys and forks in CI |
+| [What leaves the machine](What-leaves-the-machine.md) | Every path by which data leaves the machine, what it carries and to whom, how to turn each off, and the `egress` setting |
 | [Recipes](Recipes.md) | Setups for seven kinds of project, from a server-rendered app to a monorepo with preview deployments |
 | [Configuration reference](Configuration-reference.md) | Every CLI option, environment variable, GitHub Action input, repository variable and MCP prompt, with defaults |
 | [Measuring it](Measuring-it.md) | The benchmark, answer keys, the held-out app and how to read a scorecard |

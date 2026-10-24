@@ -43,6 +43,7 @@ jobs:
     permissions:
       pull-requests: write # react to the comment, and reply when no run starts
       deployments: read # find the head commit's preview deployment
+      contents: read # read the egress setting in .scenescout/config.json on the default branch
     outputs:
       run: ${{ steps.gate.outputs.run }}
       pr: ${{ steps.gate.outputs.pr }}

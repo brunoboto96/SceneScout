@@ -11,6 +11,7 @@
 - [Signing in](Signing-in.md)
 - [Recipes](Recipes.md)
 - [Safety model](Safety-model.md)
+- [What leaves the machine](What-leaves-the-machine.md)
 
 #### Reference
 

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Text over painted backgrounds</title>
+  <style>
+    body { margin: 0; padding: 24px; font: 16px/1.5 sans-serif; background: rgb(255, 255, 255); color: rgb(17, 24, 39); }
+    section { margin: 0 0 24px; }
+    .box { position: relative; padding: 24px; width: 420px; }
+    .light { color: rgb(248, 250, 252); }
+    .pale { color: rgb(229, 231, 235); }
+
+    /* A panel painted by a pseudo-element of the text's ancestor, and the same box with no panel. */
+    .pseudo { isolation: isolate; }
+    .pseudo.on::before { content: ""; position: absolute; inset: 0; background: rgb(15, 23, 42); z-index: -1; }
+
+    /* Gradients: every stop dark, every stop pale, and one that runs from dark to white. */
+    .grad-dark { background: linear-gradient(135deg, rgb(15, 23, 42), rgb(30, 41, 59)); }
+    .grad-pale { background: linear-gradient(rgb(255, 255, 255), rgb(243, 244, 246)); }
+    .grad-mixed { background: linear-gradient(to right, rgb(15, 23, 42), rgb(255, 255, 255)); }
+
+    /* A panel laid behind the text as its sibling, and the same box with none. */
+    .backdrop { position: absolute; inset: 0; background: rgb(15, 23, 42); }
+    .stage p { position: relative; margin: 0; }
+    /* A positioned panel with a negative z-index on a white sheet: beneath the sheet's background, unless the sheet is isolated. */
+    .sheet { background: rgb(255, 255, 255); }
+    .sheet .backdrop { z-index: -1; }
+    .sheet.isolated { isolation: isolate; }
+
+    /* Colours written in lab() and oklch(), which some engines' canvas keeps in their own space. */
+    .lab-dark { background: lab(2 0 -5); }
+    .lab-pale { background: oklch(0.99 0 0); }
+    .oklch-text { color: oklch(0.9 0 0); }
+    .oklch-text-dark { color: oklch(0.2 0 0); }
+
+    /* Dark text on white, under paint that does not reach it, beside the same paint where it does. */
+    .dark { color: rgb(17, 24, 39); }
+    .underline { background: linear-gradient(rgb(17, 24, 39), rgb(17, 24, 39)) no-repeat 0 100% / 100% 2px; }
+    .underline-full { background: linear-gradient(rgb(17, 24, 39), rgb(17, 24, 39)); }
+    .fill::before { content: ""; position: absolute; inset: 0; background: rgb(17, 24, 39); z-index: -1; }
+    .fill { isolation: isolate; }
+    .fill.rest::before { transform: scaleX(0); }
+    .tint::after { content: ""; position: absolute; inset: 0; background: rgb(0, 0, 0); }
+    .tint.faint::after { opacity: 0.05; }
+    .card { background: rgb(255, 255, 255); }
+    .card::before { content: ""; position: absolute; inset: 0; background: rgb(17, 24, 39); z-index: -1; }
+    .card.isolated { isolation: isolate; }
+    .gradient-text { background: linear-gradient(90deg, rgb(37, 99, 235), rgb(147, 51, 234)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: rgb(17, 24, 39); }
+  </style>
+</head>
+<body>
+  <!-- Each pair differs in the one fact that decides whether the text can be
+       read: the light text over a dark panel reads clearly on screen and is
+       not a contrast failure; the same text with the panel gone, or the panel
+       pale, is. Where the text sits on dark at one end and white at the other,
+       the audit cannot give one ratio and says so rather than fail it. -->
+  <section>
+    <div class="box pseudo on"><p class="light" data-testid="contrast-pseudo-dark">Light text over a dark panel drawn by a pseudo-element</p></div>
+    <div class="box pseudo"><p class="light" data-testid="contrast-pseudo-none">Light text over the same box with no panel drawn</p></div>
+  </section>
+  <section>
+    <div class="box grad-dark"><p class="light" data-testid="contrast-gradient-dark">Light text over a dark gradient</p></div>
+    <div class="box grad-pale"><p class="pale" data-testid="contrast-gradient-pale">Pale text over a pale gradient</p></div>
+    <div class="box grad-mixed"><p class="light" data-testid="contrast-gradient-mixed">Light text over a gradient from dark to white</p></div>
+  </section>
+  <section>
+    <div class="box stage"><div class="backdrop"></div><p class="light" data-testid="contrast-sibling-dark">Light text over a dark sibling panel</p></div>
+    <div class="box stage"><p class="light" data-testid="contrast-sibling-none">Light text over the same box with no panel</p></div>
+    <div class="box sheet"><div class="backdrop"></div><p class="pale" data-testid="contrast-sheet-under">Pale text on a white sheet whose dark panel sits beneath its background</p></div>
+    <div class="box sheet isolated"><div class="backdrop"></div><p class="pale" data-testid="contrast-sheet-over">Pale text on the same sheet isolated, so the panel paints over its background</p></div>
+  </section>
+  <section>
+    <div class="box lab-dark"><p class="light" data-testid="contrast-lab-dark">Light text over a dark lab() background</p></div>
+    <div class="box lab-pale"><p class="light" data-testid="contrast-lab-pale">Light text over a pale oklch() background</p></div>
+    <div class="box"><p class="oklch-text" data-testid="contrast-oklch-pale-text">Pale oklch() text on the white page</p></div>
+    <div class="box"><p class="oklch-text-dark" data-testid="contrast-oklch-dark-text">Dark oklch() text on the white page</p></div>
+  </section>
+  <section>
+    <div class="box"><p><span class="dark underline" data-testid="contrast-underline-strip">Dark text with an underline drawn as a 2px gradient</span></p></div>
+    <div class="box"><p><span class="dark underline-full" data-testid="contrast-underline-full">Dark text over the same gradient at full size</span></p></div>
+    <div class="box fill rest"><p class="dark" data-testid="contrast-fill-rest">Dark text over a hover fill scaled to nothing at rest</p></div>
+    <div class="box fill"><p class="dark" data-testid="contrast-fill-shown">Dark text over the same fill shown</p></div>
+    <div class="box tint faint"><p class="dark" data-testid="contrast-tint-faint">Dark text under a 5% dark tint</p></div>
+    <div class="box tint"><p class="dark" data-testid="contrast-tint-full">Dark text under the same tint at full opacity</p></div>
+    <div class="box card"><p class="dark" data-testid="contrast-card-under">Dark text on a white card whose dark pseudo-element sits beneath it</p></div>
+    <div class="box card isolated"><p class="dark" data-testid="contrast-card-over">Dark text on the same card isolated, so the pseudo-element paints over its background</p></div>
+    <div class="box"><p class="gradient-text" data-testid="contrast-gradient-text">Text painted with a gradient clipped to its glyphs</p></div>
+  </section>
+  <section>
+    <dark-frame><p class="light" data-testid="contrast-slot-dark">Light text slotted into a dark shadow-root panel</p></dark-frame>
+    <pale-frame><p class="light" data-testid="contrast-slot-pale">Light text slotted into a pale shadow-root panel</p></pale-frame>
+  </section>
+  <script>
+    // The panel is drawn inside the custom element's shadow root, around the <slot> the text renders in.
+    for (const [name, colour] of [["dark-frame", "rgb(15, 23, 42)"], ["pale-frame", "rgb(255, 255, 255)"]]) {
+      customElements.define(name, class extends HTMLElement {
+        constructor() {
+          super();
+          this.attachShadow({ mode: "open" }).innerHTML =
+            '<div style="padding: 24px; width: 420px; background: ' + colour + '"><slot></slot></div>';
+        }
+      });
+    }
+  </script>
+</body>
+</html>

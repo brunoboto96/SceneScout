@@ -11,11 +11,25 @@
  * a missing gap below a scroll pane's fold, which is reported. The checks
  * are on the ORDER of the scores and on the clean page staying high, so a
  * later change to the weights cannot flatten the scale without failing here.
+ *
+ * test-app/design-contrast.html holds contrastive pairs for the contrast
+ * read: light text over a dark panel drawn by a pseudo-element, a gradient, a
+ * positioned sibling, a lab() background or a shadow root's slot, each beside
+ * the same text with the panel gone or pale. The dark ones are not failures,
+ * the pale ones are, and text whose background runs from dark to white is
+ * listed as unsure rather than failed. Dark text under paint that does not
+ * reach it (an underline drawn as a 2px gradient, a hover fill scaled to
+ * nothing, a 5% tint, a pseudo-element beneath an opaque card) is never a
+ * failure, while the same paint where it does reach the text is. A dark
+ * panel with a negative z-index on a white sheet paints beneath the sheet's
+ * background, so pale text there fails; on the same sheet isolated it is the
+ * panel the text may sit on, and the text is not failed.
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BrowserEngine } from "../../dist/engine/browser.js";
+import { contrastVerdict, DESIGN_COLLECT_SCRIPT, type DesignPayload } from "../../dist/engine/design.js";
 import { check, type SmokeContext } from "./harness.ts";
 
 export const title = "design scores";
@@ -79,6 +93,75 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       "the defective page lists its top deductions beside the score",
       /^-16 touching containers ×2 · (-6 6 button heights · -\d+ \d+ grays|-\d+ \d+ grays · -6 6 button heights)$/.test(whyOf(all)),
       whyOf(all) || all,
+    );
+
+    console.log("design scores: text over painted backgrounds, the contrastive pairs");
+    await engine.navigate("/design-contrast.html");
+    const layered = await engine.designAudit();
+    const page = (engine as any).page as { evaluate(script: string): Promise<unknown> };
+    const records = ((await page.evaluate(DESIGN_COLLECT_SCRIPT)) as DesignPayload).records;
+    const verdictOf = (testid: string): string => {
+      const r = records.find((x) => x.testid === testid);
+      return r ? contrastVerdict(r).kind : "missing";
+    };
+    // The report lists the first eight failures; each verdict is read from the records, and the count from the why line.
+    const failed = layered.match(/CONTRAST failures[^\n]*\n((?: {2}⚠[^\n]*\n?)*)/)?.[1] ?? "";
+    const unsure = layered.match(/CONTRAST unsure[^\n]*\n((?: {2}→[^\n]*\n?)*)/)?.[1] ?? "";
+    const seen = `${layered}\n${JSON.stringify(records.filter((r) => r.testid).map((r) => [r.testid, r.color, r.bg, r.bgRange]))}`;
+    for (const [dark, pale, what] of [
+      ["contrast-pseudo-dark", "contrast-pseudo-none", "light text over a dark panel drawn by a pseudo-element"],
+      ["contrast-gradient-dark", "contrast-gradient-pale", "light text over a dark gradient"],
+      ["contrast-lab-dark", "contrast-lab-pale", "light text over a dark background written in lab()"],
+      ["contrast-slot-dark", "contrast-slot-pale", "light text slotted into a dark panel in a shadow root"],
+      ["contrast-oklch-dark-text", "contrast-oklch-pale-text", "dark text coloured in oklch()"],
+      ["contrast-tint-faint", "contrast-tint-full", "dark text under a 5% tint drawn by a pseudo-element"],
+      ["contrast-card-under", "contrast-card-over", "dark text on a white card whose negative-z-index pseudo-element sits beneath it"],
+    ] as const) {
+      check(`${what} passes, and its contrastive twin fails`, verdictOf(dark) === "pass" && !failed.includes(dark) && verdictOf(pale) === "fail", seen);
+    }
+    for (const [maybe, shown, what] of [
+      ["contrast-underline-strip", "contrast-underline-full", "an underline drawn as a 2px gradient"],
+      ["contrast-fill-rest", "contrast-fill-shown", "a hover fill scaled to nothing at rest"],
+    ] as const) {
+      check(
+        `dark text over ${what} is not failed, and the same paint at full size is`,
+        verdictOf(maybe) === "varies" && !failed.includes(maybe) && verdictOf(shown) === "fail",
+        seen,
+      );
+    }
+    check(
+      "text painted with a gradient clipped to its glyphs is not measured",
+      verdictOf("contrast-gradient-text") === "unmeasured" && !failed.includes("contrast-gradient-text"),
+      seen,
+    );
+    check(
+      "light text over a positioned dark sibling is not failed; the same box with no sibling is",
+      verdictOf("contrast-sibling-dark") === "varies" && !failed.includes("contrast-sibling-dark") && failed.includes("contrast-sibling-none"),
+      seen,
+    );
+    check(
+      "pale text on a white sheet whose negative-z-index panel paints beneath the sheet's background fails; the same sheet isolated, the panel over its background, is not failed",
+      failed.includes("contrast-sheet-under") &&
+        verdictOf("contrast-sheet-under") === "fail" &&
+        verdictOf("contrast-sheet-over") === "varies" &&
+        !failed.includes("contrast-sheet-over"),
+      seen,
+    );
+    check(
+      "text over a gradient from dark to white, or over a panel that may be under it, is listed as unsure and not scored",
+      unsure.includes("contrast-gradient-mixed") && unsure.includes("contrast-sibling-dark") && !failed.includes("contrast-gradient-mixed"),
+      seen,
+    );
+    check("the page loses points for the eleven failures only", /-15 contrast failures ×11/.test(whyOf(layered)), whyOf(layered) || layered);
+
+    // The body's background is the page canvas when the root element sets none, so a negative-z-index panel there paints over it.
+    await engine.navigate("/design-contrast-canvas.html");
+    const canvasRecords = ((await page.evaluate(DESIGN_COLLECT_SCRIPT)) as DesignPayload).records;
+    const onCanvas = canvasRecords.find((x) => x.testid === "contrast-canvas-panel");
+    check(
+      "pale text over a negative-z-index panel on the page canvas is not failed",
+      onCanvas !== undefined && contrastVerdict(onCanvas).kind !== "fail",
+      JSON.stringify(onCanvas),
     );
   } finally {
     await engine.close();

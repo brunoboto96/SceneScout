@@ -203,6 +203,10 @@ export const TICKET_SAYS = {
     "Something went wrong while filing, so not every ticket was filed. The ones that were are listed; the rest can be filed from a new preview.",
 } as const;
 
+/** Said when the SceneScout config's egress lets nothing reach a tracker, so tickets are neither previewed nor filed. */
+export const TICKET_EGRESS_REFUSED =
+  "This project's SceneScout settings do not allow sending anything to GitHub or Jira, so no tickets were filed. Whoever set SceneScout up can change that setting.";
+
 /** Said once the tickets are filed. */
 export function ticketsFiled(n: number, where: string): string {
   return `Filed ${n} ticket${n === 1 ? "" : "s"} in ${where}. Each one's link is below.`;

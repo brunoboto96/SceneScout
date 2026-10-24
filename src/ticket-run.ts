@@ -26,7 +26,8 @@ import {
   type PlanEntry,
 } from "./engine/export.js";
 import type { ConfirmFormOutcome } from "./engine/guided.js";
-import { TICKET_SAYS, ticketNoSignIn, ticketsFiled } from "./engine/guided-words.js";
+import { TICKET_EGRESS_REFUSED, TICKET_SAYS, ticketNoSignIn, ticketsFiled } from "./engine/guided-words.js";
+import { egressRefusal } from "./engine/project-config.js";
 import { MEMORY_DIRNAME, type Finding } from "./engine/memory.js";
 import {
   checkPreview,
@@ -107,6 +108,9 @@ export async function previewTickets(
   const env = trackerEnv(deps.env);
   const secrets = credentialSecrets(env);
   const clean = (s: string): string => redactKeys(s, secrets);
+  // Before the tracker is read: a preview reads it to find what is already filed.
+  const egress = egressRefusal(deps.config, "tracker", "scout_ticket_preview");
+  if (egress) return { ok: false, error: `${egress} Tell the person: "${TICKET_EGRESS_REFUSED}"` };
   const t = checkTicketTarget(input.to, input.target);
   if (!t.ok) return { ok: false, error: t.error };
   const ids = Array.isArray(input.ids) ? [...new Set(input.ids.filter((x): x is string => typeof x === "string"))] : [];
@@ -210,6 +214,13 @@ export async function fileTickets(
       ].join("\n"),
     ),
   });
+  // Checked again here: the project's own config is read on every call, and may have tightened since the preview.
+  const egress = egressRefusal(deps.config, "tracker", "scout_ticket_file");
+  if (egress) {
+    if (typeof previewId === "string") store.take(previewId);
+    const r = refused("could-not-file", TICKET_EGRESS_REFUSED);
+    return { ...r, problems: [egress] };
+  }
   const id = typeof previewId === "string" ? previewId : "";
   const kept = store.get(id, now());
   const digestNow = (k: KeptPreview): string | null => {
@@ -275,6 +286,9 @@ export async function ticketStatus(projectDir: string, reads: TicketStatusReads,
   const now = (deps.now ?? Date.now)();
   const env = trackerEnv(deps.env);
   const clean = (s: string): string => redactKeys(s, credentialSecrets(env));
+  // Before the cache too: a read from before the config tightened is not answered once it says no.
+  const egress = egressRefusal(deps.config, "tracker", "scout_ticket_status");
+  if (egress) return { fresh: false, readAt: new Date(now).toISOString(), nextReadAt: new Date(now).toISOString(), tickets: [], problems: [egress] };
   const recordPath = path.join(projectDir, MEMORY_DIRNAME, EXPORT_RECORD_FILE);
   let text: string | null = null;
   let unreadable: string | null = null;

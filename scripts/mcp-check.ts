@@ -1747,6 +1747,28 @@ async function configCheck(): Promise<void> {
       const fixture = await call("scout_upload", { fixture: "pdf", task: "Uploading a file" });
       if (/SceneScout config/.test(fixture.text)) fail(`uploads "fixtures" refused a generated fixture:\n${fixture.text}`);
     });
+    // egress "none": no picture of the page is returned into the conversation, and an attach asking for one is refused.
+    await withServer({ SCENESCOUT_CONFIG: configFile("egress.json", { egress: "none" }) }, async (attach, call) => {
+      const inline = await attach({ mode: "observe", evidence: "inline" });
+      if (!inline.isError || !/evidence "inline" is above the config's egress "none"/.test(inline.text))
+        fail(`egress "none" did not refuse an attach asking for inline evidence:\n${inline.text}`);
+      const r = await attach({ mode: "observe" });
+      if (r.isError) fail(`an observe attach under egress "none" was refused:\n${r.text}`);
+      const shot = await call("scout_screenshot", {});
+      if (!shot.isError || !/egress "none" .* so scout_screenshot is not run/.test(shot.text))
+        fail(`egress "none" did not refuse scout_screenshot:\n${shot.text}`);
+      const cards = await call("scout_cards", { pictures: "inline" });
+      if (!cards.isError || !/egress "none"/.test(cards.text)) fail(`egress "none" did not refuse scout_cards with inline pictures:\n${cards.text}`);
+      const files = await call("scout_cards", { pictures: "files" });
+      if (files.isError) fail(`egress "none" refused scout_cards naming picture files:\n${files.text}`);
+    });
+    // The contrast: model-only leaves the model path as it is.
+    await withServer({ SCENESCOUT_CONFIG: configFile("model-only.json", { egress: "model-only" }) }, async (attach, call) => {
+      const r = await attach({ mode: "observe", evidence: "inline" });
+      if (r.isError) fail(`egress "model-only" refused an attach asking for inline evidence:\n${r.text}`);
+      const shot = await call("scout_screenshot", {});
+      if (shot.isError) fail(`egress "model-only" refused scout_screenshot:\n${shot.text}`);
+    });
     // projectsRoot: a project folder outside it is refused at attach and at scan; one inside it is taken.
     const root = path.join(dir, "root");
     fs.mkdirSync(path.join(root, "app"), { recursive: true });
@@ -1835,7 +1857,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();
