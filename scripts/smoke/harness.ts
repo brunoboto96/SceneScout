@@ -374,8 +374,9 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       return;
     }
     // A session check that answers "signed out" after a quarter of a second, then holds its body open for half a
-    // second more (gated-on-scroll.html): a page that acts on the answer starts its next request while this one is
-    // still open, and after the call that started the check has finished its own reads of the page.
+    // second more (gated-on-scroll.html): the page acts on the answer after the call that started the check has
+    // finished its own reads of the page, with this request still open, or, where the page is handed the answer only
+    // once the body has ended (WebKit on Linux), just after it has finished.
     if (urlPath === "/api/session-check") {
       const timers: NodeJS.Timeout[] = [];
       res.on("close", () => timers.forEach(clearTimeout));
@@ -399,6 +400,11 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     // A file the server says to save, sent a chunk at a time over SLOW_FILE_MS (file-on-load.html): a navigation
     // answered with it never commits, while its request stays open until the file has arrived.
     if (urlPath === "/slow-file") {
+      // A HEAD is answered at once, as a web server answers one: its headers, and no file.
+      if (req.method === "HEAD") {
+        res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="report.bin"' });
+        return void res.end();
+      }
       stats.slowFilesOpen += 1;
       res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="report.bin"' });
       const chunks = 50;

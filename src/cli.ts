@@ -12,6 +12,7 @@
  *   scenescout login <url> --role r Sign in once in a visible browser and save it as a named role
  *   scenescout export --to github   File the project's findings as GitHub or Jira issues, each once
  *   scenescout policy explain M URL Whether the write policy would let one request out, in each mode, and why
+ *   scenescout config explain       Every config setting as a run would use it, and where each value came from
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -62,8 +63,10 @@ import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
 import { configureCommand, fsPolicyReader, readCommandPolicy, type CommandOptions, type SessionWriteRules } from "./engine/project-config.js";
 import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
+import { runConfigCommand } from "./engine/config-explain.js";
 import { MAX_EXPLAIN_BODY, runPolicyCommand } from "./engine/policy-explain.js";
 import { runPreflight } from "./engine/preflight.js";
+import { installFetchProxy } from "./engine/proxy.js";
 import { VISUAL_DIRNAME } from "./engine/baseline.js";
 import { openOrSay } from "./engine/open.js";
 import {
@@ -284,6 +287,14 @@ Usage:
                                      --header "Name: value": a request header, such as a method override; repeatable;
                                      --app url: the address the server is attached to (default: the request's origin))
                                     Exit code: 0 explained, 2 could not (a bad argument, a body file not read).
+  scenescout config explain         Every setting of the operator's config file as a run would use it, and where
+                                    each value came from: a default, a preset, the operator's file, the project's
+                                    own file (which can only tighten) or an environment variable. Reads the file as
+                                    check does (SCENESCOUT_CONFIG, else .scenescout/config.json here), starts
+                                    nothing and sends nothing.
+                                    (--project dir: also read that project's own file (default: here))
+                                    Exit code: 0 explained, 2 could not (a file that is not valid, a folder outside
+                                    projectsRoot, a bad argument).
   scenescout preflight <url>        Whether this machine can reach what a run needs, in seconds and with no browser:
                                     one GET of the URL (DNS, connection, timeout, TLS, HTTP status, a bot challenge),
                                     a saved sign-in's expiry, and the model's API when asked. Run it first in CI.
@@ -991,6 +1002,18 @@ function policy(args: string[]): void {
   process.exit(code);
 }
 
+/** `scenescout config explain`: the config as a run would resolve it, and where each value came from. Starts nothing. */
+function config(args: string[]): void {
+  const code = runConfigCommand(args, {
+    env: process.env,
+    launchDir: process.cwd(),
+    reader: fsPolicyReader,
+    out: (line) => console.log(line),
+    err: (line) => console.error(line),
+  });
+  process.exit(code);
+}
+
 /** `scenescout preflight`: exits as EXIT_PREFLIGHT says. */
 async function preflight(args: string[]): Promise<never> {
   const code = await runPreflight(args, {
@@ -1016,6 +1039,8 @@ const [, , command, ...args] = process.argv;
 // one line the user needs. `serve` is deliberately outside this: it hands off
 // to the MCP server, whose own transport owns error reporting from then on.
 try {
+  // SceneScout's own requests (the preflight, the model's API, GitHub, Jira) go through the proxy the environment names (proxy.ts).
+  await installFetchProxy(process.env);
   await dispatch(command, args, {
     usage,
     version: () => console.log(packageVersion()),
@@ -1039,6 +1064,7 @@ try {
       login,
       export: exportFindings,
       policy,
+      config,
       preflight,
       status: (a) => status(path.resolve(a[0] ?? process.cwd())),
       watch: (a) => {

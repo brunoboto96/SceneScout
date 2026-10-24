@@ -27,12 +27,13 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout doctor` | Checks the setup and prints the fix for anything missing |
 | `scenescout serve` | Runs the MCP server on stdio; this is what a client starts |
 | `scenescout scan <path>` | Prints what the project scan finds: framework, routes, saved logins |
-| `scenescout check <url>` | The deterministic check; exit 0 passed, 1 failed the gate, 2 could not run |
+| `scenescout check <url>` | The deterministic check; exit 0 passed, 1 failed the gate, 2 could not run, 3 passed on what loaded while the network kept part of the app from loading |
 | `scenescout ci <url>` | An unattended exploratory run driven by a model's API; exit 0 ran, 2 could not run |
 | `scenescout login <url> --role <name>` | Saves a sign-in as a role's profile; exit 0 saved, 1 not |
 | `scenescout export --to <tracker>` | Files the project's open findings, or a `check.json` or `ci.json` (`--from`), as GitHub or Jira issues, each once; a dry run unless `--yes`; exit 0 done, 2 could not export |
 | `scenescout preflight <url>` | Whether this machine can reach what a run needs, with no browser: the app (DNS, connection, timeout, TLS, HTTP status, bot challenge), a saved sign-in's expiry and, when asked, the model's API; exit 0 ready, 2 could not run, 10 to 17 one per cause |
 | `scenescout policy explain <METHOD> <URL>` | Whether the write policy would let one request out in each mode, and the rule that decided; sends nothing; exit 0 explained, 2 could not |
+| `scenescout config explain` | Every setting of the config file as a run would use it, and where each value came from (a default, a preset, the operator's file, the project's file, an environment variable); sends nothing; exit 0 explained, 2 could not |
 | `scenescout status [path]` | What every session of a running engine is doing, as text |
 | `scenescout watch [path]` | Opens the live view in a browser |
 
@@ -195,6 +196,19 @@ npx -y scenescout policy explain POST https://app.example.com/api/things/3 --hea
 | `--header` | none | A request header, `"Name: value"`, such as a method override. Repeat it for more |
 | `--app` | the request's origin | The address the server is attached to. A read `POST` or sign-in entry written as a path (`POST /api/search`) means this origin |
 
+### `scenescout config`
+
+`scenescout config explain` prints, for every key of the [config file](#the-config-file), the value a run would use and where it came from: `default` (no file sets it), the operator's file, a preset (`operator file's preset "strict"`), the project's own file (named only when it tightened the operator's value, since it can only tighten), or an environment variable (`SCENESCOUT_STRICT_WRITES`, `SCENESCOUT_REFUSE_DESTRUCTIVE_GETS`, `SCENESCOUT_AUTH_POSTS` and `SCENESCOUT_READ_POSTS`, where the file allows it). A ceiling is shown as a run enforces it: `dedup` and `evidence` read `rule` and `file` under `egress: "none"` whatever the file sets them to, and a sign-in list only the project's file sets says it narrows the path rule rather than replacing it. A last section lists what the file lowered or left out, such as environment entries a list does not allow. It reads the files exactly as `check` does (`SCENESCOUT_CONFIG`, else `.scenescout/config.json` in the directory it runs in, then the project's own file, after the `projectsRoot` check), starts no browser and sends nothing. An address in a printed entry or message loses its user name and password, and a token in its query is masked. Exit 0 explained, 2 could not: a file that is not valid (the message names the file and the key, as at an attach), a project folder outside `projectsRoot`, an environment value the server would refuse, or a bad argument.
+
+```bash
+npx -y scenescout config explain
+npx -y scenescout config explain --project ../other-app
+```
+
+| Option | Default | |
+|---|---|---|
+| `--project` | the current directory | The project whose own `.scenescout/config.json` is read after the operator's file |
+
 ### `scenescout preflight`
 
 `scenescout preflight <url>` makes one `GET` of the URL, following redirects, and needs no browser, so it can run before anything is downloaded. It judges a saved sign-in by its own dates when one is named, and, with `--model-api`, asks the model's API for its list of models with the key. Every check runs, and the exit code is the first failure's: 0 ready, 2 could not run, 10 DNS, 11 connection refused or dropped, 12 timeout, 13 TLS, 14 HTTP 4xx or 5xx, 15 bot challenge, 16 sign-in missing or expired, 17 model API. [Network requirements](Network-requirements.md#check-it-first-scenescout-preflight) says what each looks like and what the preflight does not check.
@@ -330,6 +344,9 @@ The presets:
 | `SCENESCOUT_BROWSER_DOWNLOAD` | the server | Whether an attach downloads the browser build it needs when it is missing: `auto` (default) downloads it once, except in CI, where `CI` or `GITHUB_ACTIONS` is set; `on` downloads in CI too; `off` never downloads and names the command to run instead |
 | `SCENESCOUT_ACTION_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long one action may take, 1000 to 120000 (default 5000). An option wins over it |
 | `SCENESCOUT_NAV_TIMEOUT_MS` | the server, `check`, `ci`, `login`, a first look | How long a page may take to load, 1000 to 300000 (default 20000; 15000 per crawled route). An option wins over it |
+| `SCENESCOUT_RETRY_NETWORK` | the server, `check`, `ci`, a first look | `on` tries a page load once more when it failed on the network (a name that did not resolve, a refused or dropped connection, a network timeout, a failed TLS handshake), after a 2-second pause and within the load's own limit; `off` (default) reports it as it is. An HTTP answer is never retried. Any other value stops the attach. Each retry is listed in the report ([Network requirements](Network-requirements.md#failures-on-the-network-are-not-the-apps)) |
+| `SCENESCOUT_PROXY` | the server, `check`, `ci`, `login`, `export`, `preflight`, a first look | A proxy URL (`http://host:port`, credentials allowed) for the browser and SceneScout's own requests, used instead of `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`, which are read otherwise (lower case first). `off` reaches everything directly whatever those say. A URL that is not a proxy's stops the command ([Network requirements](Network-requirements.md#behind-a-proxy)) |
+| `SCENESCOUT_APP_HEADER` | the server, `check`, `ci`, `login`, `preflight`, a first look | `Name: value`: a header sent with every request to the app's own origin, and never to another, for a firewall that lets CI traffic through by a header. Its value is never printed. Chromium and Firefox only: on WebKit the attach stops. A name such as `Cookie`, `Authorization` or `Host`, or a malformed value, stops the attach or command ([Network requirements](Network-requirements.md#an-allowlist-header-for-a-firewall)) |
 | `SCENESCOUT_WATCHDOG_MS` | the server | A cap on how long any tool call may run before the server answers that it timed out, in milliseconds, at least 100. Unset, each tool keeps its own limit (a minute for most, raised with the time limits above). A value that is not a whole number of at least 100 stops the server at start |
 | `SCENESCOUT_LIVE` | the server | `off` keeps the live view closed |
 | `SCENESCOUT_OPEN` | the server | What opens in the default browser: `live` (the live view, on attach), `report` (`report.html`, when `scout_report` writes it), `both` or `none`. Unset: `both` on a local desktop session, headed or headless; `none` in CI, over SSH, or on Linux with no display. `none` for a developer who wants no tabs. Set, it is also an explicit choice in CI, over SSH or with no display. A `scout_attach` `open` may ask for less than it allows, never more: what it leaves out stays shut (`none` shuts both), and with it unset an `open` is refused in CI, over SSH or with no display; the attach result names what was not opened and why. `ci` runs its server with `none` unless this is set |

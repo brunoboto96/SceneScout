@@ -8,6 +8,7 @@
  * run writes. The loop that uses them is src/ci-run.ts; the two APIs' message
  * shapes are engine/provider.ts. Why it reports and never gates: ADR 14.
  */
+import { APP_HEADER_ENV } from "./app-header.js";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { BROWSER_ENGINES, type BrowserEngineName } from "../browsers.js";
@@ -501,11 +502,11 @@ export function childEnv(env: Record<string, string | undefined>, run: { storage
 
 export const REDACTED_KEY = "[redacted key]";
 
-/** The key values set in this environment, to be removed from anything printed or written. */
+/** The key values set in this environment, and the allowlist header's value (app-header.ts), to be removed from anything printed or written. */
 export function secretValues(env: Record<string, string | undefined>): string[] {
-  return Object.values(KEY_ENV)
-    .map((name) => (env[name] ?? "").trim())
-    .filter((v) => v.length >= 8);
+  const header = env[APP_HEADER_ENV] ?? "";
+  const colon = header.indexOf(":");
+  return [...Object.values(KEY_ENV).map((name) => (env[name] ?? "").trim()), colon > 0 ? header.slice(colon + 1).trim() : ""].filter((v) => v.length >= 8);
 }
 
 /** Key-shaped strings, for a key that reached a message from somewhere other than this environment (an echo of another). */

@@ -29,6 +29,7 @@ import {
   redactPageTextNote,
   readCommandPolicy,
   fsPolicyReader,
+  CONFIG_KEYS,
   NO_POLICY,
   parsePolicy,
   PRESET_POLICY,
@@ -150,6 +151,36 @@ import {
   type WriteClassifier,
 } from "../src/engine/strict-writes.ts";
 import { fuzzCases, fuzzRates } from "./policy-fuzz.ts";
+import {
+  explainConfig,
+  formatConfigExplanation,
+  parseConfigArgs,
+  runConfigCommand,
+  shown,
+  withoutUserinfo,
+  type ConfigLayer,
+} from "../src/engine/config-explain.ts";
+import {
+  abortCodeFor,
+  answersWithPage,
+  headVerdict,
+  cookieLineAfter,
+  cookieLineFor,
+  crossSite,
+  withoutAppHeader,
+  forOwnSend,
+  APP_HEADER_ENV,
+  appHeaderApplies,
+  appHeaderCarried,
+  appHeaderLine,
+  appRedirectPlan,
+  readAppHeader,
+  redirectStandIn,
+  withAppHeader,
+} from "../src/engine/app-header.ts";
+import { browserProxy, fetchProxyOptions, proxyLine, readProxy, shownProxy } from "../src/engine/proxy.ts";
+import { redactKeys, secretValues } from "../src/engine/ci.ts";
+import { appHeaderPermissions, fulfilsRedirects } from "../src/browsers.ts";
 import {
   DEFAULT_POLICY_SETTINGS,
   explainRequest,
@@ -4516,4 +4547,414 @@ test("config: redactPageText says so on the Config line of an attach, a command 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// scenescout config explain: where each resolved value came from.
+const layer = (label: string, file: string, text: string): ConfigLayer => {
+  const parsed = parsePolicy(text, file);
+  assert.ok(parsed.ok, JSON.stringify(parsed));
+  const raw = JSON.parse(text) as Record<string, unknown>;
+  return { label, file, policy: parsed.policy, named: Object.keys(raw) as ConfigLayer["named"], preset: raw.preset as ConfigLayer["preset"] };
+};
+const rowOf = (e: ReturnType<typeof explainConfig>, key: string) => e.rows.find((r) => r.key === key)!;
+
+test("config explain: a value is a default, a preset's, the operator's file's or the project's, and a project value is named only when it tightened", () => {
+  const operator = layer("operator file", "/op/config.json", '{"preset":"strict","maxMode":"read-only","egress":"model-only"}');
+  const project = layer("project file", "/p/.scenescout/config.json", '{"maxMode":"observe","egress":"model-only","uploads":"fixtures"}');
+  const joined = tightenPolicy(operator.policy, project.policy);
+  const e = explainConfig({ operator, project, loaded: { policy: joined, sources: ["/op/config.json", "/p/.scenescout/config.json"] }, env: {} });
+  assert.deepEqual(rowOf(e, "maxMode"), { key: "maxMode", value: "observe", source: "project file, tightening the operator file" });
+  assert.equal(rowOf(e, "egress").source, "operator file", "the project repeats the operator's value: it is the operator's");
+  assert.equal(rowOf(e, "requireGuidedPlan").source, 'operator file\'s preset "strict"');
+  assert.equal(
+    rowOf(e, "uploads").source,
+    'operator file\'s preset "strict"',
+    "the preset set it and the project repeated it, so the operator's preset stays the source",
+  );
+  assert.deepEqual(rowOf(e, "projectsRoot"), { key: "projectsRoot", value: "no limit", source: "default" });
+  assert.equal(rowOf(e, "writeClassifier").value, "standard");
+  assert.equal(rowOf(e, "writeClassifier").source, "default");
+  // No file at all: every row is a default.
+  const none = explainConfig({ loaded: NO_POLICY, env: {} });
+  assert.ok(none.rows.every((r) => r.source === "default"));
+  assert.equal(none.rows.length, 14);
+  assert.match(formatConfigExplanation(none)[0], /^Config files: none/);
+});
+
+test("config explain: the environment is a source only where it changes the value, and only toward stricter", () => {
+  const operator = layer("operator file", "/op/config.json", '{"writeClassifier":"standard","readPosts":["POST /api/search","POST /api/find"],"dedup":"rule"}');
+  const loaded = { policy: operator.policy, sources: ["/op/config.json"] };
+  const env = {
+    SCENESCOUT_STRICT_WRITES: "1",
+    SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1",
+    SCENESCOUT_READ_POSTS: "POST /api/search\nPOST /other",
+    SCENESCOUT_DEDUP: "judge",
+  };
+  const e = explainConfig({ operator, loaded, env });
+  assert.deepEqual(rowOf(e, "writeClassifier"), { key: "writeClassifier", value: "strict", source: "environment SCENESCOUT_STRICT_WRITES" });
+  assert.deepEqual(rowOf(e, "refuseDestructiveGets"), {
+    key: "refuseDestructiveGets",
+    value: "true",
+    source: "environment SCENESCOUT_REFUSE_DESTRUCTIVE_GETS",
+  });
+  assert.deepEqual(rowOf(e, "readPosts"), { key: "readPosts", value: "POST /api/search", source: "operator file, narrowed by SCENESCOUT_READ_POSTS" });
+  assert.ok(
+    e.notes.some((n) => n.includes('"POST /other"')),
+    e.notes.join("\n"),
+  );
+  assert.ok(
+    e.notes.some((n) => n.startsWith('dedup "rule"')),
+    e.notes.join("\n"),
+  );
+  // Contrast: the same file with an empty environment reports the file alone, and no note.
+  const quiet = explainConfig({ operator, loaded, env: {} });
+  assert.equal(rowOf(quiet, "writeClassifier").source, "default".replace("default", "operator file"));
+  assert.deepEqual(quiet.notes, []);
+  // The environment's list alone, with no file list.
+  const alone = explainConfig({ loaded: NO_POLICY, env: { SCENESCOUT_AUTH_POSTS: "POST /api/login", SCENESCOUT_READ_POSTS: "POST /api/search" } });
+  assert.deepEqual(rowOf(alone, "authPosts"), { key: "authPosts", value: "POST /api/login", source: "environment SCENESCOUT_AUTH_POSTS" });
+  assert.equal(rowOf(alone, "readPosts").source, "environment SCENESCOUT_READ_POSTS");
+});
+
+test("config explain: an address in a printed value or message loses its user name, password and token", () => {
+  assert.equal(withoutUserinfo("POST https://user:pw@idp.example.com/token"), "POST https://idp.example.com/token");
+  assert.equal(withoutUserinfo('"POST https://u:p@a.example/x", "POST https://b.example/y"'), '"POST https://a.example/x", "POST https://b.example/y"');
+  assert.equal(withoutUserinfo("POST https://idp.example.com/a@b"), "POST https://idp.example.com/a@b", "an @ in the path is not a user name");
+  assert.doesNotMatch(shown("POST https://u:hunter2pw@idp.example.com/t?access_token=abcdefghij1234567890"), /hunter2pw|abcdefghij1234567890/);
+  const operator = layer("operator file", "/op/config.json", '{"authPosts":["POST https://idp.example.com/token"]}');
+  const lines = formatConfigExplanation(explainConfig({ operator, loaded: { policy: operator.policy, sources: ["/op/config.json"] }, env: {} }));
+  assert.ok(
+    lines.some((l) => /authPosts +POST https:\/\/idp\.example\.com\/token +\(operator file\)/.test(l)),
+    lines.join("\n"),
+  );
+});
+
+test("config explain: every key has a row, in the order of CONFIG_KEYS, and the command line takes only --project", () => {
+  const e = explainConfig({ loaded: NO_POLICY, env: {} });
+  assert.deepEqual(
+    e.rows.map((r) => r.key),
+    [...CONFIG_KEYS],
+  );
+  assert.deepEqual(parseConfigArgs(["explain"]), { ok: true, project: undefined });
+  assert.deepEqual(parseConfigArgs(["explain", "--project", "/p"]), { ok: true, project: "/p" });
+  assert.deepEqual(parseConfigArgs(["explain", "--project=/p"]), { ok: true, project: "/p" });
+  for (const bad of [[], ["explain", "--mode", "x"], ["explain", "x"], ["--project", "x"], ["explain", "--project"]])
+    assert.equal(parseConfigArgs(bad).ok, false, bad.join(" "));
+});
+
+test('config explain: dedup and evidence show the ceiling an attach enforces, egress "none" included', () => {
+  const ask = (loaded: { policy: Policy; sources: string[] }, asked: { dedup?: "rule" | "judge"; evidence?: "off" | "file" | "inline" }) =>
+    resolveSettings(loaded, {}, asked, { mode: "read-only", evidence: () => "inline" }).refused.length === 0;
+  for (const text of ['{"egress":"none"}', '{"egress":"none","evidence":"inline","dedup":"judge"}', '{"egress":"none","evidence":"off"}']) {
+    const operator = layer("operator file", "/op/config.json", text);
+    const loaded = { policy: operator.policy, sources: ["/op/config.json"] };
+    const e = explainConfig({ operator, loaded, env: {} });
+    // What the row says is the most an attach may ask for, and the one above it is refused.
+    const dedup = rowOf(e, "dedup");
+    assert.equal(dedup.value, "rule", text);
+    assert.ok(ask(loaded, { dedup: "rule" }) && !ask(loaded, { dedup: "judge" }));
+    const evidence = rowOf(e, "evidence");
+    const want = operator.policy.evidence === "off" ? "off" : "file";
+    assert.equal(evidence.value, want, text);
+    assert.ok(ask(loaded, { evidence: want }) && !ask(loaded, { evidence: "inline" }));
+    assert.equal(evidence.source, want === "off" ? "operator file" : 'lowered by egress "none" (operator file)', text);
+  }
+  // Contrast: egress "model-only" lowers neither.
+  const open = layer("operator file", "/op/config.json", '{"egress":"model-only"}');
+  const e = explainConfig({ operator: open, loaded: { policy: open.policy, sources: ["/op/config.json"] }, env: {} });
+  assert.deepEqual([rowOf(e, "dedup").value, rowOf(e, "evidence").value], ["no limit", "no limit"]);
+});
+
+test("config explain: a sign-in list only the project's file sets is shown as narrowing the path rule", () => {
+  const project = layer("project file", "/p/.scenescout/config.json", '{"authPosts":["POST /api/signin"]}');
+  const policy = tightenPolicy({}, project.policy);
+  const loaded = { policy, sources: ["/op/config.json", "/p/.scenescout/config.json"] };
+  const narrow = explainConfig({ project, loaded, env: {} });
+  assert.equal(writeRulesSettings(policy, {}, false).authPosts?.andSignInPath, true);
+  assert.equal(rowOf(narrow, "authPosts").value, "POST /api/signin, each only when it also looks like a sign-in by its path");
+  // Contrast: the operator's list replaces the path rule, and so does the project's when SCENESCOUT_AUTH_POSTS lists it too.
+  const operator = layer("operator file", "/op/config.json", '{"authPosts":["POST /api/signin"]}');
+  assert.equal(
+    rowOf(explainConfig({ operator, loaded: { policy: operator.policy, sources: ["/op/config.json"] }, env: {} }), "authPosts").value,
+    "POST /api/signin",
+  );
+  assert.equal(rowOf(explainConfig({ project, loaded, env: { SCENESCOUT_AUTH_POSTS: "POST /api/signin" } }), "authPosts").value, "POST /api/signin");
+});
+
+test("config explain: redactPageText is off by default, the operator's file's, or the project's own file turning it on", () => {
+  const files: Record<string, string> = {};
+  const reader = { exists: (f: string) => f in files, read: (f: string) => files[f], realpath: (f: string) => f };
+  const run = () => {
+    const out: string[] = [];
+    runConfigCommand(["explain", "--project", "/p"], { env: {}, launchDir: "/launch", reader, out: (l) => out.push(l), err: (l) => out.push(l) });
+    return out.join("\n");
+  };
+  assert.match(run(), /^ {2}redactPageText +off +\(default\)$/m);
+  files["/launch/.scenescout/config.json"] = '{"redactPageText":"pii"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
+  // A project's file that says "off" cannot turn the operator's off: the value stays the operator's.
+  files["/p/.scenescout/config.json"] = '{"redactPageText":"off"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
+  // The project's own file turns it on over the operator's "off", and is named as tightening it.
+  files["/launch/.scenescout/config.json"] = '{"redactPageText":"off"}';
+  files["/p/.scenescout/config.json"] = '{"redactPageText":"pii"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(project file, tightening the operator file\)$/m);
+  // With no operator file, the project's own file is the source.
+  delete files["/launch/.scenescout/config.json"];
+  assert.match(run(), /^ {2}redactPageText +pii +\(project file\)$/m);
+});
+
+test("config explain: with no operator file, the project's own file is named as the project's", () => {
+  // Paths are resolved, so the stand-in reader is keyed the way the command joins them on every platform.
+  const projectDir = path.resolve("/p");
+  const launchDir = path.resolve("/launch");
+  const files: Record<string, string> = { [path.join(projectDir, ".scenescout", "config.json")]: '{"maxMode":"observe"}' };
+  const reader = { exists: (f: string) => f in files, read: (f: string) => files[f], realpath: (f: string) => f };
+  const run = () => {
+    const out: string[] = [];
+    runConfigCommand(["explain", "--project", projectDir], { env: {}, launchDir, reader, out: (l) => out.push(l), err: (l) => out.push(l) });
+    return out.join("\n");
+  };
+  const alone = run();
+  assert.match(alone, /^ {2}maxMode +observe +\(project file\)$/m);
+  assert.doesNotMatch(alone, /operator file/);
+  // Contrast: an operator's file in the launch directory is the operator's, and the project's tightening is named as such.
+  files[path.join(launchDir, ".scenescout", "config.json")] = '{"maxMode":"read-only"}';
+  assert.match(run(), /^ {2}maxMode +observe +\(project file, tightening the operator file\)$/m);
+});
+
+// ── the allowlist header and the proxy (#555) ───────────────────────────────
+
+test("allowlist header: read from SCENESCOUT_APP_HEADER as Name: value; a name that changes who the request is, or a malformed one, is refused without repeating the value", () => {
+  assert.equal(readAppHeader({}), null);
+  assert.equal(readAppHeader({ [APP_HEADER_ENV]: "  " }), null);
+  assert.deepEqual(readAppHeader({ [APP_HEADER_ENV]: "X-CI-Allow: abc:def " }), { name: "x-ci-allow", value: "abc:def" });
+  const refused: Array<[string, RegExp]> = [
+    ["no colon here", /must be "Name: value"/],
+    [": value", /must be "Name: value"/],
+    ["Bad Name: v", /must be a header name/],
+    ["Cookie: sid=1", /cannot set Cookie/],
+    ["Authorization: Bearer x", /cannot set Authorization/],
+    ["host: evil.example", /cannot set host/],
+    ["X-HTTP-Method-Override: DELETE", /cannot set X-HTTP-Method-Override/],
+    ["Sec-Fetch-Site: none", /cannot set Sec-Fetch-Site/],
+    ["Proxy-Connection: x", /cannot set Proxy-Connection/],
+    ["X-CI-Allow:", /empty value/],
+    ["X-CI-Allow: a\r\nX-Other: b", /control character/],
+    [`X-CI-Allow: ${"v".repeat(1025)}`, /longer than 1024/],
+  ];
+  for (const [raw, error] of refused) {
+    assert.throws(
+      () => readAppHeader({ [APP_HEADER_ENV]: raw }),
+      (e: unknown) => e instanceof Error && error.test(e.message) && !(raw.includes("sid=1") && e.message.includes("sid=1")),
+      raw,
+    );
+  }
+});
+
+test("allowlist header: only a request for the app's own scheme, host and port gets it; an event stream never does", () => {
+  const app = "https://app.example.com/start";
+  assert.ok(appHeaderApplies("https://app.example.com/api/things?x=1", app));
+  for (const other of [
+    "https://cdn.example.com/lib.js",
+    "http://app.example.com/api",
+    "https://app.example.com:8443/api",
+    "https://app.example.com.evil.example/",
+    "https://evil.example/?u=https://app.example.com/",
+    "data:text/plain,app.example.com",
+    "not a url",
+  ])
+    assert.ok(!appHeaderApplies(other, app), other);
+  assert.ok(!appHeaderApplies("https://app.example.com/", "not a url"));
+  const header = { name: "x-ci-allow", value: "token-123" };
+  assert.deepEqual(withAppHeader({ accept: "*/*", "X-CI-Allow": "old" }, header), { accept: "*/*", "x-ci-allow": "token-123" });
+  for (const type of ["document", "fetch", "xhr", "script", "image", "stylesheet", "font"]) assert.ok(appHeaderCarried(type), type);
+  assert.ok(!appHeaderCarried("eventsource"));
+  assert.ok(!appHeaderCarried("websocket"));
+  const line = appHeaderLine(header, app);
+  assert.equal(line, "Allowlist header (SCENESCOUT_APP_HEADER): x-ci-allow is sent to https://app.example.com only; its value is never printed.");
+  assert.ok(!line.includes("token-123"));
+  // A browser that cannot be handed a redirect would copy the header to wherever the app redirects.
+  assert.equal(fulfilsRedirects("chromium"), true);
+  assert.equal(fulfilsRedirects("firefox"), true);
+  assert.equal(fulfilsRedirects("webkit"), false);
+  // A page handed to Chromium has no address, so its Local Network Access checks would block the page's private
+  // requests: the app's origin alone is granted the permission, rather than the checks being turned off for every origin.
+  assert.deepEqual(appHeaderPermissions("chromium"), ["local-network-access"]);
+  assert.deepEqual(appHeaderPermissions("firefox"), []);
+  assert.deepEqual(appHeaderPermissions("webkit"), []);
+});
+
+test("allowlist header: a send that failed aborts with the network's code, so the oracles see a network failure", () => {
+  const cases: Array<[string, string]> = [
+    ["apiRequestContext.fetch: getaddrinfo ENOTFOUND app.example.com", "namenotresolved"],
+    ["apiRequestContext.fetch: connect ECONNREFUSED 127.0.0.1:443", "connectionrefused"],
+    ["apiRequestContext.fetch: read ECONNRESET", "connectionreset"],
+    ["apiRequestContext.fetch: socket hang up", "connectionclosed"],
+    ["apiRequestContext.fetch: connect ETIMEDOUT 10.0.0.1:443", "timedout"],
+    ["apiRequestContext.fetch: Timeout 20000ms exceeded.", "failed"],
+    ["apiRequestContext.fetch: certificate has expired", "failed"],
+    ["Target page, context or browser has been closed", "failed"],
+  ];
+  for (const [message, code] of cases) assert.equal(abortCodeFor(message), code, message);
+});
+
+test("allowlist header: its value is among the secrets a ci run's lines are redacted of", () => {
+  const secrets = secretValues({ [APP_HEADER_ENV]: "X-CI-Allow: ci-allow-0123456789" });
+  assert.ok(secrets.includes("ci-allow-0123456789"));
+  assert.equal(redactKeys("sent x-ci-allow: ci-allow-0123456789", secrets).includes("ci-allow-0123456789"), false);
+  assert.deepEqual(secretValues({ [APP_HEADER_ENV]: "malformed" }), []);
+});
+
+test("proxy: the standard variables, lower case first, or SCENESCOUT_PROXY over them; off and NO_PROXY=* mean direct", () => {
+  assert.equal(readProxy({}), null);
+  assert.deepEqual(readProxy({ HTTPS_PROXY: "http://proxy.example.com:3128", NO_PROXY: "localhost, .internal ,10.0.0.0/8" }), {
+    httpsProxy: "http://proxy.example.com:3128",
+    noProxy: ["localhost", ".internal", "10.0.0.0/8"],
+    source: "environment",
+  });
+  assert.equal(readProxy({ https_proxy: "http://lower:1", HTTPS_PROXY: "http://upper:2" })?.httpsProxy, "http://lower:1");
+  assert.equal(readProxy({ HTTP_PROXY: "proxy.example.com:3128" })?.httpProxy, "http://proxy.example.com:3128", "no scheme is read as http");
+  assert.deepEqual(readProxy({ SCENESCOUT_PROXY: "http://own:8080", HTTPS_PROXY: "http://std:1" }), {
+    httpProxy: "http://own:8080",
+    httpsProxy: "http://own:8080",
+    noProxy: [],
+    source: "SCENESCOUT_PROXY",
+  });
+  assert.equal(readProxy({ SCENESCOUT_PROXY: "off", HTTPS_PROXY: "http://std:1" }), null);
+  assert.equal(readProxy({ HTTPS_PROXY: "http://std:1", NO_PROXY: "*" }), null);
+  for (const [env, error] of [
+    [{ HTTPS_PROXY: "socks5://p:1080" }, /HTTPS_PROXY must be an http or https proxy URL/],
+    [{ https_proxy: "http://p:1/path" }, /https_proxy must be a proxy's address only/],
+    [{ SCENESCOUT_PROXY: "http://user:hunter2@p:1/x" }, /SCENESCOUT_PROXY must be a proxy's address only/],
+  ] as Array<[Record<string, string>, RegExp]>)
+    assert.throws(
+      () => readProxy(env),
+      (e: unknown) => e instanceof Error && error.test(e.message) && !e.message.includes("hunter2"),
+    );
+});
+
+test("proxy: the browser takes the proxy for the app's scheme, its credentials as their own fields; no line prints them", () => {
+  const settings = readProxy({
+    HTTPS_PROXY: "http://ci:s3cret@proxy.example.com:3128",
+    HTTP_PROXY: "http://plain.example.com:80",
+    NO_PROXY: "localhost,.internal",
+  })!;
+  assert.deepEqual(browserProxy(settings, "https://app.example.com/"), {
+    server: "http://proxy.example.com:3128",
+    bypass: "localhost,.internal",
+    username: "ci",
+    password: "s3cret",
+  });
+  assert.deepEqual(browserProxy(settings, "http://app.example.com/"), { server: "http://plain.example.com", bypass: "localhost,.internal" });
+  // An https app with only HTTP_PROXY falls back to it, as undici does; an http app with only HTTPS_PROXY goes direct.
+  assert.equal(browserProxy(readProxy({ HTTP_PROXY: "http://p:1" }), "https://app.example.com/")?.server, "http://p:1");
+  assert.equal(browserProxy(readProxy({ HTTPS_PROXY: "http://p:1" }), "http://app.example.com/"), null);
+  assert.equal(browserProxy(null, "https://app.example.com/"), null);
+  const line = proxyLine(settings);
+  assert.equal(
+    line,
+    "Proxy (HTTPS_PROXY / HTTP_PROXY / NO_PROXY): https through http://proxy.example.com:3128; http through http://plain.example.com; direct for localhost, .internal.",
+  );
+  assert.ok(!line.includes("s3cret"));
+  assert.equal(shownProxy("http://ci:s3cret@proxy.example.com:3128"), "http://proxy.example.com:3128");
+  assert.deepEqual(fetchProxyOptions(settings), {
+    httpProxy: "http://plain.example.com",
+    httpsProxy: "http://ci:s3cret@proxy.example.com:3128",
+    noProxy: "localhost,.internal",
+  });
+});
+
+test("allowlist header: a redirect within the app is followed with it, a page load by a stand-in page; one away from the app, or one that would resend a body, goes to the browser without it", () => {
+  const app = "https://app.example.com";
+  const plan = (status: number, location: string | undefined, method = "GET", resourceType = "document") =>
+    appRedirectPlan({ status, location, requestUrl: `${app}/start`, appUrl: app, method, resourceType });
+  assert.equal(plan(200, undefined), null);
+  assert.equal(plan(302, undefined), null);
+  assert.deepEqual(plan(302, "/login"), { kind: "stand-in", url: `${app}/login`, method: "GET" });
+  assert.deepEqual(plan(301, "/data", "GET", "fetch"), { kind: "follow", url: `${app}/data`, method: "GET" });
+  // A form's POST answered 303, or 302, continues as a GET, as browsers do.
+  assert.deepEqual(plan(303, "/done", "POST"), { kind: "stand-in", url: `${app}/done`, method: "GET" });
+  assert.deepEqual(plan(302, "/done", "POST", "xhr"), { kind: "follow", url: `${app}/done`, method: "GET" });
+  // 307 and 308 keep the method and body: the browser resends it, without the header.
+  assert.deepEqual(plan(307, "/again", "POST", "fetch"), { kind: "hand-over" });
+  assert.deepEqual(plan(308, "/again", "GET", "fetch"), { kind: "follow", url: `${app}/again`, method: "GET" });
+  // Away from the app's origin: never with the header.
+  for (const away of ["https://idp.example.net/authorize", "http://app.example.com/login", "https://app.example.com:8443/", "//evil.example/x"])
+    assert.deepEqual(plan(302, away), { kind: "hand-over" }, away);
+  const page = redirectStandIn(`${app}/a?b=</script><script>alert(1)</script>`);
+  assert.ok(page.includes("location.replace("));
+  assert.ok(!page.includes("</script><script>alert"), "the address stays a string inside the script");
+});
+
+test("allowlist header: a page load is asked by HEAD whether it is a page or a file, through redirects within the app; a file goes back to the browser without the header", () => {
+  assert.ok(answersWithPage({ "content-type": "text/html; charset=utf-8" }));
+  assert.ok(answersWithPage({ "Content-Type": "application/xhtml+xml" }));
+  assert.ok(answersWithPage({}), "no type: the browser sniffs it, as a page");
+  assert.ok(!answersWithPage({ "content-type": "application/pdf" }));
+  assert.ok(!answersWithPage({ "content-type": "text/csv" }));
+  assert.ok(
+    !answersWithPage({ "content-type": "text/html", "content-disposition": "attachment; filename=x.html" }),
+    "an attachment is a download, whatever its type",
+  );
+  const app = "https://app.example.com";
+  const verdict = (status: number, headers: Record<string, string>) => headVerdict({ status, headers, requestUrl: `${app}/start`, appUrl: app });
+  assert.deepEqual(verdict(200, { "content-type": "text/html" }), { kind: "page" });
+  assert.deepEqual(verdict(200, { "content-type": "application/pdf" }), { kind: "file" });
+  assert.deepEqual(verdict(302, { location: "/report.pdf" }), { kind: "next", url: `${app}/report.pdf` });
+  assert.deepEqual(
+    verdict(302, { location: "https://files.example.net/r.pdf" }),
+    { kind: "unknown" },
+    "a redirect away from the app is the browser's, without the header",
+  );
+  assert.deepEqual(verdict(405, {}), { kind: "unknown" });
+  assert.deepEqual(verdict(501, {}), { kind: "unknown" });
+  // A 404 page is a page: sent with the header, as before.
+  assert.deepEqual(verdict(404, { "content-type": "text/html" }), { kind: "page" });
+  assert.deepEqual(withoutAppHeader({ accept: "*/*", "X-CI-Allow": "t" }, { name: "x-ci-allow", value: "t" }), { accept: "*/*" });
+});
+
+test("allowlist header: SceneScout's send in the browser's place carries the cookies the browser would, never a SameSite one it withholds from another site", () => {
+  const app = "https://app.example.com/page";
+  assert.equal(crossSite(undefined, app), false, "no Referer: a load SceneScout started, or one whose page sends none");
+  assert.equal(crossSite("https://app.example.com/a", app), false);
+  assert.equal(crossSite("https://www.example.com/a", app), false, "another host of the same site");
+  assert.equal(crossSite("https://evil.example.net/", app), true);
+  assert.equal(crossSite("http://app.example.com/a", app), true, "another scheme is another site");
+  assert.equal(crossSite("http://localhost:5000/", "http://127.0.0.1:5001/x"), true);
+  assert.equal(crossSite("http://127.0.0.1:5000/", "http://127.0.0.1:5001/x"), false, "the port does not make a site");
+  assert.equal(crossSite("http://10.0.0.2/", "http://10.0.0.1/x"), true, "an address is its own site");
+  assert.equal(crossSite("not a url", app), false);
+  const jar = [
+    { name: "none", value: "1", sameSite: "None" },
+    { name: "lax", value: "2", sameSite: "Lax" },
+    { name: "strict", value: "3", sameSite: "Strict" },
+  ];
+  assert.equal(cookieLineFor(jar, false, true), "none=1; lax=2; strict=3");
+  assert.equal(cookieLineFor(jar, false, false), "none=1; lax=2; strict=3");
+  assert.equal(cookieLineFor(jar, true, true), "none=1; lax=2", "another site's link: Lax goes with a top-level load, Strict never");
+  assert.equal(cookieLineFor(jar, true, false), "none=1", "another site's frame or request: neither Lax nor Strict");
+  assert.equal(cookieLineFor([], true, true), "");
+});
+
+test("allowlist header: a HEAD's next hop within the app carries the cookies the earlier hops set, as the browser will", () => {
+  const now = Date.parse("2026-10-24T12:00:00Z");
+  assert.equal(cookieLineAfter("sid=1", ["step=1; Path=/"], "/next", now), "sid=1; step=1");
+  assert.equal(cookieLineAfter("sid=1; step=0", ["step=2"], "/next", now), "sid=1; step=2", "a cookie set again replaces the jar's");
+  assert.equal(cookieLineAfter("sid=1; step=0", ["step=; Max-Age=0"], "/next", now), "sid=1", "expired by Max-Age");
+  assert.equal(cookieLineAfter("sid=1; step=0", ["step=x; Expires=Thu, 01 Jan 1970 00:00:00 GMT"], "/next", now), "sid=1", "expired by Expires");
+  assert.equal(cookieLineAfter("sid=1", ["step=1; Expires=Sun, 01 Jan 2040 00:00:00 GMT"], "/next", now), "sid=1; step=1");
+  // Path: a cookie for /files reaches /files and /files/a, never /filesx or /next.
+  assert.equal(cookieLineAfter("", ["f=1; Path=/files"], "/files/a", now), "f=1");
+  assert.equal(cookieLineAfter("", ["f=1; Path=/files"], "/files", now), "f=1");
+  assert.equal(cookieLineAfter("", ["f=1; Path=/files"], "/filesx", now), "");
+  assert.equal(cookieLineAfter("", ["f=1; Path=/files"], "/next", now), "");
+  assert.equal(cookieLineAfter("sid=1", [], "/next", now), "sid=1");
+});
+
+test("allowlist header: the HEAD a page load is asked by carries the request's headers, less those Node sets itself and the cookie the jar supplies", () => {
+  assert.deepEqual(forOwnSend({ accept: "text/html", Cookie: "sid=1", host: "x", connection: "keep-alive", ":authority": "x", "x-ci-allow": "t" }), {
+    accept: "text/html",
+    "x-ci-allow": "t",
+  });
 });
