@@ -25,16 +25,16 @@ It makes one `GET` of the URL, following redirects, and judges the answer. A sav
 | 11 | Connection | The connection was refused or dropped: nothing listens on that port, or a firewall rejects the runner. Also a port that browsers refuse to load (6000, 6667 and the other ports the Fetch standard blocks) |
 | 12 | Timeout | No answer within `--timeout-ms` (default 10000): a firewall that drops packets, or an app still starting. Node gives up on a connection that is never set up after 10 seconds, whatever `--timeout-ms` says, and the line says so |
 | 13 | TLS | The certificate has expired, does not name the host, or is signed by an authority this machine does not trust |
-| 14 | HTTP | The start page answered 4xx or 5xx; the status is named, with the likely fix |
+| 14 | HTTP | The start page answered 4xx or 5xx, or redirected more than 20 times; the status is named, with the likely fix |
 | 15 | Bot challenge | A bot protection answered in the app's place, by the same rule `check` stops on |
 | 16 | Sign-in | No profile is saved for the role, the file is missing or unreadable, or every dated credential in it has ended |
-| 17 | Model API | No key is set, the API refused the key (401 or 403), the API answered 5xx, or it could not be reached (the line names the network cause) |
+| 17 | Model API | No key is set, the API refused the key (401 or 403), the API answered 5xx or a redirect, or it could not be reached (the line names the network cause) |
 
 What it does not do:
 
 - **It is not a browser.** Its request is a plain HTTP client's, sent with the user agent `scenescout-preflight`. A protection that judges the client can treat it differently from the browser a check drives. If `check` gets through where the preflight is challenged, or the other way round, the protection is judging the client.
 - **It does not sign in.** It reads a profile's dates and sends nothing from it. A session the server has ended early still reads as unexpired.
-- **It does not follow the model API's redirects.** The key is not sent to another address, so an API that redirects fails with the connection cause.
+- **It does not follow the model API's redirects.** The key is not sent to another address, so an API that redirects fails with exit 17, and the line names where it pointed. `scenescout ci` follows no redirect either. The app's own redirects are followed, up to 20; more than that is a redirect loop and fails with exit 14.
 - **It does not judge the key's model.** An API that does not list models (404 or 405) is reported as reachable with the key unchecked, and a 429 is reported as reachable but rate-limited. The request carries the key and nothing of the app, and it spends no tokens.
 - **Node's own trust store and settings apply.** A certificate signed by your own authority needs `NODE_EXTRA_CA_CERTS` for this check. Proxy settings are not read yet, so behind a proxy it reports what a run that bypasses the proxy would see.
 

@@ -222,6 +222,20 @@ export function networkCause(err: unknown): { cause: NetworkCause; code: string 
   return { cause: "connection", code: firstCode ?? "no code" };
 }
 
+/** The most redirects fetch follows (the Fetch standard's limit, and a browser's): past it the request fails with no HTTP answer. */
+export const MAX_REDIRECTS = 20;
+
+/** Whether a request failed because it was redirected more than MAX_REDIRECTS times (Node's fetch says "redirect count exceeded" behind "fetch failed"). */
+export function redirectLoop(err: unknown): boolean {
+  const queue: unknown[] = [err];
+  for (let seen = 0; queue.length > 0 && seen < 20; seen++) {
+    const parts = errorParts(queue.shift());
+    if (parts.message === "redirect count exceeded") return true;
+    queue.push(...parts.inner);
+  }
+  return false;
+}
+
 /** The sentence for a request to `url` that failed with `cause`. */
 export function networkSentence(url: string, failure: { cause: NetworkCause; code: string }, timeoutMs: number): string {
   const u = new URL(url);
@@ -332,9 +346,19 @@ export function modelListRequest(provider: ProviderName, baseUrl: string, key: s
   return { url: `${baseUrl}/models`, headers: { ...headers, "user-agent": PREFLIGHT_USER_AGENT } };
 }
 
-/** The verdict on the models list's status. Any answer below 500 but a refused key means the API is reachable. */
-export function judgeModelReply(api: string, status: number): Verdict {
+/**
+ * The verdict on the models list's status. Any answer below 500 but a refused key means the API is reachable.
+ * A redirect fails: the key is not sent on to another address, and a ci run, which follows no redirect either, would stop there.
+ * `location` is where the redirect pointed, as printed.
+ */
+export function judgeModelReply(api: string, status: number, location?: string): Verdict {
   if (status >= 200 && status < 300) return { kind: "ok", line: `${api} answered and accepted the key (HTTP ${status})` };
+  if (status >= 300 && status < 400)
+    return {
+      kind: "fail",
+      cause: "modelApi",
+      line: `${api} answered with a redirect (HTTP ${status}${location ? ` to ${location}` : ""}). The key is not sent on to another address, and a ci run would stop here too: set --base-url to the address the API answers at.`,
+    };
   if (status === 401 || status === 403)
     return { kind: "fail", cause: "modelApi", line: `${api} refused the key (HTTP ${status}): check the key, and that it may use this API.` };
   if (status >= 500) return { kind: "fail", cause: "modelApi", line: `${api} answered HTTP ${status}: the API is failing. Try again later.` };
@@ -354,7 +378,7 @@ export function preflightExitCode(verdicts: readonly Verdict[]): number {
 
 /** What the command reaches the world through, so a test can stand in for each. */
 export interface PreflightIo {
-  fetch: (url: string, init: { method: string; headers: Record<string, string>; redirect: "follow" | "error"; signal: AbortSignal }) => Promise<Response>;
+  fetch: (url: string, init: { method: string; headers: Record<string, string>; redirect: "follow" | "manual"; signal: AbortSignal }) => Promise<Response>;
   env: Record<string, string | undefined>;
   readFile: (file: string) => string;
   exists: (file: string) => boolean;
@@ -396,6 +420,12 @@ async function checkPage(o: PreflightOptions, io: PreflightIo): Promise<Verdict>
       signal: AbortSignal.timeout(o.timeoutMs),
     });
   } catch (err) {
+    if (redirectLoop(err))
+      return {
+        kind: "fail",
+        cause: "http",
+        line: `${shownUrl(o.url)} redirected more than ${MAX_REDIRECTS} times without answering: a redirect loop, often a sign-in or HTTPS rule that sends the request back where it came from. Open the address in a browser to follow the loop, and check the app's redirect rules.`,
+      };
     const failure = networkCause(err);
     return { kind: "fail", cause: failure.cause, line: networkSentence(o.url, failure, o.timeoutMs) };
   }
@@ -445,14 +475,24 @@ async function checkModelApi(o: PreflightOptions, io: PreflightIo): Promise<Verd
   const api = `the ${resolved.provider === "anthropic" ? "Anthropic" : "OpenAI"} API at ${resolved.baseUrl}`;
   let res: Response;
   try {
-    res = await io.fetch(req.url, { method: "GET", headers: req.headers, redirect: "error", signal: AbortSignal.timeout(o.timeoutMs) });
+    // "manual": a redirect is answered as its own status and never followed, so the key goes to this address only.
+    res = await io.fetch(req.url, { method: "GET", headers: req.headers, redirect: "manual", signal: AbortSignal.timeout(o.timeoutMs) });
   } catch (err) {
     const failure = networkCause(err);
     return { kind: "fail", cause: "modelApi", line: `${api}: ${networkSentence(req.url, failure, o.timeoutMs)}` };
   }
   // The status is the whole answer; the list itself is never read.
   await res.body?.cancel().catch(() => undefined);
-  return judgeModelReply(api, res.status);
+  const to = res.headers.get("location");
+  let location: string | undefined;
+  if (to) {
+    try {
+      location = shownUrl(new URL(to, req.url).href);
+    } catch {
+      // A Location that does not parse is not repeated; the status still says it was a redirect.
+    }
+  }
+  return judgeModelReply(api, res.status, location);
 }
 
 /**

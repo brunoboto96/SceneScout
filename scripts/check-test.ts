@@ -4917,6 +4917,83 @@ test("preflight over real HTTP: the model API is asked for its models with the k
   }
 });
 
+test("preflight over real HTTP: a model API that redirects fails with 17 and names where, the key reaches no other address, and an echoed key is never printed", async () => {
+  const key = "sk-test-preflight-key-redirect-0123456789";
+  const app = await standIn((_req, res) => {
+    res.writeHead(200);
+    res.end("app");
+  });
+  const elsewhere = await standIn((req, res) => {
+    res.writeHead(200);
+    res.end(JSON.stringify(req.headers));
+  });
+  let mode: "redirect" | "401" | "500" = "redirect";
+  const model = await standIn((req, res) => {
+    if (mode === "redirect") {
+      res.writeHead(302, { location: `${elsewhere.base}/v1/models` });
+      return res.end();
+    }
+    // A body and a header that echo the key back, as a misconfigured proxy might.
+    res.writeHead(mode === "401" ? 401 : 500, { "x-echo": String(req.headers.authorization ?? req.headers["x-api-key"]) });
+    res.end(JSON.stringify(req.headers));
+  });
+  try {
+    for (const [provider, env] of [
+      ["openai", { OPENAI_API_KEY: key }],
+      ["anthropic", { ANTHROPIC_API_KEY: key }],
+    ] as const) {
+      mode = "redirect";
+      const args = [`${app.base}/`, "--model-api", "--provider", provider, "--base-url", `${model.base}/v1`];
+      const moved = await preflightRun(args, env);
+      assert.equal(moved.code, EXIT_PREFLIGHT.modelApi, moved.err.join("\n"));
+      assert.match(moved.err.join("\n"), /answered with a redirect \(HTTP 302 to http:\/\/127\.0\.0\.1:\d+\/v1\/models\)/);
+      assert.doesNotMatch(moved.err.join("\n"), /could not connect/, "a redirect is not a refused connection");
+      assert.equal(elsewhere.seen.length, 0, "the key is not sent on to the redirect's address");
+      for (const m of ["401", "500"] as const) {
+        mode = m;
+        const r = await preflightRun(args, env);
+        assert.equal(r.code, EXIT_PREFLIGHT.modelApi);
+        for (const line of [...r.out, ...r.err, ...moved.out, ...moved.err]) assert.ok(!line.includes(key), `the key is never printed: ${line}`);
+      }
+    }
+  } finally {
+    await app.close();
+    await elsewhere.close();
+    await model.close();
+  }
+});
+
+test("preflight over real HTTP: an app that redirects in a loop is an HTTP failure that says so, not a refused connection", async () => {
+  const loop = await standIn((req, res) => {
+    res.writeHead(302, { location: `${req.url}x` });
+    res.end();
+  });
+  try {
+    const r = await preflightRun([`${loop.base}/`]);
+    assert.equal(r.code, EXIT_PREFLIGHT.http, r.err.join("\n"));
+    assert.match(r.err.join("\n"), /✗ App: http:\/\/127\.0\.0\.1:\d+\/ redirected more than 20 times without answering: a redirect loop/);
+    assert.equal(loop.seen.length, 21, "fetch's own bound: the first request and 20 redirects");
+  } finally {
+    await loop.close();
+  }
+  // Contrast: a single redirect to a page is followed and passes.
+  const once = await standIn((req, res) => {
+    if (req.url === "/") {
+      res.writeHead(302, { location: "/home" });
+      return res.end();
+    }
+    res.writeHead(200);
+    res.end("home");
+  });
+  try {
+    const r = await preflightRun([`${once.base}/`]);
+    assert.equal(r.code, EXIT_PREFLIGHT.ready, r.err.join("\n"));
+    assert.match(r.out.join("\n"), /after redirects, at http:\/\/127\.0\.0\.1:\d+\/home/);
+  } finally {
+    await once.close();
+  }
+});
+
 test('preflight: egress "none" refuses the model check before any request; model-only lets it through', async () => {
   const model = await standIn((_req, res) => {
     res.writeHead(200);
