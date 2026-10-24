@@ -26,6 +26,7 @@ import {
   parsePolicy,
   PRESET_POLICY,
   readCommandPolicy,
+  readLaunchPolicy,
   resolveSettings,
   writeRulesSettings,
   type ConfigKey,
@@ -172,26 +173,39 @@ export function explainConfig(input: {
 }): ConfigExplanation {
   const { operator, project, loaded, env } = input;
   const notes: string[] = [];
-  const resolved = resolveSettings(loaded, env, {}, { mode: "read-only", evidence: () => evidenceSettings(undefined, env).mode as EvidenceMode }, "command");
+  const defaults = { mode: "read-only" as const, evidence: () => evidenceSettings(undefined, env).mode as EvidenceMode };
+  const resolved = resolveSettings(loaded, env, {}, defaults, "command");
   notes.push(...resolved.notes);
   const rules = writeRulesSettings(loaded.policy, env, false);
   notes.push(...rules.notes);
   const rows: ConfigRow[] = [];
   const policy = loaded.policy as Record<string, unknown>;
+  /** Where the joined files' value of a key came from. */
+  const fileSource = (key: ConfigKey): string => {
+    const fromOperator = originIn(operator, key);
+    const operatorValue = (operator?.policy as Record<string, unknown> | undefined)?.[key];
+    const fromProject = originIn(project, key);
+    if (policy[key] === undefined) return "default";
+    if (fromProject && !same(operatorValue, policy[key])) return fromOperator ? `${fromProject}, tightening the ${fromOperator}` : fromProject;
+    return fromOperator ?? "default";
+  };
+  /**
+   * The most an attach or a command may ask for, read from resolveSettings itself: the loosest value of `order` (least to
+   * most) it does not refuse. It is lower than the key's own value where another key lowers it (egress "none" keeps the
+   * judge off and pictures out of the conversation); undefined when nothing is refused.
+   */
+  const ceiling = <T extends string>(key: "dedup" | "evidence", order: readonly T[]): T | undefined => {
+    const allowed = order.filter((v) => resolveSettings(loaded, env, { [key]: v }, defaults, "command").refused.length === 0);
+    return allowed.length === order.length ? undefined : allowed[allowed.length - 1];
+  };
   for (const key of CONFIG_KEYS) {
     if (key === "preset") {
       const presets = [operator, project].flatMap((l) => (l?.preset ? [`${l.label}: ${l.preset}`] : []));
       rows.push({ key, value: presets.length > 0 ? presets.join(", ") : UNSET.preset, source: presets.length > 0 ? "the files" : "default" });
       continue;
     }
-    const fromOperator = originIn(operator, key);
-    const operatorValue = (operator?.policy as Record<string, unknown> | undefined)?.[key];
-    const fromProject = originIn(project, key);
     let value: unknown = policy[key];
-    let source: string;
-    if (value === undefined) source = "default";
-    else if (fromProject && !same(operatorValue, value)) source = fromOperator ? `${fromProject}, tightening the ${fromOperator}` : fromProject;
-    else source = fromOperator ?? "default";
+    let source = fileSource(key);
     // The environment's part, as the attach and the commands apply it.
     if (key === "writeClassifier") {
       value = rules.writeClassifier;
@@ -201,6 +215,12 @@ export function explainConfig(input: {
       value = rules.refuseDestructiveGets;
       if (rules.from.refuseDestructiveGets && rules.from.refuseDestructiveGets !== "the SceneScout config")
         source = `environment ${rules.from.refuseDestructiveGets}`;
+    } else if (key === "dedup" || key === "evidence") {
+      const most = key === "dedup" ? ceiling("dedup", ["rule", "judge"] as const) : ceiling("evidence", ["off", "file", "inline"] as const);
+      if (most !== value) {
+        value = most;
+        source = `lowered by egress "none" (${fileSource("egress")})`;
+      }
     } else if (key === "authPosts") {
       value = rules.authPosts?.entries;
       const via = rules.from.authPosts;
@@ -220,7 +240,11 @@ export function explainConfig(input: {
     } else if (key === "maxMode" && value === undefined) {
       source = "default";
     }
-    rows.push({ key, value: shownValue(key, value), source });
+    let shownAs = shownValue(key, value);
+    // A list only a project's own file set narrows the path rule rather than replacing it (tightenPolicy, writeRulesSettings).
+    if (key === "authPosts" && rules.authPosts?.andSignInPath && rules.authPosts.entries.length > 0)
+      shownAs += ", each only when it also looks like a sign-in by its path";
+    rows.push({ key, value: shownAs, source });
   }
   return { files: loaded.sources, rows, notes };
 }
@@ -280,8 +304,10 @@ export function runConfigCommand(
     const read = readCommandPolicy(io.env, io.launchDir, projectDir, io.reader);
     if (!read.ok) return fail(read.error);
     const loaded = read.loaded;
-    // The first source is the operator's file; a second is the project's own.
-    const [operatorFile, projectFile] = loaded.sources;
+    // The operator's file is a first source only when there is one: with none, the one source is the project's own.
+    const launch = readLaunchPolicy(io.env, io.launchDir, io.reader);
+    if (!launch.ok) return fail(launch.error);
+    const [operatorFile, projectFile] = launch.loaded.sources.length > 0 ? loaded.sources : [undefined, loaded.sources[0]];
     const operator = operatorFile ? layerOf("operator file", operatorFile, io.reader) : undefined;
     const project = projectFile ? layerOf("project file", projectFile, io.reader) : undefined;
     for (const line of formatConfigExplanation(explainConfig({ operator, project, loaded, env: io.env }))) io.out(line);

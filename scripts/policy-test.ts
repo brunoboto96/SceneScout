@@ -148,7 +148,15 @@ import {
   type WriteClassifier,
 } from "../src/engine/strict-writes.ts";
 import { fuzzCases, fuzzRates } from "./policy-fuzz.ts";
-import { explainConfig, formatConfigExplanation, parseConfigArgs, shown, withoutUserinfo, type ConfigLayer } from "../src/engine/config-explain.ts";
+import {
+  explainConfig,
+  formatConfigExplanation,
+  parseConfigArgs,
+  runConfigCommand,
+  shown,
+  withoutUserinfo,
+  type ConfigLayer,
+} from "../src/engine/config-explain.ts";
 import {
   DEFAULT_POLICY_SETTINGS,
   explainRequest,
@@ -4547,4 +4555,59 @@ test("config explain: every key has a row, in the order of CONFIG_KEYS, and the 
   assert.deepEqual(parseConfigArgs(["explain", "--project=/p"]), { ok: true, project: "/p" });
   for (const bad of [[], ["explain", "--mode", "x"], ["explain", "x"], ["--project", "x"], ["explain", "--project"]])
     assert.equal(parseConfigArgs(bad).ok, false, bad.join(" "));
+});
+
+test('config explain: dedup and evidence show the ceiling an attach enforces, egress "none" included', () => {
+  const ask = (loaded: { policy: Policy; sources: string[] }, asked: { dedup?: "rule" | "judge"; evidence?: "off" | "file" | "inline" }) =>
+    resolveSettings(loaded, {}, asked, { mode: "read-only", evidence: () => "inline" }).refused.length === 0;
+  for (const text of ['{"egress":"none"}', '{"egress":"none","evidence":"inline","dedup":"judge"}', '{"egress":"none","evidence":"off"}']) {
+    const operator = layer("operator file", "/op/config.json", text);
+    const loaded = { policy: operator.policy, sources: ["/op/config.json"] };
+    const e = explainConfig({ operator, loaded, env: {} });
+    // What the row says is the most an attach may ask for, and the one above it is refused.
+    const dedup = rowOf(e, "dedup");
+    assert.equal(dedup.value, "rule", text);
+    assert.ok(ask(loaded, { dedup: "rule" }) && !ask(loaded, { dedup: "judge" }));
+    const evidence = rowOf(e, "evidence");
+    const want = operator.policy.evidence === "off" ? "off" : "file";
+    assert.equal(evidence.value, want, text);
+    assert.ok(ask(loaded, { evidence: want }) && !ask(loaded, { evidence: "inline" }));
+    assert.equal(evidence.source, want === "off" ? "operator file" : 'lowered by egress "none" (operator file)', text);
+  }
+  // Contrast: egress "model-only" lowers neither.
+  const open = layer("operator file", "/op/config.json", '{"egress":"model-only"}');
+  const e = explainConfig({ operator: open, loaded: { policy: open.policy, sources: ["/op/config.json"] }, env: {} });
+  assert.deepEqual([rowOf(e, "dedup").value, rowOf(e, "evidence").value], ["no limit", "no limit"]);
+});
+
+test("config explain: a sign-in list only the project's file sets is shown as narrowing the path rule", () => {
+  const project = layer("project file", "/p/.scenescout/config.json", '{"authPosts":["POST /api/signin"]}');
+  const policy = tightenPolicy({}, project.policy);
+  const loaded = { policy, sources: ["/op/config.json", "/p/.scenescout/config.json"] };
+  const narrow = explainConfig({ project, loaded, env: {} });
+  assert.equal(writeRulesSettings(policy, {}, false).authPosts?.andSignInPath, true);
+  assert.equal(rowOf(narrow, "authPosts").value, "POST /api/signin, each only when it also looks like a sign-in by its path");
+  // Contrast: the operator's list replaces the path rule, and so does the project's when SCENESCOUT_AUTH_POSTS lists it too.
+  const operator = layer("operator file", "/op/config.json", '{"authPosts":["POST /api/signin"]}');
+  assert.equal(
+    rowOf(explainConfig({ operator, loaded: { policy: operator.policy, sources: ["/op/config.json"] }, env: {} }), "authPosts").value,
+    "POST /api/signin",
+  );
+  assert.equal(rowOf(explainConfig({ project, loaded, env: { SCENESCOUT_AUTH_POSTS: "POST /api/signin" } }), "authPosts").value, "POST /api/signin");
+});
+
+test("config explain: with no operator file, the project's own file is named as the project's", () => {
+  const files: Record<string, string> = { "/p/.scenescout/config.json": '{"maxMode":"observe"}' };
+  const reader = { exists: (f: string) => f in files, read: (f: string) => files[f], realpath: (f: string) => f };
+  const run = () => {
+    const out: string[] = [];
+    runConfigCommand(["explain", "--project", "/p"], { env: {}, launchDir: "/launch", reader, out: (l) => out.push(l), err: (l) => out.push(l) });
+    return out.join("\n");
+  };
+  const alone = run();
+  assert.match(alone, /^ {2}maxMode +observe +\(project file\)$/m);
+  assert.doesNotMatch(alone, /operator file/);
+  // Contrast: an operator's file in the launch directory is the operator's, and the project's tightening is named as such.
+  files["/launch/.scenescout/config.json"] = '{"maxMode":"read-only"}';
+  assert.match(run(), /^ {2}maxMode +observe +\(project file, tightening the operator file\)$/m);
 });
