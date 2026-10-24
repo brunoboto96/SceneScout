@@ -138,7 +138,7 @@ const tokenText = (what: string, max: number) =>
     for (const m of value.matchAll(TOKEN_RE)) {
       if (!Object.hasOwn(REPORT_TOKENS, m[1]))
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           message: `uses {${m[1]}}, which is not a token: use ${Object.keys(REPORT_TOKENS)
             .map((t) => `{${t}}`)
             .join(", ")}`,
@@ -150,13 +150,13 @@ const paragraphs = z.array(text("a paragraph of text", 4000)).max(50, "holds at 
 const heading = text("the section's heading", 200);
 
 const columnSchema = z.union([z.enum(REPORT_COLUMNS), z.object({ key: z.enum(REPORT_COLUMNS), heading }).strict()], {
-  errorMap: () => ({ message: `must be one of ${REPORT_COLUMNS.join(", ")}, or { "key": one of those, "heading": "…" }` }),
+  error: () => `must be one of ${REPORT_COLUMNS.join(", ")}, or { "key": one of those, "heading": "…" }`,
 });
 
 const signoffRole = z.union(
   [text("the role that signs", 200), z.object({ role: text("the role that signs", 200), meaning: text("what the signature means", 500).optional() }).strict()],
   {
-    errorMap: () => ({ message: 'must be the role that signs, e.g. "Reviewer", or { "role": "…", "meaning": "…" }' }),
+    error: () => 'must be the role that signs, e.g. "Reviewer", or { "role": "…", "meaning": "…" }',
   },
 );
 
@@ -218,7 +218,7 @@ const templateSchema = z
         sections.forEach((s, i) => {
           if (s.type !== "text" && seen.has(s.type))
             ctx.addIssue({
-              code: z.ZodIssueCode.custom,
+              code: "custom",
               path: [i, "type"],
               message: `"${s.type}" appears more than once: each section but text appears at most once`,
             });

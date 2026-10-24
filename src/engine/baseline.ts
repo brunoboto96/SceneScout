@@ -254,9 +254,9 @@ export function elementTarget(element: string): FlowTarget | null | undefined {
 
 const elementSchema = z.string().superRefine((e, ctx) => {
   const target = elementTarget(e);
-  if (target === undefined) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `must be ${ELEMENT_HELP}` });
+  if (target === undefined) ctx.addIssue({ code: "custom", message: `must be ${ELEMENT_HELP}` });
   else if (target?.by === "role" && !ARIA_ROLES.has(target.role)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `names the role "${target.role}", which is not an ARIA role (e.g. button, link, region, img)` });
+    ctx.addIssue({ code: "custom", message: `names the role "${target.role}", which is not an ARIA role (e.g. button, link, region, img)` });
   }
 });
 
@@ -282,7 +282,7 @@ const targetsSchema = z
       const key = `${t.path}\u0000${t.element ?? PAGE_ELEMENT}`;
       const first = seen.get(key);
       if (first === undefined) seen.set(key, i);
-      else ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["targets", i], message: `repeats targets[${first}]` });
+      else ctx.addIssue({ code: "custom", path: ["targets", i], message: `repeats targets[${first}]` });
     });
   });
 
@@ -421,7 +421,7 @@ export function parseBaselineMeta(text: string): { ok: true; meta: BaselineMeta 
   } catch (err) {
     return { ok: false, error: `its JSON is not valid (${err instanceof Error ? err.message : String(err)})` };
   }
-  const parsed = metaSchema.safeParse(json);
+  const parsed = metaSchema.safeParse(json, { reportInput: true });
   if (!parsed.success) {
     const first = parsed.error.issues[0];
     return { ok: false, error: `its JSON is not a baseline's: ${fieldPath(first.path)} ${issueMessage(first)}` };
