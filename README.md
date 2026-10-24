@@ -174,7 +174,7 @@ npx -y scenescout doctor                       # every line should be a ✓
 
 - **Claude Code plugin:** `/plugin marketplace add brunoboto96/SceneScout`, then `/plugin install scenescout@scenescout-marketplace`. The command becomes `/scenescout:scenescout`.
 - **Claude Desktop:** download `scenescout-X.Y.Z.mcpb` from the [latest release](https://github.com/brunoboto96/SceneScout/releases/latest) and open it. No terminal needed. In the chat, pick **Check my site** from its prompts to start a guided check without writing a prompt ([guided prompts](docs/guide/Ways-to-use-it.md#guided-prompts-in-the-chat)).
-- **Any other MCP client:** add a stdio server whose command is `npx -y scenescout serve`. [Each client's config](docs/guide/Start-here.md#a-client-that-install-does-not-know).
+- **Any other MCP client:** add a stdio server whose command is `npx -y scenescout@3.29.0 serve`. [Each client's config](docs/guide/Start-here.md#a-client-that-install-does-not-know).
 
 </details>
 
