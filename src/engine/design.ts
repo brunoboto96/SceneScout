@@ -366,6 +366,20 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
   const bgStack = ${BG_STACK_SRC};
   // The parent in the tree that is painted: a slotted element renders inside its slot, and a shadow tree's top inside its host.
   const paintParent = (n) => n.assignedSlot || n.parentElement || (n.parentNode && n.parentNode.host) || null;
+  // Whether an element starts a stacking context, so a child with a negative z-index paints over its background, not under it.
+  const startsStacking = (n, s) => {
+    if (s.isolation === "isolate" || s.opacity !== "1" || s.transform !== "none" || s.position === "fixed" || s.position === "sticky") return true;
+    if (s.zIndex !== "auto") {
+      if (s.position !== "static") return true;
+      const parent = paintParent(n);
+      if (parent && parent.nodeType === 1 && /flex|grid/.test(window.getComputedStyle(parent).display)) return true;
+    }
+    if ((s.filter && s.filter !== "none") || (s.backdropFilter && s.backdropFilter !== "none")) return true;
+    if ((s.mixBlendMode && s.mixBlendMode !== "normal") || (s.clipPath && s.clipPath !== "none")) return true;
+    if ((s.maskImage && s.maskImage !== "none") || (s.webkitMaskImage && s.webkitMaskImage !== "none")) return true;
+    if (/paint|layout|strict|content/.test(s.contain || "") || /opacity|transform|filter|isolation|z-index/.test(s.willChange || "")) return true;
+    return false;
+  };
   // Replaced content that paints pixels the audit cannot read: an <img>,
   // <picture>, <video> or <canvas>, often absolutely positioned under a hero
   // heading as a sibling or cousin of the text rather than its ancestor.
@@ -429,8 +443,7 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
       const o = parseFloat(ps.opacity);
       if (Array.isArray(cs) && o < 1) cs = cs.map((c) => [c[0], c[1], c[2], c[3] * o]);
       // A negative z-index puts it under the element's own background unless the element starts a stacking context.
-      const stacking = s.isolation === "isolate" || (s.position !== "static" && s.zIndex !== "auto") || s.opacity !== "1" || s.transform !== "none";
-      const under = parseInt(ps.zIndex, 10) < 0 && !stacking;
+      const under = parseInt(ps.zIndex, 10) < 0 && !startsStacking(node, s);
       // Moved or clipped (a hover fill scaled to nothing at rest), its box is not where its offsets say.
       const moved = (ps.transform && ps.transform !== "none") || (ps.clipPath && ps.clipPath !== "none");
       const w = px(ps.width) + px(ps.paddingLeft) + px(ps.paddingRight) + px(ps.borderLeftWidth) + px(ps.borderRightWidth);
@@ -471,10 +484,29 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
         if (r.width < 8 || r.height < 8) continue;
         // A translucent panel paints its colours at its opacity.
         const o = parseFloat(s.opacity);
-        panels.push({ n, r, cs: o < 1 ? cs.map((c) => [c[0], c[1], c[2], c[3] * o]) : cs });
+        panels.push({ n, r, cs: o < 1 ? cs.map((c) => [c[0], c[1], c[2], c[3] * o]) : cs, sunk: parseInt(s.zIndex, 10) < 0 });
       }
     }
     return panels.filter(({ r }) => cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom);
+  };
+  // A panel with a negative z-index paints beneath every background in its
+  // stacking context, so under the opaque box the text sits on unless that box,
+  // or a box between them, starts a stacking context of its own. The root's
+  // background, or the body's when the root sets none, is the page canvas,
+  // which every panel paints over.
+  const stackedWithin = (n, top) => {
+    const root = document.documentElement;
+    if (top === root) return true;
+    if (top === document.body) {
+      const rs = window.getComputedStyle(root);
+      const rc = parseColor(rs.backgroundColor);
+      if ((!rc || rc[3] === 0) && rs.backgroundImage === "none") return true;
+    }
+    for (let a = paintParent(n); a; a = paintParent(a)) {
+      if (a.nodeType === 1 && startsStacking(a, window.getComputedStyle(a))) return true;
+      if (a === top) return false;
+    }
+    return false;
   };
   // Effective background: COMPOSITE the layers behind the text (a chip with
   // rgba(...,0.12) over white is nearly white — treating it as opaque produces
@@ -526,8 +558,9 @@ export const DESIGN_COLLECT_SCRIPT = `(() => {
     if (mediaUnder(el, opaque)) return { bg: "image" };
     // A positioned panel that is neither the text's ancestor nor inside it may
     // lie under it. One outside the opaque ancestor is treated as behind that.
-    for (const { n, cs } of panelsAt(cx, cy)) {
+    for (const { n, cs, sunk } of panelsAt(cx, cy)) {
       if (walked.has(n) || el.contains(n) || (opaque && !opaque.contains(n))) continue;
+      if (sunk && opaque && !stackedWithin(n, opaque)) continue;
       layers.unshift({ cs, maybe: true });
     }
     return bgStack(layers);

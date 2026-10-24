@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>A panel under the text, over the page canvas</title>
+  <style>
+    /* The body's background is the page canvas here, as the root element sets none: a panel with a negative
+       z-index paints over the canvas, not beneath it, so the pale text sits on the dark panel. */
+    body { margin: 0; padding: 24px; font: 16px/1.5 sans-serif; background: rgb(255, 255, 255); }
+    .panel { position: absolute; left: 0; top: 0; width: 480px; height: 120px; background: rgb(15, 23, 42); z-index: -1; }
+    p { color: rgb(229, 231, 235); margin: 24px; width: 420px; }
+  </style>
+</head>
+<body>
+  <div class="panel"></div>
+  <p data-testid="contrast-canvas-panel">Pale text over a dark panel that paints over the page canvas</p>
+</body>
+</html>

@@ -22,6 +22,10 @@
     /* A panel laid behind the text as its sibling, and the same box with none. */
     .backdrop { position: absolute; inset: 0; background: rgb(15, 23, 42); }
     .stage p { position: relative; margin: 0; }
+    /* A positioned panel with a negative z-index on a white sheet: beneath the sheet's background, unless the sheet is isolated. */
+    .sheet { background: rgb(255, 255, 255); }
+    .sheet .backdrop { z-index: -1; }
+    .sheet.isolated { isolation: isolate; }
 
     /* Colours written in lab() and oklch(), which some engines' canvas keeps in their own space. */
     .lab-dark { background: lab(2 0 -5); }
@@ -62,6 +66,8 @@
   <section>
     <div class="box stage"><div class="backdrop"></div><p class="light" data-testid="contrast-sibling-dark">Light text over a dark sibling panel</p></div>
     <div class="box stage"><p class="light" data-testid="contrast-sibling-none">Light text over the same box with no panel</p></div>
+    <div class="box sheet"><div class="backdrop"></div><p class="pale" data-testid="contrast-sheet-under">Pale text on a white sheet whose dark panel sits beneath its background</p></div>
+    <div class="box sheet isolated"><div class="backdrop"></div><p class="pale" data-testid="contrast-sheet-over">Pale text on the same sheet isolated, so the panel paints over its background</p></div>
   </section>
   <section>
     <div class="box lab-dark"><p class="light" data-testid="contrast-lab-dark">Light text over a dark lab() background</p></div>

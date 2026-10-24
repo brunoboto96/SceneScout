@@ -20,7 +20,10 @@
  * listed as unsure rather than failed. Dark text under paint that does not
  * reach it (an underline drawn as a 2px gradient, a hover fill scaled to
  * nothing, a 5% tint, a pseudo-element beneath an opaque card) is never a
- * failure, while the same paint where it does reach the text is.
+ * failure, while the same paint where it does reach the text is. A dark
+ * panel with a negative z-index on a white sheet paints beneath the sheet's
+ * background, so pale text there fails; on the same sheet isolated it is the
+ * panel the text may sit on, and the text is not failed.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -137,11 +140,29 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       seen,
     );
     check(
+      "pale text on a white sheet whose negative-z-index panel paints beneath the sheet's background fails; the same sheet isolated, the panel over its background, is not failed",
+      failed.includes("contrast-sheet-under") &&
+        verdictOf("contrast-sheet-under") === "fail" &&
+        verdictOf("contrast-sheet-over") === "varies" &&
+        !failed.includes("contrast-sheet-over"),
+      seen,
+    );
+    check(
       "text over a gradient from dark to white, or over a panel that may be under it, is listed as unsure and not scored",
       unsure.includes("contrast-gradient-mixed") && unsure.includes("contrast-sibling-dark") && !failed.includes("contrast-gradient-mixed"),
       seen,
     );
-    check("the page loses points for the ten failures only", /-15 contrast failures ×10/.test(whyOf(layered)), whyOf(layered) || layered);
+    check("the page loses points for the eleven failures only", /-15 contrast failures ×11/.test(whyOf(layered)), whyOf(layered) || layered);
+
+    // The body's background is the page canvas when the root element sets none, so a negative-z-index panel there paints over it.
+    await engine.navigate("/design-contrast-canvas.html");
+    const canvasRecords = ((await page.evaluate(DESIGN_COLLECT_SCRIPT)) as DesignPayload).records;
+    const onCanvas = canvasRecords.find((x) => x.testid === "contrast-canvas-panel");
+    check(
+      "pale text over a negative-z-index panel on the page canvas is not failed",
+      onCanvas !== undefined && contrastVerdict(onCanvas).kind !== "fail",
+      JSON.stringify(onCanvas),
+    );
   } finally {
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
