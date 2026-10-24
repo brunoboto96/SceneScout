@@ -350,15 +350,17 @@ export function fulfilsRedirects(engine: BrowserEngineName): boolean {
 }
 
 /**
- * Launch switches a session with the allowlist header needs. A page the route
- * handler hands Chromium has no network address of its own, so Chromium's
- * Local Network Access checks treat it as public and block its requests to a
- * private or loopback address (a staging host's other services, a local
- * fixture) with ERR_FAILED; the checks are turned off for such a session.
- * Firefox has no such check.
+ * Permissions the app's own origin is granted in a session with the allowlist
+ * header. A page the route handler hands Chromium has no network address of
+ * its own, so Chromium's Local Network Access checks treat it as public and
+ * block its requests to a private or loopback address (a staging host's other
+ * services, a local fixture) with ERR_FAILED. Granting the app's origin the
+ * local-network-access permission lets its pages make them, as they could
+ * before; every other origin's pages and frames keep the checks. Firefox has
+ * no such check.
  */
-export function appHeaderLaunchArgs(engine: BrowserEngineName): string[] {
-  return engine === "chromium" ? ["--disable-features=LocalNetworkAccessChecks"] : [];
+export function appHeaderPermissions(engine: BrowserEngineName): string[] {
+  return engine === "chromium" ? ["local-network-access"] : [];
 }
 
 /**

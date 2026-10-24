@@ -156,7 +156,7 @@ import {
 } from "../src/engine/app-header.ts";
 import { browserProxy, fetchProxyOptions, proxyLine, readProxy, shownProxy } from "../src/engine/proxy.ts";
 import { redactKeys, secretValues } from "../src/engine/ci.ts";
-import { appHeaderLaunchArgs, fulfilsRedirects } from "../src/browsers.ts";
+import { appHeaderPermissions, fulfilsRedirects } from "../src/browsers.ts";
 import {
   DEFAULT_POLICY_SETTINGS,
   explainRequest,
@@ -4250,9 +4250,11 @@ test("allowlist header: only a request for the app's own scheme, host and port g
   assert.equal(fulfilsRedirects("chromium"), true);
   assert.equal(fulfilsRedirects("firefox"), true);
   assert.equal(fulfilsRedirects("webkit"), false);
-  // A page handed to Chromium has no address, so its Local Network Access checks would block the page's private requests.
-  assert.deepEqual(appHeaderLaunchArgs("chromium"), ["--disable-features=LocalNetworkAccessChecks"]);
-  assert.deepEqual(appHeaderLaunchArgs("firefox"), []);
+  // A page handed to Chromium has no address, so its Local Network Access checks would block the page's private
+  // requests: the app's origin alone is granted the permission, rather than the checks being turned off for every origin.
+  assert.deepEqual(appHeaderPermissions("chromium"), ["local-network-access"]);
+  assert.deepEqual(appHeaderPermissions("firefox"), []);
+  assert.deepEqual(appHeaderPermissions("webkit"), []);
 });
 
 test("allowlist header: a send that failed aborts with the network's code, so the oracles see a network failure", () => {

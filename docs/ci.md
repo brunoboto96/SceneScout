@@ -13,6 +13,7 @@ The exploratory side can run in CI too, with a model's API in place of a person 
 | 0 | Passed the gate | Pass |
 | 1 | Failed it: something at the `--fail-on` severity or worse | Fail: the app has a defect |
 | 2 | Could not run, or not all of it: a bad argument, an app that never answered, a start page that bot protection answered in the app's place (`blocked by bot protection (HTTP 403)`) or that answered any 4xx (the status is named), a saved session that no longer signs in, only the sign-in page reached, only a start page with at most one control reached (the app had not finished drawing), a saved flow that is not valid, or a flow step the write policy refused | Fail, and read it as a setup problem; with a refused flow step the report still has the rest's verdict |
+| 3 | Passed the gate on what loaded, but a request or page load reaching the app failed on the network (DNS, a refused or dropped connection, a timeout, TLS) at the gate's severity | Fail or run again: the verdict is incomplete ([Network requirements](guide/Network-requirements.md#failures-on-the-network-are-not-the-apps)) |
 
 ## GitHub Actions
 

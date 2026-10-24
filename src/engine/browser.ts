@@ -172,7 +172,7 @@ import {
   DROPPED_NAVIGATION_WAIT_MS,
   requestCancelled,
   fulfilsRedirects,
-  appHeaderLaunchArgs,
+  appHeaderPermissions,
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
@@ -1845,6 +1845,9 @@ export class BrowserEngine {
         serviceWorkers: serviceWorkerPolicy(this.engineName),
         ...(this.network.proxy ? { proxy: this.network.proxy } : {}),
       });
+      // The pages the allowlist header hands over have no address of their own: the app's origin alone may still reach private addresses.
+      const permissions = this.network.appHeader ? appHeaderPermissions(this.engineName) : [];
+      if (permissions.length > 0) await this.context.grantPermissions(permissions, { origin: new URL(opts.url).origin });
       const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
       if (restoreSession) await this.context.addInitScript(restoreSession);
       if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
@@ -4822,6 +4825,7 @@ export class BrowserEngine {
       await route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
       return;
     }
+    this.appHeaderAnswers.set(req, response);
     await route.fulfill({ response }).catch(() => {
       /* the page went away before its answer */
     });
@@ -4858,7 +4862,7 @@ export class BrowserEngine {
     const answered = req
       .response()
       .then((res): RefreshAnswer | null =>
-        res ? { ok: res.ok(), status: res.status(), text: () => res.text(), setCookies: () => res.headerValues("set-cookie") } : null,
+        res ? { ok: res.ok(), status: res.status(), text: () => res.text(), setCookies: () => this.setCookiesOf(res) } : null,
       )
       .finally(() => clearTimeout(timer));
     return Promise.race([answered, new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), 30000)))]);
@@ -4870,12 +4874,28 @@ export class BrowserEngine {
       ok: res.ok(),
       status: res.status(),
       text: () => res.text(),
-      setCookies: async () =>
-        res
-          .headersArray()
-          .filter((h) => h.name.toLowerCase() === "set-cookie")
-          .map((h) => h.value),
+      setCookies: async () => BrowserEngine.fetchedSetCookies(res),
     };
+  }
+
+  private static fetchedSetCookies(res: APIResponse): string[] {
+    return res
+      .headersArray()
+      .filter((h) => h.name.toLowerCase() === "set-cookie")
+      .map((h) => h.value);
+  }
+
+  /**
+   * The answers SceneScout fetched itself with the allowlist header and handed to the page (sendWithAppHeader).
+   * Chromium leaves Set-Cookie out of the headers it reports for a handed-over answer, so the refresh broker reads
+   * a rotation from the answer that was fetched.
+   */
+  private readonly appHeaderAnswers = new WeakMap<Request, APIResponse>();
+
+  /** A response's Set-Cookie lines, from the answer fetched with the allowlist header when it was one. */
+  private async setCookiesOf(res: Response): Promise<string[]> {
+    const fetched = this.appHeaderAnswers.get(res.request());
+    return fetched ? BrowserEngine.fetchedSetCookies(fetched) : res.headerValues("set-cookie");
   }
 
   /**
@@ -4927,7 +4947,7 @@ export class BrowserEngine {
     if (this.brokeredRequests.has(req) || !res.ok() || !learnableEndpoint(req.url())) return;
     this.trackRefreshTask(
       (async () => {
-        const rotated = rotatedCookies(await res.headerValues("set-cookie"), broker.known);
+        const rotated = rotatedCookies(await this.setCookiesOf(res), broker.known);
         if (rotated.length > 0) await this.adoptRotation(endpointKey(req.method(), req.url()), rotated);
       })().catch((err: unknown) => {
         this.logAction({
@@ -6809,7 +6829,7 @@ export class BrowserEngine {
       // so a leaked one of those is not reaped and has to be closed by hand.
       const launch = types[engine].launch({
         headless: !headed,
-        args: [...(engine === "chromium" ? [`--enable-features=${BROWSER_MARKER}`] : []), ...(this.network.appHeader ? appHeaderLaunchArgs(engine) : [])],
+        args: engine === "chromium" ? [`--enable-features=${BROWSER_MARKER}`] : [],
       });
       let timer: NodeJS.Timeout | undefined;
       try {

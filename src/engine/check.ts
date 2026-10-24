@@ -274,8 +274,8 @@ export const SEVERITY_RANK: Record<CheckSeverity, number> = { high: 0, medium: 1
  * A page load or a request that failed on the network (network-failure.ts:
  * DNS, a refused or dropped connection, a network timeout, TLS) rather than
  * with an answer from the app (#554). Never an issue: a failure reaching the
- * app's site (sameSite) leaves the verdict incomplete (exit 3), and one reaching
- * another host is listed as the environment's.
+ * app's site (sameSite) at the gate's severity leaves the verdict incomplete
+ * (exit 3), and one reaching another host is listed as the environment's.
  */
 export interface NetworkFailure {
   /** "page": a route that did not load. "request": a request a page made. */
@@ -287,6 +287,11 @@ export interface NetworkFailure {
   what: string;
   /** Whether it was the app's own site (sameSite): a page load always is. */
   app: boolean;
+  /**
+   * The severity the issue it replaces would have had (route-load-failed's or request-failed's): one reaching the app
+   * leaves the verdict incomplete only at the gate's severity or worse, so a check that passed before still passes.
+   */
+  severity: CheckSeverity;
   /** Every route it was seen on, first first. */
   routes: string[];
 }
@@ -313,7 +318,7 @@ export function sameSite(u: URL, origin: string): boolean {
 }
 
 /** A request_failed oracle line ("GET <url> → <browser error>") read as a network failure, or null when it is not one. */
-export function requestNetworkFailure(detail: string, origin: string): Omit<NetworkFailure, "routes"> | null {
+export function requestNetworkFailure(detail: string, origin: string): Omit<NetworkFailure, "routes" | "severity"> | null {
   const arrow = detail.lastIndexOf(" → ");
   if (arrow === -1) return null;
   const failure = browserNetworkCause(detail.slice(arrow + 3));
@@ -489,7 +494,7 @@ export function checkFindings(
     });
   };
   /** A network failure, listed once with every route it was seen on; --ignore-path exempts it as it would the rule it replaces. */
-  const addNetwork = (failure: Omit<NetworkFailure, "routes">, route: string, rule: CheckRule): void => {
+  const addNetwork = (failure: Omit<NetworkFailure, "routes" | "severity">, route: string, rule: CheckRule, severity: CheckSeverity): void => {
     if (ignore.includes(rule) || exempt(rule, route)) return;
     const what = cleanEvidence(failure.what);
     const key = `${failure.kind}\u0000${failure.code}\u0000${what}`;
@@ -498,7 +503,7 @@ export function checkFindings(
       if (!known.routes.includes(route)) known.routes.push(route);
       return;
     }
-    network.set(key, { ...failure, what, routes: [route] });
+    network.set(key, { ...failure, what, routes: [route], severity });
   };
   /** A violation that is a network failure, or its console echo, goes to the network list; true when it did. */
   const networkViolation = (v: RouteHealth["violations"][number], route: string): boolean => {
@@ -506,7 +511,8 @@ export function checkFindings(
     if (v.kind !== "request_failed") return false;
     const failure = requestNetworkFailure(v.detail, origin);
     if (!failure) return false;
-    addNetwork(failure, route, "request-failed");
+    // As add() would have filed it: a request from an embed is medium.
+    addNetwork(failure, route, "request-failed", v.embed ? "medium" : CHECK_RULES["request-failed"].severity);
     return true;
   };
   for (const r of routes) {
@@ -516,7 +522,7 @@ export function checkFindings(
     if (isNonPageResource(r)) continue;
     if (r.loadError !== undefined) {
       const failure = browserNetworkCause(r.loadError);
-      if (failure) addNetwork({ kind: "page", ...failure, what: route, app: true }, route, "route-load-failed");
+      if (failure) addNetwork({ kind: "page", ...failure, what: route, app: true }, route, "route-load-failed", CHECK_RULES["route-load-failed"].severity);
       else add("route-load-failed", `${route}: ${r.loadError}`, route);
       continue;
     }
@@ -1131,29 +1137,36 @@ export function summarise(result: CheckResult): {
   retestsFailing: number;
   /** Flows a refused step kept from running: the check has no verdict on them, so it exits 2 whatever the rest did. */
   couldNotRun: number;
-  /** Network failures reaching the app's site (sameSite): what they kept from loading was not measured, so a passing gate exits 3. */
+  /** Network failures reaching the app's site (sameSite), at any severity. */
   networkApp: number;
+  /** Of networkApp, those at the gate's severity or worse (as the issue each replaces): a gate that passed exits 3 on one. */
+  networkGated: number;
   /** Network failures reaching other hosts: the environment's, listed and never counted. */
   networkOther: number;
 } {
   const retestsFailing = retestGateFailures(result).length;
   const failing = gateFailures(result.issues, result.failOn).length + retestsFailing;
   const couldNotRun = result.flows.filter((f) => f.outcome.status === "refused").length;
-  const networkApp = (result.network ?? []).filter((n) => n.app).length;
+  const app = (result.network ?? []).filter((n) => n.app);
+  const networkApp = app.length;
+  // Only what would have been an issue at the gate's severity: a check that passed before this listing existed still passes.
+  const failOn = result.failOn;
+  const networkGated = failOn === "never" ? 0 : app.filter((n) => SEVERITY_RANK[n.severity] <= SEVERITY_RANK[failOn]).length;
   const networkOther = (result.network ?? []).length - networkApp;
-  return { passed: failing === 0, counts: countBySeverity(result.issues), failing, retestsFailing, couldNotRun, networkApp, networkOther };
+  return { passed: failing === 0, counts: countBySeverity(result.issues), failing, retestsFailing, couldNotRun, networkApp, networkGated, networkOther };
 }
 
 /**
  * The exit code a finished check ends with. A flow that could not run outranks the gate: the verdict is incomplete.
  * A failed gate outranks a network failure, since running again would not pass it. A gate that passed while the
- * network kept part of the app from loading exits 3, so a job can tell it from a pass and from a failure, and run again.
+ * network kept part of the app from loading exits 3, so a job can tell it from a pass and from a failure, and run again:
+ * only for a failure at the gate's severity (as the issue it replaces), so a check that passed before still exits 0.
  */
 export function exitCodeOf(result: CheckResult): number {
-  const { passed, couldNotRun, networkApp } = summarise(result);
+  const { passed, couldNotRun, networkGated } = summarise(result);
   if (couldNotRun > 0) return EXIT.error;
   if (!passed) return EXIT.gateFailed;
-  return networkApp > 0 ? EXIT.network : EXIT.pass;
+  return networkGated > 0 ? EXIT.network : EXIT.pass;
 }
 
 /** One line of the settings, for the report and the job summary. */
@@ -1508,7 +1521,7 @@ export function unvisitedLine(unvisited: readonly string[], why: string): string
 
 /** The human report: the verdict first, then what failed it, then everything else. */
 export function formatCheck(result: CheckResult): string {
-  const { passed, counts, failing, retestsFailing, couldNotRun, networkApp, networkOther } = summarise(result);
+  const { passed, counts, failing, retestsFailing, couldNotRun, networkApp, networkGated, networkOther } = summarise(result);
   const lines: string[] = [];
   lines.push(`# SceneScout check`);
   lines.push("");
@@ -1523,10 +1536,12 @@ export function formatCheck(result: CheckResult): string {
     retestsFailing > 0
       ? `${failing} failing the gate (${failing - retestsFailing} issue(s), ${retestsFailing} re-tested finding(s))`
       : `${failing} issue(s) at the gate's severity`;
-  const incomplete = couldNotRun === 0 && passed && networkApp > 0;
+  const incomplete = couldNotRun === 0 && passed && networkGated > 0;
   lines.push(
     (couldNotRun > 0 ? `**COULD NOT RUN** — ${couldNotRun} flow(s) had a step refused (see Flows); the rest ` : "") +
-      (incomplete ? `**NETWORK FAILURES** — ${networkApp} failure(s) reaching the app on the network, not in the app (see Network failures); the rest ` : "") +
+      (incomplete
+        ? `**NETWORK FAILURES** — ${networkGated} failure(s) reaching the app on the network, not in the app (see Network failures); the rest `
+        : "") +
       (passed
         ? `${couldNotRun > 0 || incomplete ? "passed" : "**PASSED**"} — ${counts.high} high · ${counts.medium} medium · ${counts.low} low`
         : `${couldNotRun > 0 ? "failed" : "**FAILED**"} — ${failingText} · ${counts.high} high · ${counts.medium} medium · ${counts.low} low`) +
@@ -1621,14 +1636,14 @@ export function formatCheck(result: CheckResult): string {
 
 /** The machine summary: stable keys for scripts and follow-up jobs. */
 export function toSummaryJson(result: CheckResult, toolVersion: string): object {
-  const { passed, counts, failing, retestsFailing, couldNotRun, networkApp } = summarise(result);
+  const { passed, counts, failing, retestsFailing, couldNotRun, networkGated } = summarise(result);
   return {
     tool: "scenescout-check",
     version: toolVersion,
     url: result.url,
     generatedAt: result.generatedAt,
     mode: result.mode,
-    gate: { failOn: result.failOn, passed, failing, retestsFailing, couldNotRun, ...(networkApp > 0 ? { networkFailures: networkApp } : {}) },
+    gate: { failOn: result.failOn, passed, failing, retestsFailing, couldNotRun, ...(networkGated > 0 ? { networkFailures: networkGated } : {}) },
     settings: result.settings,
     counts,
     routes: result.routes.map((r) => ({

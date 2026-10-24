@@ -180,16 +180,21 @@ async function runAll({ baseUrl, server, base, work }: { baseUrl: string; server
 
   // The fixture app: a linked page whose server hangs up is tried once, not on every discovery round.
   const links = await runCli([`${baseUrl}/check-links.html`, "--project", work, "--out", path.join(work, "links")]);
-  const linkSummary = JSON.parse(fs.readFileSync(path.join(work, "links", "check.json"), "utf8")) as Summary & { unvisited: string[] };
+  const linkSummary = JSON.parse(fs.readFileSync(path.join(work, "links", "check.json"), "utf8")) as Summary & {
+    unvisited: string[];
+    network?: Array<{ kind: string; what: string; app: boolean }>;
+  };
   const dropped = linkSummary.routes.filter((r) => r.path === "/drop-connection");
+  // A hang-up is the network's, not an answer from the app (#554): one network entry, no route-load-failed.
   check(
-    "a page that fails to load is one route and one issue, not one per round",
+    "a page that fails to load is one route and one network failure, not one per round",
     dropped.length === 1 &&
-      linkSummary.issues.filter((i) => i.rule === "route-load-failed").length === 1 &&
+      (linkSummary.network ?? []).filter((n) => n.kind === "page" && n.what === "/drop-connection" && n.app).length === 1 &&
+      !linkSummary.issues.some((i) => i.rule === "route-load-failed") &&
       !linkSummary.unvisited.includes("/drop-connection"),
-    JSON.stringify({ routes: linkSummary.routes, unvisited: linkSummary.unvisited }),
+    JSON.stringify({ routes: linkSummary.routes, network: linkSummary.network, unvisited: linkSummary.unvisited }),
   );
-  check("...and fails the default gate", links.status === 1, links.out.slice(-600));
+  check("...and leaves the passing default gate incomplete: exit 3", links.status === 3, links.out.slice(-600));
 
   // A feed and a plain-text file linked from a page are not pages, and an HTML page with no controls still is a dead end.
   await runCli([`${baseUrl}/check-resources.html`, "--project", work, "--out", path.join(work, "resources"), "--fail-on", "never"]);

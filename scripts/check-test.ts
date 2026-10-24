@@ -5169,7 +5169,9 @@ const requestFailed = (detail: string): RouteHealth["violations"][number] => ({ 
 test("network failures: a route that did not load on the network is not route-load-failed; the same route timing out still is", () => {
   const dropped = checkFindings([route({ path: "/a", status: null, loadError: `page.goto: net::ERR_EMPTY_RESPONSE at ${ORIGIN}/a` })], ORIGIN);
   assert.deepEqual(dropped.issues, []);
-  assert.deepEqual(dropped.network, [{ kind: "page", cause: "connection", code: "net::ERR_EMPTY_RESPONSE", what: "/a", app: true, routes: ["/a"] }]);
+  assert.deepEqual(dropped.network, [
+    { kind: "page", cause: "connection", code: "net::ERR_EMPTY_RESPONSE", what: "/a", app: true, routes: ["/a"], severity: "high" },
+  ]);
   // The contrast: the same route, failed by a Playwright timeout, which the app's slowness can cause.
   const slow = checkFindings([route({ path: "/a", status: null, loadError: "page.goto: Timeout 15000ms exceeded." })], ORIGIN);
   assert.deepEqual(rules(slow.issues), ["route-load-failed"]);
@@ -5202,6 +5204,7 @@ test("network failures: an unreachable third-party host is one environment entry
     what: "cdn.example.net",
     app: false,
     routes: ["/", "/b"],
+    severity: "medium",
   });
   // The contrast: the same request refused by the CDN with a status is the app's issue, and its console echo stays one too.
   const answered = checkFindings([route({ violations: [httpError("https://cdn.example.net/lib.js", 403), loadEcho(ECHO_404)] })], ORIGIN);
@@ -5209,15 +5212,56 @@ test("network failures: an unreachable third-party host is one environment entry
   assert.deepEqual(answered.network, []);
 });
 
+test("network failures: exit 3 only at the gate's severity, so a check that passed before still exits 0", () => {
+  // As the issues they replace: a request that failed was medium, a page that did not load high.
+  const found = checkFindings(
+    [
+      route({ path: "/", violations: [requestFailed(`GET ${ORIGIN}/api/items → net::ERR_CONNECTION_REFUSED`)] }),
+      route({ path: "/a", status: null, loadError: `page.goto: net::ERR_CONNECTION_RESET at ${ORIGIN}/a` }),
+    ],
+    ORIGIN,
+  );
+  const request = found.network.filter((n) => n.kind === "request");
+  const page = found.network.filter((n) => n.kind === "page");
+  assert.deepEqual([request.map((n) => n.severity), page.map((n) => n.severity)], [["medium"], ["high"]]);
+  // A medium request below a high gate: listed, and the exit code is the pass it was before.
+  assert.equal(exitCodeOf({ ...result([], "high"), network: request }), EXIT.pass);
+  assert.doesNotMatch(formatCheck({ ...result([], "high"), network: request }), /NETWORK FAILURES/);
+  assert.match(formatCheck({ ...result([], "high"), network: request }), /\*\*PASSED\*\* — .* · 1 failure\(s\) reaching the app on the network, not counted/);
+  assert.equal((toSummaryJson({ ...result([], "high"), network: request }, "0.0.0") as { gate: { networkFailures?: number } }).gate.networkFailures, undefined);
+  // The same request at a medium gate, and a page that did not load at a high one: the verdict is incomplete.
+  assert.equal(exitCodeOf({ ...result([], "medium"), network: request }), EXIT.network);
+  assert.equal(exitCodeOf({ ...result([], "high"), network: page }), EXIT.network);
+  // Report only: nothing gates, so nothing is incomplete.
+  assert.equal(exitCodeOf({ ...result([], "never"), network: [...page, ...request] }), EXIT.pass);
+  assert.doesNotMatch(formatCheck({ ...result([], "never"), network: page }), /NETWORK FAILURES/);
+});
+
 test("network failures: one reaching the app leaves a passing gate incomplete (exit 3); a failed gate still exits 1; another host's changes nothing", () => {
-  const appFailure = { kind: "request" as const, cause: "connection" as const, code: "net::ERR_CONNECTION_RESET", what: "GET /api", app: true, routes: ["/"] };
-  const elsewhere = { kind: "request" as const, cause: "dns" as const, code: "net::ERR_NAME_NOT_RESOLVED", what: "cdn.example.net", app: false, routes: ["/"] };
+  const appFailure = {
+    kind: "request" as const,
+    cause: "connection" as const,
+    code: "net::ERR_CONNECTION_RESET",
+    what: "GET /api",
+    app: true,
+    routes: ["/"],
+    severity: "medium" as const,
+  };
+  const elsewhere = {
+    kind: "request" as const,
+    cause: "dns" as const,
+    code: "net::ERR_NAME_NOT_RESOLVED",
+    what: "cdn.example.net",
+    app: false,
+    routes: ["/"],
+    severity: "medium" as const,
+  };
   assert.equal(EXIT.network, 3);
-  assert.equal(exitCodeOf({ ...result([]), network: [appFailure] }), EXIT.network);
+  assert.equal(exitCodeOf({ ...result([], "medium"), network: [appFailure] }), EXIT.network);
   assert.equal(exitCodeOf({ ...result([]), network: [elsewhere] }), EXIT.pass);
   assert.equal(exitCodeOf({ ...result([issue("high")]), network: [appFailure] }), EXIT.gateFailed, "running again would not pass it");
   assert.equal(exitCodeOf(result([])), EXIT.pass);
-  const report = formatCheck({ ...result([]), network: [appFailure, elsewhere] });
+  const report = formatCheck({ ...result([], "medium"), network: [appFailure, elsewhere] });
   assert.match(report, /\*\*NETWORK FAILURES\*\* — 1 failure\(s\) reaching the app on the network, not in the app \(see Network failures\); the rest passed/);
   assert.match(report, /1 host\(s\) or request\(s\) elsewhere unreachable, not counted/);
   assert.match(report, /## Network failures \(2\)/);
@@ -5228,7 +5272,7 @@ test("network failures: one reaching the app leaves a passing gate incomplete (e
   assert.match(formatCheck({ ...result([]), network: [elsewhere] }), /\*\*PASSED\*\* — .* · 1 host\(s\) or request\(s\) elsewhere unreachable, not counted/);
   assert.deepEqual(networkSection(undefined), []);
   const json = toSummaryJson(
-    { ...result([]), network: [appFailure], loadRetries: [{ at: "t", url: "u", session: "s", cause: "ERR_CONNECTION_RESET", sockets: "x" }] },
+    { ...result([], "medium"), network: [appFailure], loadRetries: [{ at: "t", url: "u", session: "s", cause: "ERR_CONNECTION_RESET", sockets: "x" }] },
     "0.0.0",
   ) as {
     gate: { networkFailures?: number };
