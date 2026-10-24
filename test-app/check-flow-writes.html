@@ -20,7 +20,8 @@
          own path, so the smoke suite can count the two apart).
        - ?heartbeat=1: a fetch POST to this origin on a timer, which no step
          causes either, but is sent as a fetch.
-       - "Save on leave": a sendBeacon to this origin on pagehide.
+       - "Save on leave": a sendBeacon to this origin on pagehide, or on the
+         event ?on= names (visibilitychange or unload, which fire after it).
        - "Sign in on leave": a sendBeacon on pagehide to a sign-in address the
          fixture server answers 1.5 s later with a 307 to an ordinary save.
        - "Open things in a new tab": a same-origin link with target=_blank.
@@ -55,7 +56,9 @@
     });
     document.querySelector('[data-testid="writes-save-on-leave"]').addEventListener("click", () => {
       status.textContent = "Will save on leave";
-      addEventListener("pagehide", () => navigator.sendBeacon("/api/leave", "{}"));
+      // ?on= names the event the beacon goes on: pagehide unless it names visibilitychange or unload, which fire after it.
+      const on = ["visibilitychange", "unload"].includes(params.get("on")) ? params.get("on") : "pagehide";
+      addEventListener(on, () => navigator.sendBeacon("/api/leave", "{}"));
     });
     document.querySelector('[data-testid="writes-save-as-you-leave"]').addEventListener("click", () => {
       status.textContent = "Will save as you leave";

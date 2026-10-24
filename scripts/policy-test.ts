@@ -134,6 +134,7 @@ import {
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 import type { Request, Route } from "playwright";
 import { marksRouteExercised, pathnameOf, RouteGuard, routedWriteVerdict, type RouteGuardHost } from "../src/engine/route-guard.ts";
+import { settleWithin } from "../src/engine/best-effort.ts";
 import {
   destructiveGet,
   identifierWords,
@@ -1753,7 +1754,11 @@ test("a leave marker is sent to the page's own origin, only from a web page, and
   assert.equal(leaveMarkerToken("http://app.test/api/leave"), null);
   assert.equal(leaveMarkerToken("http://app.test/api__scenescout_left__/x"), null, "only at the start of the path");
   assert.equal(leaveMarkerToken(`http://app.test/app${LEAVE_MARKER_PATH}x`), null);
-  assert.equal(leaveMarkerToken(`http://app.test${LEAVE_MARKER_PATH}`), "", "the marker's path with no token is still the engine's");
+  assert.equal(
+    leaveMarkerToken(`http://app.test${LEAVE_MARKER_PATH}`),
+    "",
+    "the marker's path with no token parses as an empty token, which the guard never issues",
+  );
   assert.equal(leaveMarkerToken(`http://app.test${LEAVE_MARKER_PATH}%E0%A4%A`), "", "a token that cannot be decoded");
   assert.equal(leaveMarkerToken("garbage"), null);
 });
@@ -2558,6 +2563,64 @@ test("RouteGuard: a redirect's later hop to a destructive page load is refused a
   assert.equal(await hop(true, "https://app.example.com/items/3/delete"), "Fetch.failRequest");
   assert.equal(await hop(false, "https://app.example.com/items/3/delete"), "Fetch.continueRequest");
   assert.equal(await hop(true, "https://app.example.com/blog/archive"), "Fetch.continueRequest");
+});
+
+test("RouteGuard: only a leave marker the guard issued is failed unjudged; the same path with any other token is judged as the request it is", async () => {
+  const unseen = async (rule: (typeof WRITE_MODES)[number], url: string, postData = "") => {
+    const rig = guardRig(rule);
+    const marker = rig.guard.leaveMarker("https://app.example.com/things")!;
+    const sent: string[] = [];
+    let heard = false;
+    const waited = marker.heard(2000).then(() => (heard = true));
+    await (rig.guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+      { send: async (cmd: string) => void sent.push(cmd) },
+      {
+        requestId: "1",
+        resourceType: "Ping",
+        request: {
+          url: url.replace("ISSUED", marker.url),
+          method: "POST",
+          headers: { Origin: "https://app.example.com" },
+          postData: postData.replace("ISSUED", marker.url),
+        },
+      },
+    );
+    await settleWithin(waited, 50);
+    return { sent: sent[0], heard, calls: rig.calls };
+  };
+  // Destructive lets every write go, so only the marker's own handling can fail one.
+  const issued = await unseen("destructive", "ISSUED");
+  assert.deepEqual([issued.sent, issued.heard], ["Fetch.failRequest", true], "the issued marker is heard and never sent");
+  const guessed = await unseen("destructive", `https://app.example.com${LEAVE_MARKER_PATH}not-the-token`);
+  assert.deepEqual([guessed.sent, guessed.heard], ["Fetch.continueRequest", false], "a guessed token is the app's own request, and ends no wait");
+  const bare = await unseen("destructive", `https://app.example.com${LEAVE_MARKER_PATH}`);
+  assert.equal(bare.sent, "Fetch.continueRequest");
+  // Judged as the write it is: observe refuses a POST, and reports it.
+  const refused = await unseen("observe", `https://app.example.com${LEAVE_MARKER_PATH}not-the-token`);
+  assert.equal(refused.sent, "Fetch.failRequest");
+  assert.ok(
+    refused.calls.some((c) => c.startsWith("noteBlocked POST")),
+    refused.calls.join(" | "),
+  );
+  // A request carrying the issued marker in its body (a content policy's report of the blocked marker, or the app's
+  // analytics wrapping sendBeacon) is the engine's doing: failed unjudged, so the marker never leaves the browser. A body
+  // naming some other token is the app's.
+  const report = JSON.stringify({ "csp-report": { "blocked-uri": "ISSUED" } });
+  const carried = await unseen("destructive", "https://app.example.com/csp-report", report);
+  assert.deepEqual([carried.sent, carried.heard], ["Fetch.failRequest", false], "carrying the marker is not hearing it");
+  const other = await unseen("destructive", "https://app.example.com/csp-report", report.replace("ISSUED", `https://app.example.com${LEAVE_MARKER_PATH}x`));
+  assert.equal(other.sent, "Fetch.continueRequest");
+});
+
+test("RouteGuard: the route handler aborts only the leave marker the guard issued", async () => {
+  const rig = guardRig("destructive");
+  const marker = rig.guard.leaveMarker("https://app.example.com/things")!;
+  const path = new URL(marker.url).pathname;
+  assert.equal(await rig.send("POST", path).done, "abort blockedbyclient");
+  assert.equal(await rig.send("POST", `${LEAVE_MARKER_PATH}not-the-token`).done, "fallback");
+  assert.equal(await rig.send("POST", "/csp-report", { body: JSON.stringify({ "blocked-uri": marker.url }) }).done, "abort blockedbyclient");
+  const readOnly = guardRig("read-only");
+  assert.equal(await readOnly.send("GET", `${LEAVE_MARKER_PATH}x`).done, "fallback", "a read on the path is a read");
 });
 
 test("RouteGuard: the refusal of an overridden POST names the method it was judged as", async () => {

@@ -266,11 +266,18 @@ a beacon sent on `pagehide` after the navigation to `about:blank` has returned
 it. The write was still refused, under the flow's rule that `WriteRule` holds
 for a moment, but a refusal heard after a flow had handed back was missing from
 the flow's list. Before a flow leaves a page, the engine therefore has the page
-beacon a marker of its own as the last thing it does on `pagehide`
-(`LEAVE_MARKER_PATH` in `unload.ts`), and waits, up to a second, until the
-interception hears it. What one page sends as it is left is heard in the order
-it was sent (240 of 240 under load), so every write before the marker is then
-being judged. The marker itself is failed unjudged and never leaves the browser.
+beacon a marker of its own as the last thing it does as it is left
+(`LEAVE_MARKER_PATH` in `unload.ts`): on `unload`, or where a permissions policy
+turns `unload` off, on `visibilitychange` or `pagehide`, whichever fires last.
+It then waits, up to a second, until the interception hears it. What one
+document sends as it is left is heard in the order it was sent (240 of 240
+under load), so every write before the marker is then being judged. The marker
+itself is failed unjudged and never leaves the browser, and so is any request
+carrying it (a content policy's report of the blocked marker); only a marker the
+engine issued is treated so, and any other request to its path is judged as the
+request it is. A frame's leaving writes are heard in no fixed order with the
+page's marker, so one of those heard late is still refused but may be missing
+from the flow's list.
 
 ## Consequences
 

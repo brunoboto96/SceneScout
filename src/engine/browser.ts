@@ -6776,23 +6776,29 @@ export class BrowserEngine {
 
   /**
    * Before a page is left, where the browser-level interception judges what it sends on its way out (Chromium): have it
-   * beacon a marker as the last thing it does on pagehide (unload.ts LEAVE_MARKER_PATH), and return the wait for that
+   * beacon a marker as the last thing it does as it is left (unload.ts LEAVE_MARKER_PATH), and return the wait for that
    * marker to be heard, which once it returns means what the page sent before it is in unseenInFlight. The browser can
    * report a pagehide beacon after the navigation away has returned (measured: in 10 of 240 leaves under load), and a
    * round trip to the page is not ordered with that report. Bounded: a page whose content policy stops the marker, or
-   * that cannot be armed, costs the bound once, and a page with nothing to leave is not armed.
+   * that cannot be armed, costs the bound once, and a page with nothing to leave is not armed. Only the page's own
+   * document is armed: a frame's leaving writes are heard in no fixed order with it, and one heard late is still refused
+   * under the flow's rule (WriteRule), but may be missing from the flow's list.
    */
   private async armLeaveMarker(page: Page): Promise<() => Promise<void>> {
     const none = async (): Promise<void> => {};
     if (unloadWriteInterception(this.engineName) !== "browser-fetch" || page.isClosed()) return none;
     const marker = this.guard.leaveMarker(page.url());
     if (!marker) return none;
-    // Registered now, after every listener the app has added, so it runs after them on the way out.
+    // Registered now, after every listener the app has added, so it runs after them on the way out. On the last event
+    // the page will fire as it is left: pagehide, then visibilitychange (when the page is visible), then unload (unless a
+    // permissions policy turns unload off), so a beacon the app sends on any of them goes before the marker.
     let armed = false;
     await settleWithin(
       page
         .evaluate((url) => {
-          addEventListener("pagehide", () => {
+          const unload = (document as { featurePolicy?: { allowsFeature?(name: string): boolean } }).featurePolicy?.allowsFeature?.("unload") ?? true;
+          const last = unload ? "unload" : document.visibilityState === "visible" ? "visibilitychange" : "pagehide";
+          addEventListener(last, () => {
             try {
               navigator.sendBeacon(url, "");
             } catch {
