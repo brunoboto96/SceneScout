@@ -150,6 +150,19 @@ import {
   type ExplainOutcome,
 } from "../src/engine/policy-explain.ts";
 
+/** A destructive command joined to another word, and a read endpoint beside it whose word is another form of the verb (#684). */
+const JOINED_VERB_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ["deleteAll", "deletedAtFilter"],
+  ["bulkDelete", "bulkDeletionStatus"],
+  ["removeAll", "removedItems"],
+  ["purgeCache", "purgeableItems"],
+  ["archiveItem", "archives"],
+  ["revokeAllTokens", "revokedTokens"],
+  ["DeleteUser", "deleteReasons"],
+  ["delete_all", "deleted_at"],
+  ["wipe-all", "wiped-count"],
+];
+
 // ---------------------------------------------------------------------------
 // isDestructiveWire — argument order is load-bearing
 // ---------------------------------------------------------------------------
@@ -178,6 +191,37 @@ test("a DELETE path is destructive from the path alone", () => {
   assert.equal(isDestructiveWire("/api/users/3/delete", null), true);
   assert.equal(isDestructiveWire("/api/users/bulk-delete", null), true);
   assert.equal(isDestructiveWire("/api/users/3", null), false, "a plain resource path is not");
+});
+
+test("standard classifier: a verb joined to another word is read as a word of the path, and another form of the verb is not (#684)", () => {
+  // Each pair: the destructive command, then a read endpoint that a substring match would refuse.
+  for (const [refused, plain] of JOINED_VERB_PAIRS) {
+    assert.equal(isDestructiveRequest(`https://app.example.com/api/items/${refused}`, "{}"), true, `${refused} is a command`);
+    assert.equal(isDestructiveRequest(`https://app.example.com/api/items/${plain}`, "{}"), false, `${plain} is not`);
+  }
+  // A verb then a noun reads as the verb and its object, joined or not: the standard classifier does not guess the noun is a record about the act.
+  for (const path of ["/api/items/bulkDeleteHistory", "/api/items/bulk-delete-history", "/api/purgeReport", "/api/purge-report"])
+    assert.equal(isDestructiveWire(path, null), true, path);
+  // Except request(s) and reason(s), the strict classifier's noun phrase, in a segment of its own words: the verb alone in a segment still counts.
+  for (const path of ["/api/deleteReasons", "/api/delete-requests", "/api/bulkDeleteRequests"]) assert.equal(isDestructiveWire(path, null), false, path);
+  for (const path of ["/api/items/3/delete/requests", "/api/x?action=delete&reason=spam", "/api/delete;requests"])
+    assert.equal(isDestructiveWire(path, null), true, path);
+  // Every spelling of the same command.
+  for (const path of [
+    "/api/delete_all",
+    "/api/delete-all",
+    "/api/DELETE_ALL",
+    "/api/DeleteAll",
+    "/api/delete.all",
+    "/api/delete2",
+    "/api/v2Delete",
+    "/api/bulkdelete",
+  ])
+    assert.equal(isDestructiveWire(path, null), true, path);
+  // Verbs the standard list does not name stay plain, joined or not; the strict classifier refuses them.
+  assert.equal(isDestructiveWire("/api/items/cancelOrder", null), false);
+  assert.equal(isDestructiveRequest("https://app.example.com/api/items/cancelOrder", "{}", "strict"), true);
+  assert.equal(isDestructiveRequest("https://app.example.com/api/items/cancellationPolicy", "{}", "strict"), false);
 });
 
 test("the body is only read up to a bound", () => {
@@ -2366,10 +2410,10 @@ test("RouteGuard: a sign-in the strict classifier calls destructive is refused, 
   assert.equal(await guardRig("observe", { classifier: "strict" }).send("POST", "/api/auth/refresh", { body: '{"action":"cancel"}' }).done, "fulfill 403");
   // Allowlist: an operator listed an endpoint whose name the strict classifier reads as a command; the list never lifts that.
   for (const rule of ["observe", "read-only"] as const) {
-    const listed = { authPosts: ["POST /api/session/revokeOthers"] };
-    assert.equal(await guardRig(rule, listed).send("POST", "/api/session/revokeOthers", { body: "{}" }).done, "fallback", `${rule}: standard`);
+    const listed = { authPosts: ["POST /api/session/terminateOthers"] };
+    assert.equal(await guardRig(rule, listed).send("POST", "/api/session/terminateOthers", { body: "{}" }).done, "fallback", `${rule}: standard`);
     assert.equal(
-      await guardRig(rule, { ...listed, classifier: "strict" }).send("POST", "/api/session/revokeOthers", { body: "{}" }).done,
+      await guardRig(rule, { ...listed, classifier: "strict" }).send("POST", "/api/session/terminateOthers", { body: "{}" }).done,
       "fulfill 403",
       `${rule}: strict`,
     );
@@ -2571,13 +2615,17 @@ test("strict classifier: identifiers are split into words on camelCase, dots, da
   assert.deepEqual(identifierWords("productDelete"), ["product", "delete"]);
   assert.deepEqual(identifierWords("bulk-delete_all"), ["bulk", "delete", "all"]);
   assert.deepEqual(identifierWords("HTMLDeleteButton"), ["html", "delete", "button"]);
+  // Where letters meet digits, only when asked: a page load's address keeps `archive2024` one word, so `/blog/archive2024` still loads.
+  assert.deepEqual(identifierWords("v2delete3All", { digits: true }), ["v", "2", "delete", "3", "all"]);
+  assert.deepEqual(identifierWords("archive2024"), ["archive2024"]);
+  assert.equal(destructiveGet("https://app.example.com/blog/archive2024"), false);
 });
 
 test("strict classifier: the shapes the standard one misses are destructive when it is on, and not when it is off", () => {
   const H = "https://app.example.com";
   const missedByStandard: Array<[string, string | null, string]> = [
-    [`${H}/api/deleteUser`, '{"id":3}', "camelCase path"],
-    [`${H}/rpc/UserService.DeleteUser`, "{}", "RPC path"],
+    [`${H}/api/refundOrder`, '{"id":3}', "camelCase path with a verb only the strict one knows"],
+    [`${H}/rpc/OrderService.CancelOrder`, "{}", "RPC path with a verb only the strict one knows"],
     [`${H}/api/things/3?action=delete`, null, "the query's action"],
     [`${H}/jsonrpc`, JSON.stringify({ jsonrpc: "2.0", method: "things.delete", params: { id: 3 } }), "JSON-RPC method"],
     [`${H}/graphql`, JSON.stringify({ query: "mutation { productDelete(id: 3) { id } }" }), "noun-first GraphQL"],
@@ -2593,6 +2641,12 @@ test("strict classifier: the shapes the standard one misses are destructive when
   for (const [url, body] of [
     [`${H}/api/users/3/delete`, null],
     [`${H}/api/widgets/bulk-delete`, "{}"],
+    // Joined forms, which the standard classifier reads since #684.
+    [`${H}/api/deleteUser`, '{"id":3}'],
+    [`${H}/rpc/UserService.DeleteUser`, "{}"],
+    [`${H}/api/items/deleteAll`, "{}"],
+    [`${H}/api/items/bulkDelete`, "{}"],
+    [`${H}/api/delete2`, "{}"],
     [`${H}/graphql`, "mutation { deleteUser(id: 7) { id } }"],
     [`${H}/api/batch`, JSON.stringify({ action: "delete", ids: [1] })],
     [`${H}/api/patch`, JSON.stringify([{ op: "remove", path: "/a" }])],
@@ -2616,7 +2670,9 @@ test("strict classifier: a noun phrase and prose that looks like a command are n
   const H = "https://app.example.com";
   const harmless: Array<[string, string | null, string, boolean]> = [
     // url, body, what, what the standard classifier says today
-    [`${H}/api/delete-requests`, JSON.stringify({ reason: "moving" }), "a collection of deletion requests", true],
+    // The standard classifier refused this until #684, and reads the noun phrase as the strict one does since.
+    [`${H}/api/delete-requests`, JSON.stringify({ reason: "moving" }), "a collection of deletion requests", false],
+    [`${H}/api/deleteReasons`, "{}", "the reasons offered for deleting, joined", false],
     [`${H}/api/notes`, JSON.stringify({ note: "action: delete" }), "a note whose text looks like a command key", true],
     [`${H}/api/orders/3/cancel-reasons`, "{}", "the reasons offered for cancelling", false],
     [
@@ -2706,12 +2762,16 @@ test("strict settings: read from the environment, off by default, and a value th
 });
 
 test("RouteGuard: the strict classifier and destructive page loads apply only when turned on", async () => {
-  // A camelCase delete goes out in read-only with the standard classifier, and is refused with the strict one.
-  assert.equal(await guardRig("read-only").send("POST", "/api/deleteUser", { body: "{}" }).done, "fallback");
-  assert.equal(await guardRig("read-only", { classifier: "strict" }).send("POST", "/api/deleteUser", { body: "{}" }).done, "fulfill 403");
-  // The contrast the other way: the noun phrase the standard classifier refuses goes out with the strict one.
-  assert.equal(await guardRig("read-only").send("POST", "/api/delete-requests", { body: "{}" }).done, "fulfill 403");
-  assert.equal(await guardRig("read-only", { classifier: "strict" }).send("POST", "/api/delete-requests", { body: "{}" }).done, "fallback");
+  // A verb only the strict classifier knows goes out in read-only with the standard one, and is refused with the strict one.
+  assert.equal(await guardRig("read-only").send("POST", "/api/cancelOrder", { body: "{}" }).done, "fallback");
+  assert.equal(await guardRig("read-only", { classifier: "strict" }).send("POST", "/api/cancelOrder", { body: "{}" }).done, "fulfill 403");
+  // A camelCase delete is refused by both (#684).
+  assert.equal(await guardRig("read-only").send("POST", "/api/items/deleteAll", { body: "{}" }).done, "fulfill 403");
+  assert.equal(await guardRig("read-only", { classifier: "strict" }).send("POST", "/api/items/deleteAll", { body: "{}" }).done, "fulfill 403");
+  // The contrast the other way: prose the standard classifier reads as a command key goes out with the strict one.
+  const note = { body: '{"note":"action: delete"}' };
+  assert.equal(await guardRig("read-only").send("POST", "/api/notes", note).done, "fulfill 403");
+  assert.equal(await guardRig("read-only", { classifier: "strict" }).send("POST", "/api/notes", note).done, "fallback");
   // A link to /items/3/delete is followed unless destructive page loads are refused, and only in observe and read-only.
   assert.equal(await guardRig("read-only").send("GET", "/items/3/delete", { type: "document" }).done, "fallback");
   for (const rule of ["observe", "read-only"] as const) {
@@ -2745,6 +2805,24 @@ test("fuzz: the strict classifier misses less and flags less than the standard o
   for (const c of cases)
     if (c.destructive && isDestructiveRequest(c.url, c.body, "standard"))
       assert.equal(isDestructiveRequest(c.url, c.body, "strict"), true, `strict misses what standard catches: ${c.url} ${c.body}`);
+});
+
+test("fuzz: the standard classifier reads joined verbs, and no other form of a verb or noun phrase is among its false alarms (#684)", () => {
+  const cases = fuzzCases(4000, 548);
+  const standard = fuzzRates(cases, "standard");
+  // Its false alarms are the shapes it was always written to raise: a verb used as a noun, prose that looks like a command key, a harmless mutation naming verbs.
+  assert.deepEqual(Object.keys(standard.falseAlarmShapes).sort(), [
+    "harmless mutation with verbs in strings and fields",
+    "prose that looks like a command",
+    "verb used as a noun",
+  ]);
+  // A joined verb it names is refused; a joined verb it misses is one only the strict list names.
+  const STANDARD_VERBS = ["delete", "remove", "purge", "destroy", "archive", "revoke", "deactivate", "wipe"];
+  for (const c of cases.filter((x) => x.shape === "joined verb segment" || x.shape === "camelCase path")) {
+    const segment = c.url.split("/").pop() ?? "";
+    const named = STANDARD_VERBS.some((v) => identifierWords(segment).includes(v));
+    assert.equal(isDestructiveRequest(c.url, c.body, "standard"), named, c.url);
+  }
 });
 
 // ── The guided plan's gate on scout_attach (ADR 24) ─────────────────────────
@@ -3545,6 +3623,19 @@ test("policy explain: each mode's verdict on the request shapes the safety model
         path: "/api/auth/signup",
         expect: { observe: "refused", "read-only": "allowed", "safe-write": "allowed", destructive: "allowed" },
       },
+      // A verb joined to the word after it (#684), beside a read endpoint whose word is another form of the verb.
+      {
+        what: "a camelCase destructive POST",
+        method: "POST",
+        path: "/api/items/deleteAll",
+        expect: { observe: "refused", "read-only": "depends", "safe-write": "depends", destructive: "allowed" },
+      },
+      {
+        what: "a camelCase read POST",
+        method: "POST",
+        path: "/api/items/deletedAtFilter",
+        expect: { observe: "refused", "read-only": "allowed", "safe-write": "allowed", destructive: "allowed" },
+      },
       // The command lives only in the body.
       {
         what: "a command in the body",
@@ -3562,8 +3653,8 @@ test("policy explain: each mode's verdict on the request shapes the safety model
 });
 
 test("policy explain: the settings the server reads change the verdicts as they change the route handler's", () => {
-  // The strict classifier: a camelCase delete is plain to the standard one and destructive to the strict one.
-  const camel = { method: "POST", url: `${EXPLAIN_APP}/api/deleteUser`, body: "{}", mode: "read-only" as const };
+  // The strict classifier: a verb only it knows is plain to the standard one and destructive to the strict one.
+  const camel = { method: "POST", url: `${EXPLAIN_APP}/api/cancelOrder`, body: "{}", mode: "read-only" as const };
   assert.equal(explainRequest(camel).verdicts[0].outcome, "allowed");
   assert.equal(explainRequest({ ...camel, settings: { ...DEFAULT_POLICY_SETTINGS, classifier: "strict" } }).verdicts[0].outcome, "depends");
   // Destructive page loads: followed unless the setting is on, and then only in observe and read-only.
@@ -3607,6 +3698,13 @@ test("policy explain: its verdicts are the route handler's on the same request, 
     { method: "POST", path: "/api/rpc", body: '{"action":"archive"}' },
     { method: "POST", path: "/api/deleteUser", body: "{}" },
     { method: "POST", path: "/api/delete-requests", body: "{}" },
+    // Joined destructive verbs and the read endpoints beside them (#684).
+    ...JOINED_VERB_PAIRS.flatMap(([refused, plain]) => [
+      { method: "POST", path: `/api/items/${refused}`, body: "{}" },
+      { method: "POST", path: `/api/items/${plain}`, body: "{}" },
+    ]),
+    { method: "POST", path: "/api/items/cancelOrder", body: "{}" },
+    { method: "POST", path: "/api/items/cancellationPolicy", body: "{}" },
     { method: "POST", path: "/api/auth/login", body: "{}" },
     { method: "POST", path: "/api/auth/signup", body: "{}" },
     { method: "POST", path: "/api/session/123/delete", body: "{}" },

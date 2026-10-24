@@ -86,6 +86,13 @@ export function fuzzCases(n = 2000, seed = 548): FuzzCase[] {
       destructive: true,
       shape: "verb before its object",
     }),
+    // A verb joined to another word with no separator (#684): `deleteAll`, `bulkPurge`, `RemoveWidgets`.
+    () => {
+      const verb = pick(VERBS);
+      const noun = pick(NOUNS);
+      const segment = pick([`${verb}All`, `bulk${cap(verb)}`, `${cap(verb)}${cap(noun)}s`, `${verb}${cap(noun)}Cache`]);
+      return { url: `${HOST}/api/${noun}s/${segment}`, body: JSON.stringify({ ids: [1, 2] }), destructive: true, shape: "joined verb segment" };
+    },
     // Verbs no list here names: what both classifiers are expected to miss.
     () => ({
       url: `${HOST}/api/${pick(NOUNS)}s/${id()}/${pick(["void", "ban", "unpublish", "drop", "reset", "expire"])}`,
@@ -142,6 +149,25 @@ export function fuzzCases(n = 2000, seed = 548): FuzzCase[] {
       shape: "verb words as values",
     }),
     () => ({ url: `${HOST}/api/${pick(NOUNS)}s/${id()}/cancel-reasons`, body: "{}", destructive: false, shape: "noun phrase segment" }),
+    // Another form of a verb, joined to other words: a read that a substring match would refuse (#684).
+    () => ({
+      url: `${HOST}/api/${pick(NOUNS)}s/${pick([
+        "deletedAtFilter",
+        "deleteReasons",
+        "removedItems",
+        "purgeable",
+        "archives",
+        "bulkDeletionStatus",
+        "cancellationPolicy",
+        "revokedTokens",
+        "deactivatedSince",
+        "destroyedCount",
+        "discardedDrafts",
+      ])}`,
+      body: JSON.stringify({ page: 1 }),
+      destructive: false,
+      shape: "other form of a verb, joined",
+    }),
     // A verb used as a noun with no word after it that says so: what the strict classifier is expected to flag.
     () => ({
       url: `${HOST}/api/products/${pick(["trash-can", "archive-box", "wipe-dispenser", "remove-tool"])}/reviews`,

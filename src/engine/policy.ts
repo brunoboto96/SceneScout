@@ -7,7 +7,7 @@ import { isIdSegment } from "./fingerprint.js";
 import { fromJs, registerJsPattern } from "./js-regex.js";
 import { isSpace, LinearRegex, SPACE } from "./linear-regex.js";
 import { scriptLiteral } from "./script-literal.js";
-import { strictIsDestructive, type WriteClassifier } from "./strict-writes.js";
+import { identifierWords, strictIsDestructive, wordsCommand, type WriteClassifier } from "./strict-writes.js";
 
 /** A label's word as the destructive patterns read it: `\bword\b`, case folded as JavaScript's `i` flag does without `u`. */
 const word = (source: string, needs?: readonly string[]): LinearRegex => fromJs(String.raw`\b${source}\b`, "i", needs ? { needs } : {});
@@ -136,11 +136,45 @@ const DESTRUCTIVE_PATTERNS: LinearRegex[] = [
  * destructive. So the body is matched only for STRUCTURED destructive intent.
  */
 
-/** A destructive verb occupying a URL PATH segment. Bare keywords are meaningful here — a path is not prose. */
-const DESTRUCTIVE_URL_RE = fromJs(
-  String.raw`(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|discard|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)`,
-  "i",
-);
+/**
+ * The verbs that make a URL path a destructive command, read as whole WORDS
+ * of the path (#684). The path is read twice: as the words between its
+ * separators (`/`, `-`, `_`, `.`, … : `/users/3/delete`, `/delete_all`,
+ * `/DELETE-ALL`), and with its identifiers split on camelCase, PascalCase and
+ * where letters meet digits too (strict-writes.ts identifierWords:
+ * `/items/deleteAll`, `/bulkDelete`, `/removeAll`, `/purgeCache`,
+ * `/UserService.DeleteUser`, `/delete2`). A verb in either reading counts.
+ *
+ * Whole words only: another form of the verb is not the verb, so
+ * `/deletedAtFilter`, `/removedItems`, `/purgeable`, `/archives` and
+ * `/bulkDeletionStatus` stay plain. A verb followed by `request(s)` or
+ * `reason(s)` is a noun phrase, a record about the act (`/delete-requests`,
+ * `/deleteReasons`), as in the strict classifier. Any other noun after the
+ * verb is read as its object, so `/purgeReport` and `/bulkDeleteHistory`
+ * count, as `/purge-report` and `/bulk-delete-history` always did.
+ */
+const STANDARD_PATH_VERBS: ReadonlySet<string> = new Set(["delete", "remove", "purge", "destroy", "archive", "revoke", "deactivate", "wipe", "discard"]);
+/** Verbs written joined to a modifier, in lower case, that no split can find. */
+const JOINED_PATH_VERBS: ReadonlySet<string> = new Set(["bulkdelete", "forcedelete"]);
+/** Where a path's segments (and a query's keys and values) end: a noun phrase never reaches across one. */
+const SEGMENT_END_RE = fromJs(String.raw`[/?&=#;]+`);
+const WORD_SEPARATORS_RE = fromJs(String.raw`[^A-Za-z0-9]+`);
+
+/** Whether one path segment names a destructive verb, in either reading. */
+function segmentNamesDestructiveVerb(segment: string): boolean {
+  const tokens = WORD_SEPARATORS_RE.splitText(segment.toLowerCase()).filter(Boolean);
+  if (tokens.some((t) => JOINED_PATH_VERBS.has(t))) return true;
+  return wordsCommand(tokens, STANDARD_PATH_VERBS) || wordsCommand(identifierWords(segment, { digits: true }), STANDARD_PATH_VERBS);
+}
+
+/**
+ * Whether a URL path names a destructive verb as one of its words (the
+ * standard classifier's reading of a path). Each segment is read on its own,
+ * so `/items/3/delete/requests` and `?action=delete&reason=x` still count.
+ */
+export function pathNamesDestructiveVerb(path: string): boolean {
+  return SEGMENT_END_RE.splitText(path).some(segmentNamesDestructiveVerb);
+}
 
 /**
  * Structured destructive intent inside a body — never a bare keyword.
@@ -164,7 +198,7 @@ const DESTRUCTIVE_BODY_RE = fromJs(
 );
 
 export function isDestructiveWire(url: string, body?: string | null): boolean {
-  return DESTRUCTIVE_URL_RE.test(url) || (!!body && DESTRUCTIVE_BODY_RE.test(body.slice(0, 2000)));
+  return pathNamesDestructiveVerb(url) || (!!body && DESTRUCTIVE_BODY_RE.test(body.slice(0, 2000)));
 }
 
 /**
