@@ -109,6 +109,7 @@ import {
 } from "../src/engine/forms.ts";
 import { coverageView, generateReport, runRecordOf } from "../src/engine/report.ts";
 import { maskedValue, maskFillCalls, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
+import { maskPageText, maskToolResult } from "../src/engine/redact.ts";
 import { MASK_COLOR, MAX_FIELD_MASKS, masksToPaint, SECRET_BY_ATTRIBUTE } from "../src/engine/secret-pixels.ts";
 import { REDACTION_VERSION } from "../src/engine/memory-scrub.ts";
 import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
@@ -4836,3 +4837,71 @@ test(
       }
     }),
 );
+
+// ---------------------------------------------------------------------------
+// redactPageText "pii": what the tools return to the agent (issue #537)
+// ---------------------------------------------------------------------------
+
+// Built at run time: a real-looking address written out in full would be flagged by the hygiene suite.
+const PAGE_PERSON = ["jo.sample", "contoso-mail.net"].join("@");
+
+test("maskPageText masks an email, a phone after its word and a card number with typed markers, and leaves their near misses", () => {
+  const masked: Array<[string, string]> = [
+    [`Signed in as ${PAGE_PERSON}`, "Signed in as [email redacted]"],
+    ["Phone: +44 20 7946 0958", "Phone: [phone redacted]"],
+    ["Card 4111 1111 1111 1111 on file", "Card [card number redacted] on file"],
+    [`- row "${PAGE_PERSON} 4111-1111-1111-1111 Phone: (555) 123-4567"`, '- row "[email redacted] [card number redacted] Phone: [phone redacted]"'],
+  ];
+  for (const [input, want] of masked) assert.equal(maskPageText(input), want, input);
+  // Each beside the one fact that keeps it: a reserved example domain, a number with no word for a phone before it, an
+  // order id no card network issues, a date after the word for a phone.
+  const kept = ["Write to help@example.com", "Ref +44 20 7946 0958", "Order 1234 5678 9012 3456", "Phone: 2026-10-11", 'button "Save" [ref=e12]'];
+  for (const text of kept) assert.equal(maskPageText(text), text, text);
+  // Unlike the stored form, nothing is counted: a credential is left to the tools' own masking of secret fields.
+  assert.equal(maskPageText("token: abc123def456ghi789"), "token: abc123def456ghi789");
+});
+
+test("maskToolResult masks every text part and every string of structured content, and leaves pictures, keys and numbers", () => {
+  const picture = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+  const said = { type: "text", text: `Contact ${PAGE_PERSON}` };
+  const result = {
+    content: [said, picture],
+    structuredContent: { [PAGE_PERSON]: { phone: "Tel. 030 123 45 67", list: ["4111 1111 1111 1111", 4111111111111111, null, true] } },
+    isError: false,
+  };
+  const out = maskToolResult(result);
+  assert.deepEqual(out.content, [{ type: "text", text: "Contact [email redacted]" }, picture]);
+  assert.deepEqual(out.structuredContent, {
+    [PAGE_PERSON]: { phone: "Tel. [phone redacted]", list: ["[card number redacted]", 4111111111111111, null, true] },
+  });
+  assert.equal(out.isError, false);
+  assert.equal(said.text, `Contact ${PAGE_PERSON}`, "the result the tool built is not changed in place");
+  // An embedded resource's text is masked too; its other fields are kept.
+  const embedded = maskToolResult({ content: [{ type: "resource", resource: { uri: "scenescout://x", text: `Owner ${PAGE_PERSON}` } }] });
+  assert.deepEqual(embedded.content, [{ type: "resource", resource: { uri: "scenescout://x", text: "Owner [email redacted]" } }]);
+  // The contrast: a result with nothing personal comes back equal.
+  const plain = { content: [{ type: "text", text: '- heading "Orders" [ref=e1]' }] };
+  assert.deepEqual(maskToolResult(plain), plain);
+});
+
+test("a title the agent copies from masked page text dedups with the finding an oracle stored from the page as it is", () => {
+  // Oracles read the page before masking and the store redacts what it keeps with the same markers, so the two agree.
+  const store = freshStore();
+  const raw = `Profile shows ${PAGE_PERSON} as owner of every record`;
+  const [stored, isNew] = store.addFinding({ ...base, category: "wrong-data", title: raw, detail: "x", evidence: raw });
+  assert.equal(isNew, true);
+  assert.equal(stored.title, maskPageText(raw), "the stored title is the masked one");
+  const copied = maskPageText(raw);
+  const [, againNew] = store.addFinding({ ...base, category: "wrong-data", title: copied, detail: "y", evidence: copied });
+  assert.equal(againNew, false, "the agent's filing from masked text merged into the oracle's");
+  // The contrast: another person's address is another finding.
+  const other = ["kim.example", "fabrikam-mail.org"].join("@");
+  const [, otherNew] = store.addFinding({
+    ...base,
+    category: "wrong-data",
+    title: `Profile shows ${other} twice in the header`,
+    detail: "z",
+    evidence: `header ${other}`,
+  });
+  assert.equal(otherNew, true);
+});

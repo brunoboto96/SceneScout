@@ -1769,6 +1769,34 @@ async function configCheck(): Promise<void> {
       const shot = await call("scout_screenshot", {});
       if (shot.isError) fail(`egress "model-only" refused scout_screenshot:\n${shot.text}`);
     });
+    // redactPageText "pii": the page's email, phone and card reach the agent as markers in the snapshot, the title and an API
+    // response body; "off" returns them as written. A reserved example address is left either way.
+    const person = ["jo.sample", "contoso-mail.net"].join("@");
+    for (const mode of ["pii", "off"] as const) {
+      await withServer({ SCENESCOUT_CONFIG: configFile(`redact-${mode}.json`, { redactPageText: mode }) }, async (attach, call) => {
+        const r = await attach({ mode: "observe", url: `${fixture.baseUrl}/personal-data.html` });
+        if (r.isError) fail(`an observe attach under redactPageText "${mode}" was refused:\n${r.text}`);
+        if ((mode === "pii") !== /redactPageText "pii": email addresses, phone numbers and card numbers/.test(r.text))
+          fail(`the attach's Config line under redactPageText "${mode}" did not say what it masks, or said so when off:\n${r.text}`);
+        const snap = await call("scout_snapshot", {});
+        const api = await call("scout_request", { path: "/api/personal-data", task: "Reading the account record" });
+        for (const [what, out] of [
+          ["scout_snapshot", snap],
+          ["scout_request", api],
+        ] as const) {
+          if (out.isError) fail(`${what} failed under redactPageText "${mode}":\n${out.text}`);
+          const raw = [person, "7946 0958", "4111 1111 1111 1111"].filter((v) => out.text.includes(v));
+          const markers = ["[email redacted]", "[phone redacted]", "[card number redacted]"].filter((v) => out.text.includes(v));
+          if (mode === "pii" && (raw.length > 0 || markers.length !== 3))
+            fail(
+              `${what} under redactPageText "pii" returned ${raw.length > 0 ? `unmasked ${raw.join(", ")}` : `only ${markers.join(", ") || "no markers"}`}:\n${out.text}`,
+            );
+          if (mode === "off" && (raw.length !== 3 || markers.length > 0))
+            fail(`${what} under redactPageText "off" did not return the page as written:\n${out.text}`);
+        }
+        if (!snap.text.includes("help@example.com")) fail(`a reserved example address was masked under redactPageText "${mode}":\n${snap.text}`);
+      });
+    }
     // projectsRoot: a project folder outside it is refused at attach and at scan; one inside it is taken.
     const root = path.join(dir, "root");
     fs.mkdirSync(path.join(root, "app"), { recursive: true });
@@ -1857,7 +1885,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; redactPageText \"pii\" masks a page's email, phone and card in scout_snapshot and scout_request, and \"off\" does not; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();

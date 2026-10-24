@@ -303,3 +303,52 @@ export function redactRoute(route: string): string {
   // The trailing "[n secrets redacted]" note belongs to prose; in a route it would read as part of the path.
   return REDACTED_NOTE.replace(redactSecrets(route), "");
 }
+
+/**
+ * Personal data in the page's text, masked for the agent when the config's
+ * redactPageText is "pii" (issue #537): email addresses, a phone number after
+ * a word for one, and card numbers, each replaced by the marker redactPersonal
+ * writes (`[email redacted]`, `[phone redacted]`, `[card number redacted]`).
+ * They are the markers a stored finding already carries, so a title the agent
+ * copies from masked text is the title the store keeps, and dedup reads both
+ * alike. Credentials are not counted or noted here: this is what the agent
+ * reads, not what is kept.
+ */
+export const maskPageText = (text: string): string => redactPersonal(text);
+
+/** A tool's result as the MCP server returns it: text and pictures, and perhaps structured content. */
+export interface MaskableResult {
+  content: Array<{ type: string; text?: string } & Record<string, unknown>>;
+  structuredContent?: Record<string, unknown>;
+}
+
+/** Every string in a JSON value masked, its keys and every other value kept. */
+function maskStrings(value: unknown, mask: (text: string) => string): unknown {
+  if (typeof value === "string") return mask(value);
+  if (Array.isArray(value)) return value.map((v) => maskStrings(v, mask));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) out[k] = maskStrings(v, mask);
+    return out;
+  }
+  return value;
+}
+
+/**
+ * A tool's result with personal data masked in each text part (and an
+ * embedded resource's text) and in every string value of its structured
+ * content; keys are kept. A picture is returned as it is: what it
+ * shows is masked only where secret-pixels.ts paints a field over.
+ */
+export function maskToolResult<T extends MaskableResult>(result: T, mask: (text: string) => string = maskPageText): T {
+  const content = result.content.map((part) => {
+    if (part.type === "text" && typeof part.text === "string") return { ...part, text: mask(part.text) };
+    // An embedded resource's text, should a tool return one.
+    const resource = part.resource as { text?: unknown } | undefined;
+    if (part.type === "resource" && resource && typeof resource.text === "string") return { ...part, resource: { ...resource, text: mask(resource.text) } };
+    return part;
+  });
+  const out = { ...result, content };
+  if (result.structuredContent !== undefined) out.structuredContent = maskStrings(result.structuredContent, mask) as Record<string, unknown>;
+  return out;
+}

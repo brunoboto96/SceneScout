@@ -80,6 +80,7 @@ export const CONFIG_KEYS = [
   "writeClassifier",
   "refuseDestructiveGets",
   "authPosts",
+  "redactPageText",
 ] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 
@@ -132,6 +133,51 @@ export function egressRefusal(loaded: LoadedPolicy, via: EgressPath, what: strin
   ]);
 }
 
+// ---- redactPageText: personal data in the page's text masked before the agent reads it (issue #537) ----
+
+/**
+ * Whether the tools mask personal data in what they return to the agent:
+ * `off` returns the page's text as it is (the default, and what no file
+ * means); `pii` masks email addresses, phone numbers written after a word for
+ * one, and card numbers, with the markers redactPersonal writes (sensitive.ts).
+ */
+export const REDACT_PAGE_TEXT_MODES = ["off", "pii"] as const;
+export type RedactPageTextMode = (typeof REDACT_PAGE_TEXT_MODES)[number];
+
+/** Two files' redactPageText as one: masking wins, so a project's own file can turn it on and never off. */
+export function tightenRedactPageText(a: RedactPageTextMode | undefined, b: RedactPageTextMode | undefined): RedactPageTextMode | undefined {
+  if (a === undefined && b === undefined) return undefined;
+  return a === "pii" || b === "pii" ? "pii" : "off";
+}
+
+/** Whether a config masks personal data in the tools' results. No setting is `off`. */
+export const redactsPageText = (policy: Policy): boolean => policy.redactPageText === "pii";
+
+/** The attach's and a command's "Config:" line for redactPageText, empty when it is off. */
+export function redactPageTextNote(policy: Policy): string[] {
+  return redactsPageText(policy)
+    ? [
+        'redactPageText "pii": email addresses, phone numbers and card numbers in the page\'s text are masked in what the scout_* tools return to an agent, not in reports',
+      ]
+    : [];
+}
+
+/**
+ * Whether one tool call's result is masked: when the operator's config says
+ * so, when the session the call names runs under a config that says so, or,
+ * for a call that names no session (it may read any session's project, as
+ * scout_cards and the status pane do), when any open session does. `named`
+ * is the named session's config, null when the call names none, undefined
+ * when it names one that is not open.
+ */
+export function pageTextMaskedFor(operator: Policy, named: Policy | null | undefined, open: readonly Policy[]): boolean {
+  if (redactsPageText(operator)) return true;
+  if (named === null) return open.some(redactsPageText);
+  return named !== undefined && redactsPageText(named);
+}
+
+// ---- end redactPageText ----
+
 /**
  * Why the config refuses a tool that returns a picture of the app into the
  * conversation (`scout_screenshot`, `scout_cards` with inline pictures), or
@@ -173,6 +219,8 @@ export interface Policy extends WriteRulesPolicy {
   uploads?: UploadMode;
   /** What SceneScout itself may send off the machine. Unset: everything, as without a file. */
   egress?: EgressMode;
+  /** Whether personal data in the page's text is masked in what the tools return to the agent. Unset: "off", as without a file. */
+  redactPageText?: RedactPageTextMode;
   /**
    * The folder every project folder must sit inside, by its real path: an
    * attach's projectPath (or the folder it would default to), scout_login's,
@@ -197,9 +245,10 @@ export const NO_POLICY: LoadedPolicy = { policy: {}, sources: [] };
  * machine; egress, which no preset sets so that adopting one never stops an
  * export or a `ci` run that worked before; and writeClassifier and authPosts,
  * which no preset sets because the strict classifier refuses writes the
- * standard one lets out and a sign-in list names one app's endpoints.
+ * standard one lets out and a sign-in list names one app's endpoints; and
+ * redactPageText, which changes what the agent reads rather than what it may do.
  */
-export type PresetPolicy = Required<Omit<Policy, "projectsRoot" | "egress" | "writeClassifier" | "authPosts" | "authPostsNarrowOnly">>;
+export type PresetPolicy = Required<Omit<Policy, "projectsRoot" | "egress" | "writeClassifier" | "authPosts" | "authPostsNarrowOnly" | "redactPageText">>;
 
 /** What each preset sets. A key the file sets beside the preset replaces the preset's value for that key. */
 export const PRESET_POLICY: Record<Preset, PresetPolicy> = {
@@ -310,6 +359,8 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
   if (!uploads.ok) return uploads;
   const egress = oneOf("egress", EGRESS_MODES);
   if (!egress.ok) return egress;
+  const redactPageText = oneOf("redactPageText", REDACT_PAGE_TEXT_MODES);
+  if (!redactPageText.ok) return redactPageText;
   const root = obj.projectsRoot;
   if (root !== undefined && (typeof root !== "string" || !path.isAbsolute(root.trim())))
     return bad(`"projectsRoot" must be the absolute path of a folder, not ${JSON.stringify(root)}`);
@@ -338,6 +389,7 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
     writeClassifier: writeClassifier.value,
     refuseDestructiveGets: obj.refuseDestructiveGets as boolean | undefined,
     authPosts: authPosts.value,
+    redactPageText: redactPageText.value,
   };
   for (const [k, v] of Object.entries(set)) if (v !== undefined) (base as Record<string, unknown>)[k] = v;
   return { ok: true, policy: base };
@@ -383,6 +435,7 @@ export function tightenPolicy(a: Policy, b: Policy): Policy {
   if (a.evidence || b.evidence) out.evidence = a.evidence && b.evidence ? below(EVIDENCE_ORDER, a.evidence, b.evidence) : (a.evidence ?? b.evidence);
   if (a.uploads || b.uploads) out.uploads = a.uploads && b.uploads ? below(UPLOAD_ORDER, a.uploads, b.uploads) : (a.uploads ?? b.uploads);
   if (a.egress || b.egress) out.egress = a.egress && b.egress ? below(EGRESS_ORDER, a.egress, b.egress) : (a.egress ?? b.egress);
+  if (a.redactPageText || b.redactPageText) out.redactPageText = tightenRedactPageText(a.redactPageText, b.redactPageText);
   if (a.writeClassifier || b.writeClassifier) out.writeClassifier = a.writeClassifier === "strict" || b.writeClassifier === "strict" ? "strict" : "standard";
   if (a.refuseDestructiveGets !== undefined || b.refuseDestructiveGets !== undefined)
     out.refuseDestructiveGets = a.refuseDestructiveGets === true || b.refuseDestructiveGets === true;
@@ -866,7 +919,7 @@ export function applyToCommand(
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
   const dedup = options.dedup === undefined ? undefined : (r.settings.dedup ?? options.dedup);
-  const notes = [...gateNotes, ...r.notes, ...writeRulesNote(loaded.policy, writeRules)];
+  const notes = [...gateNotes, ...r.notes, ...writeRulesNote(loaded.policy, writeRules), ...redactPageTextNote(loaded.policy)];
   // Said once: resolveSettings already said so when the environment asked for the judge.
   if (options.dedup !== undefined && dedup !== options.dedup && !notes.some((n) => n.startsWith("dedup ")))
     notes.push(`dedup "${dedup}": the default "${options.dedup}" is above the config's dedup`);

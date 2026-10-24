@@ -24,6 +24,9 @@ import {
   EGRESS_PATHS,
   egressAllows,
   egressRefusal,
+  pageTextMaskedFor,
+  REDACT_PAGE_TEXT_MODES,
+  redactPageTextNote,
   readCommandPolicy,
   fsPolicyReader,
   NO_POLICY,
@@ -4449,6 +4452,69 @@ test("config: ci and export stop with exit 2 under egress none before any key or
     // And readCommandPolicy is what both read: the project's file joined to the launch directory's (none here).
     const read = readCommandPolicy({}, dir, project, fsPolicyReader);
     assert.ok(read.ok && read.loaded.policy.egress === "model-only", JSON.stringify(read));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── redactPageText: personal data in the page's text masked before the agent reads it (issue #537) ──────
+
+test("config: redactPageText is checked like every key, no preset sets it, and a project's file can turn it on and never off", () => {
+  assert.deepEqual([...REDACT_PAGE_TEXT_MODES], ["off", "pii"]);
+  const r = parsePolicy('{"redactPageText": "all"}', "config.json");
+  assert.ok(!r.ok && /"redactPageText" must be one of "off", "pii", not "all"/.test(r.error), r.ok ? "taken" : r.error);
+  assert.ok(!parsePolicy('{"redactPageText": true}', "config.json").ok, "a boolean is not a mode");
+  assert.deepEqual(parsed('{"redactPageText": "pii"}'), { redactPageText: "pii" });
+  assert.deepEqual(parsed('{"redactPageText": "off"}'), { redactPageText: "off" });
+  assert.equal(parsed('{"preset": "strict"}').redactPageText, undefined, "strict changes what the agent may do, not what it reads");
+  assert.equal(tightenPolicy({ redactPageText: "off" }, { redactPageText: "pii" }).redactPageText, "pii", "the project's file turns it on");
+  assert.equal(tightenPolicy({ redactPageText: "pii" }, { redactPageText: "off" }).redactPageText, "pii", "and cannot turn the operator's off");
+  assert.equal(tightenPolicy({}, { redactPageText: "pii" }).redactPageText, "pii");
+  assert.equal(tightenPolicy({ redactPageText: "off" }, {}).redactPageText, "off");
+  assert.equal("redactPageText" in tightenPolicy({}, {}), false);
+});
+
+test("config: which calls' results are masked, each rule beside the case it does not cover", () => {
+  const on: Policy = { redactPageText: "pii" };
+  const off: Policy = { redactPageText: "off" };
+  // The operator's file masks every call, named session or none.
+  assert.equal(pageTextMaskedFor(on, null, []), true);
+  assert.equal(pageTextMaskedFor(on, off, [off]), true);
+  // With the operator's off, a named session's own config decides, and another session's does not.
+  assert.equal(pageTextMaskedFor({}, on, [on, {}]), true);
+  assert.equal(pageTextMaskedFor({}, {}, [on, {}]), false, "a call naming an unmasked session is not masked for another session's project");
+  assert.equal(pageTextMaskedFor({}, undefined, [on]), false, "a named session that is not open has no config of its own");
+  // A call naming no session may read any session's project, so any open session masking masks it.
+  assert.equal(pageTextMaskedFor({}, null, [{}, on]), true);
+  assert.equal(pageTextMaskedFor({}, null, [{}, off]), false);
+  assert.equal(pageTextMaskedFor({}, null, []), false, "no file: today's behaviour");
+});
+
+test("config: redactPageText says so on the Config line of an attach, a command and policy explain, and only when on", () => {
+  assert.deepEqual(redactPageTextNote({}), []);
+  assert.deepEqual(redactPageTextNote({ redactPageText: "off" }), []);
+  assert.match(redactPageTextNote({ redactPageText: "pii" }).join(""), /^redactPageText "pii": email addresses, phone numbers and card numbers/);
+  const masked = applyToCommand(loadedOf({ redactPageText: "pii" }), {}, ["http://localhost:3000"], { mode: "observe" });
+  assert.ok(masked.ok && /^Config: \/srv\/\.scenescout\/config\.json; redactPageText "pii": /.test(masked.note), JSON.stringify(masked));
+  const plain = applyToCommand(loadedOf({ redactPageText: "off" }), {}, ["http://localhost:3000"], { mode: "observe" });
+  assert.ok(plain.ok && !plain.note.includes("redactPageText"), JSON.stringify(plain));
+  // policy explain prints the note applyToCommand makes, read from the launch directory's file.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-redact-explain-"));
+  try {
+    fs.mkdirSync(path.join(dir, ".scenescout"));
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), '{"redactPageText": "pii"}');
+    const lines: string[] = [];
+    runPolicyCommand(["explain", "GET", `${EXPLAIN_APP}/things`], {
+      env: {},
+      out: (l: string) => lines.push(l),
+      err: (l: string) => lines.push(l),
+      readBody: () => "",
+      config: { launchDir: dir, reader: fsPolicyReader },
+    });
+    assert.ok(
+      lines.some((l) => /redactPageText "pii"/.test(l)),
+      lines.join("\n"),
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

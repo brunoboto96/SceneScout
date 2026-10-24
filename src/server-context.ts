@@ -39,7 +39,8 @@ import { needsTask, taskRefusal, TASK_MAX } from "./engine/task.js";
 import { SERVER_INSTRUCTIONS } from "./playbook.js";
 import { type EvidenceSettings } from "./engine/capture.js";
 import { GuidedPlans, type CheckArea } from "./engine/guided.js";
-import { NO_POLICY, type LoadedPolicy } from "./engine/project-config.js";
+import { NO_POLICY, pageTextMaskedFor, type LoadedPolicy } from "./engine/project-config.js";
+import { maskPageText, maskToolResult, type MaskableResult } from "./engine/redact.js";
 import { GuidedRuns, nowSentence, troubleOfResult, troubleTell } from "./engine/progress.js";
 
 /** Live sessions: each name owns an independent BrowserEngine (browser + auth). */
@@ -92,6 +93,43 @@ type ToolResult = {
   content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
   isError?: boolean;
 };
+
+/**
+ * Every tool's result passes through here on its way to the agent, so the
+ * config's redactPageText masks personal data in one place (issue #537).
+ * Decided before and after the call: an attach sets its session's config, and
+ * a close drops it. The engine's own oracles and stores read the page as it
+ * is; only what is returned is masked.
+ */
+function maskingHandler<H extends (...args: never[]) => unknown>(handler: H): H {
+  const masked = (args: unknown): boolean => {
+    const asked = args !== null && typeof args === "object" ? (args as { session?: unknown }).session : undefined;
+    const named = typeof asked === "string" ? asked : null;
+    const policyOf = (name: string): LoadedPolicy["policy"] | undefined => {
+      const eng = engines.get(name);
+      return eng ? policyFor(eng).policy : undefined;
+    };
+    const open = [...engines.values()].map((eng) => policyFor(eng).policy);
+    return pageTextMaskedFor(operatorPolicy.policy, named === null ? null : policyOf(named), open);
+  };
+  const wrapped = async (...args: never[]): Promise<unknown> => {
+    const before = masked(args[0]);
+    let result: unknown;
+    try {
+      result = await (handler as (...a: never[]) => unknown)(...args);
+    } catch (err) {
+      if (!before && !masked(args[0])) throw err;
+      // As the SDK would answer a thrown error, but masked, and without changing the error object itself.
+      return { content: [{ type: "text", text: maskPageText(err instanceof Error ? err.message : String(err)) }], isError: true };
+    }
+    const isResult = result !== null && typeof result === "object" && Array.isArray((result as MaskableResult).content);
+    return isResult && (before || masked(args[0])) ? maskToolResult(result as MaskableResult) : result;
+  };
+  return wrapped as unknown as H;
+}
+const registerTool = server.registerTool.bind(server);
+server.registerTool = ((name: string, config: unknown, handler: (...args: never[]) => unknown) =>
+  registerTool(name, config as never, maskingHandler(handler) as never)) as typeof server.registerTool;
 
 export function text(t: string, session: string): ToolResult {
   const eng = engines.get(session);

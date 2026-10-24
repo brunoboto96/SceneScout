@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Account of Phone 020 7946 0958</title>
+  </head>
+  <body>
+    <!--
+      A page that shows a person's email address, phone number and card number, for redactPageText "pii": with it on,
+      each reaches the agent as its marker; with it off, as written. The address is written in by the script so no
+      real-looking address is in the repository (hygiene-test).
+    -->
+    <main>
+      <h1>Account</h1>
+      <p id="owner">Owner:</p>
+      <p>Phone: +44 20 7946 0958</p>
+      <p>Card 4111 1111 1111 1111 on file</p>
+      <a href="/account" id="mail">Write to the owner</a>
+      <button type="button">Remove card 4111 1111 1111 1111</button>
+      <a href="/help">Ask help@example.com</a>
+    </main>
+    <script>
+      const address = ["jo.sample", "contoso-mail.net"].join("@");
+      document.getElementById("owner").textContent = "Owner: " + address;
+      document.getElementById("mail").textContent = "Write to " + address;
+    </script>
+  </body>
+</html>
