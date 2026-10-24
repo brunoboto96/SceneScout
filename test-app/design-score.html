@@ -38,6 +38,9 @@
     .pstack { display: flex; flex-direction: column; gap: 8px; }
     .touching .stack { gap: 0; }
     .scrolled .pstack { gap: 0; }
+    .type h2 { font-size: 19px; }
+    .type .notes p { font-size: 15px; }
+    .type .actions button { font-size: 17px; }
   </style>
 </head>
 <body>
@@ -46,6 +49,8 @@
        ?with=heights gives the six buttons six heights, ?with=grays writes the
        notes in twelve grays. ?with=touching,heights,grays is all three.
        ?with=scrolled drops the gap in a stack below a scroll pane's fold.
+       ?with=type sets three sizes off the page's scale (16, 20, 28px): the
+       section headings at 19px, the notes at 15px and the buttons at 17px.
        ?section=n makes it another route with its own heading, so several
        pages can be compared with each other.
        The list group, the chat bubbles and the carousel's slides are joined on
@@ -106,6 +111,7 @@
     if (section) document.querySelector("h1").textContent = "Account settings, part " + section;
     if (wanted.includes("touching")) document.body.classList.add("touching");
     if (wanted.includes("scrolled")) document.body.classList.add("scrolled");
+    if (wanted.includes("type")) document.body.classList.add("type");
     if (wanted.includes("heights")) {
       document.querySelectorAll(".actions button").forEach((b, i) => { b.style.height = 28 + i * 4 + "px"; });
     }
