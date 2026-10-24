@@ -17,7 +17,9 @@
       //
       // The check is a request, started in the same task as the scroll, and the redirect starts on its answer while
       // the request is still open (the server answers after 250 ms and holds its body back): the page is busy from the
-      // scroll to the sign-in page, so the scroll's wait for the page to settle sees it on any machine. A bare timer after the scroll event is not: a
+      // scroll to the sign-in page, so the scroll's wait for the page to settle sees it on any machine. (WebKit cancels
+      // the open request as the redirect starts and reports the redirect's own request after that; the wait keeps a
+      // quiet window from a cancellation for that gap.) A bare timer after the scroll event is not: a
       // late frame can push it past that wait, and the next call's navigation then cancels the redirect.
       history.scrollRestoration = "manual";
       var checked = false;

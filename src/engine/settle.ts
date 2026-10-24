@@ -37,6 +37,13 @@ export interface SettleState {
   sinceLastStartMs: number;
   /** Since the action completed. */
   elapsedMs: number;
+  /**
+   * Since the browser last cancelled a request the page had open (requestCancelled in browsers.ts). WebKit cancels a
+   * document's requests the moment a navigation starts, and reports the navigation's own request only after that, so
+   * for that moment nothing is in flight while the page is on its way elsewhere: a redirect started on a request's
+   * answer, with its request still open, is otherwise read as a page that went quiet and stayed.
+   */
+  sinceLastCancelMs: number;
   /** A floor this session asked for, so a person can follow along. 0 means as fast as the page allows. */
   paceMs: number;
   /**
@@ -60,6 +67,8 @@ export function shouldKeepWaiting(state: SettleState): boolean {
   if (state.elapsedMs >= SETTLE_CAP_MS) return false;
   // Something is still out: wait for it, up to the cap.
   if (state.inFlight > 0) return true;
+  // A request was just cancelled: what cancelled it (a navigation, most often) may not have sent its own request yet.
+  if (state.sinceLastCancelMs < QUIET_MS) return true;
   // Nothing in flight and nothing recent. The action itself is the last event
   // that could still produce a request, so the quiet window runs from whichever
   // of the two is later. Without this, an action whose request comes back
@@ -346,6 +355,8 @@ export interface SettleSource {
   inFlight(): number;
   /** When the most recent request started. */
   lastRequestStart(): number;
+  /** When the browser last cancelled a request the page had open (SettleState.sinceLastCancelMs); 0 if never. */
+  lastRequestCancel(): number;
   /** The deliberate pace the session was asked for (normalizePace). */
   paceMs(): number;
   /** The page the session drives now: a wait on a page the session has left ends. */
@@ -356,7 +367,7 @@ export interface SettleSource {
  * Wait after an action until the page has settled (shouldKeepWaiting), or the session has moved to another page.
  * `now` is the clock the wait measures by; a test passes one its stand-in page advances, so no assertion rests on
  * how long a real timer took (a 20 ms tick takes about 31 ms on Windows' default timer resolution). It must be the
- * clock `src.lastRequestStart()` is read on, or the time since the last request means nothing. `read` is for a wait
+ * clock `src.lastRequestStart()` and `src.lastRequestCancel()` are read on, or the time since the last request means nothing. `read` is for a wait
  * before a read rather than after an action (SettleState.read).
  */
 export async function settlePage(page: SettlingPage, src: SettleSource, now: () => number = Date.now, read = false): Promise<void> {
@@ -369,6 +380,7 @@ export async function settlePage(page: SettlingPage, src: SettleSource, now: () 
     const state = {
       inFlight: src.inFlight(),
       sinceLastStartMs: now() - src.lastRequestStart(),
+      sinceLastCancelMs: now() - src.lastRequestCancel(),
       elapsedMs: now() - started,
       paceMs: src.paceMs(),
       read,

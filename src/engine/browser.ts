@@ -149,6 +149,7 @@ import {
   droppedNavigationErrorPage,
   errorPageExit,
   DROPPED_NAVIGATION_WAIT_MS,
+  requestCancelled,
   type BrowserEngineName,
 } from "../browsers.js";
 import { revealedLines } from "./hover.js";
@@ -1830,6 +1831,7 @@ export class BrowserEngine {
     context.on("requestfinished", (req) => requests.ended(req));
     context.on("requestfailed", (req) => {
       requests.ended(req, true);
+      if (requestCancelled(this.engineName, req.failure()?.errorText ?? "") && !this.guard.refused(req)) this.lastRequestCancel = Date.now();
       this.watchResponse(req, null);
       this.pageRequests.failed(req, req.failure()?.errorText ?? "", Date.now(), this.guard.refused(req));
       if (req.isNavigationRequest() && this.guard.refused(req)) {
@@ -2221,6 +2223,7 @@ export class BrowserEngine {
       {
         inFlight: () => this.inFlight,
         lastRequestStart: () => this.lastRequestStart,
+        lastRequestCancel: () => this.lastRequestCancel,
         paceMs: () => this.paceMs,
         current: () => this.page,
       },
@@ -2402,6 +2405,8 @@ export class BrowserEngine {
   }
   /** When the most recent request started, so a page that fires one late is not read too early. */
   private lastRequestStart = 0;
+  /** When the browser last cancelled a request the page had open, the write policy's refusals aside (settle.ts). */
+  private lastRequestCancel = 0;
   /**
    * A floor between actions this session was asked for, so a person watching
    * can follow along. Zero means as fast as the page allows, which is the

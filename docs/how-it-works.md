@@ -95,7 +95,9 @@ flowchart TD
     C -->|yes| R[read the page]
     C -->|no| D{requests in flight?}
     D -->|yes| W
-    D -->|no| E{quiet for 120ms<br/>since the last request<br/>AND since the action?}
+    D -->|no| X{a request cancelled<br/>in the last 120ms?}
+    X -->|yes| W
+    X -->|no| E{quiet for 120ms<br/>since the last request<br/>AND since the action?}
     E -->|no| W
     E -->|yes| R
     W --> B
@@ -107,6 +109,13 @@ own — reading the page between the two blamed the next action for the worker's
 request. A snapshot is a read, not an action: it sends nothing, so before
 it the window runs from the last request only, and a snapshot right after an
 action that has already settled does not wait 120 ms again.
+
+A request the browser **cancelled** starts the window again, before an action's
+read and a snapshot's alike. WebKit cancels a page's open requests as soon as
+the page starts to navigate and reports the navigation's own request only after
+that, so for a moment nothing is in flight while the page is on its way
+elsewhere: a redirect started on a request's answer, with that request still
+open, was read as a page that stayed put.
 
 A snapshot then reads the page's controls more than once, because a
 single-page app can show an empty shell, or its navigation alone, while the

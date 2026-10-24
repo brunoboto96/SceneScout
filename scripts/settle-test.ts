@@ -41,6 +41,7 @@ const state = (over: Partial<Parameters<typeof shouldKeepWaiting>[0]> = {}) => (
   inFlight: 0,
   sinceLastStartMs: QUIET_MS * 10,
   elapsedMs: QUIET_MS * 10,
+  sinceLastCancelMs: QUIET_MS * 10,
   paceMs: 0,
   ...over,
 });
@@ -81,6 +82,20 @@ test("a page that fires its XHR a tick after the click gets a quiet window", () 
   assert.equal(shouldKeepWaiting(state({ sinceLastStartMs: 0 })), true);
   assert.equal(shouldKeepWaiting(state({ sinceLastStartMs: QUIET_MS - 1 })), true);
   assert.equal(shouldKeepWaiting(state({ sinceLastStartMs: QUIET_MS })), false, "the window is exclusive");
+});
+
+test("a request the browser just cancelled gets a quiet window; one that just finished does not", () => {
+  // WebKit cancels a document's open requests as a navigation starts and reports the navigation's own request after
+  // that: between the two nothing is in flight and the last start is old, yet the page is on its way elsewhere.
+  assert.equal(shouldKeepWaiting(state({ sinceLastCancelMs: 0 })), true);
+  assert.equal(shouldKeepWaiting(state({ sinceLastCancelMs: QUIET_MS - 1 })), true);
+  assert.equal(shouldKeepWaiting(state({ sinceLastCancelMs: QUIET_MS })), false, "the window is exclusive");
+  // The same moment with the request finished rather than cancelled: the page is quiet.
+  assert.equal(shouldKeepWaiting(state()), false);
+  // Before a read too: a cancellation is the page changing, not the action.
+  assert.equal(shouldKeepWaiting(state({ elapsedMs: 0, sinceLastCancelMs: 0, read: true })), true);
+  // And never past the cap.
+  assert.equal(shouldKeepWaiting(state({ elapsedMs: SETTLE_CAP_MS, sinceLastCancelMs: 0 })), false);
 });
 
 test("the cap ends the wait however busy the page is", () => {
@@ -273,7 +288,7 @@ function standInPage(url = "http://app.test/a") {
 
 test("settlePage waits for the document, then returns once the quiet window after the action has passed", async () => {
   const page = standInPage();
-  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 0, current: () => page }, page.now);
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, lastRequestCancel: () => 0, paceMs: () => 0, current: () => page }, page.now);
   assert.equal(page.loadWaits, 1);
   // The quiet window runs from the action as well (QUIET_MS): exactly long enough for it, not a tick more.
   assert.equal(page.ticks, Math.ceil(QUIET_MS / SETTLE_TICK_MS));
@@ -286,7 +301,11 @@ test("settlePage waits while a request is in flight, and stops when it lands", a
     if (page.ticks === 10) inFlight = 0;
   };
   const started = page.clock;
-  await settlePage(page, { inFlight: () => inFlight, lastRequestStart: () => started, paceMs: () => 0, current: () => page }, page.now);
+  await settlePage(
+    page,
+    { inFlight: () => inFlight, lastRequestStart: () => started, lastRequestCancel: () => 0, paceMs: () => 0, current: () => page },
+    page.now,
+  );
   assert.equal(page.ticks, 10, "it returns on the first look after the request lands, the quiet window having passed while it was out");
 });
 
@@ -298,14 +317,50 @@ test("settlePage holds the quiet window from a request that starts late, on the 
   page.onTick = () => {
     if (page.ticks === 3) lastStart = page.clock;
   };
-  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => lastStart, paceMs: () => 0, current: () => page }, page.now);
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => lastStart, lastRequestCancel: () => 0, paceMs: () => 0, current: () => page }, page.now);
   assert.equal(page.ticks, 3 + Math.ceil(QUIET_MS / SETTLE_TICK_MS), `${page.ticks} ticks`);
+});
+
+test("settlePage waits through the gap between a cancelled request and the navigation that cancelled it", async () => {
+  // The order WebKit reports a redirect a page starts on a request's answer while that request is still open: the
+  // request is cancelled, and the navigation's own request is reported a few ticks later. Read in that gap, the page
+  // is still on the address it is leaving.
+  const run = async (cancelled: boolean) => {
+    const page = standInPage();
+    let inFlight = 1;
+    let lastStart = page.clock;
+    let lastCancel = 0;
+    let navigationSeenAt = -1;
+    page.onTick = () => {
+      if (page.ticks === 10) {
+        inFlight = 0;
+        if (cancelled) lastCancel = page.clock;
+      }
+      if (cancelled && page.ticks === 13) {
+        inFlight = 1;
+        lastStart = page.clock;
+        navigationSeenAt = page.ticks;
+      }
+      if (page.ticks === 15) inFlight = 0;
+    };
+    await settlePage(
+      page,
+      { inFlight: () => inFlight, lastRequestStart: () => lastStart, lastRequestCancel: () => lastCancel, paceMs: () => 0, current: () => page },
+      page.now,
+    );
+    return { ticks: page.ticks, navigationSeenAt };
+  };
+  const cancelled = await run(true);
+  assert.equal(cancelled.navigationSeenAt, 13, "the navigation's request is seen inside the wait");
+  assert.equal(cancelled.ticks, 13 + Math.ceil(QUIET_MS / SETTLE_TICK_MS), `${cancelled.ticks} ticks`);
+  // Contrast: the request finished (no cancellation) and nothing follows it; the wait ends on the first look after it.
+  assert.equal((await run(false)).ticks, 10);
 });
 
 test("settlePage gives up at the cap on a page that never goes quiet", async () => {
   const page = standInPage();
   const started = page.clock;
-  await settlePage(page, { inFlight: () => 1, lastRequestStart: () => page.clock, paceMs: () => 0, current: () => page }, page.now);
+  await settlePage(page, { inFlight: () => 1, lastRequestStart: () => page.clock, lastRequestCancel: () => 0, paceMs: () => 0, current: () => page }, page.now);
   assert.equal(page.clock - started, SETTLE_CAP_MS);
 });
 
@@ -313,14 +368,18 @@ test("settlePage stops waiting once the session has moved to another page", asyn
   const page = standInPage();
   const other = standInPage();
   // Something is always in flight, so only the page changing ends the wait before the cap.
-  await settlePage(page, { inFlight: () => 1, lastRequestStart: () => page.clock, paceMs: () => 0, current: () => other }, page.now);
+  await settlePage(
+    page,
+    { inFlight: () => 1, lastRequestStart: () => page.clock, lastRequestCancel: () => 0, paceMs: () => 0, current: () => other },
+    page.now,
+  );
   assert.equal(page.ticks, 1);
 });
 
 test("settlePage holds a page for the pace the session asked for, and no longer", async () => {
   const page = standInPage();
   const started = page.clock;
-  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 300, current: () => page }, page.now);
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, lastRequestCancel: () => 0, paceMs: () => 300, current: () => page }, page.now);
   assert.equal(page.clock - started, 300);
 });
 
@@ -329,7 +388,7 @@ test("settlePage reads the page even when its document wait fails", async () => 
   page.waitForLoadState = async () => {
     throw new Error("Target page, context or browser has been closed");
   };
-  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, paceMs: () => 0, current: () => page }, page.now);
+  await settlePage(page, { inFlight: () => 0, lastRequestStart: () => 0, lastRequestCancel: () => 0, paceMs: () => 0, current: () => page }, page.now);
   // The same wait as on a page whose document wait succeeds.
   assert.equal(page.ticks, Math.ceil(QUIET_MS / SETTLE_TICK_MS));
 });

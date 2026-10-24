@@ -60,6 +60,7 @@ import {
   defaultEngine,
   beaconResourceType,
   echoesFailedLoads,
+  requestCancelled,
   focusAdvanceKey,
   headlessShellDir,
   launchTarget,
@@ -1389,6 +1390,24 @@ test("service workers are allowed only where the write policy can see what they 
   assert.equal(serviceWorkerPolicy("chromium"), "allow");
   assert.equal(serviceWorkerPolicy("firefox"), "block");
   assert.equal(serviceWorkerPolicy("webkit"), "block");
+});
+
+test("which failed request each browser reports as cancelled", () => {
+  // Each engine's own words for a request it cancelled (its document leaving, or the page aborting it)...
+  assert.equal(requestCancelled("chromium", "net::ERR_ABORTED"), true);
+  assert.equal(requestCancelled("firefox", "NS_BINDING_ABORTED"), true);
+  assert.equal(requestCancelled("webkit", "cancelled"), true);
+  assert.equal(requestCancelled("webkit", "Load request cancelled"), true);
+  // ...and, beside each, what the same engine says of a refusal or a lost connection, which is not one.
+  assert.equal(requestCancelled("chromium", "net::ERR_BLOCKED_BY_CLIENT.Inspector"), false);
+  assert.equal(requestCancelled("chromium", "net::ERR_EMPTY_RESPONSE"), false);
+  assert.equal(requestCancelled("firefox", "NS_ERROR_FAILURE"), false);
+  assert.equal(requestCancelled("firefox", "NS_ERROR_NET_RESET"), false);
+  assert.equal(requestCancelled("webkit", "Blocked by Web Inspector"), false);
+  assert.equal(requestCancelled("webkit", "The network connection was lost."), false);
+  // One engine's word is not another's.
+  assert.equal(requestCancelled("chromium", "cancelled"), false);
+  assert.equal(requestCancelled("firefox", "net::ERR_ABORTED"), false);
 });
 
 test("the browsers that print their own console line for a failed load", () => {
