@@ -632,6 +632,9 @@ test("the versioning step formats the files it rewrites", () => {
   assert.match(syncScript, /path\.join\("mods", "scenescout-mod", "\.claude-plugin", "plugin\.json"\)/, "the sync moves the mod's version with the package");
 });
 
+const LAUNCH_COPIES = ["README.md", path.join("docs", "guide", "Start-here.md"), path.join("skills", "scenescout", "SKILL.md")];
+const LAUNCH_LINE = /scenescout(@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)?(?="?,? ?"?serve)/g;
+
 test("the versioning step moves the plugin's pinned server with the package version", () => {
   // Run the real sync script over a copy of the three manifests with a new
   // package version: the plugin's launch line must follow it, or the version
@@ -643,6 +646,7 @@ test("the versioning step moves the plugin's pinned server with the package vers
     path.join("mods", "scenescout-mod", ".claude-plugin", "plugin.json"),
     path.join("desktop-extension", "manifest.json"),
     path.join("scripts", "sync-plugin-version.mjs"),
+    ...LAUNCH_COPIES,
   ];
   for (const relative of files) {
     fs.mkdirSync(path.dirname(path.join(work, relative)), { recursive: true });
@@ -657,6 +661,49 @@ test("the versioning step moves the plugin's pinned server with the package vers
   assert.deepEqual(plugin.mcpServers[pkg.name].args, ["-y", `${pkg.name}@99.1.2`, "serve"], "the launch line moves with the version");
   assert.equal(read(files[1]).version, "99.1.2");
   assert.equal(read(files[2]).version, "99.1.2");
+});
+
+test("every copy-paste launch line is pinned to the package version", () => {
+  // An unpinned `npx -y scenescout serve` runs whatever npm calls latest on
+  // each launch. The README, the guide's client setups and the skill's by-hand
+  // line carry the release's own version, as the plugin does.
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")) as { version: string };
+  let seen = 0;
+  for (const relative of LAUNCH_COPIES) {
+    const text = fs.readFileSync(path.join(root, relative), "utf8");
+    const lines = [...text.matchAll(LAUNCH_LINE)].map((m) => m[0]);
+    assert.ok(lines.length > 0, `${relative} has a launch line`);
+    for (const line of lines) {
+      seen++;
+      assert.equal(line, `scenescout@${pkg.version}`, `${relative}: a launch line must name the package version`);
+    }
+  }
+  assert.ok(seen >= 7, `README, three JSON setups, Codex, Zed and the skill: found ${seen}`);
+});
+
+test("the versioning step moves the copy-paste launch lines with the package version", () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const work = tmp("sc-sync-docs-");
+  const files = [
+    path.join(".claude-plugin", "plugin.json"),
+    path.join("mods", "scenescout-mod", ".claude-plugin", "plugin.json"),
+    path.join("desktop-extension", "manifest.json"),
+    path.join("scripts", "sync-plugin-version.mjs"),
+    ...LAUNCH_COPIES,
+  ];
+  for (const relative of files) {
+    fs.mkdirSync(path.dirname(path.join(work, relative)), { recursive: true });
+    fs.copyFileSync(path.join(repo, relative), path.join(work, relative));
+  }
+  const pkg = JSON.parse(fs.readFileSync(path.join(repo, "package.json"), "utf8")) as { version: string };
+  fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ name: "scenescout", version: "99.1.2-beta.1" }));
+  execFileSync(process.execPath, [path.join(work, "scripts", "sync-plugin-version.mjs")], { stdio: "pipe" });
+  for (const relative of LAUNCH_COPIES) {
+    const before = fs.readFileSync(path.join(repo, relative), "utf8");
+    const after = fs.readFileSync(path.join(work, relative), "utf8");
+    assert.equal(after, before.split(`scenescout@${pkg.version}`).join("scenescout@99.1.2-beta.1"), `${relative}: only the pinned versions change`);
+  }
 });
 
 // ── The desktop extension (.mcpb) ────────────────────────────────────────────

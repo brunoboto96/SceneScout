@@ -82,7 +82,7 @@ npx -y scenescout install --client cursor     # or vscode, codex, gemini, copilo
 /plugin install scenescout@scenescout-marketplace
 ```
 
-Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`. A plugin starts the server at the version the plugin was released with (`npx -y scenescout@<version> serve`), so a new release reaches you only when you update the plugin: `/plugin marketplace update scenescout-marketplace`. To follow the latest npm release instead, register the server by hand with `npx -y scenescout serve`; the plugin has no setting for this, because a plugin option substituted into the server arguments is not yet a documented, tested route. If a plugin or a registration pins a version npm does not have (a release whose publish has not finished), `scenescout doctor` says so.
+Then start a new chat to use SceneScout; the test browser downloads on first use (to have it ready beforehand: `npx -y scenescout install --browser-only`). The command becomes `/scenescout:scenescout`. A plugin starts the server at the version the plugin was released with (`npx -y scenescout@<version> serve`), so a new release reaches you only when you update the plugin: `/plugin marketplace update scenescout-marketplace`. To follow the latest npm release instead, register the server by hand with `npx -y scenescout@3.29.0 serve`; the plugin has no setting for this, because a plugin option substituted into the server arguments is not yet a documented, tested route. If a plugin or a registration pins a version npm does not have (a release whose publish has not finished), `scenescout doctor` says so.
 
 An optional second plugin, `scenescout-mod`, adds a guided panel and a model setting for lane agents in the Claude Code CLI and the desktop Code tab: [The Claude Code mod](Ways-to-use-it.md#the-claude-code-mod).
 
@@ -122,12 +122,12 @@ Registering through each command above has been run against Codex CLI, Gemini CL
 
 ### A client that `install` does not know
 
-Add a stdio server to the client's configuration whose command is `npx -y scenescout serve`. Most clients accept this shape (the first test downloads the browser it drives, once; `npx -y scenescout install --browser-only` does it beforehand):
+Add a stdio server to the client's configuration whose command is `npx -y scenescout@3.29.0 serve`. Most clients accept this shape (the first test downloads the browser it drives, once; `npx -y scenescout install --browser-only` does it beforehand):
 
 ```json
 {
   "mcpServers": {
-    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"] }
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout@3.29.0", "serve"] }
   }
 }
 ```
@@ -140,7 +140,7 @@ That is the entry for Cursor (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a p
 ```json
 {
   "servers": {
-    "scenescout": { "type": "stdio", "command": "npx", "args": ["-y", "scenescout", "serve"] }
+    "scenescout": { "type": "stdio", "command": "npx", "args": ["-y", "scenescout@3.29.0", "serve"] }
   }
 }
 ```
@@ -153,7 +153,7 @@ That is the entry for Cursor (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a p
 ```toml
 [mcp_servers.scenescout]
 command = "npx"
-args = ["-y", "scenescout", "serve"]
+args = ["-y", "scenescout@3.29.0", "serve"]
 ```
 
 </details>
@@ -164,12 +164,14 @@ args = ["-y", "scenescout", "serve"]
 ```json
 {
   "context_servers": {
-    "scenescout": { "command": "npx", "args": ["-y", "scenescout", "serve"], "env": {} }
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout@3.29.0", "serve"], "env": {} }
   }
 }
 ```
 
 </details>
+
+The entries above name the release this guide was published with, so a client starts the server you read about and never a newer one by surprise. To move to a later release, change the version in the entry. To follow the newest release on every launch instead, leave the `@<version>` part out of the entry (`scenescout` alone); `npx` then runs whatever npm calls latest, which can change between two starts. `scenescout install` registers the version it ran from, and the Claude Code plugin starts the version it was released with; a plugin update picks up a new release, once that release is on npm (a plugin update read in the minutes between a release's pull request merging and its publish finishing fails to start the server until `npx` can fetch that version, and works on the next try).
 
 Every client gets the testing method from the server itself: its instructions tell the agent to call `scout_playbook` before the first attach, and a client that lists server prompts as commands also has an `explore` prompt. So *"Use SceneScout to test http://localhost:3000"* is enough as a first message.
 
