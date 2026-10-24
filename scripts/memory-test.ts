@@ -4836,3 +4836,14 @@ test(
       }
     }),
 );
+
+test("a finding filed with another site's full request address dedups with the same failure written without its query", () => {
+  const filed = { id: "f1", status: "open" as const, category: "http-error", title: "Token exchange refused", detail: "", state: "/signin" };
+  const old = { ...filed, evidence: "GET https://idp.example/oauth2/token?code=one-time-code&state=s3 → HTTP 500" };
+  const trimmed = { ...filed, evidence: "GET https://idp.example/oauth2/token → HTTP 500" };
+  assert.deepEqual([...endpointSignatures(old.evidence)], [...endpointSignatures(trimmed.evidence)], "one endpoint signature either way");
+  assert.ok(isDuplicateFinding(old, trimmed), "the stored finding and the new one are one defect");
+  assert.ok(isDuplicateFinding(trimmed, old));
+  // The contrast: another path on that site is another request.
+  assert.ok(!isDuplicateFinding(old, { ...filed, evidence: "GET https://idp.example/oauth2/userinfo → HTTP 500" }));
+});

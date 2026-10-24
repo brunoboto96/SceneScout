@@ -315,7 +315,7 @@ export class OracleMonitor {
       this.record({
         kind: "request_failed",
         severity: "medium",
-        detail: `${req.method()} ${req.url().slice(0, 200)} → ${failure}`,
+        detail: `${req.method()} ${this.requestAddress(req.url()).slice(0, 200)} → ${failure}`,
         url: page.url(),
         embed: this.embedOfRequest(req) ?? undefined,
       });
@@ -343,7 +343,7 @@ export class OracleMonitor {
       this.record({
         kind: "http_error",
         severity: status >= 500 ? "high" : "medium",
-        detail: httpErrorDetail(res.request().method(), res.url(), status),
+        detail: httpErrorDetail(res.request().method(), this.requestAddress(res.url()), status),
         url: page.url(),
         embed: this.embedOfRequest(res.request()) ?? undefined,
       });
@@ -438,6 +438,14 @@ export class OracleMonitor {
    */
   setPageAddress(of: (url: string) => string): void {
     this.pageAddress = of;
+  }
+
+  /**
+   * How a violation names a request: a request to another site keeps its origin and path only (its query can carry a
+   * sign-in request's state), one to the app keeps its query. An address that cannot be read is kept as it is.
+   */
+  private requestAddress(url: string): string {
+    return this.pageAddress(url) || url;
   }
 
   /** The engine knows exactly which requests its policy stopped; failed requests and stand-in refusals are matched against that, not against wording. */
