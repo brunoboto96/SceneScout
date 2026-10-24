@@ -429,6 +429,17 @@ export class OracleMonitor {
     this.embedOfRequest = ofRequest;
   }
 
+  /** How a violation names the page it happened on; the engine gives another site's page its origin and path only (authloss.ts logAddress). */
+  private pageAddress: (url: string) => string = (url) => url;
+
+  /**
+   * The engine knows the app's origin: a violation on another site's page (a sign-in provider's, where a crawl landed)
+   * is named through this, so the provider's query, which carries the sign-in's state, is not kept in the report.
+   */
+  setPageAddress(of: (url: string) => string): void {
+    this.pageAddress = of;
+  }
+
   /** The engine knows exactly which requests its policy stopped; failed requests and stand-in refusals are matched against that, not against wording. */
   setPolicyRefusalCheck(check: (req: Request) => boolean): void {
     this.refusedByPolicy = check;
@@ -475,7 +486,7 @@ export class OracleMonitor {
     // Another site's frame: its behaviour, reported, but never as the app's high-severity defect.
     const attributed = v.embed ? { ...v, severity: "medium" as const } : v;
     if (!attributed.embed) delete (attributed as { embed?: string }).embed;
-    const violation: OracleViolation = { ...redactViolation(attributed), at: new Date().toISOString() };
+    const violation: OracleViolation = { ...redactViolation({ ...attributed, url: this.pageAddress(attributed.url) }), at: new Date().toISOString() };
     this.buffer.push(violation);
     this.all.push(violation);
   }

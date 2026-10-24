@@ -116,7 +116,8 @@ import {
   LOGIN_ROUTE_RE,
   shouldReattach,
   SIGNED_OUT_ROUTES,
-  signInLogUrl,
+  logAddress,
+  offOriginPlace,
   signInPlace,
 } from "../src/engine/authloss.ts";
 import {
@@ -615,16 +616,23 @@ test("a sign-in page: whole segments of the path or the hash route, and a provid
     ["https://idp.example/#/login", true, "a hash route on another origin"],
     ["https://shop.example/authorized-dealers", false, "a segment that only starts like a provider's"],
     ["https://idp.example/OAuth2/Authorize", false, "a provider's upper-case endpoint with no sign-in request"],
-    ["https://idp.example/Login", false, "a sign-in segment matches by case, as on the app's own origin"],
-    [`${base}/Login`, false, "...where /Login is not /login either"],
+    ["https://idp.example/Login", true, "a sign-in segment in any case, as on the app's own origin"],
+    [`${base}/Login`, true, "...where /Login is a sign-in page too"],
+    [`${base}/Account/Login`, true, "an app's sign-in under an account area, in title case"],
+    [`${base}/Account/LoginHistory`, false, "...but not a page whose segment only starts like one"],
+    [`${base}/#/Login`, true, "a hash route in title case"],
+    [`${base}/#/Loginhelp`, false, "...but not one that only starts like one"],
+    [`${base}/SignIn`, true, "/SignIn"],
+    [`${base}/SignInStats`, false, "...but not /SignInStats"],
+    [`${base}/AUTH/callback`, true, "an upper-case /AUTH segment"],
     ["https://shop.example/products/7", false, "an ordinary page of another site"],
     ["about:blank", false, "not a page"],
     ["chrome-error://chromewebdata/", false, "an error page"],
   ];
   for (const [url, want, why] of cases) assert.equal(isSignInPage(url, base), want, why);
   // The action log keeps a provider's address without its query (the sign-in request's state); the app's own as it is.
-  assert.equal(signInLogUrl("https://idp.example/oauth2/authorize?client_id=a&state=s3cr3t", base), "https://idp.example/oauth2/authorize");
-  assert.equal(signInLogUrl(`${base}/login?next=%2Freports`, base), `${base}/login?next=%2Freports`);
+  assert.equal(logAddress("https://idp.example/oauth2/authorize?client_id=a&state=s3cr3t", base), "https://idp.example/oauth2/authorize");
+  assert.equal(logAddress(`${base}/login?next=%2Freports`, base), `${base}/login?next=%2Freports`);
   assert.equal(hashRoute("#/login?next=%2F"), "/login");
   assert.equal(hashRoute("#!/login"), "/login");
   assert.equal(hashRoute("#login"), null);
@@ -1138,6 +1146,51 @@ test("the login pattern matches a segment, not a substring", () => {
   assert.equal(LOGIN_ROUTE_RE.test("/auth/callback"), true);
   assert.equal(LOGIN_ROUTE_RE.test("/login.html"), false, "an extension is not a login route segment");
   assert.equal(LOGIN_ROUTE_RE.test("/logindetails"), false, "nor is a longer word starting with it");
+});
+
+test("a sign-in segment in any case is a sign-in page to every caller: a navigation, a crawl, the attach verdict and the later check", () => {
+  const base = "http://app.test";
+  const t = new AuthLossTracker();
+  // Contrastive pairs: each sign-in page beside a page whose segment only starts like one.
+  const pairs: Array<[string, string]> = [
+    ["/Account/Login", "/Account/LoginHistory"],
+    ["/#/Login", "/#/Loginhelp"],
+    ["/SignIn", "/SignInStats"],
+  ];
+  for (const [signIn, nearMiss] of pairs) {
+    // A navigation, a crawl step and the attach verdict all ask isLoginRedirect, with what they asked for and where it landed.
+    assert.equal(t.isLoginRedirect("/reports", `${base}${signIn}`, base), true, `${signIn} is a bounce`);
+    assert.equal(t.isLoginRedirect("/reports", `${base}${nearMiss}`, base), false, `${nearMiss} is not`);
+    assert.equal(t.isLoginRedirect(signIn, `${base}${signIn}`, base), false, `asking for ${signIn} on purpose is not a bounce`);
+    // The check before and after each call asks lateSignInBounce.
+    const late = (now: string) => lateSignInBounce({ watching: true, seen: `${base}/reports`, now, baseUrl: base });
+    assert.equal(late(`${base}${signIn}`), `${base}/reports`, `a page that went to ${signIn} on its own is a bounce`);
+    assert.equal(late(`${base}${nearMiss}`), null, `...and one that went to ${nearMiss} is not`);
+    assert.equal(leftSignIn({ seen: `${base}${signIn}`, now: `${base}/reports`, baseUrl: base }), true, `leaving ${signIn} for the app is a sign-in`);
+  }
+  // Memory re-files an old landing on a sign-in page by the same pattern.
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Account/Login"), true);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Account/LoginHistory"), false);
+});
+
+test("another site's address is kept by its origin and path only; the app's own as it is", () => {
+  const base = "http://app.test/start";
+  const cases: Array<[string, string | null, string]> = [
+    ["https://idp.example/saml2/idp/SSO?SAMLRequest=fZ&RelayState=r", "https://idp.example/saml2/idp/SSO", "a provider's sign-in, without its request"],
+    ["https://idp.example/oauth2/authorize?client_id=a&state=s3cr3t#frag", "https://idp.example/oauth2/authorize", "...and without the fragment"],
+    ["https://docs.example/help?q=x", "https://docs.example/help", "any other site's page too"],
+    ["http://app.test:8080/x?y=1", "http://app.test:8080/x", "another port is another origin"],
+    [`http://app.test/login?next=%2Freports`, null, "the app's own page is not elsewhere"],
+    ["about:blank", null, "not a page"],
+    ["chrome-error://chromewebdata/", null, "a browser's error page"],
+    ["not a url", null, "an address that cannot be read"],
+  ];
+  for (const [url, want, why] of cases) assert.equal(offOriginPlace(url, base), want, why);
+  assert.equal(logAddress("https://idp.example/oauth2/authorize?client_id=a&state=s3cr3t", base), "https://idp.example/oauth2/authorize");
+  assert.equal(logAddress("http://app.test/reports?tab=2#top", base), "http://app.test/reports?tab=2#top", "the app's own address is kept whole");
+  assert.equal(logAddress("about:blank", base), "about:blank");
+  assert.equal(logAddress("", base), "", "no address stays none");
+  assert.equal(logAddress("not a url", base), "", "an address that cannot be read is written as nothing");
 });
 
 test("the two copies of the login pattern have not drifted apart", () => {
@@ -2361,9 +2414,11 @@ function guardRig(
     refuseGets?: boolean;
     authPosts?: string[];
     narrowOnly?: boolean;
+    escape?: boolean;
   } = {},
 ) {
   const calls: GuardCall[] = [];
+  const logged: string[] = [];
   const owned = new Set<string>();
   const host: RouteGuardHost = {
     appUrl: () => "https://app.example.com",
@@ -2372,11 +2427,11 @@ function guardRig(
     trustedEmbeds: () => new Set(),
     movedByEmbed: () => null,
     noteBlocked: (e) => void calls.push(`noteBlocked ${e.sig} answered=${e.answered}${e.why ? ` why=${e.why}` : ""}`),
-    logAction: (e) => void calls.push(`log ${e.action}`),
+    logAction: (e) => void (calls.push(`log ${e.action}`), logged.push(e.target)),
     notePolicyBlock: () => void calls.push("notePolicyBlock"),
     noteSentWrite: () => void calls.push("noteSentWrite"),
     foreignWriteOf: () => opts.foreign ?? null,
-    embedEscapeNavigation: () => false,
+    embedEscapeNavigation: () => opts.escape === true,
     frameDocumentKind: () => opts.frameDoc ?? null,
     sentByMainFrame: () => true,
     readPostOf: (r, method, url) =>
@@ -2400,8 +2455,9 @@ function guardRig(
     path: string,
     { type = "xhr", body = null as string | null, created = undefined as string | undefined, answerAfterMs = 0, headers = {} as Record<string, string> } = {},
   ) => {
-    const url = `https://app.example.com${path}`;
+    const url = /^https?:/.test(path) ? path : `https://app.example.com${path}`;
     const request = {
+      isNavigationRequest: () => type === "document",
       method: () => method,
       url: () => url,
       resourceType: () => type,
@@ -2427,8 +2483,18 @@ function guardRig(
     const done = guard.handle(route as unknown as Route).then(() => outcome);
     return { request: request as unknown as Request, done };
   };
-  return { calls, guard, send };
+  return { calls, logged, guard, send };
 }
+
+test("RouteGuard: an embed's escape to another site is logged by that site's origin and path, never its query", async () => {
+  const { logged, guard, send } = guardRig("read-only", { escape: true });
+  const escape = send("GET", "https://pay.example.net/checkout/start?session=pay-session-91c2&state=x", { type: "document" });
+  await escape.done;
+  assert.equal(guard.refused(escape.request), true);
+  assert.equal(logged.length, 1);
+  assert.ok(logged[0].startsWith("navigation to https://pay.example.net/checkout/start ("), logged[0]);
+  assert.ok(!logged[0].includes("pay-session-91c2"), logged[0]);
+});
 
 test("RouteGuard: each verdict is applied to the request, and a refusal is recorded and reported", async () => {
   // Read-only: a plain POST goes out; the same POST carrying a destructive command is answered with a refusal (the contrastive pair).
