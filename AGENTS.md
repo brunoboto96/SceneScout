@@ -64,7 +64,7 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
   - smoke
   - mcp-check
 - Bug fixes need a regression test. Prefer the cheapest layer that can actually fail: pure logic goes in the matching `*-test.ts`, listed below, and anything needing a real browser goes in the matching suite under `scripts/smoke/` backed by a fixture in `test-app/`. Each smoke suite must take its own fresh snapshot rather than reuse refs from another suite — they run independently, so a crash in one does not hide the rest. Add a line for a new suite; don't extend another's line.
-  - `policy-test` for the write policy, safe-write ownership, the auth-loss tracker, the route handler's decisions in `route-guard.ts` and the guided plan's gate on `scout_attach`, and the operator's config file (its schema, presets, where it is read from, and what an argument may still ask for)
+  - `policy-test` for the write policy, safe-write ownership, the auth-loss tracker, the route handler's decisions in `route-guard.ts` and the guided plan's gate on `scout_attach`, and the operator's config file (its schema, presets, where it is read from, and what an argument may still ask for), and `scenescout policy explain` (each verdict held equal to a route handler's on the same request)
   - `fixture-test` for synthetic upload files, accept-attribute logic and the disk-upload fence
   - `dispatch-test` for the per-session queue, the watchdog, orphan-browser selection, the bounded browser teardown, `bestEffort` (a probe of a page that may navigate or close) and the check that fails a smoke suite leaving a process, an open handle or a TCP socket of its own behind (and the machine's TCP table it logs after each suite)
   - `contract-test` for route identity, the gap ledger and the plain report (held word for word to `scripts/golden/plain-section.md`), and for snapshot collection (the hydration retry, refs kept across a re-snapshot, the kept snapshots a diff is against, and how a form is keyed)
@@ -101,6 +101,7 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
   - `policy.ts`
   - `project-config.ts`: the operator's config file and what it lets an argument loosen
   - `route-guard.ts`: the write policy on the wire: the order the route handler applies its rules in, and when a write marks its page exercised
+  - `policy-explain.ts`: `scenescout policy explain`, one request's verdict in each mode, from the route handler's own functions
   - `ownership.ts`
   - `uploads.ts`
   - `journey.ts`

@@ -11,6 +11,7 @@
  *   scenescout ci <url>             An exploratory run driven by a model's API, unattended, that reports
  *   scenescout login <url> --role r Sign in once in a visible browser and save it as a named role
  *   scenescout export --to github   File the project's findings as GitHub or Jira issues, each once
+ *   scenescout policy explain M URL Whether the write policy would let one request out, in each mode, and why
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -61,6 +62,7 @@ import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
 import { configureCommand, fsPolicyReader } from "./engine/project-config.js";
 import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
+import { MAX_EXPLAIN_BODY, runPolicyCommand } from "./engine/policy-explain.js";
 import { VISUAL_DIRNAME } from "./engine/baseline.js";
 import { openOrSay } from "./engine/open.js";
 import {
@@ -269,6 +271,17 @@ Usage:
                                     Exit code: 0 done (findings over the cap wait for the next export), 2 could not
                                     export (it lists what it filed before it stopped), or a screenshot was not
                                     attached or a ticket not linked.
+  scenescout policy explain <METHOD> <URL>
+                                    Whether the write policy would let this one request out in each mode, and the
+                                    rule that decided, from the same functions the running engine judges requests
+                                    with. Reads SCENESCOUT_STRICT_WRITES, SCENESCOUT_REFUSE_DESTRUCTIVE_GETS,
+                                    SCENESCOUT_READ_POSTS and SCENESCOUT_AUTH_POSTS from this environment, as the
+                                    server does. Sends nothing.
+                                    (--mode observe|read-only|safe-write|destructive: that mode only (default: all);
+                                     --body file: the request body, read from that file;
+                                     --header "Name: value": a request header, such as a method override; repeatable;
+                                     --app url: the address the server is attached to (default: the request's origin))
+                                    Exit code: 0 explained, 2 could not (a bad argument, a body file not read).
   scenescout status [projectPath]   What is the engine doing right now? (every session + recent actions)
   scenescout watch [projectPath]    Open the live view in a browser: what each session is doing, a thumbnail
                                     of its page, and a live stream you can switch on per session
@@ -940,6 +953,21 @@ async function exportFindings(args: string[]): Promise<never> {
   process.exit(outcome.exitCode);
 }
 
+/** `scenescout policy explain`: the write policy's verdict on one request, in each mode, with the rule that decided. Sends nothing. */
+function policy(args: string[]): void {
+  const code = runPolicyCommand(args, {
+    env: process.env,
+    readBody: (file) => {
+      const resolved = path.resolve(file);
+      if (fs.statSync(resolved).size > MAX_EXPLAIN_BODY) throw new Error(`it is larger than ${MAX_EXPLAIN_BODY} bytes`);
+      return fs.readFileSync(resolved, "utf8");
+    },
+    out: (line) => console.log(line),
+    err: (line) => console.error(line),
+  });
+  process.exit(code);
+}
+
 const [, , command, ...args] = process.argv;
 
 // A CLI's failure mode should be a sentence, not a stack trace. `scan` on a
@@ -970,6 +998,7 @@ try {
       ci,
       login,
       export: exportFindings,
+      policy,
       status: (a) => status(path.resolve(a[0] ?? process.cwd())),
       watch: (a) => {
         const positional = a.filter((x) => !x.startsWith("--"));

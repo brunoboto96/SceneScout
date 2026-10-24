@@ -136,6 +136,14 @@ import {
   type WriteClassifier,
 } from "../src/engine/strict-writes.ts";
 import { fuzzCases, fuzzRates } from "./policy-fuzz.ts";
+import {
+  DEFAULT_POLICY_SETTINGS,
+  explainRequest,
+  formatExplanation,
+  parsePolicyArgs,
+  policySettingsFrom,
+  type ExplainOutcome,
+} from "../src/engine/policy-explain.ts";
 
 // ---------------------------------------------------------------------------
 // isDestructiveWire — argument order is load-bearing
@@ -2657,6 +2665,29 @@ test("destructive page loads: an address that is a command counts; a listing pag
     assert.equal(destructiveGet(url), false, url);
 });
 
+test("destructive page loads: void, reject, approve and close count as a whole segment, and not inside a page's name about them (#538)", () => {
+  const H = "https://app.example.com";
+  // Each pair differs in one fact: the verb is the whole segment, or one word of a longer name.
+  const pairs: Array<[command: string, page: string]> = [
+    [`${H}/things/9/void`, `${H}/avoid-list`],
+    [`${H}/things/9/void`, `${H}/void-fill-packaging`],
+    [`${H}/requests/4/reject`, `${H}/requests/rejected`],
+    [`${H}/requests/4/reject`, `${H}/help/how-to-reject-a-request`],
+    [`${H}/orders/3/approve`, `${H}/orders/approvals`],
+    [`${H}/approve?token=abc`, `${H}/approvals?token=abc`],
+    [`${H}/account/close`, `${H}/help/how-to-close-your-account`],
+    [`${H}/tickets/9/close`, `${H}/close-up-photos`],
+    // close is also where a sign-in popup is sent to shut itself: only after an id or the user's own account.
+    [`${H}/account/close`, `${H}/close`],
+    [`${H}/subscription/close`, `${H}/auth/close`],
+    [`${H}/things/9/Void`, `${H}/things/9/voided`],
+  ];
+  for (const [command, page] of pairs) {
+    assert.equal(destructiveGet(command), true, command);
+    assert.equal(destructiveGet(page), false, page);
+  }
+});
+
 test("strict settings: read from the environment, off by default, and a value that is not on or off is an error", () => {
   assert.equal(writeClassifierSetting({}), "standard");
   assert.equal(writeClassifierSetting({ SCENESCOUT_STRICT_WRITES: "1" }), "strict");
@@ -3448,4 +3479,226 @@ test("write rules: the file's authPosts is the most the environment may name, an
   // A guided check keeps the list, and asks the path rule as well, rather than dropping it.
   assert.deepEqual(writeRulesSettings(file, {}, true).authPosts, { entries: file.authPosts, andSignInPath: true });
   assert.deepEqual(writeRulesSettings({}, { SCENESCOUT_AUTH_POSTS: "POST /api/login" }, true).authPosts, { entries: ["POST /api/login"], andSignInPath: true });
+});
+
+// ── scenescout policy explain (#538) ──────────────────────────────────────────
+
+const EXPLAIN_APP = "https://app.example.com";
+const outcomes = (e: ReturnType<typeof explainRequest>): Record<string, ExplainOutcome> => Object.fromEntries(e.verdicts.map((v) => [v.mode, v.outcome]));
+
+test("policy explain: each mode's verdict on the request shapes the safety model names", () => {
+  const cases: Array<{ what: string; method: string; path: string; body?: string; headers?: Record<string, string>; expect: Record<string, ExplainOutcome> }> =
+    [
+      {
+        what: "a page load",
+        method: "GET",
+        path: "/things",
+        expect: { observe: "allowed", "read-only": "allowed", "safe-write": "allowed", destructive: "allowed" },
+      },
+      {
+        what: "a plain POST",
+        method: "POST",
+        path: "/api/things",
+        body: '{"name":"x"}',
+        expect: { observe: "refused", "read-only": "allowed", "safe-write": "allowed", destructive: "allowed" },
+      },
+      {
+        what: "a destructive-looking POST",
+        method: "POST",
+        path: "/api/things/3/delete",
+        expect: { observe: "refused", "read-only": "depends", "safe-write": "depends", destructive: "allowed" },
+      },
+      {
+        what: "a DELETE",
+        method: "DELETE",
+        path: "/api/things/3",
+        expect: { observe: "refused", "read-only": "refused", "safe-write": "depends", destructive: "allowed" },
+      },
+      {
+        what: "a PUT",
+        method: "put",
+        path: "/api/things/3",
+        expect: { observe: "refused", "read-only": "refused", "safe-write": "depends", destructive: "allowed" },
+      },
+      {
+        what: "a POST whose override names DELETE",
+        method: "POST",
+        path: "/api/things/3",
+        headers: { "x-http-method-override": "DELETE" },
+        expect: { observe: "refused", "read-only": "refused", "safe-write": "depends", destructive: "allowed" },
+      },
+      {
+        what: "a sign-in",
+        method: "POST",
+        path: "/api/auth/login",
+        expect: { observe: "allowed", "read-only": "allowed", "safe-write": "allowed", destructive: "allowed" },
+      },
+      // observe's narrow rule: signing up is a write there, and a sign-in path elsewhere.
+      {
+        what: "a sign-up",
+        method: "POST",
+        path: "/api/auth/signup",
+        expect: { observe: "refused", "read-only": "allowed", "safe-write": "allowed", destructive: "allowed" },
+      },
+      // The command lives only in the body.
+      {
+        what: "a command in the body",
+        method: "POST",
+        path: "/api/rpc",
+        body: '{"action":"delete","id":3}',
+        expect: { observe: "refused", "read-only": "depends", "safe-write": "depends", destructive: "allowed" },
+      },
+    ];
+  for (const c of cases) {
+    const e = explainRequest({ method: c.method, url: `${EXPLAIN_APP}${c.path}`, body: c.body, headers: c.headers });
+    assert.deepEqual(outcomes(e), c.expect, c.what);
+    for (const v of e.verdicts) assert.ok(v.rule.length > 0 && v.source.length > 0, `${c.what}: ${v.mode} names its rule`);
+  }
+});
+
+test("policy explain: the settings the server reads change the verdicts as they change the route handler's", () => {
+  // The strict classifier: a camelCase delete is plain to the standard one and destructive to the strict one.
+  const camel = { method: "POST", url: `${EXPLAIN_APP}/api/deleteUser`, body: "{}", mode: "read-only" as const };
+  assert.equal(explainRequest(camel).verdicts[0].outcome, "allowed");
+  assert.equal(explainRequest({ ...camel, settings: { ...DEFAULT_POLICY_SETTINGS, classifier: "strict" } }).verdicts[0].outcome, "depends");
+  // Destructive page loads: followed unless the setting is on, and then only in observe and read-only.
+  const load = { method: "GET", url: `${EXPLAIN_APP}/items/3/delete` };
+  assert.deepEqual(outcomes(explainRequest(load)), { observe: "allowed", "read-only": "allowed", "safe-write": "allowed", destructive: "allowed" });
+  const gets = { ...DEFAULT_POLICY_SETTINGS, refuseDestructiveGets: true };
+  assert.deepEqual(outcomes(explainRequest({ ...load, settings: gets })), {
+    observe: "refused",
+    "read-only": "refused",
+    "safe-write": "allowed",
+    destructive: "allowed",
+  });
+  assert.deepEqual(outcomes(explainRequest({ method: "GET", url: `${EXPLAIN_APP}/blog/archive`, settings: gets })).observe, "allowed");
+  // A read POST: out of observe when named, never when its body is a mutation.
+  const reads = policySettingsFrom({ SCENESCOUT_READ_POSTS: "POST /api/search" });
+  const search = { method: "POST", url: `${EXPLAIN_APP}/api/search`, body: '{"q":"x"}', mode: "observe" as const };
+  assert.equal(explainRequest(search).verdicts[0].outcome, "refused");
+  assert.equal(explainRequest({ ...search, settings: reads }).verdicts[0].outcome, "allowed");
+  assert.equal(explainRequest({ ...search, body: '{"query":"mutation { addThing { id } }"}', settings: reads }).verdicts[0].outcome, "refused");
+  // A path-only entry means the app's origin: a POST to an API on another origin matches it only when --app says the app is elsewhere.
+  const api = { method: "POST", url: "https://api.example.com/api/search", body: '{"q":"x"}', mode: "observe" as const, settings: reads };
+  assert.equal(explainRequest(api).verdicts[0].outcome, "allowed", "judged against its own origin");
+  assert.equal(explainRequest({ ...api, appUrl: "https://app.example.com" }).verdicts[0].outcome, "refused", "the app is elsewhere");
+  // A sign-in list replaces the path rule: an unlisted login path is a write, a listed one is a sign-in.
+  const auth = policySettingsFrom({ SCENESCOUT_AUTH_POSTS: "POST /api/session-start" });
+  assert.equal(explainRequest({ method: "POST", url: `${EXPLAIN_APP}/api/auth/login`, mode: "observe", settings: auth }).verdicts[0].outcome, "refused");
+  assert.equal(explainRequest({ method: "POST", url: `${EXPLAIN_APP}/api/session-start`, mode: "observe", settings: auth }).verdicts[0].outcome, "allowed");
+  // A value the server would refuse is refused here too.
+  assert.throws(() => policySettingsFrom({ SCENESCOUT_STRICT_WRITES: "maybe" }), /SCENESCOUT_STRICT_WRITES/);
+});
+
+test("policy explain: its verdicts are the route handler's on the same request, in every mode the handler runs in", async () => {
+  const requests: Array<{ method: string; path: string; body?: string; headers?: Record<string, string>; type?: string }> = [
+    { method: "GET", path: "/things", type: "document" },
+    { method: "GET", path: "/items/3/delete", type: "document" },
+    // A HEAD is never a page load, so the destructive page-load rule does not reach it.
+    { method: "HEAD", path: "/items/3/delete", type: "other" },
+    { method: "POST", path: "/api/things", body: '{"a":1}' },
+    { method: "POST", path: "/api/session-start", body: "{}" },
+    { method: "POST", path: "/api/things/3/delete", body: "{}" },
+    { method: "POST", path: "/api/rpc", body: '{"action":"archive"}' },
+    { method: "POST", path: "/api/deleteUser", body: "{}" },
+    { method: "POST", path: "/api/delete-requests", body: "{}" },
+    { method: "POST", path: "/api/auth/login", body: "{}" },
+    { method: "POST", path: "/api/auth/signup", body: "{}" },
+    { method: "POST", path: "/api/session/123/delete", body: "{}" },
+    { method: "POST", path: "/api/things/3", body: "{}", headers: { "x-http-method-override": "DELETE" } },
+    { method: "POST", path: "/api/things/3?_method=PATCH", body: "{}" },
+    { method: "PUT", path: "/api/things/3", body: "{}" },
+    { method: "PATCH", path: "/api/things/3", body: "{}" },
+    { method: "DELETE", path: "/api/things/3" },
+  ];
+  for (const classifier of ["standard", "strict"] as const)
+    for (const refuseGets of [false, true])
+      for (const authPosts of [undefined, ["POST /api/session-start"]])
+        for (const rule of ["observe", "read-only", "safe-write"] as const)
+          for (const owned of [false, true])
+            for (const r of requests) {
+              const handler = await guardRig(rule, { classifier, refuseGets, authPosts, owned: () => owned }).send(r.method, r.path, {
+                type: r.type ?? "xhr",
+                body: r.body ?? null,
+                headers: r.headers ?? {},
+              }).done;
+              const [v] = explainRequest({
+                method: r.method,
+                url: `${EXPLAIN_APP}${r.path}`,
+                body: r.body,
+                headers: r.headers,
+                mode: rule,
+                settings: {
+                  ...DEFAULT_POLICY_SETTINGS,
+                  classifier,
+                  refuseDestructiveGets: refuseGets,
+                  authPosts: authPosts ? readPostEntries(authPosts).entries : null,
+                },
+              }).verdicts;
+              const explained = v.outcome === "depends" ? (owned ? "allowed" : "refused") : v.outcome;
+              const label = `${classifier} gets=${refuseGets} auth=${authPosts ?? "path rule"} ${rule} owned=${owned} ${r.method} ${r.path} ${JSON.stringify(r.headers ?? {})}`;
+              assert.equal(explained, handler === "fallback" ? "allowed" : "refused", `${label}: handler ${handler}, explain ${v.outcome} (${v.rule})`);
+            }
+});
+
+test("policy explain: the printed lines name the method it was judged as, each mode's rule and the settings in force", () => {
+  const url = `${EXPLAIN_APP}/api/things/3`;
+  const e = explainRequest({ method: "POST", url, headers: { "x-http-method-override": "DELETE" } });
+  const text = formatExplanation(url, e, DEFAULT_POLICY_SETTINGS).join("\n");
+  assert.match(text, /^POST as DELETE https:\/\/app\.example\.com\/api\/things\/3$/m);
+  assert.match(text, /Judged as DELETE: X-HTTP-Method-Override: DELETE\./);
+  assert.match(text, /^ {2}observe {6}refused/m);
+  assert.match(text, /^ {2}safe-write {3}depends/m);
+  assert.match(text, /best effort, not a guarantee/);
+  assert.match(text, /Settings read from this environment: none \(the defaults\)\./);
+  const load = `${EXPLAIN_APP}/orders/3/cancel`;
+  const get = formatExplanation(load, explainRequest({ method: "GET", url: load }), DEFAULT_POLICY_SETTINGS).join("\n");
+  assert.match(get, /reads as a destructive command/);
+  assert.match(get, /only when SCENESCOUT_REFUSE_DESTRUCTIVE_GETS=1/);
+});
+
+test("policy explain: the command line, and what it refuses", () => {
+  const ok = parsePolicyArgs([
+    "explain",
+    "post",
+    "https://app.example.com/api/x",
+    "--mode",
+    "read-only",
+    "--body=body.json",
+    "--header",
+    "X-HTTP-Method-Override: DELETE",
+  ]);
+  assert.deepEqual(ok, {
+    ok: true,
+    options: {
+      method: "POST",
+      url: "https://app.example.com/api/x",
+      mode: "read-only",
+      bodyFile: "body.json",
+      headers: { "x-http-method-override": "DELETE" },
+      appUrl: "https://app.example.com",
+    },
+  });
+  // --app: the origin a path-only list entry means, when the API is on another origin than the request's own.
+  const withApp = parsePolicyArgs(["explain", "POST", "https://api.example.com/api/search", "--app", "https://app.example.com/start"]);
+  assert.ok(withApp.ok && withApp.options.appUrl === "https://app.example.com");
+  const refused: Array<[string[], RegExp]> = [
+    [[], /say what to do/],
+    [["explian", "GET", "https://a.example.com"], /unknown action explian/],
+    [["explain", "GET"], /give a method and a URL/],
+    [["explain", "GET", "https://a.example.com", "extra"], /give a method and a URL/],
+    [["explain", "GET", "https://a.example.com", "--nope"], /unknown option --nope/],
+    [["explain", "GET", "https://a.example.com", "--mode", "careful"], /--mode must be one of observe, read-only, safe-write, destructive/],
+    [["explain", "GET", "https://a.example.com", "--mode"], /--mode needs a value/],
+    [["explain", "GET", "https://a.example.com", "--header", "no colon"], /--header must be "Name: value"/],
+    [["explain", "G E T", "https://a.example.com"], /not an HTTP method/],
+    [["explain", "GET", "/relative"], /not a URL/],
+    [["explain", "GET", "ftp://a.example.com/x"], /only http and https/],
+    [["explain", "GET", "https://a.example.com", "--app", "nope"], /--app is not a URL/],
+  ];
+  for (const [argv, message] of refused) {
+    const r = parsePolicyArgs(argv);
+    assert.equal(r.ok, false, argv.join(" "));
+    if (!r.ok) assert.match(r.error, message, argv.join(" "));
+  }
 });
