@@ -64,7 +64,7 @@ export function extraHandles(baseline: string[], now: string[]): string[] {
 }
 
 /** The handle types that are this process's own TCP sockets: a server listening, and a connection to or from one. */
-const TCP_HANDLES = new Set(["TCPServerWrap", "TCPSocketWrap", "TCPWrap"]);
+const TCP_HANDLES = new Set(["TCPServerWrap", "TCPSocketWrap"]);
 
 /**
  * The TCP sockets open now in this process that were not open at `baseline`:
