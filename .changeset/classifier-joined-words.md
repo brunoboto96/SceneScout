@@ -1,5 +1,0 @@
----
-"scenescout": minor
----
-
-The standard write classifier reads a request's path as words: it splits each segment on camelCase, PascalCase, underscores, dashes, dots and where letters meet digits before looking for a destructive verb. `read-only` (and `observe`'s check of a named read POST or sign-in) now refuses more: `POST /api/items/deleteAll`, `/bulkDelete`, `/removeAll`, `/purgeCache`, `/UserService.DeleteUser` and `/delete2` are destructive, as `/delete-all` already was. Nothing it refused before goes out now. Matching stays whole-word, so read endpoints named with another form of the verb (`/deletedAtFilter`, `/removedItems`, `/bulkDeletionStatus`, `/archives`) still go out. A verb followed by any word is read as the verb and its object, so a read named `/archiveStats` or `/deleteReasons` is refused in `read-only`, as `/archive-stats` and `/delete-reasons` already were; `/delete-requests` stays refused, since such an endpoint commonly files a deletion. The strict classifier also splits where letters meet digits, and still refuses everything it refused before. `scenescout policy explain` gives the same verdicts.
