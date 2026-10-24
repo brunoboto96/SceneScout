@@ -2298,14 +2298,15 @@ test("test.yml: a browser build is restored only from a cache of the same image,
   let cached = 0;
   for (const [name, job] of Object.entries(workflow.jobs as Record<string, WorkflowJob>)) {
     const steps = job.steps ?? [];
-    const install = steps.findIndex((s) => /npx playwright install --with-deps /.test(s.run ?? ""));
+    const install = steps.findIndex((s) => /npx playwright install (?!-)/.test(s.run ?? ""));
     if (install === -1) continue;
     cached += 1;
-    const browser = /--with-deps (.+)$/.exec(steps[install].run!.trim())![1];
+    // The browser download leaves the system libraries to their own bounded step, on a hit or a miss.
+    assert.doesNotMatch(steps[install].run ?? "", /--with-deps/, `${name}: the download installs no system libraries`);
+    const browser = /npx playwright install (.+)$/.exec(steps[install].run!.trim())![1];
     const keyStep = steps.findIndex((s) => s.id === "browser");
     const restore = steps.findIndex((s) => s.id === "browser-cache");
-    const save = steps.findIndex((s) => (s.uses ?? "").startsWith("actions/cache/save@"));
-    const deps = steps.findIndex((s) => /npx playwright install-deps /.test(s.run ?? ""));
+    const save = steps.findIndex((s) => s.with?.key === "${{ steps.browser-cache.outputs.cache-primary-key }}");
     const ci = steps.findIndex((s) => s.run === "npm ci");
     // The version is read from the installed package, so the key step runs after npm ci.
     assert.ok(ci !== -1 && ci < keyStep && keyStep < restore && restore < install && install < save, `${name}: npm ci, key, restore, install, save`);
@@ -2313,6 +2314,7 @@ test("test.yml: a browser build is restored only from a cache of the same image,
     assert.match(keyRun, /playwright=\$\(node -p "require\('playwright\/package\.json'\)\.version"\)/, name);
     assert.match(keyRun, /image=\$\{ImageOS:-/, `${name}: the key step names the runner image`);
     assert.match(steps[restore].uses ?? "", /^actions\/cache\/restore@/, name);
+    assert.match(steps[save].uses ?? "", /^actions\/cache\/save@/, name);
     assert.equal(
       steps[restore].with?.key,
       `playwright-\${{ runner.os }}-\${{ steps.browser.outputs.image }}-\${{ runner.arch }}-${browser}-\${{ steps.browser.outputs.playwright }}`,
@@ -2322,12 +2324,82 @@ test("test.yml: a browser build is restored only from a cache of the same image,
     assert.equal(steps[install].if, miss, `${name}: a hit skips the download`);
     // No always(): a download that failed part-way is never saved.
     assert.equal(steps[save].if, miss, `${name}: only a build this job installed is saved`);
-    assert.equal(steps[save].with?.key, "${{ steps.browser-cache.outputs.cache-primary-key }}", name);
     assert.equal(steps[save].with?.path, steps[restore].with?.path, `${name}: saved from where it is restored to`);
-    assert.equal(steps[deps].if, "steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'", name);
-    assert.equal(steps[deps].run?.trim(), `npx playwright install-deps ${browser}`, `${name}: the system libraries of the browser it restored`);
   }
   assert.equal(cached, 3, "the docs, suite and cross-browser jobs each install a browser");
+});
+
+test("test.yml: a browser's system libraries install from cached packages, each attempt bounded, and the packages are saved only after an install", () => {
+  // On 2026-10-23 the Ubuntu mirror ran at about 140 KB/s or stalled, and a download of 50-150 MB of packages ran a
+  // shard out of time. A hit installs from the packages a past job downloaded; only apt's package lists come from
+  // the mirror.
+  const workflow = parseYaml(readText(path.join(REPO, ".github", "workflows", "test.yml"))) as Record<string, any>;
+  let installed = 0;
+  for (const [name, job] of Object.entries(workflow.jobs as Record<string, WorkflowJob>)) {
+    const steps = job.steps ?? [];
+    const deps = steps.findIndex((s) => /npx playwright install-deps /.test(s.run ?? ""));
+    if (deps === -1) continue;
+    installed += 1;
+    const keyStep = steps.findIndex((s) => s.id === "browser");
+    const browserRestore = steps.findIndex((s) => s.id === "browser-cache");
+    const browser = /-([^-]+)-\$\{\{ steps\.browser\.outputs\.playwright \}\}$/.exec(steps[browserRestore].with?.key ?? "")![1];
+    const restore = steps.findIndex((s) => s.id === "apt-cache");
+    const save = steps.findIndex((s) => s.with?.key === "${{ steps.apt-cache.outputs.cache-primary-key }}");
+    assert.ok(keyStep < restore && restore < deps && deps < save, `${name}: key, restore the packages, install, save them`);
+    // Both a hit and a miss of the browser cache need the libraries; Playwright's --with-deps is no longer the miss path.
+    const linux = "runner.os == 'Linux'";
+    assert.equal(steps[deps].if, linux, `${name}: the libraries install on Linux whether the browser was cached or not`);
+    assert.equal(steps[restore].if, linux, name);
+
+    // The key: the image and its version (which packages it ships), the arch, the browser and Playwright (which it asks for).
+    const keyRun = steps[keyStep].run ?? "";
+    assert.match(keyRun, /image-version=\$\{ImageVersion:-/, `${name}: the key step names the image's version`);
+    assert.match(keyRun, /Linux\) .*echo "apt=\$HOME\/[^"]+"/, `${name}: the packages are kept in a directory the runner owns`);
+    assert.equal(steps[restore].uses, steps[browserRestore].uses, `${name}: restored by the same pinned action as the browser`);
+    assert.equal(steps[restore].with?.path, "${{ steps.browser.outputs.apt }}", name);
+    assert.equal(
+      steps[restore].with?.key,
+      `apt-\${{ runner.os }}-\${{ steps.browser.outputs.image }}-\${{ steps.browser.outputs.image-version }}-\${{ runner.arch }}-${browser}-\${{ steps.browser.outputs.playwright }}`,
+      `${name}: the key names the image and its version, the arch, the browser and the Playwright version`,
+    );
+    // No always(): the packages of an install that failed are never saved, and a hit is not saved again.
+    assert.match(steps[save].uses ?? "", /^actions\/cache\/save@/, name);
+    assert.equal(steps[save].if, "runner.os == 'Linux' && steps.apt-cache.outputs.cache-hit != 'true'", `${name}: saved only on a miss`);
+    assert.equal(steps[save].with?.path, steps[restore].with?.path, `${name}: saved from where it is restored to`);
+
+    const depsRun = steps[deps].run ?? "";
+    assert.equal(steps[deps].env?.ARCHIVES, steps[restore].with?.path, `${name}: the install reads the restored directory`);
+    // timeout runs as root: the apt that Playwright starts runs as root, and a timeout of the runner's own user cannot stop it.
+    const attempt = /^\s*if sudo env "PATH=\$PATH" timeout --kill-after=(\d+) (\d+) npx playwright install-deps (\S+); then$/m.exec(depsRun);
+    assert.ok(attempt, `${name}: each attempt runs under a timeout of root's`);
+    const named = attempt[3] === '"$BROWSER"' ? steps[deps].env?.BROWSER : attempt[3];
+    assert.equal(named, browser, `${name}: the system libraries of the browser it restored`);
+    // The cached packages are in apt's own archive before apt runs, and what it downloaded is copied out only after it succeeded.
+    const copyIn = depsRun.search(/-name '\*\.deb' -exec sudo cp -t \/var\/cache\/apt\/archives \{\} \+/);
+    assert.ok(copyIn !== -1 && copyIn < attempt.index, `${name}: the cached packages are copied in before apt runs`);
+    const success = depsRun.slice(attempt.index + attempt[0].length).split(/\n\s*fi\n/)[0];
+    assert.match(
+      success,
+      /find \/var\/cache\/apt\/archives -maxdepth 1 -name '\*\.deb' -exec cp -t "\$ARCHIVES" \{\} \+/,
+      `${name}: copied out after a success`,
+    );
+    assert.match(depsRun, /Binary::apt::APT::Keep-Downloaded-Packages "true";/, `${name}: apt keeps the packages it downloads`);
+    assert.match(depsRun, /sudo rm -f \/etc\/apt\/apt\.conf\.d\/docker-clean/, `${name}: no hook deletes them after the install`);
+
+    // A slow mirror still moves: the packages the first attempt finished are kept for the second, so the two attempts
+    // add up. Both fit inside the step's limit, and the step leaves the job time to run its tests.
+    const stepLimit = Number(steps[deps]["timeout-minutes"]);
+    assert.ok(Number(attempt[2]) >= 480, `${name}: each attempt gets at least eight minutes`);
+    assert.ok(2 * (Number(attempt[1]) + Number(attempt[2])) < stepLimit * 60, `${name}: both attempts fit inside the step's own time limit`);
+    const jobLimit = Number((job as Record<string, unknown>)["timeout-minutes"]);
+    assert.ok(jobLimit - stepLimit >= 10, `${name}: the step leaves the job at least ten minutes (${stepLimit} of ${jobLimit})`);
+    assert.match(depsRun, /sudo dpkg --configure -a/, `${name}: an install cut off part-way is finished before the retry`);
+    assert.match(depsRun, /Acquire::Retries "\d+";/, `${name}: apt fetches a failed download again`);
+    assert.match(depsRun, /Acquire::https?::Timeout "\d+";/, `${name}: apt drops a stalled download`);
+    assert.match(depsRun, /for attempt in 1 2; do/, `${name}: a failed or hung attempt is tried once more`);
+    assert.match(depsRun, /\nexit 1\s*$/, `${name}: two failed attempts fail the step`);
+  }
+  assert.equal(installed, 3, "the docs, suite and cross-browser jobs each install the system libraries");
 });
 
 test("the same lines compare equal as LF and as CRLF, and one different line does not", () => {
@@ -2359,7 +2431,15 @@ test("the same place matches with either separator and, on Windows, either case"
   assert.equal(samePlace("posix", "/work/app", "/work/other"), false);
 });
 
-type WorkflowStep = { id?: string; uses?: string; run?: string; if?: string; env?: Record<string, string>; with?: Record<string, string> };
+type WorkflowStep = {
+  id?: string;
+  uses?: string;
+  run?: string;
+  if?: string;
+  env?: Record<string, string>;
+  with?: Record<string, string>;
+  "timeout-minutes"?: number;
+};
 type WorkflowJob = {
   permissions?: Record<string, string>;
   needs?: string | string[];

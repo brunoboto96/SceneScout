@@ -97,7 +97,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.kind == 'docs'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -113,8 +113,8 @@ jobs:
       # version. Restore and save are separate steps, as in action.yml: the
       # combined action saves only when the whole job passes, so a failing suite
       # would never cache it.
-      # A hit skips the download; Linux still installs the system libraries,
-      # which live outside the cache.
+      # A hit skips the download. On Linux the system libraries, which live outside
+      # this cache, are installed by a step of their own on a hit or a miss.
       - name: Browser cache key
         id: browser
         shell: bash
@@ -122,8 +122,9 @@ jobs:
           echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
           # The runner image (ubuntu24, macos15, win25): Playwright's WebKit and Firefox builds differ by OS release.
           echo "image=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "image-version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
           case "$RUNNER_OS" in
-            Linux) echo "path=$HOME/.cache/ms-playwright" ;;
+            Linux) echo "path=$HOME/.cache/ms-playwright"; echo "apt=$HOME/.cache/apt-archives" ;;
             macOS) echo "path=$HOME/Library/Caches/ms-playwright" ;;
             Windows) echo "path=$USERPROFILE\\AppData\\Local\\ms-playwright" ;;
           esac >> "$GITHUB_OUTPUT"
@@ -135,16 +136,50 @@ jobs:
           key: playwright-${{ runner.os }}-${{ steps.browser.outputs.image }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
       - name: Install browser
         if: steps.browser-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
       - name: Save the browser cache
         if: steps.browser-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.browser.outputs.path }}
           key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+      # The packages apt downloads are cached by image, browser and Playwright, so a hit
+      # installs from them and needs the mirror only for its package lists. On a miss
+      # each attempt gets eight minutes and a failed one is tried once more, keeping what
+      # the first downloaded. timeout runs as root to stop the apt Playwright runs as root.
+      - name: Restore the system libraries' packages
+        id: apt-cache
+        if: runner.os == 'Linux'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.apt }}
+          key: apt-${{ runner.os }}-${{ steps.browser.outputs.image }}-${{ steps.browser.outputs.image-version }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
       - name: Install the browser's system libraries
-        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
-        run: npx playwright install-deps chromium
+        if: runner.os == 'Linux'
+        timeout-minutes: 17
+        env:
+          ARCHIVES: ${{ steps.browser.outputs.apt }}
+        run: |
+          # A download that stalls is dropped after 20 s and fetched again; downloaded packages are kept.
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' | sudo tee /etc/apt/apt.conf.d/80-scenescout-retries >/dev/null
+          sudo rm -f /etc/apt/apt.conf.d/docker-clean
+          mkdir -p "$ARCHIVES"
+          find "$ARCHIVES" -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives {} +
+          for attempt in 1 2; do
+            if sudo env "PATH=$PATH" timeout --kill-after=15 480 npx playwright install-deps chromium; then
+              find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$ARCHIVES" {} +
+              exit 0
+            fi
+            echo "::warning title=System libraries::attempt $attempt to install them failed or ran out of time"
+            sudo dpkg --configure -a || echo "::warning title=System libraries::dpkg could not finish an interrupted install"
+          done
+          exit 1
+      - name: Save the system libraries' packages
+        if: runner.os == 'Linux' && steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.apt }}
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
       - run: npm run build
       - name: Unit suites
         run: npm run test:unit
@@ -190,8 +225,9 @@ jobs:
           echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
           # The runner image (ubuntu24, macos15, win25): Playwright's WebKit and Firefox builds differ by OS release.
           echo "image=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "image-version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
           case "$RUNNER_OS" in
-            Linux) echo "path=$HOME/.cache/ms-playwright" ;;
+            Linux) echo "path=$HOME/.cache/ms-playwright"; echo "apt=$HOME/.cache/apt-archives" ;;
             macOS) echo "path=$HOME/Library/Caches/ms-playwright" ;;
             Windows) echo "path=$USERPROFILE\\AppData\\Local\\ms-playwright" ;;
           esac >> "$GITHUB_OUTPUT"
@@ -203,16 +239,50 @@ jobs:
           key: playwright-${{ runner.os }}-${{ steps.browser.outputs.image }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
       - name: Install browser
         if: steps.browser-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
       - name: Save the browser cache
         if: steps.browser-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.browser.outputs.path }}
           key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+      # The packages apt downloads are cached by image, browser and Playwright, so a hit
+      # installs from them and needs the mirror only for its package lists. On a miss
+      # each attempt gets eight minutes and a failed one is tried once more, keeping what
+      # the first downloaded. timeout runs as root to stop the apt Playwright runs as root.
+      - name: Restore the system libraries' packages
+        id: apt-cache
+        if: runner.os == 'Linux'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.apt }}
+          key: apt-${{ runner.os }}-${{ steps.browser.outputs.image }}-${{ steps.browser.outputs.image-version }}-${{ runner.arch }}-chromium-${{ steps.browser.outputs.playwright }}
       - name: Install the browser's system libraries
-        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
-        run: npx playwright install-deps chromium
+        if: runner.os == 'Linux'
+        timeout-minutes: 17
+        env:
+          ARCHIVES: ${{ steps.browser.outputs.apt }}
+        run: |
+          # A download that stalls is dropped after 20 s and fetched again; downloaded packages are kept.
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' | sudo tee /etc/apt/apt.conf.d/80-scenescout-retries >/dev/null
+          sudo rm -f /etc/apt/apt.conf.d/docker-clean
+          mkdir -p "$ARCHIVES"
+          find "$ARCHIVES" -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives {} +
+          for attempt in 1 2; do
+            if sudo env "PATH=$PATH" timeout --kill-after=15 480 npx playwright install-deps chromium; then
+              find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$ARCHIVES" {} +
+              exit 0
+            fi
+            echo "::warning title=System libraries::attempt $attempt to install them failed or ran out of time"
+            sudo dpkg --configure -a || echo "::warning title=System libraries::dpkg could not finish an interrupted install"
+          done
+          exit 1
+      - name: Save the system libraries' packages
+        if: runner.os == 'Linux' && steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.apt }}
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
       - run: npm run build
       # The test scripts are run by tsx, which strips types without checking them; this checks them against the built engine.
       - name: Type check of the test scripts
@@ -266,8 +336,9 @@ jobs:
           echo "playwright=$(node -p "require('playwright/package.json').version")" >> "$GITHUB_OUTPUT"
           # The runner image (ubuntu24, macos15, win25): Playwright's WebKit and Firefox builds differ by OS release.
           echo "image=${ImageOS:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "image-version=${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
           case "$RUNNER_OS" in
-            Linux) echo "path=$HOME/.cache/ms-playwright" ;;
+            Linux) echo "path=$HOME/.cache/ms-playwright"; echo "apt=$HOME/.cache/apt-archives" ;;
             macOS) echo "path=$HOME/Library/Caches/ms-playwright" ;;
             Windows) echo "path=$USERPROFILE\\AppData\\Local\\ms-playwright" ;;
           esac >> "$GITHUB_OUTPUT"
@@ -279,16 +350,51 @@ jobs:
           key: playwright-${{ runner.os }}-${{ steps.browser.outputs.image }}-${{ runner.arch }}-${{ matrix.browser }}-${{ steps.browser.outputs.playwright }}
       - name: Install browser
         if: steps.browser-cache.outputs.cache-hit != 'true'
-        run: npx playwright install --with-deps ${{ matrix.browser }}
+        run: npx playwright install ${{ matrix.browser }}
       - name: Save the browser cache
         if: steps.browser-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.browser.outputs.path }}
           key: ${{ steps.browser-cache.outputs.cache-primary-key }}
+      # The packages apt downloads are cached by image, browser and Playwright, so a hit
+      # installs from them and needs the mirror only for its package lists. On a miss
+      # each attempt gets eight minutes and a failed one is tried once more, keeping what
+      # the first downloaded. timeout runs as root to stop the apt Playwright runs as root.
+      - name: Restore the system libraries' packages
+        id: apt-cache
+        if: runner.os == 'Linux'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.apt }}
+          key: apt-${{ runner.os }}-${{ steps.browser.outputs.image }}-${{ steps.browser.outputs.image-version }}-${{ runner.arch }}-${{ matrix.browser }}-${{ steps.browser.outputs.playwright }}
       - name: Install the browser's system libraries
-        if: steps.browser-cache.outputs.cache-hit == 'true' && runner.os == 'Linux'
-        run: npx playwright install-deps ${{ matrix.browser }}
+        if: runner.os == 'Linux'
+        timeout-minutes: 17
+        env:
+          ARCHIVES: ${{ steps.browser.outputs.apt }}
+          BROWSER: ${{ matrix.browser }}
+        run: |
+          # A download that stalls is dropped after 20 s and fetched again; downloaded packages are kept.
+          printf 'Acquire::Retries "3";\nAcquire::http::Timeout "20";\nAcquire::https::Timeout "20";\nBinary::apt::APT::Keep-Downloaded-Packages "true";\n' | sudo tee /etc/apt/apt.conf.d/80-scenescout-retries >/dev/null
+          sudo rm -f /etc/apt/apt.conf.d/docker-clean
+          mkdir -p "$ARCHIVES"
+          find "$ARCHIVES" -maxdepth 1 -name '*.deb' -exec sudo cp -t /var/cache/apt/archives {} +
+          for attempt in 1 2; do
+            if sudo env "PATH=$PATH" timeout --kill-after=15 480 npx playwright install-deps "$BROWSER"; then
+              find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp -t "$ARCHIVES" {} +
+              exit 0
+            fi
+            echo "::warning title=System libraries::attempt $attempt to install them failed or ran out of time"
+            sudo dpkg --configure -a || echo "::warning title=System libraries::dpkg could not finish an interrupted install"
+          done
+          exit 1
+      - name: Save the system libraries' packages
+        if: runner.os == 'Linux' && steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.browser.outputs.apt }}
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
       - run: npm run build
       - name: Browser suite, shard ${{ matrix.shard }} of 3
         env:
