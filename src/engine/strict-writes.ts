@@ -4,13 +4,13 @@
  * rather lose some coverage than let a delete out (#548).
  *
  * The standard classifier (policy.ts isDestructiveWire) matches whole words
- * in the path and a command key's value at the start of the body. It misses
- * a verb inside an identifier (`/api/deleteUser`, `UserService.DeleteUser`,
- * a noun-first GraphQL field such as `productDelete`), a command in the
- * query (`?action=delete`), one past the first 2,000 characters of the body,
- * and verbs outside its list (cancel, refund, terminate, …). It also flags a
- * noun phrase (`/api/delete-requests`) and prose that looks like a command
- * key (`{"note":"action: delete"}`).
+ * of the path, split as here (`/api/deleteUser` counts since #684), and a
+ * command key's value at the start of the body. It misses a verb inside a
+ * command's value or a noun-first GraphQL field (`productDelete`), a command
+ * in the query (`?action=delete`), one past the first 2,000 characters of the
+ * body, and verbs outside its list (cancel, refund, terminate, …). It also
+ * flags a noun phrase (`/api/delete-requests`) and prose that looks like a
+ * command key (`{"note":"action: delete"}`).
  *
  * The strict classifier splits identifiers into words (on camelCase, dots,
  * dashes and underscores) before matching, reads the query's command keys and
@@ -38,6 +38,8 @@ import type { LinearRegex } from "./linear-regex.js";
 const LOWER_THEN_UPPER_RE = fromJs(String.raw`([a-z0-9])([A-Z])`);
 const CAPITALS_THEN_WORD_RE = fromJs(String.raw`([A-Z]+)([A-Z][a-z])`);
 const NOT_LETTER_OR_DIGIT_RE = fromJs(String.raw`[^A-Za-z0-9]+`);
+const LETTER_THEN_DIGIT_RE = fromJs(String.raw`([A-Za-z])([0-9])`);
+const DIGIT_THEN_LETTER_RE = fromJs(String.raw`([0-9])([A-Za-z])`);
 const MUTATION_WORD_RE = fromJs(String.raw`\bmutation\b`);
 const isLetter = (c: string): boolean => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z");
 const isWordChar = (c: string): boolean => isLetter(c) || (c >= "0" && c <= "9") || c === "_";
@@ -100,10 +102,18 @@ const NOUN_PHRASE_HEADS = new Set(["request", "requests", "reason", "reasons"]);
 /** Keys whose value is a command, in a body or a query: `action=delete`, `"method":"UserService.DeleteUser"`. */
 const COMMAND_KEYS = new Set(["action", "operation", "op", "method", "_method", "command", "cmd", "operationname", "procedure", "rpc"]);
 
-/** An identifier split into lower-case words: on anything not a letter or digit, and on camelCase boundaries. */
-export function identifierWords(text: string): string[] {
+/**
+ * An identifier split into lower-case words: on anything not a letter or
+ * digit, and on camelCase boundaries (`deleteAll`, `DeleteUser`,
+ * `HTTPDelete`). With `digits`, also where letters meet digits (`delete2`,
+ * `v2delete`); a page load's address is read without it, so `/blog/archive2024`
+ * stays one word there.
+ */
+export function identifierWords(text: string, opts: { digits?: boolean } = {}): string[] {
   const spaced = (re: LinearRegex, t: string): string => re.replace(t, ({ groups: [, a, b] }) => `${a} ${b}`);
-  return NOT_LETTER_OR_DIGIT_RE.splitText(spaced(CAPITALS_THEN_WORD_RE, spaced(LOWER_THEN_UPPER_RE, text)))
+  let t = spaced(CAPITALS_THEN_WORD_RE, spaced(LOWER_THEN_UPPER_RE, text));
+  if (opts.digits) t = spaced(DIGIT_THEN_LETTER_RE, spaced(LETTER_THEN_DIGIT_RE, t));
+  return NOT_LETTER_OR_DIGIT_RE.splitText(t)
     .filter(Boolean)
     .map((w) => w.toLowerCase());
 }
@@ -115,7 +125,8 @@ function wordsCommand(words: readonly string[], verbs: ReadonlySet<string>): boo
 
 /** Whether one identifier (a path segment, a command's value, a GraphQL field) names a destructive command. */
 export function identifierIsDestructive(text: string): boolean {
-  return wordsCommand(identifierWords(text), STRICT_VERBS);
+  // Read with and without the split at digits: `delete-requests0` is a noun phrase only once `requests0` is split, so the reading without it keeps that refusal.
+  return wordsCommand(identifierWords(text), STRICT_VERBS) || wordsCommand(identifierWords(text, { digits: true }), STRICT_VERBS);
 }
 
 /** The query's command keys, read: `?action=delete`, `?op=cancelOrder`. */
