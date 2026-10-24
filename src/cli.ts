@@ -276,7 +276,8 @@ Usage:
                                     rule that decided, from the same functions the running engine judges requests
                                     with. Reads SCENESCOUT_STRICT_WRITES, SCENESCOUT_REFUSE_DESTRUCTIVE_GETS,
                                     SCENESCOUT_READ_POSTS and SCENESCOUT_AUTH_POSTS from this environment, as the
-                                    server does, and the config file's readPosts. Sends nothing.
+                                    server does, and the config file's readPosts, writeClassifier,
+                                    refuseDestructiveGets and authPosts. Sends nothing.
                                     (--mode observe|read-only|safe-write|destructive: that mode only (default: all);
                                      --body file: the request body, read from that file;
                                      --header "Name: value": a request header, such as a method override; repeatable;

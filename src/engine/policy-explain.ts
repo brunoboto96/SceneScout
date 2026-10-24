@@ -174,6 +174,8 @@ export interface PolicySettings {
   readPosts: readonly ReadPost[];
   /** The config's authPosts or SCENESCOUT_AUTH_POSTS, parsed, or null when neither sets a list (the path rule decides). */
   authPosts: readonly ReadPost[] | null;
+  /** True: a listed POST must also look like a sign-in by its path (a list only a project's own file set; project-config.ts writeRulesSettings). */
+  authPostsNarrowOnly?: boolean;
   /** What turned each write-judgement setting on, when the operator's config was read (project-config.ts writeRulesSettings). Absent: the environment. */
   from?: WriteRulesSources;
 }
@@ -195,6 +197,7 @@ export function policySettingsFrom(env: Record<string, string | undefined>, rule
     refuseDestructiveGets: rules.refuseDestructiveGets,
     readPosts: readPostEntries(readPostsSetting(undefined, env[READ_POSTS_ENV])).entries,
     authPosts: rules.authPosts ? readPostEntries(rules.authPosts.entries).entries : null,
+    authPostsNarrowOnly: rules.authPosts?.andSignInPath === true,
     from: rules.from,
   };
 }
@@ -264,7 +267,7 @@ function verdictFor(
     foreign: null,
     offApp: null,
     readPost: readPost !== null,
-    authList: settings.authPosts ? { entries: settings.authPosts, appUrl, url: input.url } : null,
+    authList: settings.authPosts ? { entries: settings.authPosts, appUrl, url: input.url, andSignInPath: settings.authPostsNarrowOnly === true } : null,
   });
   if (verdict.kind === "refuse") return { mode, outcome: "refused", rule: verdict.why, source: "route-guard.ts routedWriteVerdict" };
   if (verdict.kind === "auth")
@@ -272,7 +275,7 @@ function verdictFor(
       mode,
       outcome: "allowed",
       rule: settings.authPosts
-        ? `a sign-in POST listed in ${settings.from?.authPosts ?? AUTH_POSTS_ENV}`
+        ? `a sign-in POST listed in ${settings.from?.authPosts ?? AUTH_POSTS_ENV}${settings.authPostsNarrowOnly ? " that also looks like a sign-in by its path" : ""}`
         : mode === "observe"
           ? "a sign-in, sign-out or token refresh by its path (observe's narrow sign-in rule)"
           : "an auth or session request by its path",

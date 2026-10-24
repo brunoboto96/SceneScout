@@ -110,7 +110,10 @@ disagree, the file wins and the argument is refused.
   `check` and a first look), so the engine reads the environment only when no
   caller passes them. No tool argument names them; the environment can turn
   either flag on and narrow the list, never the reverse, and a project's own
-  file can only tighten them.
+  file can only tighten them. A sign-in list replaces the path rule, so a
+  list only the project's own file sets is held as a narrowing of it: a POST
+  must be listed and also look like a sign-in by its path, unless
+  `SCENESCOUT_AUTH_POSTS`, the operator's, lists it too.
 - **While a guided plan is open, a sign-in list only narrows the path rule.**
   The attach used to stop reading `SCENESCOUT_AUTH_POSTS` in a guided check;
   it now reads it, and the config's list, with `andSignInPath`, so an

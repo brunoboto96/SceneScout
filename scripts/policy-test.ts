@@ -3587,7 +3587,7 @@ test("config: the write-judgement locks hold against the environment and the pro
   const looser: Policy = { writeClassifier: "standard", refuseDestructiveGets: false, authPosts: ["POST /api/login", "POST /api/orders"] };
   assert.deepEqual(tightenPolicy(lock, looser), lock);
   assert.deepEqual(tightenPolicy({ writeClassifier: "standard", refuseDestructiveGets: false, authPosts: ["POST /api/login", "POST /api/sso"] }, lock), lock);
-  assert.deepEqual(tightenPolicy({}, lock), lock, "the operator set none: the project's own apply");
+  assert.deepEqual(tightenPolicy({}, lock), { ...lock, authPostsNarrowOnly: true }, "the operator set none: the project's own apply, its list only narrowing");
   assert.deepEqual(tightenPolicy({ authPosts: [] }, { authPosts: ["POST /api/login"] }).authPosts, [], "[] allows none, whatever the project lists");
   // The same over a stand-in disk, as an attach reads it.
   const at = (dir: string): string => path.join(dir, ".scenescout", "config.json");
@@ -3599,6 +3599,92 @@ test("config: the write-judgement locks hold against the environment and the pro
   assert.equal(joined.loaded.policy.refuseDestructiveGets, true);
   assert.deepEqual(joined.loaded.policy.authPosts, ["POST /api/login"]);
   // No tool argument names any of the three: scout_attach takes them from here and the environment only (mcp-check holds its schema).
+});
+
+test("config: a project's own sign-in list, where the operator set none, only narrows the path rule, so it cannot let a write out as a sign-in", () => {
+  const app = "https://app.example.com";
+  const at = (dir: string): string => path.join(dir, ".scenescout", "config.json");
+  const project: Policy = { authPosts: ["POST /api/login", "POST /api/orders"] };
+  const files = new Map<string, string>([[at("/srv/app"), JSON.stringify(project)]]);
+  const disk = { exists: (f: string) => files.has(f), read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+  const exempt = (rules: ReturnType<typeof writeRulesSettings>, pathname: string, mode: WriteMode = "observe") =>
+    isAuthExempt(mode, "POST", pathname, false, {
+      entries: readPostEntries(rules.authPosts!.entries).entries,
+      appUrl: app,
+      url: `${app}${pathname}`,
+      andSignInPath: rules.authPosts!.andSignInPath,
+    });
+  // No operator file and no environment list: without the project's file the path rule refuses POST /api/orders in observe.
+  assert.equal(isAuthExempt("observe", "POST", "/api/orders", false, null), false);
+  const joined = withProjectPolicy(NO_POLICY, "/srv/app", disk);
+  assert.ok(joined.ok);
+  const rules = writeRulesSettings(joined.loaded.policy, {}, false);
+  assert.equal(rules.authPosts?.andSignInPath, true, "the project's list is joined to the path rule, not put in its place");
+  for (const mode of ["observe", "read-only", "safe-write"] as const)
+    assert.equal(exempt(rules, "/api/orders", mode), false, `${mode}: a listed write is not a sign-in`);
+  assert.equal(exempt(rules, "/api/login"), true, "listed and a sign-in by its path: out, as without the file");
+  // The contrast: the same list in the operator's own file replaces the path rule, the operator's choice.
+  const operator = writeRulesSettings(project, {}, false);
+  assert.equal(operator.authPosts?.andSignInPath, false);
+  assert.equal(exempt(operator, "/api/orders"), true);
+  // The operator's environment list beside the project's: their intersection, within what the operator listed, so no extra narrowing.
+  const withEnv = writeRulesSettings(joined.loaded.policy, { SCENESCOUT_AUTH_POSTS: "POST /api/orders" }, false);
+  assert.deepEqual(withEnv.authPosts, { entries: ["POST /api/orders"], andSignInPath: false });
+  // Both files list: the intersection, which is within the operator's list.
+  assert.deepEqual(tightenPolicy({ authPosts: ["POST /api/orders"] }, project), { authPosts: ["POST /api/orders"] });
+  // policy explain, with SCENESCOUT_CONFIG naming the operator's file and the project's in the folder it runs in, judges the same way.
+  const explainFiles = new Map<string, string>([
+    ["/op/config.json", JSON.stringify({ maxMode: "safe-write" })],
+    [at("/launch"), JSON.stringify(project)],
+  ]);
+  const reader = { exists: (f: string) => explainFiles.has(f), read: (f: string) => explainFiles.get(f)!, realpath: (f: string) => f };
+  const explain = (url: string): string => {
+    const out: string[] = [];
+    runPolicyCommand(["explain", "POST", url, "--mode", "observe"], {
+      env: { SCENESCOUT_CONFIG: "/op/config.json" },
+      readBody: () => "",
+      out: (line) => void out.push(line),
+      err: (line) => void out.push(line),
+      config: { launchDir: "/launch", reader },
+    });
+    return out.join("\n");
+  };
+  assert.match(explain(`${app}/api/orders`), /^ {2}observe +refused /m);
+  assert.match(explain(`${app}/api/login`), /^ {2}observe +allowed +a sign-in POST listed in /m);
+});
+
+test("a sign-in list joined to the path rule can only refuse more than the path rule alone, in every mode and on every path", () => {
+  const app = "https://app.example.com";
+  const paths = [
+    "/api/login",
+    "/api/orders",
+    "/api/auth/refresh",
+    "/oauth/token",
+    "/u/login/password",
+    "/account/password",
+    "/api/session/123/delete",
+    "/api/login/../users/delete",
+    "/api/login/%2e%2e/users/delete",
+    "/api/graphql",
+    "/logout",
+    "/api/things",
+  ];
+  const lists = [[], ["POST /api/login"], ["POST /api/orders", "POST /api/graphql"], ["POST /*/*"], ["POST /*", "POST /*/*", "POST /*/*/*"]];
+  let narrowedOut = 0;
+  for (const mode of ["observe", "read-only", "safe-write"] as const)
+    for (const entries of lists)
+      for (const p of paths)
+        for (const destructiveWire of [false, true]) {
+          const url = new URL(p, app).href;
+          const pathname = new URL(url).pathname;
+          const list = { entries: readPostEntries(entries).entries, appUrl: app, url };
+          const narrowed = isAuthExempt(mode, "POST", pathname, destructiveWire, { ...list, andSignInPath: true });
+          const pathRule = isAuthExempt(mode, "POST", pathname, destructiveWire, null);
+          if (narrowed) assert.equal(pathRule, true, `${mode} ${JSON.stringify(entries)} ${p}: let out by the list but not by the path rule`);
+          // The contrast: the same list in place of the path rule does let some of these out.
+          if (!pathRule && isAuthExempt(mode, "POST", pathname, destructiveWire, list)) narrowedOut++;
+        }
+  assert.ok(narrowedOut > 0, "a list in place of the path rule lets out POSTs the path rule refuses, so the check above can fail");
 });
 
 test("config: what the write-judgement locks did is said on the attach's and a command's Config line", () => {
@@ -3856,14 +3942,30 @@ test("policy explain: its verdicts are the route handler's on the same request, 
     { method: "PUT", path: "/api/things/3", body: "{}" },
     { method: "PATCH", path: "/api/things/3", body: "{}" },
     { method: "DELETE", path: "/api/things/3" },
+    // A listed sign-in path reached by another request: a dot segment, an encoded one, a query override, a header override.
+    { method: "POST", path: "/api/session-start/../things/3/delete", body: "{}" },
+    { method: "POST", path: "/api/session-start/%2e%2e/things/3/delete", body: "{}" },
+    { method: "POST", path: "/api/session-start?_method=DELETE", body: "{}" },
+    { method: "POST", path: "/api/session-start", body: "{}", headers: { "x-http-method-override": "DELETE" } },
+    { method: "POST", path: "/api/auth/login", body: '{"_method":"DELETE"}', headers: { "content-type": "application/json" } },
   ];
   for (const classifier of ["standard", "strict"] as const)
     for (const refuseGets of [false, true])
-      for (const authPosts of [undefined, ["POST /api/session-start"]])
+      for (const [authPosts, narrowOnly] of [
+        [undefined, false],
+        [["POST /api/session-start"], false],
+        [["POST /api/session-start", "POST /api/auth/login"], true],
+      ] as const)
         for (const rule of ["observe", "read-only", "safe-write"] as const)
           for (const owned of [false, true])
             for (const r of requests) {
-              const handler = await guardRig(rule, { classifier, refuseGets, authPosts, owned: () => owned }).send(r.method, r.path, {
+              const handler = await guardRig(rule, {
+                classifier,
+                refuseGets,
+                authPosts: authPosts ? [...authPosts] : undefined,
+                narrowOnly,
+                owned: () => owned,
+              }).send(r.method, r.path, {
                 type: r.type ?? "xhr",
                 body: r.body ?? null,
                 headers: r.headers ?? {},
@@ -3879,10 +3981,11 @@ test("policy explain: its verdicts are the route handler's on the same request, 
                   classifier,
                   refuseDestructiveGets: refuseGets,
                   authPosts: authPosts ? readPostEntries(authPosts).entries : null,
+                  authPostsNarrowOnly: narrowOnly,
                 },
               }).verdicts;
               const explained = v.outcome === "depends" ? (owned ? "allowed" : "refused") : v.outcome;
-              const label = `${classifier} gets=${refuseGets} auth=${authPosts ?? "path rule"} ${rule} owned=${owned} ${r.method} ${r.path} ${JSON.stringify(r.headers ?? {})}`;
+              const label = `${classifier} gets=${refuseGets} auth=${authPosts ?? "path rule"} narrow=${narrowOnly} ${rule} owned=${owned} ${r.method} ${r.path} ${JSON.stringify(r.headers ?? {})}`;
               assert.equal(explained, handler === "fallback" ? "allowed" : "refused", `${label}: handler ${handler}, explain ${v.outcome} (${v.rule})`);
             }
 });

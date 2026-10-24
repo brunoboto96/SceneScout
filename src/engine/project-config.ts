@@ -199,7 +199,7 @@ export const NO_POLICY: LoadedPolicy = { policy: {}, sources: [] };
  * which no preset sets because the strict classifier refuses writes the
  * standard one lets out and a sign-in list names one app's endpoints.
  */
-export type PresetPolicy = Required<Omit<Policy, "projectsRoot" | "egress" | "writeClassifier" | "authPosts">>;
+export type PresetPolicy = Required<Omit<Policy, "projectsRoot" | "egress" | "writeClassifier" | "authPosts" | "authPostsNarrowOnly">>;
 
 /** What each preset sets. A key the file sets beside the preset replaces the preset's value for that key. */
 export const PRESET_POLICY: Record<Preset, PresetPolicy> = {
@@ -363,7 +363,13 @@ function intersect(inner: readonly string[], outer: readonly string[], key: (e: 
 /**
  * Two policies as one, each setting the stricter of the two. The project's
  * own file is joined to the operator's this way, so it can tighten what the
- * operator's file allows and never loosen it.
+ * operator's file allows and never loosen it: `a` is the operator's, `b` the
+ * project's.
+ *
+ * A sign-in list replaces the path rule, so one only the project lists would
+ * let out as a sign-in a POST the path rule refuses. It is kept as a narrowing
+ * of the path rule instead (`authPostsNarrowOnly`): a POST must be listed and
+ * also look like a sign-in by its path.
  */
 export function tightenPolicy(a: Policy, b: Policy): Policy {
   const out: Policy = {};
@@ -381,6 +387,7 @@ export function tightenPolicy(a: Policy, b: Policy): Policy {
   if (a.refuseDestructiveGets !== undefined || b.refuseDestructiveGets !== undefined)
     out.refuseDestructiveGets = a.refuseDestructiveGets === true || b.refuseDestructiveGets === true;
   if (a.authPosts || b.authPosts) out.authPosts = a.authPosts && b.authPosts ? intersect(b.authPosts, a.authPosts, readPostKey) : (a.authPosts ?? b.authPosts);
+  if (a.authPosts ? a.authPostsNarrowOnly === true : b.authPosts !== undefined) out.authPostsNarrowOnly = true;
   // The operator's only: withProjectPolicy refuses a project's file that sets it.
   if (a.projectsRoot) out.projectsRoot = a.projectsRoot;
   return out;
@@ -562,6 +569,12 @@ export interface WriteRulesPolicy {
   refuseDestructiveGets?: boolean;
   /** The only POSTs that may count as signing in. SCENESCOUT_AUTH_POSTS may narrow it. [] allows none. */
   authPosts?: string[];
+  /**
+   * Not a key, so no file sets it: true when `authPosts` came from a project's
+   * own file alone (tightenPolicy), so the list only narrows the path rule
+   * unless SCENESCOUT_AUTH_POSTS, the operator's, also lists the entry.
+   */
+  authPostsNarrowOnly?: boolean;
 }
 
 /** The sign-in allowlist a session judges by: its entries, and whether a POST must also look like a sign-in (policy.ts isAuthExempt). */
@@ -601,7 +614,9 @@ const BY_CONFIG = "the SceneScout config";
  * - While a guided plan is open (`guided`), a POST must be both listed and
  *   look like a sign-in to the path rule, so an operator's stricter list stays
  *   strict, and the list cannot let out a POST the path rule would refuse.
- *   With no list, the path rule decides, as before.
+ *   With no list, the path rule decides, as before. A list only a project's
+ *   own file set (`authPostsNarrowOnly`) is held the same way in every
+ *   session, unless SCENESCOUT_AUTH_POSTS lists the entries too.
  *
  * Throws, naming the variable, on an environment value strict-writes.ts
  * cannot read, as the attach does today.
@@ -629,7 +644,8 @@ export function writeRulesSettings(file: WriteRulesPolicy, env: Record<string, s
   if (writeClassifier === "strict") from.writeClassifier = file.writeClassifier === "strict" ? BY_CONFIG : STRICT_WRITES_ENV;
   if (refuseDestructiveGets) from.refuseDestructiveGets = file.refuseDestructiveGets === true ? BY_CONFIG : REFUSE_DESTRUCTIVE_GETS_ENV;
   if (entries !== null) from.authPosts = file.authPosts ? (fromEnv.length > 0 ? `${BY_CONFIG}, narrowed by ${AUTH_POSTS_ENV}` : BY_CONFIG) : AUTH_POSTS_ENV;
-  return { writeClassifier, refuseDestructiveGets, authPosts: entries === null ? null : { entries, andSignInPath: guided }, notes, from };
+  const andSignInPath = guided || (file.authPostsNarrowOnly === true && fromEnv.length === 0);
+  return { writeClassifier, refuseDestructiveGets, authPosts: entries === null ? null : { entries, andSignInPath }, notes, from };
 }
 
 /**
@@ -647,7 +663,7 @@ export function writeRulesNote(policy: WriteRulesPolicy, rules: SessionWriteRule
     const { entries, andSignInPath } = rules.authPosts;
     const which = entries.length === 0 ? "no POST counts" : `only ${quoted(entries)} ${entries.length === 1 ? "counts" : "count"}`;
     out.push(
-      `authPosts: ${which} as signing in${andSignInPath && entries.length > 0 ? ", and only when it also looks like a sign-in by its path (a guided check)" : ""}`,
+      `authPosts: ${which} as signing in${andSignInPath && entries.length > 0 ? `, and only when it also looks like a sign-in by its path (${policy.authPostsNarrowOnly === true ? "the list is the project's own" : "a guided check"})` : ""}`,
     );
   }
   return [...out, ...rules.notes];

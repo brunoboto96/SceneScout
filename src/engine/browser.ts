@@ -861,7 +861,7 @@ export class BrowserEngine {
   private strictNotice = "";
   /** The only POSTs that count as signing in, when the operator listed them (SCENESCOUT_AUTH_POSTS); null for the path rule. */
   private authPosts: ReadPost[] | null = null;
-  /** True while a guided plan is open: a listed POST must also look like a sign-in to the path rule (policy.ts isAuthExempt andSignInPath). */
+  /** True while a guided plan is open, or for a list only a project's own file set: a listed POST must also look like a sign-in to the path rule (policy.ts isAuthExempt andSignInPath). */
   private authPostsNarrowOnly = false;
   private authPostNotice = "";
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
@@ -1716,7 +1716,7 @@ export class BrowserEngine {
     this.authPosts = authList?.entries ?? null;
     this.authPostsNarrowOnly = rules.authPosts?.andSignInPath === true;
     this.authPostNotice = authList
-      ? ` Sign-in POSTs: only ${authList.entries.length > 0 ? authList.entries.map((e) => e.entry).join(", ") : "none"} (${rules.from.authPosts})${this.authPostsNarrowOnly ? ", and each must also look like a sign-in by its path while a guided plan is open" : ""}; no other POST counts as signing in.` +
+      ? ` Sign-in POSTs: only ${authList.entries.length > 0 ? authList.entries.map((e) => e.entry).join(", ") : "none"} (${rules.from.authPosts})${this.authPostsNarrowOnly ? ", and each must also look like a sign-in by its path" : ""}; no other POST counts as signing in.` +
         (authList.rejected.length > 0 ? ` Not a "POST /path" or "POST https://host/path" entry, so not a sign-in: ${authList.rejected.join(", ")}.` : "") +
         (authList.overflow.length > 0 ? ` More than ${MAX_READ_POSTS} sign-in POSTs; not counted: ${authList.overflow.join(", ")}.` : "")
       : "";
