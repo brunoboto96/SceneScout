@@ -147,7 +147,7 @@ import {
   writeClassifierSetting,
   type WriteClassifier,
 } from "../src/engine/strict-writes.ts";
-import { fuzzCases, fuzzRates } from "./policy-fuzz.ts";
+import { fuzzCases, fuzzRates, ratesMarkdown, RATES_BEGIN, RATES_END } from "./policy-fuzz.ts";
 import {
   explainConfig,
   formatConfigExplanation,
@@ -3015,6 +3015,18 @@ test("fuzz: the strict classifier misses less and flags less than the standard o
   for (const c of cases)
     if (c.destructive && isDestructiveRequest(c.url, c.body, "standard"))
       assert.equal(isDestructiveRequest(c.url, c.body, "strict"), true, `strict misses what standard catches: ${c.url} ${c.body}`);
+});
+
+test("fuzz: the miss and false-alarm rates in the Safety model guide are the fuzz script's output", () => {
+  const guide = fs.readFileSync(new URL("../docs/guide/Safety-model.md", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const a = guide.indexOf(RATES_BEGIN);
+  const b = guide.indexOf(RATES_END);
+  assert.ok(a >= 0 && b > a, "docs/guide/Safety-model.md lost its fuzz-rates markers");
+  assert.equal(
+    guide.slice(a, b + RATES_END.length),
+    ratesMarkdown(),
+    "the published write-classifier rates differ from a fresh seeded fuzz run: a classifier or the fuzz corpus changed. Regenerate them with `npm run fuzz-rates` and commit the guide.",
+  );
 });
 
 test("fuzz: the standard classifier reads joined verbs, and no other form of a verb is among its false alarms (#684)", () => {
