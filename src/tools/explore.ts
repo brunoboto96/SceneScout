@@ -39,7 +39,7 @@ import {
   guidedSessions,
   policyFor,
 } from "../server-context.js";
-import { egressRefusal, uploadRefusal } from "../engine/project-config.js";
+import { conversationPictureRefusal, uploadRefusal } from "../engine/project-config.js";
 import { planUploadOptions } from "../engine/uploads.js";
 import { writeDocumentSync } from "../engine/owner-file.js";
 
@@ -624,8 +624,8 @@ export function registerExploreTools(): void {
     serializedPerSession("scout_screenshot", async (_args: { session?: string }, session) => {
       try {
         const eng = engineFor(session);
-        // egress "none": a picture of the page is not returned into the conversation, as a finding's is kept to a file.
-        const refused = egressRefusal(policyFor(eng), "model", "scout_screenshot");
+        // egress "none", or evidence capped at "file" or "off": a picture of the page is not returned into the conversation.
+        const refused = conversationPictureRefusal(policyFor(eng), "scout_screenshot", "scout_capture saves a picture of one element to a file instead");
         if (refused) throw new Error(refused);
         const { base64, mimeType } = await eng.screenshot();
         return { content: [{ type: "image", data: base64, mimeType }] };

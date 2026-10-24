@@ -35,6 +35,7 @@ import { SARIF_ANCHOR_FALLBACKS, checkSarifAnchor, sarifFileFor, sarifLocation, 
 import { httpErrorDetail, httpStatusOf, withoutFragment, type OracleViolation } from "./oracles.js";
 import type { CheckRetest } from "./verify.js";
 import type { CheckReplay } from "./check-replay.js";
+import type { SessionWriteRules } from "./project-config.js";
 
 const CHECK_SEVERITIES = ["high", "medium", "low"] as const;
 export type CheckSeverity = (typeof CHECK_SEVERITIES)[number];
@@ -698,6 +699,11 @@ export interface CheckOptions extends CheckSettings {
   template?: string;
   /** The most frames one recorded session keeps. Not a command-line option: unset is RECORD_MAX_FRAMES, and only tests lower it. */
   maxFrames?: number;
+  /**
+   * The write-judgement settings with the operator's config applied (project-config.ts writeRulesSettings), passed to
+   * every browser the check attaches. Not a command-line option: unset reads the environment alone, as without a config.
+   */
+  writeRules?: SessionWriteRules;
 }
 
 /**

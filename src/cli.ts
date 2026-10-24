@@ -60,7 +60,7 @@ import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
-import { configureCommand, fsPolicyReader, readCommandPolicy, type EgressPath } from "./engine/project-config.js";
+import { configureCommand, fsPolicyReader, readCommandPolicy, type CommandOptions, type SessionWriteRules } from "./engine/project-config.js";
 import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
 import { MAX_EXPLAIN_BODY, runPolicyCommand } from "./engine/policy-explain.js";
 import { VISUAL_DIRNAME } from "./engine/baseline.js";
@@ -648,10 +648,10 @@ async function doctor(flags: string[]): Promise<void> {
  */
 function commandConfig(
   args: string[],
-  options: { mode: WriteMode; dedup?: DedupMode; projectDir: string; sends?: { via: EgressPath; what: string } },
+  options: CommandOptions & { projectDir: string },
   command: string,
   exitCode: number,
-): { mode: WriteMode; dedup?: DedupMode } {
+): { mode: WriteMode; dedup?: DedupMode; writeRules?: SessionWriteRules } {
   const stop = (error: string): never => {
     console.error(`scenescout${command ? ` ${command}` : ""}: ${error}`);
     process.exit(exitCode);
@@ -672,7 +672,7 @@ async function check(args: string[]): Promise<never> {
     process.exit(EXIT.error);
   }
   const capped = commandConfig(args, parsed.options, "check", EXIT.error);
-  let options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode };
+  let options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode, writeRules: capped.writeRules };
   const outDir = options.outDir ?? defaultCheckDir(options.projectDir);
   let inputs: CheckInputs;
   let template: ReportTemplate | null = null;
@@ -817,7 +817,7 @@ async function firstRun(args: string[]): Promise<never> {
   let error = "";
   try {
     console.log(`\nLooking at ${options.url} …`);
-    result = await runCheck(firstRunCheckOptions(options, projectDir), (line) => console.log(line));
+    result = await runCheck({ ...firstRunCheckOptions(options, projectDir), writeRules: capped.writeRules }, (line) => console.log(line));
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
   } finally {
@@ -866,7 +866,8 @@ async function ci(args: string[]): Promise<never> {
   const parsed = parseCiArgs(args, process.cwd(), process.env);
   if (!parsed.ok) return fail(parsed.error);
   // Before a key is read or a browser starts: the config's egress may refuse every call to a model.
-  const capped = commandConfig(args, { ...parsed.options, sends: { via: "model", what: "scenescout ci" } }, "ci", EXIT_CI.couldNotRun);
+  // A model drives it: under requireGuidedPlan it runs in observe, since no person is there to accept a plan.
+  const capped = commandConfig(args, { ...parsed.options, sends: { via: "model", what: "scenescout ci" }, agentDriven: true }, "ci", EXIT_CI.couldNotRun);
   const options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode, dedup: capped.dedup ?? parsed.options.dedup };
   const provider = detectProvider(process.env, options);
   if (!provider.ok) return fail(provider.error);

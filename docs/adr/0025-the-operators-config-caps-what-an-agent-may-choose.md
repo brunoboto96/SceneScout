@@ -64,13 +64,10 @@ override (issue #546).
   folder is checked against the operator's root before its file is read.
 - **`uploads` is checked where the tool is called**, before the engine's own
   upload fence, so `fixtures` holds whatever `SCENESCOUT_UPLOAD_ALLOW` lists.
-- **`writeClassifier`, `refuseDestructiveGets` and `authPosts` have their rule
-  (`writeRulesSettings`) but are not keys yet.** The browser engine reads
-  them from its environment as a session starts; until it takes them from
-  the attach, a file naming them is refused as unknown, as above. Their rule:
-  the stricter of the file and the environment wins, and while a guided plan
-  is open a sign-in POST must be listed and also look like one to the path
-  rule.
+- **`writeClassifier`, `refuseDestructiveGets` and `authPosts` are keys** (see
+  the amendment below). Their rule (`writeRulesSettings`): the stricter of the
+  file and the environment wins, and while a guided plan is open a sign-in
+  POST must be listed and also look like one to the path rule.
 
 ## Failure direction
 
@@ -104,3 +101,30 @@ disagree, the file wins and the argument is refused.
 - **It does not cover the coding agent's own model.** Over MCP the agent sends
   what the tools return to its model; SceneScout cannot see that call. The
   guide says so where it describes the setting.
+
+## Amendment: the write-judgement keys, and what an unattended run may do
+
+- **`writeClassifier`, `refuseDestructiveGets` and `authPosts` are read by
+  whoever starts the session and handed to the browser engine with the
+  attach** (`AttachOptions.writeRules`, and `CheckOptions.writeRules` for
+  `check` and a first look), so the engine reads the environment only when no
+  caller passes them. No tool argument names them; the environment can turn
+  either flag on and narrow the list, never the reverse, and a project's own
+  file can only tighten them.
+- **While a guided plan is open, a sign-in list only narrows the path rule.**
+  The attach used to stop reading `SCENESCOUT_AUTH_POSTS` in a guided check;
+  it now reads it, and the config's list, with `andSignInPath`, so an
+  operator's stricter list stays strict without letting out a POST the path
+  rule would refuse.
+- **`strict` also sets `refuseDestructiveGets: true`.** It refuses only page
+  loads whose address reads as a destructive command, in `observe` and
+  `read-only`. No preset sets `writeClassifier` (the strict classifier refuses
+  writes the standard one lets out) or `authPosts` (a list names one app's
+  endpoints).
+- **`ci` under `requireGuidedPlan` runs in `observe`.** No person is there to
+  accept a plan, so a `--mode` above `observe` stops the command before it
+  starts, and the default is lowered to `observe` with a note. `check` and a
+  first look are run by a person and are not held by it.
+- **`evidence` capped at `file` or `off` refuses the tools that return a
+  picture into the conversation** (`scout_screenshot`, `scout_cards` with
+  inline pictures), as `egress: "none"` does.

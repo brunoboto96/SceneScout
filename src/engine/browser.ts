@@ -243,8 +243,6 @@ import {
   READ_POSTS_ENV,
   readPostAllowed,
   writeMethod,
-  AUTH_POSTS_ENV,
-  authPostsSetting,
   matchReadPost,
   refusedPostPage,
   readPostEntries,
@@ -257,7 +255,8 @@ import {
   WriteRule,
 } from "./policy.js";
 import { scanProject } from "../scan.js";
-import { REFUSE_DESTRUCTIVE_GETS_ENV, refuseDestructiveGetsSetting, STRICT_WRITES_ENV, writeClassifierSetting, type WriteClassifier } from "./strict-writes.js";
+import { refuseDestructiveGetsSetting, writeClassifierSetting, type WriteClassifier } from "./strict-writes.js";
+import { writeRulesSettings, type SessionWriteRules } from "./project-config.js";
 import type { RouteHealth } from "./check.js";
 import { botChallenge, challengeBodyMatters, startPageWarning } from "./challenge.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
@@ -387,8 +386,13 @@ export interface AttachOptions {
    * none (policy.ts readPostsSetting).
    */
   readPosts?: string[];
-  /** False: SCENESCOUT_AUTH_POSTS is not read and the path rule decides what is a sign-in (a guided check). Default: read it. */
-  operatorAuthPosts?: boolean;
+  /**
+   * The write-judgement settings: the strict classifier, refusing destructive
+   * page loads and the sign-in allowlist, with the operator's config applied
+   * (project-config.ts writeRulesSettings). Default: read from the
+   * environment alone, as without a config.
+   */
+  writeRules?: SessionWriteRules;
   /**
    * Share one MemoryStore across engines attached to the same project
    * (multi-session/multi-role runs): coverage and findings from every role
@@ -857,6 +861,8 @@ export class BrowserEngine {
   private strictNotice = "";
   /** The only POSTs that count as signing in, when the operator listed them (SCENESCOUT_AUTH_POSTS); null for the path rule. */
   private authPosts: ReadPost[] | null = null;
+  /** True while a guided plan is open: a listed POST must also look like a sign-in to the path rule (policy.ts isAuthExempt andSignInPath). */
+  private authPostsNarrowOnly = false;
   private authPostNotice = "";
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
@@ -1326,6 +1332,7 @@ export class BrowserEngine {
     writeClassifier: () => this.writeClassifier,
     refuseDestructiveGets: () => this.refuseDestructiveGets,
     authPosts: () => this.authPosts,
+    authPostsNarrowOnly: () => this.authPostsNarrowOnly,
   });
   /**
    * Every request answered since the last action, with its status. The HTTP
@@ -1694,20 +1701,22 @@ export class BrowserEngine {
         : "") +
       (trust.rejected.length > 0 ? ` Not a plain http(s) origin, so not trusted: ${trust.rejected.join(", ")}.` : "") +
       (trust.overflow.length > 0 ? ` More than ${MAX_TRUSTED_EMBEDS} trusted embeds; not trusted: ${trust.overflow.join(", ")}.` : "");
-    // Operator settings, read whatever else the attach asks for (strict-writes.ts says what each changes).
-    this.writeClassifier = writeClassifierSetting(process.env);
-    this.refuseDestructiveGets = refuseDestructiveGetsSetting(process.env);
+    // Operator settings: the config's joined with the environment's by the caller, else the environment's (strict-writes.ts says what each changes).
+    const rules = opts.writeRules ?? writeRulesSettings({}, process.env, false);
+    this.writeClassifier = rules.writeClassifier;
+    this.refuseDestructiveGets = rules.refuseDestructiveGets;
     this.strictNotice =
       (this.writeClassifier === "strict" && this.mode !== "destructive"
-        ? ` Strict write judgement is on (${STRICT_WRITES_ENV}): a write whose path, query or body names a destructive command anywhere in an identifier counts as destructive.`
+        ? ` Strict write judgement is on (${rules.from.writeClassifier}): a write whose path, query or body names a destructive command anywhere in an identifier counts as destructive.`
         : "") +
       (this.refuseDestructiveGets && (this.mode === "observe" || this.mode === "read-only")
-        ? ` Page loads whose address is a destructive command (/items/3/delete) are refused (${REFUSE_DESTRUCTIVE_GETS_ENV}).`
+        ? ` Page loads whose address is a destructive command (/items/3/delete) are refused (${rules.from.refuseDestructiveGets}).`
         : "");
-    const authList = opts.operatorAuthPosts === false ? null : authPostsSetting(process.env[AUTH_POSTS_ENV]);
+    const authList = rules.authPosts ? readPostEntries(rules.authPosts.entries) : null;
     this.authPosts = authList?.entries ?? null;
+    this.authPostsNarrowOnly = rules.authPosts?.andSignInPath === true;
     this.authPostNotice = authList
-      ? ` Sign-in POSTs: only ${authList.entries.length > 0 ? authList.entries.map((e) => e.entry).join(", ") : "none"} (${AUTH_POSTS_ENV}); no other POST counts as signing in.` +
+      ? ` Sign-in POSTs: only ${authList.entries.length > 0 ? authList.entries.map((e) => e.entry).join(", ") : "none"} (${rules.from.authPosts})${this.authPostsNarrowOnly ? ", and each must also look like a sign-in by its path while a guided plan is open" : ""}; no other POST counts as signing in.` +
         (authList.rejected.length > 0 ? ` Not a "POST /path" or "POST https://host/path" entry, so not a sign-in: ${authList.rejected.join(", ")}.` : "") +
         (authList.overflow.length > 0 ? ` More than ${MAX_READ_POSTS} sign-in POSTs; not counted: ${authList.overflow.join(", ")}.` : "")
       : "";
