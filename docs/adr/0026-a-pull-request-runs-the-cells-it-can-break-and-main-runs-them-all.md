@@ -71,7 +71,8 @@ reasons, and each would cancel the run in flight.
 
 **Concurrency is unchanged.** Only a pull request's runs share a group and
 cancel each other. A push to `main` and a dispatched run each get a group of
-their own, so one never cancels another.
+their own, so one never cancels another. (Amended below for issue #692: main
+and the Version Packages branch now each share a group.)
 
 ## Consequences
 
@@ -99,3 +100,63 @@ list of changed files, and every event other than a pull request, gets the
 full matrix. A documentation-only pull request with one file that is not
 documentation is a code pull request. Running a cell that was not needed
 costs minutes; skipping one that was needed costs a broken `main`.
+
+## Amendment: superseded runs on main and the version branch do not run (issue #692)
+
+With several merges an hour the test queue reached 17 runs, the oldest
+waiting two hours. Every merge started a full `main` run, and the release
+workflow dispatched another full run on `changeset-release/main` after it
+updated the Version Packages pull request. Most of those runs tested a commit
+a newer one had already replaced.
+
+GitHub's documented rule for a concurrency group ("Control the concurrency of
+workflows and jobs"): at most one run in a group is running and at most one is
+pending. A newly queued run cancels the run still pending in its group whatever
+`cancel-in-progress` says; `cancel-in-progress: true` also cancels the run
+already going. GitHub does not promise the order runs in a group start in.
+
+`test.yml` now groups its runs like this. `ci-test` evaluates the block for
+each kind of run and holds each line, beside the near miss that stays alone.
+
+| Run | Group | A newer run in the group |
+| --- | --- | --- |
+| Pull request | One per pull request | Cancels the run going or waiting |
+| Push to `main` | One for `main` | Replaces the run waiting; the run going always finishes |
+| Dispatch on `changeset-release/main` (the release's) | One for the version branch | Cancels the run going or waiting |
+| Any other dispatch (by hand, the weekly benchmark's results branch) | Its own | Nothing |
+
+**Main** keeps the rule this record set: a `main` run in progress is never
+cancelled, so every run that starts gives its commit a verdict. Nothing waits
+on a `main` run: the release workflow runs on the push without reading it, and
+the release's gate is the required `test` on the Version Packages pull
+request, which the version branch's own run reports. What changes is that `main` runs no
+longer queue behind each other one per merge. The queue holds the run going
+and the newest push's run waiting; a push in between has its waiting run
+replaced. Its code is still tested, because the newest commit contains it, but
+that commit has no verdict of its own: its run shows as cancelled. When the
+newer run fails, the failure is narrowed to the commits since the last
+`main` run that finished rather than to one merge. `main` runs also no longer
+run side by side, which leaves the runners to pull requests.
+
+**The version branch** holds one commit that matters: its head, which is the
+Version Packages pull request's head. The required check `test` attaches to a
+commit, so an older run, cancelled or finished, reports on an older commit and
+cannot show a green check on the head. The head's `test` comes from the newest
+run. When the same commit is dispatched twice, an older run still waiting is
+cancelled before any job starts and reports nothing; one already going has its
+`test` job (`if: always()`) fail on the cancelled jobs it needs, and the newer
+run reports after it; GitHub shows the newest check of a name, so a cancelled
+run reads as red until the newer one passes, never as a stale green.
+
+The release workflow's own concurrency and the other workflows are unchanged.
+The wave hold check the release also dispatches is a single short job and
+keeps its group per run.
+
+**Not done: skipping the version branch's run.** The version branch differs
+from `main` only in the version, `CHANGELOG.md` and the plugin manifests, so
+`main`'s own run tests the same code. Skipping the dispatch was considered and
+not done. The pull request's required check must still report on the version
+branch's head, which would mean copying a verdict from a `main` run across to
+that commit; that `main` run may itself be waiting, replaced or failed; and
+`install-test` reads the changelog and the manifests' versions, so the bump is
+not inert.
