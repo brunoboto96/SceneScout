@@ -68,7 +68,7 @@ With `pii`, everything the `scout_*` tools return to the agent passes through on
 
 These are the detectors and the markers SceneScout already uses for what it stores and publishes, so a finding's title the agent copies from masked text is the title the store keeps, and the two are counted as one finding. The markers keep the page's structure: the agent still sees that a row has an address, a phone and a card, and where.
 
-`off`, the default and what no file means, returns the page as it is. Only the file sets it: no argument or variable names it, and a project's own file can turn it on but not off. When it is on, the attach's `🔒 CONFIG` line, and the `Config:` line of `check`, `ci` and `scenescout policy explain`, say so. No preset sets it.
+`off`, the default and what no file means, returns the page as it is. Only the file sets it: no argument or variable names it, and a project's own file can turn it on but not off. One server that has sessions open on two projects masks every call while either project's file sets `pii`, since a result such as the session list can show both projects' pages. When it is on, the attach's `🔒 CONFIG` line, and the `Config:` line of `check`, `ci` and `scenescout policy explain`, say so. No preset sets it.
 
 What it does not do:
 

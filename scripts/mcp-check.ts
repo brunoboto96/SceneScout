@@ -1797,6 +1797,22 @@ async function configCheck(): Promise<void> {
         if (!snap.text.includes("help@example.com")) fail(`a reserved example address was masked under redactPageText "${mode}":\n${snap.text}`);
       });
     }
+    // Two projects in one server, one masking and one not: a call naming the unmasked session still masks, because its
+    // result can carry the masking session's page (here the session list names each session's address).
+    await withServer({}, async (attach, call) => {
+      const plain = path.join(dir, "redact-plain");
+      const masking = path.join(dir, "redact-masking");
+      fs.mkdirSync(plain, { recursive: true });
+      fs.mkdirSync(path.join(masking, ".scenescout"), { recursive: true });
+      fs.writeFileSync(path.join(masking, ".scenescout", "config.json"), JSON.stringify({ redactPageText: "pii" }));
+      const b = await attach({ mode: "observe", session: "masking", projectPath: masking, url: `${fixture.baseUrl}/personal-data.html?who=${person}` });
+      const a = await attach({ mode: "observe", session: "plain", projectPath: plain });
+      if (a.isError || b.isError) fail(`the two projects' attaches were refused:\n${a.text}\n${b.text}`);
+      for (const out of [a, await call("scout_session", { session: "plain" }), await call("scout_snapshot", { session: "plain" })])
+        if (out.text.includes(person)) fail(`a call naming the unmasked session returned the masking session's address unmasked:\n${out.text}`);
+      const listed = await call("scout_session", {});
+      if (!listed.text.includes("who=[email redacted]")) fail(`the session list did not name the masking session's address masked:\n${listed.text}`);
+    });
     // projectsRoot: a project folder outside it is refused at attach and at scan; one inside it is taken.
     const root = path.join(dir, "root");
     fs.mkdirSync(path.join(root, "app"), { recursive: true });
@@ -1885,7 +1901,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; redactPageText \"pii\" masks a page's email, phone and card in scout_snapshot and scout_request, and \"off\" does not; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; redactPageText \"pii\" masks a page's email, phone and card in scout_snapshot and scout_request, and \"off\" does not, and a masking project masks a call naming another project's session; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();

@@ -4477,17 +4477,15 @@ test("config: redactPageText is checked like every key, no preset sets it, and a
 test("config: which calls' results are masked, each rule beside the case it does not cover", () => {
   const on: Policy = { redactPageText: "pii" };
   const off: Policy = { redactPageText: "off" };
-  // The operator's file masks every call, named session or none.
-  assert.equal(pageTextMaskedFor(on, null, []), true);
-  assert.equal(pageTextMaskedFor(on, off, [off]), true);
-  // With the operator's off, a named session's own config decides, and another session's does not.
-  assert.equal(pageTextMaskedFor({}, on, [on, {}]), true);
-  assert.equal(pageTextMaskedFor({}, {}, [on, {}]), false, "a call naming an unmasked session is not masked for another session's project");
-  assert.equal(pageTextMaskedFor({}, undefined, [on]), false, "a named session that is not open has no config of its own");
-  // A call naming no session may read any session's project, so any open session masking masks it.
-  assert.equal(pageTextMaskedFor({}, null, [{}, on]), true);
-  assert.equal(pageTextMaskedFor({}, null, [{}, off]), false);
-  assert.equal(pageTextMaskedFor({}, null, []), false, "no file: today's behaviour");
+  // The operator's file masks every call.
+  assert.equal(pageTextMaskedFor(on, []), true);
+  assert.equal(pageTextMaskedFor(on, [off]), true);
+  // With the operator's off, any open session's config masks every call, a call naming an unmasked session too: its
+  // result can carry the masking session's page (the session list names each session's address).
+  assert.equal(pageTextMaskedFor({}, [off, on]), true);
+  assert.equal(pageTextMaskedFor(off, [{}, on]), true);
+  assert.equal(pageTextMaskedFor({}, [{}, off]), false, "no open session masks");
+  assert.equal(pageTextMaskedFor({}, []), false, "no file: today's behaviour");
 });
 
 test("config: redactPageText says so on the Config line of an attach, a command and policy explain, and only when on", () => {

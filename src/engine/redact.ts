@@ -314,7 +314,67 @@ export function redactRoute(route: string): string {
  * alike. Credentials are not counted or noted here: this is what the agent
  * reads, not what is kept.
  */
-export const maskPageText = (text: string): string => redactPersonal(text);
+export function maskPageText(text: string): string {
+  if (!text.includes("\\")) return redactPersonal(text);
+  // JSON a tool quotes (an API body, a console argument) writes a newline as `\n`: read as it is, `\nme@host` is an
+  // address starting with the escape's letter, and its marker would leave a backslash before `[`, which is no JSON
+  // escape. So the text is read as JSON would decode it and written back with its escapes: `\n`, `\r` and `\t` are
+  // read as a space that stands for them (so `Phone:\n+44 …` is still a phone after its word), `\u0040` and
+  // `\u002e` as the `@` and `.` they stand for, and every other escape ends the stretch masked on its own. A stretch
+  // nothing is masked in is written back exactly as it came.
+  const spacesFree = !WHITESPACE_STAND_INS.some((c) => text.includes(c));
+  let out = "";
+  let raw = "";
+  let read = "";
+  const flush = (): void => {
+    if (raw === "") return;
+    const masked = redactPersonal(read);
+    out += masked === read ? raw : WHITESPACE_STAND_INS.reduce((t, c, i) => t.split(c).join(WHITESPACE_ESCAPES[i]!), masked);
+    raw = "";
+    read = "";
+  };
+  for (let i = 0; i < text.length;) {
+    const c = text[i]!;
+    const next = text[i + 1];
+    if (c === "\\" && next !== undefined) {
+      const hex = next === "u" && isHex4(text, i + 2) ? text.slice(i + 2, i + 6).toLowerCase() : "";
+      const plain = hex === "0040" ? "@" : hex === "002e" ? "." : "";
+      const space = spacesFree ? WHITESPACE_ESCAPES.indexOf(`\\${next}`) : -1;
+      if (plain || space >= 0) {
+        raw += text.slice(i, plain ? i + 6 : i + 2);
+        read += plain || WHITESPACE_STAND_INS[space]!;
+        i += plain ? 6 : 2;
+        continue;
+      }
+      if (hex !== "" || JSON_ESCAPES.includes(next)) {
+        flush();
+        const length = hex === "" ? 2 : 6;
+        out += text.slice(i, i + length);
+        i += length;
+        continue;
+      }
+    }
+    raw += c;
+    read += c;
+    i += 1;
+  }
+  flush();
+  return out;
+}
+
+/**
+ * JSON's escapes for a newline, a carriage return and a tab, and the space each
+ * is read as while masking: characters redactPersonal reads as space and a page
+ * seldom holds (a text that holds one is masked between those escapes instead).
+ */
+const WHITESPACE_ESCAPES = ["\\n", "\\r", "\\t"];
+const WHITESPACE_STAND_INS = ["\u2028", "\u2029", "\u205f"];
+
+/** The letters JSON writes after a backslash for a one-character escape. */
+const JSON_ESCAPES = '"\\/bfnrt';
+
+const isHexDigit = (c: string | undefined): boolean => c !== undefined && (isAsciiDigit(c) || (c >= "a" && c <= "f") || (c >= "A" && c <= "F"));
+const isHex4 = (text: string, at: number): boolean => isHexDigit(text[at]) && isHexDigit(text[at + 1]) && isHexDigit(text[at + 2]) && isHexDigit(text[at + 3]);
 
 /** A tool's result as the MCP server returns it: text and pictures, and perhaps structured content. */
 export interface MaskableResult {
@@ -351,4 +411,28 @@ export function maskToolResult<T extends MaskableResult>(result: T, mask: (text:
   const out = { ...result, content };
   if (result.structuredContent !== undefined) out.structuredContent = maskStrings(result.structuredContent, mask) as Record<string, unknown>;
   return out;
+}
+
+/**
+ * A tool's handler whose result is masked when `masked()` says so, asked
+ * before and after the call (an attach opens a session under its config, a
+ * close drops one), either answer masking. A thrown error is returned as the
+ * MCP SDK would answer it, an `isError` result, with its message masked, and
+ * the error object itself is left as it was; with masking off it is thrown on
+ * unchanged. Anything that is not a result (no `content` list) passes as it is.
+ */
+export function maskingHandler<H extends (...args: never[]) => unknown>(handler: H, masked: () => boolean, mask: (text: string) => string = maskPageText): H {
+  const wrapped = async (...args: never[]): Promise<unknown> => {
+    const before = masked();
+    let result: unknown;
+    try {
+      result = await (handler as (...a: never[]) => unknown)(...args);
+    } catch (err) {
+      if (!before && !masked()) throw err;
+      return { content: [{ type: "text", text: mask(err instanceof Error ? err.message : String(err)) }], isError: true };
+    }
+    const isResult = result !== null && typeof result === "object" && Array.isArray((result as MaskableResult).content);
+    return isResult && (before || masked()) ? maskToolResult(result as MaskableResult, mask) : result;
+  };
+  return wrapped as unknown as H;
 }

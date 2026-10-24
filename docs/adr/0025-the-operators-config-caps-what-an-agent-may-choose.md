@@ -152,9 +152,17 @@ disagree, the file wins and the argument is refused.
   changes what they find. What the agent judges from the content is what it
   loses, and the guide says so.
 - **Only the file sets it, and masking wins** (`tightenRedactPageText`): a
-  project's own file may turn it on and never off. A call that names a
-  session is masked by that session's config; one that names none may read
-  any project, so it is masked when any open session's config masks.
+  project's own file may turn it on and never off. Every call is masked
+  while any open session's config masks, a call naming a session whose own
+  project leaves it off included: a result can carry another session's page
+  (the session list names each session's address, and a call naming none may
+  read any project), so masking per named session let a masking project's
+  text out. Masking a second project more than it asked costs that run some
+  content; masking it less sends what the first project kept back.
+- **JSON a tool quotes keeps its escapes.** An API body or a console line
+  writes a newline as `\n`; the mask reads each run of text between escapes
+  on its own, so `\nme@host` keeps its `\n` and stays valid JSON, and an
+  `@` written as `\u0040` is read as an `@`.
 - **No preset sets it.** It changes what the agent reads, not what it may do,
   and turning it on for every `strict` team would hide content bugs they test
   for today.

@@ -163,17 +163,16 @@ export function redactPageTextNote(policy: Policy): string[] {
 }
 
 /**
- * Whether one tool call's result is masked: when the operator's config says
- * so, when the session the call names runs under a config that says so, or,
- * for a call that names no session (it may read any session's project, as
- * scout_cards and the status pane do), when any open session does. `named`
- * is the named session's config, null when the call names none, undefined
- * when it names one that is not open.
+ * Whether a tool call's result is masked: when the operator's config says so,
+ * or when the config of any open session does. Not by the session a call
+ * names alone: a result can carry another session's page (the session list
+ * gives each one's address, and a call that names no session may read any
+ * session's project), so a session whose project leaves it off would let a
+ * masking project's text out. Masking more than a project asked for hides
+ * content from its run; masking less sends what another project kept back.
  */
-export function pageTextMaskedFor(operator: Policy, named: Policy | null | undefined, open: readonly Policy[]): boolean {
-  if (redactsPageText(operator)) return true;
-  if (named === null) return open.some(redactsPageText);
-  return named !== undefined && redactsPageText(named);
+export function pageTextMaskedFor(operator: Policy, open: readonly Policy[]): boolean {
+  return redactsPageText(operator) || open.some(redactsPageText);
 }
 
 // ---- end redactPageText ----
