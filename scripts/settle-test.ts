@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   AnsweredEnds,
+  answerMayMovePage,
   ATTACH_URL_QUIET_MS,
   CRAWL_URL_HELD_MS,
   describePace,
@@ -332,15 +333,15 @@ test("settlePage holds the quiet window from a request that starts late, on the 
   assert.equal(page.ticks, 3 + Math.ceil(QUIET_MS / SETTLE_TICK_MS), `${page.ticks} ticks`);
 });
 
-test("an answered request that finished or was cancelled is counted; one aborted before its answer or refused is not", () => {
+test("an answered request that was cancelled, or finished on an answer a page may leave on, is counted; one aborted before its answer, finished on a routine answer or refused is not", () => {
   const at = 5000;
   const finished = { id: 0 };
   const ends = new AnsweredEnds<object>();
-  ends.answer(finished);
+  ends.answer(finished, 401);
   ends.finished(finished, false, at - 10);
-  assert.equal(ends.last, at - 10, "a request that finished with its answer: the page acts on that answer after it");
+  assert.equal(ends.last, at - 10, "a request that finished on a 401: a guard sends the page to sign-in on that answer");
   const cancelledAfterAnswer = { id: 1 };
-  ends.answer(cancelledAfterAnswer);
+  ends.answer(cancelledAfterAnswer, 200);
   ends.failed(cancelledAfterAnswer, true, false, at);
   assert.equal(ends.last, at, "a request cancelled with its answer in is what a navigation leaves");
   // Each near miss differs from one of those in one fact, and none moves the time.
@@ -348,17 +349,21 @@ test("an answered request that finished or was cancelled is counted; one aborted
   ends.failed(beforeAnswer, true, false, at + 10);
   assert.equal(ends.last, at, "cancelled before its answer: the page's own abort (a search box, a status check's timeout)");
   const refused = { id: 3 };
-  ends.answer(refused);
+  ends.answer(refused, 401);
   ends.failed(refused, true, true, at + 20);
   assert.equal(ends.last, at, "refused by the write policy");
   const lost = { id: 4 };
-  ends.answer(lost);
+  ends.answer(lost, 401);
   ends.failed(lost, false, false, at + 30);
   assert.equal(ends.last, at, "failed with its answer in, but not cancelled (a lost connection)");
   const refusedFinished = { id: 5 };
-  ends.answer(refusedFinished);
+  ends.answer(refusedFinished, 401);
   ends.finished(refusedFinished, true, at + 40);
   assert.equal(ends.last, at, "finished, but it was the write policy that answered it");
+  const routine = { id: 6 };
+  ends.answer(routine, 200);
+  ends.finished(routine, false, at + 50);
+  assert.equal(ends.last, at, "finished on a 200: a poll or a beacon, which a page does not leave on");
   assert.equal(new AnsweredEnds<object>().last, 0, "none yet");
 });
 
@@ -384,7 +389,7 @@ test("settlePage waits through the gap between a request's answer ending and the
     let inFlight = 1;
     let lastStart = page.clock;
     let navigationSeenAt = -1;
-    if (ending !== "cancelled before its answer") ends.answer(check);
+    if (ending !== "cancelled before its answer") ends.answer(check, 401);
     page.onTick = () => {
       if (page.ticks === 10) {
         inFlight = 0;
@@ -437,23 +442,29 @@ test("settlePage is not held to the cap by a page that polls with a timeout shor
   assert.equal(page.ticks, 8, `returns on the first look after the check is aborted, at ${page.clock - started} ms`);
 });
 
-test("a page whose polls are answered is waited on to the cap only while the answers come less than QUIET_MS apart", async () => {
-  // Each answered poll that finishes starts the quiet window again, so a poll every P ms answered in L ms lets the wait
-  // end only when P > L + QUIET_MS. Chosen on purpose: what a page does with an answer comes after it, and a page
-  // polling that fast is still bounded by SETTLE_CAP_MS.
-  const run = async (everyTicks: number, answeredAfterTicks: number) => {
+test("which finished answers a page may move on", () => {
+  for (const status of [301, 302, 303, 307, 308, 401, 403, 419, 440]) assert.equal(answerMayMovePage(status), true, String(status));
+  for (const status of [200, 201, 204, 206, 304, 400, 404, 409, 422, 429, 500, 503]) assert.equal(answerMayMovePage(status), false, String(status));
+});
+
+test("a page polling every 250 ms is not held to the cap by its answers, unless they are ones a page leaves on", async () => {
+  // A poll every 250 ms (12 ticks of 20 ms, near enough), answered in 160 ms: each answer ends less than QUIET_MS
+  // before the next poll starts. Answered 200, as a status poll, a beacon or a chat widget's check is, the wait ends
+  // in the gap between polls, as it does for a page that sent nothing. Answered 401, every poll is one the page may
+  // leave on, the windows join up, and the wait runs to the cap: held there, and no longer.
+  const run = async (status: number) => {
     const page = standInPage();
     const ends = new AnsweredEnds<object>();
     let open: object | null = null;
     let lastStart = 0;
     const poll = () => {
-      const tick = page.ticks % everyTicks;
+      const tick = page.ticks % 12;
       if (tick === 1) {
         open = { at: page.clock };
         lastStart = page.clock;
       }
-      if (tick === 1 + answeredAfterTicks && open) {
-        ends.answer(open);
+      if (tick === 9 && open) {
+        ends.answer(open, status);
         ends.finished(open, false, page.clock);
         open = null;
       }
@@ -464,10 +475,9 @@ test("a page whose polls are answered is waited on to the cap only while the ans
     await settleThrough(page, { inFlight: () => (open ? 1 : 0), lastStart: () => lastStart }, ends);
     return page.clock - started;
   };
-  // Every 400 ms, answered in 200 ms: a quiet stretch longer than QUIET_MS follows each answer.
-  assert.ok((await run(20, 10)) < SETTLE_CAP_MS, "the wait ends between polls");
-  // Every 250 ms (12 ticks of 20 ms, near enough), answered in 160 ms: the windows join up and the wait runs to the cap.
-  assert.ok((await run(12, 8)) >= SETTLE_CAP_MS, "held to the cap, and no longer");
+  const routine = await run(200);
+  assert.ok(routine < SETTLE_CAP_MS / 4, `answered 200: the wait ends between polls, at ${routine} ms`);
+  assert.equal(await run(401), SETTLE_CAP_MS, "answered 401: held to the cap, and no longer");
 });
 
 test("settlePage gives up at the cap on a page that never goes quiet", async () => {

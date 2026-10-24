@@ -21,8 +21,8 @@
       // comes after the check has ended, in one of two orders: where the page is handed the answer as its headers
       // arrive, the redirect starts with the body still open and the browser cancels the check (WebKit and Firefox
       // report the redirect's request only after that); where it is handed the answer only once the body has ended
-      // (WebKit on Linux), the check has finished before the redirect starts. The wait keeps a quiet window from the
-      // end of an answered request for that gap, either way. A bare timer after the scroll event is not: a late frame
+      // (WebKit on Linux), the check has finished before the redirect starts. The wait keeps a quiet window for that
+      // gap from a request cancelled after its answer, or one that finished on a 401. A bare timer after the scroll event is not: a late frame
       // can push it past that wait, and the next call's navigation then cancels the redirect.
       history.scrollRestoration = "manual";
       var checked = false;

@@ -21,6 +21,7 @@
  * person taking notes wants a fixed pace, not the fastest one. `paceMs` is a
  * floor a session asks for; unset, a session goes as fast as its page allows.
  */
+import { UNAUTHENTICATED_STATUSES } from "./authloss.js";
 import { bestEffort } from "./best-effort.js";
 
 /** No request has started for this long and none is in flight: the page has settled. */
@@ -38,12 +39,12 @@ export interface SettleState {
   /** Since the action completed. */
   elapsedMs: number;
   /**
-   * Since a request whose answer had arrived last ended: it finished, or the browser cancelled it (AnsweredEnds). A page
-   * acts on an answer after it has arrived (a guard's redirect, a follow-up request), and the request is over by then:
-   * a small answer is over the moment it arrives, WebKit on Linux hands the page an answer only once its body has
-   * ended, and WebKit and Firefox cancel a document's open requests the moment a navigation starts, reporting the
-   * navigation's own request only after that. So for a moment nothing is in flight and the last start can be old while
-   * the page is on its way elsewhere.
+   * Since a request whose answer had arrived last ended: it finished with an answer a page may move on (a redirect, a
+   * 401), or the browser cancelled it (AnsweredEnds). A page leaves on an answer after it has arrived (a guard's
+   * redirect to sign-in), and the request is over by then: a small answer is over the moment it arrives, WebKit on
+   * Linux hands the page an answer only once its body has ended, and WebKit and Firefox cancel a document's open
+   * requests the moment a navigation starts, reporting the navigation's own request only after that. So for a moment
+   * nothing is in flight and the last start can be old while the page is on its way elsewhere.
    */
   sinceLastAnsweredEndMs: number;
   /** A floor this session asked for, so a person can follow along. 0 means as fast as the page allows. */
@@ -69,7 +70,7 @@ export function shouldKeepWaiting(state: SettleState): boolean {
   if (state.elapsedMs >= SETTLE_CAP_MS) return false;
   // Something is still out: wait for it, up to the cap.
   if (state.inFlight > 0) return true;
-  // An answered request just ended: what the page does with its answer may not have sent its request yet.
+  // An answered request just ended: where the page goes on its answer may not have sent its request yet.
   if (state.sinceLastAnsweredEndMs < QUIET_MS) return true;
   // Nothing in flight and nothing recent. The action itself is the last event
   // that could still produce a request, so the quiet window runs from whichever
@@ -81,26 +82,42 @@ export function shouldKeepWaiting(state: SettleState): boolean {
   return Math.min(state.sinceLastStartMs, state.elapsedMs) < QUIET_MS;
 }
 
+/** The statuses a request is redirected with; a 304 is a cached copy still good, not a redirect. */
+const REDIRECT_STATUSES: ReadonlySet<number> = new Set([301, 302, 303, 307, 308]);
+
 /**
- * When a request whose answer had arrived last ended, for SettleState.sinceLastAnsweredEndMs: it finished, or the
- * browser cancelled it with its answer in (a redirect the page started on the answer cancels it). A request the page
- * aborts before its answer (a search box cancelling the previous search, a status check on a timeout) is the page's own
- * routine and is not counted: counted, a page that polls with a short timeout had every action and snapshot held to
- * SETTLE_CAP_MS. A request that failed any other way is not counted, and nor is one the write policy refused, finished
- * or not: the page did not reach the network.
+ * Whether a page is likely to leave on an answer once that answer's request has finished: a redirect
+ * (REDIRECT_STATUSES), or a refusal a guard sends the visitor to sign-in on (UNAUTHENTICATED_STATUSES, and 403). Any
+ * other answer finishing is the page's routine (a status poll, an analytics beacon, a chat widget's check, a lazy
+ * image): counted, a page polling every 250 ms with each poll answered in 150 ms had every action and snapshot held to
+ * SETTLE_CAP_MS, because each answer's window ran into the next poll.
+ */
+export function answerMayMovePage(status: number): boolean {
+  return REDIRECT_STATUSES.has(status) || status === 403 || UNAUTHENTICATED_STATUSES.has(status);
+}
+
+/**
+ * When a request whose answer had arrived last ended, for SettleState.sinceLastAnsweredEndMs: the browser cancelled it
+ * with its answer in (a redirect the page started on the answer cancels it), or it finished with an answer a page may
+ * move on (answerMayMovePage). A request the page aborts before its answer (a search box cancelling the previous
+ * search, a status check on a timeout) is the page's own routine and is not counted: counted, a page that polls with a
+ * short timeout had every action and snapshot held to SETTLE_CAP_MS. A request that failed any other way is not
+ * counted, and nor is one the write policy refused, finished or not: the page did not reach the network.
  */
 export class AnsweredEnds<R extends object> {
-  private readonly answered = new WeakSet<R>();
+  /** Each answered request's status. */
+  private readonly answered = new WeakMap<R, number>();
   private at = 0;
 
   /** A request's answer (its status and headers) arrived. */
-  answer(request: R): void {
-    this.answered.add(request);
+  answer(request: R, status: number): void {
+    this.answered.set(request, status);
   }
 
   /** A request finished. `refused` is the write policy's refusal. */
   finished(request: R, refused: boolean, at: number = Date.now()): void {
-    if (!refused && this.answered.has(request)) this.at = at;
+    const status = this.answered.get(request);
+    if (!refused && status !== undefined && answerMayMovePage(status)) this.at = at;
   }
 
   /** A request failed: `cancelled` is requestCancelled's verdict on its error text, `refused` the write policy's refusal. */

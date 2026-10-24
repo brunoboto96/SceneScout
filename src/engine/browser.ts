@@ -1879,7 +1879,7 @@ export class BrowserEngine {
       }
     });
     context.on("response", (res) => {
-      answered.answer(res.request());
+      answered.answer(res.request(), res.status());
       this.noteAuthAnswer(res);
       this.noteUnauthenticated(res);
       this.noteDocumentLoad(res.request());
@@ -2501,7 +2501,7 @@ export class BrowserEngine {
   }
   /** When the most recent request started, so a page that fires one late is not read too early. */
   private lastRequestStart = 0;
-  /** When a request whose answer had arrived last finished or was cancelled, the write policy's refusals aside (settle.ts). */
+  /** When a request whose answer had arrived was last cancelled, or finished on an answer a page may move on (settle.ts). */
   private answered = new AnsweredEnds<Request>();
   /**
    * A floor between actions this session was asked for, so a person watching
