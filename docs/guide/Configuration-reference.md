@@ -31,6 +31,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout ci <url>` | An unattended exploratory run driven by a model's API; exit 0 ran, 2 could not run |
 | `scenescout login <url> --role <name>` | Saves a sign-in as a role's profile; exit 0 saved, 1 not |
 | `scenescout export --to <tracker>` | Files the project's open findings, or a `check.json` or `ci.json` (`--from`), as GitHub or Jira issues, each once; a dry run unless `--yes`; exit 0 done, 2 could not export |
+| `scenescout policy explain <METHOD> <URL>` | Whether the write policy would let one request out in each mode, and the rule that decided; sends nothing; exit 0 explained, 2 could not |
 | `scenescout status [path]` | What every session of a running engine is doing, as text |
 | `scenescout watch [path]` | Opens the live view in a browser |
 
@@ -176,6 +177,22 @@ Each `--script` option can also come from an environment variable, below; the op
 | `--yes` | off | File the issues |
 
 Every issue carries the `scenescout` label, which a later export lists issues by, and a marker with the finding's id. Credentials have no option: they are read from `GH_TOKEN` or `GITHUB_TOKEN`, or from `JIRA_EMAIL` and `JIRA_API_TOKEN`, only.
+
+### `scenescout policy`
+
+`scenescout policy explain <METHOD> <URL>` prints, for each mode, whether the [write policy](Safety-model.md) would let that request out and the rule that decided, with the function that holds it: `allowed`, `refused`, or `depends`, which means it goes out only when it addresses a record a `safe-write` session in the same server created (a change in `safe-write`, or a destructive-looking `POST` in `read-only` or `safe-write`). It sends nothing. The verdicts come from the functions the running engine judges requests with, and it reads `SCENESCOUT_STRICT_WRITES`, `SCENESCOUT_REFUSE_DESTRUCTIVE_GETS`, `SCENESCOUT_READ_POSTS` and `SCENESCOUT_AUTH_POSTS` from its own environment, as the server does, so run it with the values the server has, and applies the `readPosts` of a [config file](#the-config-file) in the directory it runs in (or the one `SCENESCOUT_CONFIG` names) as the other commands do. It prints the address without a user name, password or token. It assumes the app's own page sent the request; a write sent from another site's embedded frame is judged by the [embed rules](Safety-model.md#embedded-third-party-frames) instead. A `GET` is judged as a page load. Exit 0 explained, 2 could not (a bad argument, a body file it could not read, a setting or config file the server would refuse too).
+
+```bash
+npx -y scenescout policy explain POST https://app.example.com/api/things/3/delete
+npx -y scenescout policy explain POST https://app.example.com/api/things/3 --header "X-HTTP-Method-Override: DELETE" --mode read-only
+```
+
+| Option | Default | |
+|---|---|---|
+| `--mode` | every mode | `observe`, `read-only`, `safe-write` or `destructive`: explain that mode only |
+| `--body` | no body | A file holding the request body, read as text, at most 1 MB |
+| `--header` | none | A request header, `"Name: value"`, such as a method override. Repeat it for more |
+| `--app` | the request's origin | The address the server is attached to. A read `POST` or sign-in entry written as a path (`POST /api/search`) means this origin |
 
 ### `scenescout watch`
 

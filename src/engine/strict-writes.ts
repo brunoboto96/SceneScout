@@ -288,6 +288,23 @@ const GET_VERBS = new Set([
 /** Verbs that are also the name of a page that lists things (`/blog/archive`, `/mail/trash`): a command only right after a record's id. */
 const GET_NOUN_VERBS = new Set(["archive", "trash"]);
 
+/**
+ * Verbs that are ordinary words inside other names (`/avoid-list`,
+ * `/close-up-photos`, `/help/how-to-close-your-account`): a command only as a
+ * whole path segment (`/things/9/void`, `/requests/4/reject`, `/approve?token=…`).
+ * Read whole, not as one word of a segment, so a page about the act is not
+ * taken for the act.
+ */
+const GET_SEGMENT_VERBS = new Set(["void", "reject", "approve"]);
+
+/**
+ * `close` is also the page a sign-in popup is sent to so it can shut itself
+ * (`/close`, `/auth/close`), so it counts only as a whole segment right after
+ * a record's id (`/tickets/9/close`) or after a segment naming the signed-in
+ * user's own record, which has no id in the path (`/account/close`).
+ */
+const GET_CLOSE_AFTER = new Set(["account", "subscription", "membership"]);
+
 /** A path segment that reads as a record's id: digits, a UUID, or a long hex or mixed token. */
 const ALL_DIGITS_RE = fromJs(String.raw`^\d+$`);
 const ID_SEGMENT_RE = fromJs(
@@ -304,13 +321,18 @@ const ID_SEGMENT_RE = fromJs(
  * that a server may act on, `/items/3/delete`, `/orders/3/cancel`,
  * `/unsubscribe?token=…`, `?action=delete`. `archive` and `trash` are also
  * the names of listing pages, so they count only right after an id
- * (`/items/3/archive`, not `/blog/archive`). Opt-in: refusing these loses the
- * page behind every such link, which is the point.
+ * (`/items/3/archive`, not `/blog/archive`); `void`, `reject` and `approve`
+ * count only as a whole segment, and `close` only as a whole segment after an
+ * id or the user's own account. Opt-in: refusing these loses the page behind
+ * every such link, which is the point.
  */
 export function destructiveGet(url: string): boolean {
   const { pathname, search } = urlParts(url);
   const segments = pathname.split("/").filter(Boolean).map(decodeSegment);
   const command = segments.some((seg, i) => {
+    const whole = seg.toLowerCase();
+    if (GET_SEGMENT_VERBS.has(whole)) return true;
+    if (whole === "close") return i > 0 && (ID_SEGMENT_RE.test(segments[i - 1]) || GET_CLOSE_AFTER.has(segments[i - 1].toLowerCase()));
     const words = identifierWords(seg);
     if (!wordsCommand(words, GET_VERBS)) return false;
     // A noun-or-verb word alone in its segment is a listing page unless a record's id comes just before it.

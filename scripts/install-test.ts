@@ -9,7 +9,7 @@
  *   npx tsx --test scripts/install-test.ts
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -86,6 +86,7 @@ import { trackerEnv } from "../src/engine/ticket-preview.ts";
 import { GUIDED_PROMPTS, guidedPromptText, livePrompt, loginPrompt, LOGIN_PROMPT_ARGUMENTS, LIVE_PROMPT_ARGUMENTS } from "../src/prompts.ts";
 
 import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
+import { EXIT_POLICY, runPolicyCommand } from "../src/engine/policy-explain.ts";
 import {
   downloadLine,
   FIRST_RUN_DEFAULTS,
@@ -1478,6 +1479,11 @@ test("the error page is left for about:blank, with no GET, when the page's addre
   assert.equal(errorPageExit("POST", "https://app.test/things/9"), "get");
   assert.equal(errorPageExit("POST", "https://app.test/things/9/delete"), "blank");
   assert.equal(errorPageExit("POST", "https://app.test/things?action=delete"), "blank");
+  // Whole-segment commands (#538), each beside a page that only names the word.
+  assert.equal(errorPageExit("POST", "https://app.test/things/9/void"), "blank");
+  assert.equal(errorPageExit("POST", "https://app.test/avoid-list"), "get");
+  assert.equal(errorPageExit("POST", "https://app.test/account/close"), "blank");
+  assert.equal(errorPageExit("POST", "https://app.test/close"), "get");
   assert.equal(errorPageExit("POST", "https://app.test/things?action=list"), "get");
   // `archive` names a listing page unless a record's id comes just before it.
   assert.equal(errorPageExit("POST", "https://app.test/things/9/archive"), "blank");
@@ -2210,17 +2216,130 @@ test("the flags each hand-parsed command documents still reach it", async () => 
   for (const argv of cases) assert.deepEqual(await dispatched(argv), { ran: [argv.join(" ")], exit: null, said: [] }, argv.join(" "));
 });
 
-test("check, ci, login and export keep their own option parsing, and serve starts whatever else it is given", async () => {
-  // Their parsers refuse unknown options with their own exit codes (check, ci and export exit 2), so the preflight leaves them be.
+test("check, ci, login, export and policy keep their own option parsing, and serve starts whatever else it is given", async () => {
+  // Their parsers refuse unknown options with their own exit codes (check, ci, export and policy exit 2), so the preflight leaves them be.
   for (const argv of [
     ["check", "http://127.0.0.1:3000", "--nope"],
     ["ci", "http://127.0.0.1:3000", "--nope"],
     ["login", "http://127.0.0.1:3000", "--nope"],
     ["export", "--to", "github", "--nope"],
+    ["policy", "explain", "POST", "http://127.0.0.1:3000/api/x", "--nope"],
+    ["policy", "explain", "DELETE", "http://127.0.0.1:3000/api/x", "--mode", "read-only", "--header", "X-Trace: 1"],
     ["serve", "--stray"],
   ]) {
     assert.deepEqual((await dispatched(argv)).ran, [argv.join(" ")], argv.join(" "));
   }
+});
+
+test("`scenescout policy explain`: each mode's verdict and exit 0, its body from a file, the server's settings, and exit 2 on a bad argument", () => {
+  const run = (args: string[], env: Record<string, string | undefined> = {}, files: Record<string, string> = {}) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = runPolicyCommand(args, {
+      env,
+      readBody: (file) => {
+        if (!(file in files)) throw new Error(`ENOENT: ${file}`);
+        return files[file];
+      },
+      out: (line) => void out.push(line),
+      err: (line) => void err.push(line),
+    });
+    return { code, stdout: out.join("\n"), stderr: err.join("\n") };
+  };
+  const missing = run(["explain", "POST", "https://app.example.com/api/things", "--body", "body.json"]);
+  assert.equal(missing.code, EXIT_POLICY.couldNotExplain, "a body file that is not there");
+  assert.match(missing.stderr, /^scenescout policy: could not read the body file body\.json/);
+  const out = run(["explain", "POST", "https://app.example.com/api/things", "--body", "body.json"], {}, { "body.json": '{"action":"delete","id":3}' });
+  assert.equal(out.code, EXIT_POLICY.explained, out.stderr);
+  assert.match(out.stdout, /Looks destructive to the standard classifier/);
+  for (const [mode, outcome] of [
+    ["observe", "refused"],
+    ["read-only", "depends"],
+    ["safe-write", "depends"],
+    ["destructive", "allowed"],
+  ])
+    assert.match(out.stdout, new RegExp(`^  ${mode} +${outcome} `, "m"), mode);
+  const one = run(["explain", "GET", "https://app.example.com/things/9/void", "--mode", "observe"]);
+  assert.equal(one.code, EXIT_POLICY.explained);
+  assert.equal(one.stdout.match(/^  [a-z-]+ +(allowed|refused|depends) /gm)?.length, 1, "one mode asked for, one verdict");
+  assert.match(one.stdout, /^  observe +allowed /m);
+  // With the server's setting on, the same page load is refused, as the server would refuse it.
+  assert.match(
+    run(["explain", "GET", "https://app.example.com/things/9/void", "--mode", "observe"], { SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1" }).stdout,
+    /^  observe +refused /m,
+  );
+  // A setting the server would refuse to start with is refused here too.
+  const badEnv = run(["explain", "GET", "https://app.example.com/"], { SCENESCOUT_STRICT_WRITES: "maybe" });
+  assert.equal(badEnv.code, EXIT_POLICY.couldNotExplain);
+  assert.match(badEnv.stderr, /SCENESCOUT_STRICT_WRITES must be 1 or 0/);
+  for (const bad of [
+    ["explain", "GET"],
+    ["explain", "GET", "https://app.example.com", "--nope"],
+    ["show", "GET", "https://app.example.com"],
+  ]) {
+    const r = run(bad);
+    assert.equal(r.code, EXIT_POLICY.couldNotExplain, bad.join(" "));
+    assert.match(r.stderr, /^scenescout policy: /, bad.join(" "));
+    assert.equal(r.stdout, "", bad.join(" "));
+  }
+});
+
+test("`scenescout policy explain` prints no credential from the URL or a malformed argument, and applies the config file's readPosts as a session would", () => {
+  const run = (args: string[], config?: Record<string, string>) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const reader = {
+      exists: (file: string) => config !== undefined && file in config,
+      read: (file: string) => config![file],
+      realpath: (file: string) => file,
+    };
+    const code = runPolicyCommand(args, {
+      env: {},
+      readBody: () => "",
+      out: (line) => void out.push(line),
+      err: (line) => void err.push(line),
+      config: { launchDir: "/launch", reader },
+    });
+    return { code, text: [...out, ...err].join("\n") };
+  };
+  const secretUrl = run([
+    "explain",
+    "POST",
+    "https://someone:hunter2@app.example.com/api/x?token=abcdef123456",
+    "--header",
+    "Authorization: Bearer abc.def.ghi",
+  ]);
+  assert.equal(secretUrl.code, EXIT_POLICY.explained, secretUrl.text);
+  assert.doesNotMatch(secretUrl.text, /hunter2|abcdef123456|abc\.def\.ghi/);
+  assert.match(secretUrl.text, /^POST https:\/\/app\.example\.com\/api\/x\?token=/m, "the address is still shown, without them");
+  for (const argv of [
+    ["explain", "POST", "https://app.example.com/x", "--header", "Authorization Bearer opensesame-hunter2"],
+    ["explain", "POST", "https:/someone:hunter2@[bad"],
+    ["explain", "POST", "https://app.example.com/x", "--app", "hunter2 is not an address"],
+  ]) {
+    const r = run(argv);
+    assert.equal(r.code, EXIT_POLICY.couldNotExplain, argv.join(" "));
+    assert.doesNotMatch(r.text, /hunter2|opensesame/, argv.join(" "));
+  }
+  assert.match(run(["--nope"]).text, /unknown option --nope/);
+  // The config file's readPosts is the list a session reads, with no environment list: observe lets the named POST out.
+  const search = ["explain", "POST", "https://app.example.com/api/search", "--mode", "observe"];
+  assert.match(run(search).text, /^ {2}observe +refused /m, "no config: not a read POST");
+  const withFile = run(search, { [path.join("/launch", ".scenescout", "config.json")]: JSON.stringify({ readPosts: ["POST /api/search"] }) });
+  assert.equal(withFile.code, EXIT_POLICY.explained, withFile.text);
+  assert.match(withFile.text, /^ {2}observe +allowed .*POST \/api\/search/m);
+  assert.match(withFile.text, /Config: /);
+});
+
+test("the CLI runs `scenescout policy explain` and exits with its code (one process: the codes themselves are tested above)", () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const env: Record<string, string | undefined> = { ...process.env };
+  for (const name of ["SCENESCOUT_STRICT_WRITES", "SCENESCOUT_REFUSE_DESTRUCTIVE_GETS", "SCENESCOUT_READ_POSTS", "SCENESCOUT_AUTH_POSTS"]) delete env[name];
+  const cli = (...args: string[]) =>
+    spawnSync(process.execPath, ["--import", "tsx", path.join(repo, "src", "cli.ts"), "policy", ...args], { cwd: repo, env, encoding: "utf8" });
+  const ok = cli("explain", "DELETE", "https://app.example.com/api/things/3", "--mode", "read-only");
+  assert.equal(ok.status, EXIT_POLICY.explained, ok.stderr);
+  assert.match(ok.stdout, /^  read-only +refused /m);
 });
 
 test("the top level: help, version, and an unknown or missing command", async () => {
