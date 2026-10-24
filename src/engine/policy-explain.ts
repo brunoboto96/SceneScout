@@ -34,6 +34,8 @@ import {
   type ReadPost,
   type WriteMode,
 } from "./policy.js";
+import { applyToCommand, readLaunchPolicy, withProjectPolicy, type PolicyReader } from "./project-config.js";
+import { redactRoute } from "./redact.js";
 import { pathnameOf, routedWriteVerdict } from "./route-guard.js";
 import {
   destructiveGet,
@@ -78,7 +80,12 @@ export function parsePolicyArgs(args: readonly string[]): { ok: true; options: P
   if (action !== "explain")
     return {
       ok: false,
-      error: action === undefined ? "say what to do: scenescout policy explain <METHOD> <URL>" : `unknown action ${action}: the one action is explain`,
+      error:
+        action === undefined
+          ? "say what to do: scenescout policy explain <METHOD> <URL>"
+          : action.startsWith("--")
+            ? `unknown option --${flagName(action)}`
+            : `unknown action ${action}: the one action is explain`,
     };
   const positional: string[] = [];
   const headers: Record<string, string> = {};
@@ -103,7 +110,8 @@ export function parsePolicyArgs(args: readonly string[]): { ok: true; options: P
     else if (name === "app") app = read.value;
     else {
       const colon = read.value.indexOf(":");
-      if (colon <= 0) return { ok: false, error: `--header must be "Name: value", not ${JSON.stringify(read.value)}` };
+      // The value is not repeated: a header given without its colon may still be a credential.
+      if (colon <= 0) return { ok: false, error: `--header must be "Name: value"` };
       if (Object.keys(headers).length >= MAX_HEADERS) return { ok: false, error: `at most ${MAX_HEADERS} --header options` };
       headers[read.value.slice(0, colon).trim().toLowerCase()] = read.value.slice(colon + 1).trim();
     }
@@ -116,7 +124,8 @@ export function parsePolicyArgs(args: readonly string[]): { ok: true; options: P
   try {
     parsed = new URL(url);
   } catch {
-    return { ok: false, error: `not a URL: ${url}` };
+    // Not repeated: an address that does not parse may still carry a password or a token.
+    return { ok: false, error: "the URL is not an absolute http or https URL" };
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
     return { ok: false, error: `only http and https URLs can be explained (got ${parsed.protocol})` };
@@ -126,12 +135,35 @@ export function parsePolicyArgs(args: readonly string[]): { ok: true; options: P
     try {
       a = new URL(app);
     } catch {
-      return { ok: false, error: `--app is not a URL: ${app}` };
+      return { ok: false, error: "--app is not an absolute http or https URL" };
     }
     if (a.protocol !== "http:" && a.protocol !== "https:") return { ok: false, error: `--app must be an http or https URL (got ${a.protocol})` };
     appUrl = a.origin;
   }
-  return { ok: true, options: { method: method.toUpperCase(), url: parsed.href, mode, bodyFile, headers, appUrl } };
+  return { ok: true, options: { method: method.toUpperCase(), url: wireUrl(parsed.href), mode, bodyFile, headers, appUrl } };
+}
+
+/** The URL as a browser sends it: the fragment never leaves the page, so no rule may read it (a `#?_method=DELETE` is not a query). */
+function wireUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    return u.href;
+  } catch {
+    return url;
+  }
+}
+
+/** The URL as printed: no user name or password, and a token in its query masked, as every other line the engine writes. */
+function shownUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    u.username = "";
+    u.password = "";
+    return redactRoute(u.href);
+  } catch {
+    return redactRoute(url);
+  }
 }
 
 /** The operator's settings the write policy reads from the server's environment, as the server reads them (browser.ts attach). */
@@ -258,7 +290,7 @@ export function explainRequest(input: {
   const settings = input.settings ?? DEFAULT_POLICY_SETTINGS;
   const req = {
     method: input.method.toUpperCase(),
-    url: input.url,
+    url: wireUrl(input.url),
     body: input.body ?? null,
     headers: input.headers ?? {},
     appUrl: input.appUrl ?? new URL(input.url).origin,
@@ -278,7 +310,7 @@ export function explainRequest(input: {
 
 /** What `scenescout policy explain` prints. */
 export function formatExplanation(url: string, e: PolicyExplanation, settings: PolicySettings): string[] {
-  const lines = [`${e.label} ${url}`];
+  const lines = [`${e.label} ${shownUrl(url)}`];
   if (e.via) lines.push(`Judged as ${e.judgedAs}: ${e.via}.`);
   if (isReadMethod(e.judgedAs)) {
     lines.push(
@@ -316,7 +348,17 @@ export function formatExplanation(url: string, e: PolicyExplanation, settings: P
  */
 export function runPolicyCommand(
   args: readonly string[],
-  io: { env: Record<string, string | undefined>; readBody: (file: string) => string; out: (line: string) => void; err: (line: string) => void },
+  io: {
+    env: Record<string, string | undefined>;
+    readBody: (file: string) => string;
+    out: (line: string) => void;
+    err: (line: string) => void;
+    /**
+     * The operator's config file, read as the other commands read it (project-config.ts configureCommand): its
+     * `readPosts` is the most a session may name, so it changes what observe lets out. Absent: no file is read.
+     */
+    config?: { launchDir: string; reader: PolicyReader };
+  },
 ): number {
   const fail = (message: string): number => {
     io.err(`scenescout policy: ${message}`);
@@ -333,13 +375,26 @@ export function runPolicyCommand(
       return fail(`could not read the body file ${o.bodyFile}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  let env = io.env;
+  let configNote = "";
+  if (io.config) {
+    // As configureCommand reads it, short of the projectsRoot fence: nothing is opened or written, so no folder is out of bounds.
+    const launch = readLaunchPolicy(io.env, io.config.launchDir, io.config.reader);
+    const loaded = launch.ok ? withProjectPolicy(launch.loaded, io.config.launchDir, io.config.reader) : launch;
+    if (!loaded.ok) return fail(loaded.error);
+    const applied = applyToCommand(loaded.loaded, io.env, [], { mode: "observe" });
+    if (!applied.ok) return fail(applied.error);
+    if (applied.readPosts !== undefined) env = { ...io.env, [READ_POSTS_ENV]: applied.readPosts.join("\n") };
+    configNote = applied.note;
+  }
   let settings: PolicySettings;
   try {
-    settings = policySettingsFrom(io.env);
+    settings = policySettingsFrom(env);
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
   }
   const explanation = explainRequest({ method: o.method, url: o.url, body, headers: o.headers, mode: o.mode, settings, appUrl: o.appUrl });
   for (const line of formatExplanation(o.url, explanation, settings)) io.out(line);
+  if (configNote) io.out(configNote);
   return EXIT_POLICY.explained;
 }

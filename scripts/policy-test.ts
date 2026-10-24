@@ -3692,13 +3692,30 @@ test("policy explain: the command line, and what it refuses", () => {
     [["explain", "GET", "https://a.example.com", "--mode"], /--mode needs a value/],
     [["explain", "GET", "https://a.example.com", "--header", "no colon"], /--header must be "Name: value"/],
     [["explain", "G E T", "https://a.example.com"], /not an HTTP method/],
-    [["explain", "GET", "/relative"], /not a URL/],
+    [["explain", "GET", "/relative"], /not an absolute http or https URL/],
     [["explain", "GET", "ftp://a.example.com/x"], /only http and https/],
-    [["explain", "GET", "https://a.example.com", "--app", "nope"], /--app is not a URL/],
+    [["explain", "GET", "https://a.example.com", "--app", "nope"], /--app is not an absolute http or https URL/],
   ];
   for (const [argv, message] of refused) {
     const r = parsePolicyArgs(argv);
     assert.equal(r.ok, false, argv.join(" "));
     if (!r.ok) assert.match(r.error, message, argv.join(" "));
   }
+});
+
+test("policy explain: a URL's fragment is not read, since a browser never sends it, so the verdict stays the route handler's", async () => {
+  // Contrastive pair: the same override in the query is read; written after the `#`, it never reaches the server.
+  const cases: Array<{ method: string; path: string; mode: (typeof WRITE_MODES)[number] }> = [
+    { method: "GET", path: "/things#x?_method=DELETE", mode: "read-only" },
+    { method: "POST", path: "/api/things#?_method=DELETE", mode: "read-only" },
+    { method: "GET", path: "/things?_method=DELETE", mode: "read-only" },
+  ];
+  for (const c of cases) {
+    const wire = c.path.split("#")[0];
+    const handler = await guardRig(c.mode).send(c.method, wire, { type: "xhr", body: c.method === "POST" ? "{}" : null }).done;
+    const [v] = explainRequest({ method: c.method, url: `${EXPLAIN_APP}${c.path}`, body: c.method === "POST" ? "{}" : null, mode: c.mode }).verdicts;
+    assert.equal(v.outcome, handler === "fallback" ? "allowed" : "refused", `${c.method} ${c.path}: handler ${handler}, explain ${v.outcome} (${v.rule})`);
+  }
+  const parsed = parsePolicyArgs(["explain", "GET", `${EXPLAIN_APP}/things#x?_method=DELETE`]);
+  assert.ok(parsed.ok && parsed.options.url === `${EXPLAIN_APP}/things`, "the command line drops it too");
 });

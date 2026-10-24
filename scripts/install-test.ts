@@ -2284,6 +2284,53 @@ test("`scenescout policy explain`: each mode's verdict and exit 0, its body from
   }
 });
 
+test("`scenescout policy explain` prints no credential from the URL or a malformed argument, and applies the config file's readPosts as a session would", () => {
+  const run = (args: string[], config?: Record<string, string>) => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const reader = {
+      exists: (file: string) => config !== undefined && file in config,
+      read: (file: string) => config![file],
+      realpath: (file: string) => file,
+    };
+    const code = runPolicyCommand(args, {
+      env: {},
+      readBody: () => "",
+      out: (line) => void out.push(line),
+      err: (line) => void err.push(line),
+      config: { launchDir: "/launch", reader },
+    });
+    return { code, text: [...out, ...err].join("\n") };
+  };
+  const secretUrl = run([
+    "explain",
+    "POST",
+    "https://someone:hunter2@app.example.com/api/x?token=abcdef123456",
+    "--header",
+    "Authorization: Bearer abc.def.ghi",
+  ]);
+  assert.equal(secretUrl.code, EXIT_POLICY.explained, secretUrl.text);
+  assert.doesNotMatch(secretUrl.text, /hunter2|abcdef123456|abc\.def\.ghi/);
+  assert.match(secretUrl.text, /^POST https:\/\/app\.example\.com\/api\/x\?token=/m, "the address is still shown, without them");
+  for (const argv of [
+    ["explain", "POST", "https://app.example.com/x", "--header", "Authorization Bearer opensesame-hunter2"],
+    ["explain", "POST", "https:/someone:hunter2@[bad"],
+    ["explain", "POST", "https://app.example.com/x", "--app", "hunter2 is not an address"],
+  ]) {
+    const r = run(argv);
+    assert.equal(r.code, EXIT_POLICY.couldNotExplain, argv.join(" "));
+    assert.doesNotMatch(r.text, /hunter2|opensesame/, argv.join(" "));
+  }
+  assert.match(run(["--nope"]).text, /unknown option --nope/);
+  // The config file's readPosts is the list a session reads, with no environment list: observe lets the named POST out.
+  const search = ["explain", "POST", "https://app.example.com/api/search", "--mode", "observe"];
+  assert.match(run(search).text, /^ {2}observe +refused /m, "no config: not a read POST");
+  const withFile = run(search, { [path.join("/launch", ".scenescout", "config.json")]: JSON.stringify({ readPosts: ["POST /api/search"] }) });
+  assert.equal(withFile.code, EXIT_POLICY.explained, withFile.text);
+  assert.match(withFile.text, /^ {2}observe +allowed .*POST \/api\/search/m);
+  assert.match(withFile.text, /Config: /);
+});
+
 test("the CLI runs `scenescout policy explain` and exits with its code (one process: the codes themselves are tested above)", () => {
   const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const env: Record<string, string | undefined> = { ...process.env };
