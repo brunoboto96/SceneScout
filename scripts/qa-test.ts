@@ -35,6 +35,7 @@ import {
   EGRESS_MODES as QA_EGRESS_MODES,
   egressOf,
   egressReply,
+  gateJobOf,
   gateDecision,
   githubClient,
   inert,
@@ -2527,7 +2528,17 @@ test("gate stage: the default branch's egress decides; none posts only the refus
   assert.ok(!held.calls.some((c) => c.url.includes("/deployments")), "no deployment is looked up");
   const refused = await run(new Refusal(403, "Resource not accessible by integration"));
   assert.equal(refused.out.run, "false", "a config the token may not read is not taken for no config");
-  assert.match(refused.calls.at(-1)!.body.body, /could not be read: .*HTTP 403/);
+  assert.match(refused.calls.at(-1)!.body.body, /add `contents: read` under `permissions:`/, "GitHub's 403 for a missing permission says what to add");
+  // Contrast: a rate limit's 403 is not a missing permission, so the reply says what failed instead.
+  const limited = await run(new Refusal(403, "API rate limit exceeded for installation"));
+  assert.equal(limited.out.run, "false");
+  assert.match(limited.calls.at(-1)!.body.body, /could not be read: .*HTTP 403/);
+  assert.doesNotMatch(limited.calls.at(-1)!.body.body, /contents: read/);
+  // Nor is a 401: a token that is not valid at all, which a permission line would not fix.
+  const badToken = await run(new Refusal(401, "Bad credentials"));
+  assert.equal(badToken.out.run, "false");
+  assert.match(badToken.calls.at(-1)!.body.body, /could not be read: .*HTTP 401/);
+  assert.doesNotMatch(badToken.calls.at(-1)!.body.body, /contents: read/);
   const missing = await run(undefined);
   assert.equal(missing.out.run, "true", "no file is today's behaviour");
   // GitHub answers 404 for a private repository's file the token may not read, too: a 404 is no file only when the top folder can be read.
@@ -2542,7 +2553,11 @@ test("gate stage: the default branch's egress decides; none posts only the refus
     },
     async (api, calls) => {
       hidden = await runGate({
-        env: gateEnv(dir, api, "owner", "/scenescout qa https://pr-7.preview.example.com"),
+        env: {
+          ...gateEnv(dir, api, "owner", "/scenescout qa https://pr-7.preview.example.com"),
+          GITHUB_WORKFLOW_REF: "owner/app/.github/workflows/scenescout-qa.yml@refs/heads/main",
+          GITHUB_JOB: "gate",
+        },
         inputs: { "github-token": "test-token" },
         log: quiet,
       });
@@ -2550,5 +2565,39 @@ test("gate stage: the default branch's egress decides; none posts only the refus
     },
   );
   assert.equal(hidden.run, "false", "a config the gate may not see is not taken for no config");
-  assert.ok(hiddenCalls.at(-1)!.body.body.includes(CONTENTS_UNREADABLE));
+  // The reply names the job and the file, so the maintainer knows exactly which line to add where.
+  assert.ok(
+    hiddenCalls
+      .at(-1)!
+      .body.body.includes(
+        "No QA run was started: the gate could not read this repository's SceneScout config (`.scenescout/config.json` on the default branch), so it cannot tell whether the config's `egress` lets SceneScout post here. " +
+          "To fix it, add `contents: read` under `permissions:` of the `gate` job in `.github/workflows/scenescout-qa.yml`, on the default branch.",
+      ),
+    hiddenCalls.at(-1)!.body.body,
+  );
+  assert.equal(CONTENTS_UNREADABLE.includes("`contents: read`"), true);
+});
+
+test("egress: the unreadable reply names the gate's job and workflow file only when GitHub's variables have their shape", () => {
+  const cases: Array<[string, Record<string, string | undefined>, { workflow: string; job: string }]> = [
+    [
+      "both",
+      { GITHUB_WORKFLOW_REF: "owner/app/.github/workflows/scenescout-qa.yml@refs/heads/main", GITHUB_JOB: "gate" },
+      { workflow: ".github/workflows/scenescout-qa.yml", job: "gate" },
+    ],
+    [
+      "a .yaml file",
+      { GITHUB_WORKFLOW_REF: "o/r/.github/workflows/qa.yaml@refs/pull/7/merge", GITHUB_JOB: "qa-gate" },
+      { workflow: ".github/workflows/qa.yaml", job: "qa-gate" },
+    ],
+    ["neither set", {}, { workflow: "", job: "" }],
+    ["markup in the job", { GITHUB_JOB: "gate`<img>" }, { workflow: "", job: "" }],
+    ["a ref outside .github/workflows", { GITHUB_WORKFLOW_REF: "o/r/elsewhere/qa.yml@refs/heads/main" }, { workflow: "", job: "" }],
+    ["a ref with markup", { GITHUB_WORKFLOW_REF: "o/r/.github/workflows/q`a.yml@refs/heads/main" }, { workflow: "", job: "" }],
+  ];
+  for (const [name, env, want] of cases) assert.deepEqual(gateJobOf(env), want, name);
+  const unknown = egressReply({ ok: false, error: CONTENTS_UNREADABLE, unreadable: true });
+  assert.match(unknown!.reply, /add `contents: read` under `permissions:` of the job that runs the gate in this workflow's file/);
+  // Contrast: a config that says none is not a permission problem, and its reply says nothing about permissions.
+  assert.doesNotMatch(egressReply({ ok: true, egress: "none" }, { workflow: ".github/workflows/x.yml", job: "gate" })!.reply, /contents: read/);
 });

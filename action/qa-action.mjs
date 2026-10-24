@@ -305,6 +305,7 @@ export function gateDecision({
   base = { source: "none", url: "" },
   checkWorkflow = "",
   egress = { ok: true, egress: "all" },
+  gateJob = { workflow: "", job: "" },
 }) {
   if (!command) return { run: false, reason: "not the command", reaction: null, reply: null };
   if (!teamMember && !isAllowed(login, association, allowed))
@@ -312,7 +313,7 @@ export function gateDecision({
   if (!pr || pr.state !== "open")
     return { run: false, reason: "the pull request is not open", reaction: "confused", reply: "The pull request is not open, so no QA run was started." };
   // Before either kind of run: both end in a reply on the pull request, which only egress "all" allows.
-  const held = egressReply(egress);
+  const held = egressReply(egress, gateJob);
   if (held) return { run: false, reason: held.reason, reaction: "confused", reply: held.reply };
   if (command.check) return checkDecision({ pr, checkWorkflow });
   if (isFork(pr) && !allowForks)
@@ -402,15 +403,41 @@ export function egressOf(text) {
 }
 
 /**
- * Why the config keeps a QA run from starting, or null. `egress` is what
- * readEgress found: a mode, or why the file could not be read.
- * @param {{ ok: true, egress: string } | { ok: false, error: string }} egress
+ * The workflow file and job the gate runs in, from GitHub's own variables, so
+ * a reply can say where `contents: read` goes. A value of another shape is left
+ * out rather than quoted in the reply.
+ * @returns {{ workflow: string, job: string }}
  */
-export function egressReply(egress) {
+export function gateJobOf(env) {
+  const ref = /^[\w.-]+\/[\w.-]+\/(\.github\/workflows\/[\w.-]+\.ya?ml)@/.exec(String(env.GITHUB_WORKFLOW_REF ?? ""));
+  const job = String(env.GITHUB_JOB ?? "");
+  return { workflow: ref ? ref[1] : "", job: /^[\w-]{1,100}$/.test(job) ? job : "" };
+}
+
+/**
+ * Why the config keeps a QA run from starting, or null. `egress` is what
+ * readEgress found: a mode, or why the file could not be read; `unreadable`
+ * marks a token that may not read the repository's files, and the reply then
+ * says where in the workflow `contents: read` goes (`where`, from gateJobOf).
+ * @param {{ ok: true, egress: string } | { ok: false, error: string, unreadable?: boolean }} egress
+ * @param {{ workflow?: string, job?: string }} [where]
+ */
+export function egressReply(egress, where = {}) {
   if (egress.ok && egress.egress === "all") return null;
+  const file = `this repository's SceneScout config (\`${CONFIG_PATH}\` on the default branch)`;
+  if (!egress.ok && egress.unreadable) {
+    const job = where.job ? `the \`${where.job}\` job` : "the job that runs the gate";
+    const workflow = where.workflow ? `\`${where.workflow}\`` : "this workflow's file";
+    return {
+      reason: "the gate's token may not read the repository's files",
+      reply:
+        `No QA run was started: the gate could not read ${file}, so it cannot tell whether the config's \`egress\` lets SceneScout post here. ` +
+        `To fix it, add \`contents: read\` under \`permissions:\` of ${job} in ${workflow}, on the default branch.`,
+    };
+  }
   const why = egress.ok
-    ? `this repository's SceneScout config (\`${CONFIG_PATH}\` on the default branch) sets \`egress\` to \`${egress.egress}\`, which lets SceneScout post nothing on a pull request`
-    : `this repository's SceneScout config (\`${CONFIG_PATH}\` on the default branch) could not be read: ${egress.error}`;
+    ? `${file} sets \`egress\` to \`${egress.egress}\`, which lets SceneScout post nothing on a pull request`
+    : `${file} could not be read: ${egress.error}`;
   return {
     reason: egress.ok ? `egress "${egress.egress}"` : "the config could not be read",
     reply: `No QA run was started: ${why}. Whoever looks after the repository can change it.`,
@@ -421,23 +448,35 @@ export function egressReply(egress) {
 export const CONTENTS_UNREADABLE = "the gate cannot read the repository's files: give the gate job `contents: read`";
 
 /**
+ * GitHub's refusal of a token that lacks a permission: a 403 in its words for
+ * that. A rate limit's 403 is not one, nor a 401, which is a token that is not
+ * valid at all and which no permission line would fix.
+ */
+const permissionGap = (err) => err?.status === 403 && /not accessible by integration|permission/i.test(String(err?.detail ?? ""));
+
+/**
  * The config's egress, read from the repository's default branch (the
  * contents API's default), never from the pull request, which could loosen
  * it. No file is `all`. GitHub answers 404 both for a file that is not there
  * and for a private repository the token may not read, so a 404 counts as no
- * file only when the repository's top folder can be read; otherwise, and on
- * any other failure, it is an error and no run starts on a guess.
+ * file only when the repository's top folder can be read. A token that may not
+ * read the files (that 404, or GitHub's 403 for a missing permission) is
+ * `unreadable`, so the reply can say what to add; any other failure is an
+ * error too, and no run starts on a guess.
  */
 async function readEgress(call, repo) {
   let file;
   try {
     file = await call("GET", `/repos/${repo}/contents/${CONFIG_PATH}`);
   } catch (err) {
+    if (permissionGap(err)) return { ok: false, error: CONTENTS_UNREADABLE, unreadable: true };
     if (err?.status !== 404) return { ok: false, error: err instanceof Error ? err.message : String(err) };
     try {
       await call("GET", `/repos/${repo}/contents/`);
-    } catch {
-      return { ok: false, error: CONTENTS_UNREADABLE };
+    } catch (probe) {
+      // A 404 here is a private repository the token may not read; a failure of another kind is said as it is.
+      if (probe?.status === 404 || permissionGap(probe)) return { ok: false, error: CONTENTS_UNREADABLE, unreadable: true };
+      return { ok: false, error: probe instanceof Error ? probe.message : String(probe) };
     }
     return { ok: true, egress: "all" };
   }
@@ -900,6 +939,7 @@ export async function runGate({ env = process.env, inputs = inputsFromEnv(), fet
     base,
     checkWorkflow: inputs["check-workflow"],
     egress,
+    gateJob: gateJobOf(env),
   });
   log(`${decision.run ? "Starting a QA run" : decision.check ? "Starting the project's check" : "No QA run"}: ${decision.reason}.`);
   if (decision.reaction && event.comment?.id)
