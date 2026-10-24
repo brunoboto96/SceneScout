@@ -360,6 +360,12 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end(JSON.stringify({ authorization: req.headers.authorization ? "sent" : "none" }));
       return;
     }
+    // A record holding personal data (personal-data.html): the address is built here so no real-looking one is written in the repository.
+    if (urlPath === "/api/personal-data") {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({ owner: ["jo.sample", "contoso-mail.net"].join("@"), contact: "Phone: +44 20 7946 0958", card: "4111 1111 1111 1111", id: 42 }));
+      return;
+    }
     // An embed that redirects before it loads, as many do (/embed → /embed/).
     // A server error, served on both origins.
     if (urlPath === "/api/fail-500") {

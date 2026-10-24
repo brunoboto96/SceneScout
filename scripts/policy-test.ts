@@ -24,6 +24,9 @@ import {
   EGRESS_PATHS,
   egressAllows,
   egressRefusal,
+  pageTextMaskedFor,
+  REDACT_PAGE_TEXT_MODES,
+  redactPageTextNote,
   readCommandPolicy,
   fsPolicyReader,
   CONFIG_KEYS,
@@ -4563,6 +4566,67 @@ test("config: ci and export stop with exit 2 under egress none before any key or
   }
 });
 
+// ── redactPageText: personal data in the page's text masked before the agent reads it (issue #537) ──────
+
+test("config: redactPageText is checked like every key, no preset sets it, and a project's file can turn it on and never off", () => {
+  assert.deepEqual([...REDACT_PAGE_TEXT_MODES], ["off", "pii"]);
+  const r = parsePolicy('{"redactPageText": "all"}', "config.json");
+  assert.ok(!r.ok && /"redactPageText" must be one of "off", "pii", not "all"/.test(r.error), r.ok ? "taken" : r.error);
+  assert.ok(!parsePolicy('{"redactPageText": true}', "config.json").ok, "a boolean is not a mode");
+  assert.deepEqual(parsed('{"redactPageText": "pii"}'), { redactPageText: "pii" });
+  assert.deepEqual(parsed('{"redactPageText": "off"}'), { redactPageText: "off" });
+  assert.equal(parsed('{"preset": "strict"}').redactPageText, undefined, "strict changes what the agent may do, not what it reads");
+  assert.equal(tightenPolicy({ redactPageText: "off" }, { redactPageText: "pii" }).redactPageText, "pii", "the project's file turns it on");
+  assert.equal(tightenPolicy({ redactPageText: "pii" }, { redactPageText: "off" }).redactPageText, "pii", "and cannot turn the operator's off");
+  assert.equal(tightenPolicy({}, { redactPageText: "pii" }).redactPageText, "pii");
+  assert.equal(tightenPolicy({ redactPageText: "off" }, {}).redactPageText, "off");
+  assert.equal("redactPageText" in tightenPolicy({}, {}), false);
+});
+
+test("config: which calls' results are masked, each rule beside the case it does not cover", () => {
+  const on: Policy = { redactPageText: "pii" };
+  const off: Policy = { redactPageText: "off" };
+  // The operator's file masks every call.
+  assert.equal(pageTextMaskedFor(on, []), true);
+  assert.equal(pageTextMaskedFor(on, [off]), true);
+  // With the operator's off, any open session's config masks every call, a call naming an unmasked session too: its
+  // result can carry the masking session's page (the session list names each session's address).
+  assert.equal(pageTextMaskedFor({}, [off, on]), true);
+  assert.equal(pageTextMaskedFor(off, [{}, on]), true);
+  assert.equal(pageTextMaskedFor({}, [{}, off]), false, "no open session masks");
+  assert.equal(pageTextMaskedFor({}, []), false, "no file: today's behaviour");
+});
+
+test("config: redactPageText says so on the Config line of an attach, a command and policy explain, and only when on", () => {
+  assert.deepEqual(redactPageTextNote({}), []);
+  assert.deepEqual(redactPageTextNote({ redactPageText: "off" }), []);
+  assert.match(redactPageTextNote({ redactPageText: "pii" }).join(""), /^redactPageText "pii": email addresses, phone numbers and card numbers/);
+  const masked = applyToCommand(loadedOf({ redactPageText: "pii" }), {}, ["http://localhost:3000"], { mode: "observe" });
+  assert.ok(masked.ok && /^Config: \/srv\/\.scenescout\/config\.json; redactPageText "pii": /.test(masked.note), JSON.stringify(masked));
+  const plain = applyToCommand(loadedOf({ redactPageText: "off" }), {}, ["http://localhost:3000"], { mode: "observe" });
+  assert.ok(plain.ok && !plain.note.includes("redactPageText"), JSON.stringify(plain));
+  // policy explain prints the note applyToCommand makes, read from the launch directory's file.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-redact-explain-"));
+  try {
+    fs.mkdirSync(path.join(dir, ".scenescout"));
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), '{"redactPageText": "pii"}');
+    const lines: string[] = [];
+    runPolicyCommand(["explain", "GET", `${EXPLAIN_APP}/things`], {
+      env: {},
+      out: (l: string) => lines.push(l),
+      err: (l: string) => lines.push(l),
+      readBody: () => "",
+      config: { launchDir: dir, reader: fsPolicyReader },
+    });
+    assert.ok(
+      lines.some((l) => /redactPageText "pii"/.test(l)),
+      lines.join("\n"),
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // scenescout config explain: where each resolved value came from.
 const layer = (label: string, file: string, text: string): ConfigLayer => {
   const parsed = parsePolicy(text, file);
@@ -4591,7 +4655,7 @@ test("config explain: a value is a default, a preset's, the operator's file's or
   // No file at all: every row is a default.
   const none = explainConfig({ loaded: NO_POLICY, env: {} });
   assert.ok(none.rows.every((r) => r.source === "default"));
-  assert.equal(none.rows.length, 13);
+  assert.equal(none.rows.length, 14);
   assert.match(formatConfigExplanation(none)[0], /^Config files: none/);
 });
 
@@ -4693,6 +4757,37 @@ test("config explain: a sign-in list only the project's file sets is shown as na
     "POST /api/signin",
   );
   assert.equal(rowOf(explainConfig({ project, loaded, env: { SCENESCOUT_AUTH_POSTS: "POST /api/signin" } }), "authPosts").value, "POST /api/signin");
+});
+
+test("config explain: redactPageText is off by default, the operator's file's, or the project's own file turning it on", () => {
+  // Keyed by resolved path, so the stand-in files are found however the command joins its paths on this platform.
+  const files: Record<string, string> = {};
+  const key = (f: string) => path.resolve(f);
+  const reader = { exists: (f: string) => key(f) in files, read: (f: string) => files[key(f)] ?? "", realpath: (f: string) => f };
+  const run = () => {
+    const out: string[] = [];
+    runConfigCommand(["explain", "--project", path.resolve("/p")], {
+      env: {},
+      launchDir: path.resolve("/launch"),
+      reader,
+      out: (l) => out.push(l),
+      err: (l) => out.push(l),
+    });
+    return out.join("\n");
+  };
+  assert.match(run(), /^ {2}redactPageText +off +\(default\)$/m);
+  files[key("/launch/.scenescout/config.json")] = '{"redactPageText":"pii"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
+  // A project's file that says "off" cannot turn the operator's off: the value stays the operator's.
+  files[key("/p/.scenescout/config.json")] = '{"redactPageText":"off"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
+  // The project's own file turns it on over the operator's "off", and is named as tightening it.
+  files[key("/launch/.scenescout/config.json")] = '{"redactPageText":"off"}';
+  files[key("/p/.scenescout/config.json")] = '{"redactPageText":"pii"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(project file, tightening the operator file\)$/m);
+  // With no operator file, the project's own file is the source.
+  delete files[key("/launch/.scenescout/config.json")];
+  assert.match(run(), /^ {2}redactPageText +pii +\(project file\)$/m);
 });
 
 test("config explain: with no operator file, the project's own file is named as the project's", () => {
