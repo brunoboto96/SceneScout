@@ -15,6 +15,8 @@ import { chromium, firefox, webkit } from "playwright";
 import { createDemoServer } from "../../demo-app/server.mjs";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { writeRedirectHopsJudged } from "../../dist/browsers.js";
+import { RouteGuard } from "../../dist/engine/route-guard.js";
+import { LEAVE_MARKER_PATH } from "../../dist/engine/unload.js";
 import { firstLook } from "../../dist/first-run.js";
 import { BROWSER, check, eventually, settle, SIGN_IN_COOKIE, until, type SmokeContext } from "./harness.ts";
 import { writeProfile } from "../../dist/engine/profiles.js";
@@ -1327,45 +1329,77 @@ async function flowWriteEdges({
     `${leave.status} ${JSON.stringify(leave.flows)} writes=${JSON.stringify(stats.writes)}`,
   );
 
-  // The same beacon, judged late. How soon the policy hears of a beacon sent on pagehide depends on the machine: heard
-  // after the flow's last look, it was dropped by the hand-back and the flow listed nothing (a chromium flake in CI).
-  // White-box: the policy's judgement of this one request is held back 400 ms, at both places it is judged (the route
-  // handler, and in Chromium the browser-level interception), so the late report happens on every run.
-  const slowLeavesBefore = writes("POST /api/leave");
-  const slowEngine = new BrowserEngine();
-  let slowReplay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
-  try {
-    const project = path.join(work, "flow-leave-beacon-late");
-    fs.mkdirSync(project, { recursive: true });
-    await slowEngine.attach({ url: baseUrl, projectDir: project, mode: "read-only" });
-    const guard = (slowEngine as unknown as { guard: Record<string, (...args: never[]) => Promise<unknown>> }).guard;
-    const holdBack = (name: string, urlOf: (args: never[]) => string): void => {
-      const judge = guard[name]!.bind(guard);
-      guard[name] = async (...args: never[]) => {
-        if (/\/api\/leave\b/.test(urlOf(args))) await settle(400);
-        return judge(...args);
-      };
+  // The same beacon, heard and judged late. How soon the policy hears of a beacon sent on pagehide depends on the
+  // machine: Chromium can report it after the navigation away has returned, and heard after the flow's last look it was
+  // dropped by the hand-back and the flow listed nothing (chromium flakes in CI). White-box: in Chromium the browser
+  // level hears this request 700 ms late, and the marker the engine has the page beacon no sooner, as what one page
+  // sent is heard in the order it was sent; and the policy's judgement of it is held back 400 ms more, at both places
+  // it is judged (the route handler, and the browser-level interception), so the late report happens on every run. The
+  // beacon may go on any event the page fires as it is left: on visibilitychange and unload, which fire after pagehide,
+  // it is sent after a marker sent on pagehide would be, and only a marker sent after it waits for it.
+  for (const event of ["pagehide", "visibilitychange", "unload"] as const) {
+    const slowLeavesBefore = writes("POST /api/leave");
+    const slowEngine = new BrowserEngine();
+    let slowReplay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
+    type Intercepts = { interceptUnseenWrites(browser: import("playwright").Browser): Promise<void> };
+    const guardProto = RouteGuard.prototype as unknown as Intercepts;
+    const intercept = guardProto.interceptUnseenWrites;
+    guardProto.interceptUnseenWrites = function (this: Intercepts, browser) {
+      let heardInOrder: Promise<unknown> = Promise.resolve();
+      const hearsLate = Object.create(browser, {
+        newBrowserCDPSession: {
+          value: async () => {
+            const session = await browser.newBrowserCDPSession();
+            const on = session.on.bind(session) as (name: string, listener: (event: { request: { url: string } }) => void) => unknown;
+            (session as unknown as { on: typeof on }).on = (name, listener) =>
+              on(name, (event) => {
+                const beacon = /\/api\/leave\b/.test(event.request.url);
+                if (name !== "Fetch.requestPaused" || !(beacon || event.request.url.includes(LEAVE_MARKER_PATH))) return listener(event);
+                heardInOrder = heardInOrder.then(() => (beacon ? settle(700) : undefined)).then(() => listener(event));
+              });
+            return session;
+          },
+        },
+      }) as import("playwright").Browser;
+      return intercept.call(this, hearsLate);
     };
-    holdBack("judge", (args) => (args[0] as unknown as { request(): { url(): string } }).request().url());
-    holdBack("judgeUnseenRequest", (args) => (args[1] as unknown as { request: { url: string } }).request.url);
-    slowReplay = await slowEngine.replayFlow(
-      [
-        { action: "navigate", target: "/check-flow-writes.html" },
-        { action: "click", target: "testid=writes-save-on-leave" },
-        { action: "expect-text", text: "Will save on leave" },
-      ],
-      "observe",
+    try {
+      const project = path.join(work, `flow-leave-beacon-late-${event}`);
+      fs.mkdirSync(project, { recursive: true });
+      try {
+        await slowEngine.attach({ url: baseUrl, projectDir: project, mode: "read-only" });
+      } finally {
+        guardProto.interceptUnseenWrites = intercept;
+      }
+      const guard = (slowEngine as unknown as { guard: Record<string, (...args: never[]) => Promise<unknown>> }).guard;
+      const holdBack = (name: string, urlOf: (args: never[]) => string): void => {
+        const judge = guard[name]!.bind(guard);
+        guard[name] = async (...args: never[]) => {
+          if (/\/api\/leave\b/.test(urlOf(args))) await settle(400);
+          return judge(...args);
+        };
+      };
+      holdBack("judge", (args) => (args[0] as unknown as { request(): { url(): string } }).request().url());
+      holdBack("judgeUnseenRequest", (args) => (args[1] as unknown as { request: { url: string } }).request.url);
+      slowReplay = await slowEngine.replayFlow(
+        [
+          { action: "navigate", target: `/check-flow-writes.html${event === "pagehide" ? "" : `?on=${event}`}` },
+          { action: "click", target: "testid=writes-save-on-leave" },
+          { action: "expect-text", text: "Will save on leave" },
+        ],
+        "observe",
+      );
+    } finally {
+      await slowEngine.close();
+    }
+    check(
+      `${BROWSER}: ...and a beacon sent on ${event} that the policy judges only after the flow's last look is still listed, not dropped as the flow hands back; nothing reaches the server`,
+      slowReplay?.outcome.status === "passed" &&
+        (slowReplay.refusedBackground ?? []).some((sig) => /\/api\/leave\b/.test(sig)) &&
+        writes("POST /api/leave") === slowLeavesBefore,
+      `${JSON.stringify(slowReplay?.outcome)} refusedBackground=${JSON.stringify(slowReplay?.refusedBackground)} writes=${JSON.stringify(stats.writes)}`,
     );
-  } finally {
-    await slowEngine.close();
   }
-  check(
-    `${BROWSER}: ...and a beacon the policy judges only after the flow's last look is still listed, not dropped as the flow hands back; nothing reaches the server`,
-    slowReplay?.outcome.status === "passed" &&
-      (slowReplay.refusedBackground ?? []).some((sig) => /\/api\/leave\b/.test(sig)) &&
-      writes("POST /api/leave") === slowLeavesBefore,
-    `${JSON.stringify(slowReplay?.outcome)} refusedBackground=${JSON.stringify(slowReplay?.refusedBackground)} writes=${JSON.stringify(stats.writes)}`,
-  );
 
   // A write that goes out only as the flow leaves the page: after the last step's own checks on any machine, since
   // nothing but the engine leaving the page sends it. The contrast to the beacon above: same moment, sent as a fetch.

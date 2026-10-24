@@ -10,6 +10,7 @@
  * `RouteGuardHost`, so the decisions below can be table-tested without a
  * browser (policy-test).
  */
+import { randomUUID } from "node:crypto";
 import type { Browser, CDPSession, Page, Request, Response, Route } from "playwright";
 import { settleWithin } from "./best-effort.js";
 import { INFRASTRUCTURE_WRITE_RE } from "./claims.js";
@@ -35,6 +36,9 @@ import {
   headerOf,
   isReadMethod,
   judgeUnseenWrite,
+  LEAVE_MARKER_PATH,
+  leaveMarkerToken,
+  leaveMarkerUrl,
   pausedRequestBytes,
   RoutedWrites,
   UnseenRefusals,
@@ -199,6 +203,13 @@ export class RouteGuard {
   private readonly routesInFlight = new Map<Page, Set<Promise<unknown>>>();
   /** Requests the browser-level interception is still judging (unseenInFlight). */
   private readonly unseenJudging = new Set<Promise<unknown>>();
+  /** Leave markers not yet heard at the browser level, by token (unload.ts LEAVE_MARKER_PATH). */
+  private readonly leaveMarkers = new Map<string, () => void>();
+  /**
+   * Every leave marker URL this guard has issued, kept after its wait ends: a marker heard late, or a request carrying
+   * one (a content policy's report of it), is still the engine's own and is failed rather than judged or sent.
+   */
+  private readonly issuedMarkers = new Set<string>();
   /** Writes refused at the browser level, so the driver's own report of them (a redirect hop failing) is known as the policy's doing. */
   private readonly unseenRefusals = new UnseenRefusals();
   /**
@@ -259,6 +270,41 @@ export class RouteGuard {
     return [...this.unseenJudging];
   }
 
+  /**
+   * A leave marker for a page at `pageUrl` (unload.ts LEAVE_MARKER_PATH): the URL the page is to beacon last as it is
+   * left, and the wait, bounded by `ms`, for the browser-level interception to hear it. Null where the page has no
+   * origin to send one to.
+   */
+  leaveMarker(pageUrl: string): { url: string; heard: (ms: number) => Promise<void> } | null {
+    const token = randomUUID();
+    const url = leaveMarkerUrl(pageUrl, token);
+    if (!url) return null;
+    this.issuedMarkers.add(url);
+    let resolve!: () => void;
+    const heard = new Promise<void>((r) => (resolve = r));
+    this.leaveMarkers.set(token, resolve);
+    return {
+      url,
+      heard: async (ms) => {
+        await settleWithin(heard, ms);
+        this.leaveMarkers.delete(token);
+      },
+    };
+  }
+
+  /**
+   * Whether a request is the engine's own leave marker, or carries one in its body: only a marker this guard issued, so
+   * the app cannot make a request of its own go unjudged by sending it to the marker's path. The marker's token is the
+   * returned value when the request is the marker itself, "" when it only carries one, null when it is neither.
+   */
+  private ownLeaveMarker(url: string, body: string | undefined): string | null {
+    if (this.issuedMarkers.size === 0) return null;
+    const token = leaveMarkerToken(url);
+    if (token !== null && this.issuedMarkers.has(leaveMarkerUrl(url, token) ?? "")) return token;
+    if (body?.includes(LEAVE_MARKER_PATH)) for (const issued of this.issuedMarkers) if (body.includes(issued)) return "";
+    return null;
+  }
+
   /** A new attach: creations a previous attach was waiting on are not this one's. */
   resetCreations(): void {
     this.pendingCreations = new Set();
@@ -301,6 +347,11 @@ export class RouteGuard {
 
   private async judge(route: Route): Promise<unknown> {
     const req = route.request();
+    // A leave marker is the engine's own and goes nowhere: it is heard at the browser level, never here in practice.
+    if (this.ownLeaveMarker(req.url(), req.postDataBuffer()?.toString("utf8")) !== null)
+      return route.abort("blockedbyclient").catch(() => {
+        /* the page that sent it is gone */
+      });
     const sent = req.method();
     // Read once, as the request arrives: the rule the page sent it under (policy.ts WriteRule), not whatever holds after an await below.
     const rule = this.host.rule();
@@ -530,6 +581,12 @@ export class RouteGuard {
       });
     };
     try {
+      // A leave marker: everything the page sent before it has now been heard. Failed unjudged, so it never leaves the browser.
+      const marker = this.ownLeaveMarker(url, pausedRequestBytes(event.request)?.toString("utf8"));
+      if (marker !== null) {
+        if (marker) this.leaveMarkers.get(marker)?.();
+        return await answer(false);
+      }
       // A request paused here was sent a moment ago, possibly by a page a flow has just left: WriteRule still holds the flow's rule.
       const rule = this.host.rule();
       // Reads, and everything in destructive, go on. A later hop of a redirect is judged like any write: the route handler never sees one.

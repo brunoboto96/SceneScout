@@ -241,3 +241,42 @@ export function headerOf(headers: Record<string, string> | undefined, name: stri
   for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() === wanted) return v;
   return undefined;
 }
+
+/**
+ * The path of the marker a page is made to beacon as the last thing it does on `pagehide`, when the engine leaves it
+ * (browser.ts `armLeaveMarker`). The browser-level interception hears what one page sent as it was left in the order it
+ * was sent, so once the marker is heard, every write the page sent before it has been heard too and is being judged.
+ * Without it, a beacon the browser reported a moment after the navigation away returned was judged after the engine
+ * had stopped waiting: refused, but missing from the flow's list. The marker itself is failed unjudged and never sent.
+ */
+export const LEAVE_MARKER_PATH = "/__scenescout_left__/";
+
+/** A leave marker's URL on `origin`, or null where a page has no origin a beacon can be sent to. */
+export function leaveMarkerUrl(pageUrl: string, token: string): string | null {
+  let origin: string;
+  try {
+    const u = new URL(pageUrl);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    origin = u.origin;
+  } catch {
+    return null;
+  }
+  return `${origin}${LEAVE_MARKER_PATH}${encodeURIComponent(token)}`;
+}
+
+/** The token a request to a leave marker carries, "" for one under the marker's path with none, or null for any other request. */
+export function leaveMarkerToken(url: string): string | null {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return null;
+  }
+  if (!pathname.startsWith(LEAVE_MARKER_PATH)) return null;
+  const rest = pathname.slice(LEAVE_MARKER_PATH.length);
+  try {
+    return decodeURIComponent(rest);
+  } catch {
+    return "";
+  }
+}
