@@ -9,6 +9,7 @@
  * checked-out ref, before any SceneScout package is installed.
  *
  *   node check-action.mjs resolve   work out what to install and where results go
+ *   node check-action.mjs preflight with the preflight input on, stop before the browser is installed when the app cannot be reached
  *   node check-action.mjs run       run the check and publish its numbers as outputs
  *   node check-action.mjs verdict   fail the step the way the exit code says
  *
@@ -40,6 +41,7 @@ export const ACTION_ONLY_INPUTS = [
   "upload-artifact",
   "artifact-name",
   "artifact-retention-days",
+  "preflight",
 ];
 
 export const ENGINES = ["chromium", "firefox", "webkit"];
@@ -56,6 +58,39 @@ export function checkArgs(inputs) {
     if (value) args.push(`--${name}=${value}`);
   }
   return args;
+}
+
+/**
+ * The arguments for `scenescout preflight`, from the action's inputs: the URL,
+ * and the storage state the check will sign in with, so an expired one stops
+ * the job too. Null when the preflight input is off.
+ */
+export function preflightArgs(inputs) {
+  const on = String(inputs.preflight ?? "").trim() || "false";
+  if (on !== "true" && on !== "false") throw new Error(`the preflight input must be true or false (got "${on}")`);
+  if (on === "false") return null;
+  const url = String(inputs.url ?? "").trim();
+  if (!url) throw new Error("the url input is required: the address of the running app to check");
+  const storage = String(inputs["storage-state"] ?? "").trim();
+  return ["preflight", url, ...(storage ? [`--storage-state=${storage}`] : [])];
+}
+
+/** The most the preflight step waits for the CLI: each of its requests has its own, shorter, limit. */
+export const PREFLIGHT_TIMEOUT_MS = 3 * 60_000;
+
+/** Whether a CLI's --help lists `preflight`: releases before it have no such command. */
+export function hasPreflightCommand(helpText) {
+  return /scenescout preflight <url>/.test(helpText);
+}
+
+/** The line the failed preflight's annotation carries: the CLI's last line that names a failure. */
+export function preflightFailure(stderr, exitCode) {
+  const lines = String(stderr ?? "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const cause = lines.filter((l) => l.startsWith("✗ ") || l.startsWith("scenescout preflight:"));
+  return cause.length > 0 ? cause.map((l) => l.replace(/^✗ /, "")).join(" ") : `scenescout preflight exited ${exitCode}`;
 }
 
 /** The engine to check with; empty means the CLI's default, Chromium. */
@@ -509,6 +544,7 @@ function nextUse() {
 function resolve() {
   const inputs = inputsFromEnv();
   checkArgs(inputs); // fail on a missing url before downloading anything
+  preflightArgs(inputs);
   retentionDaysOf(inputs);
   const engine = engineOf(inputs);
   const cwd = process.cwd();
@@ -541,6 +577,26 @@ function resolve() {
     "browsers-path": browsersPath(process.env, process.platform, os.homedir()),
     "out-dir": outDirFor(inputs, cwd),
   });
+}
+
+function preflight() {
+  const inputs = inputsFromEnv();
+  const args = preflightArgs(inputs);
+  if (!args) return;
+  const cli = process.env.SCENESCOUT_CLI;
+  if (!cli) throw new Error("SCENESCOUT_CLI must be set by the resolve step");
+  const help = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
+  if (!hasPreflightCommand(`${help.stdout ?? ""}${help.stderr ?? ""}`))
+    throw new Error(
+      `scenescout ${process.env.SCENESCOUT_VERSION || "(unknown version)"} has no preflight command: set the preflight input to false, or use a newer version`,
+    );
+  const child = spawnSync(process.execPath, [cli, ...args], { stdio: ["ignore", "inherit", "pipe"], timeout: PREFLIGHT_TIMEOUT_MS });
+  const stderr = child.stderr ? child.stderr.toString() : "";
+  if (stderr) process.stderr.write(stderr);
+  if (child.status === 0) return;
+  const code = child.status ?? (child.error ? `error: ${child.error.message}` : `signal ${child.signal}`);
+  console.log(`::error title=SceneScout preflight failed (exit ${escapeAnnotation(String(code))})::${escapeAnnotation(preflightFailure(stderr, code))}`);
+  process.exit(typeof child.status === "number" ? child.status : 2);
 }
 
 function run() {
@@ -606,10 +662,10 @@ function end() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
-  const commands = { resolve, run, verdict: end };
+  const commands = { resolve, preflight, run, verdict: end };
   const command = commands[process.argv[2]];
   try {
-    if (!command) throw new Error(`unknown subcommand "${process.argv[2] ?? ""}": use resolve, run or verdict`);
+    if (!command) throw new Error(`unknown subcommand "${process.argv[2] ?? ""}": use resolve, preflight, run or verdict`);
     command();
   } catch (err) {
     console.log(`::error title=SceneScout check could not run::${escapeAnnotation(err instanceof Error ? err.message : String(err))}`);

@@ -24,7 +24,7 @@ import { fromRunLine, resolveFromRun, type FromRun, type FromRunMode, type RunRe
 
 // ── options ─────────────────────────────────────────────────────────────────
 
-const PROVIDERS = ["anthropic", "openai"] as const;
+export const PROVIDERS = ["anthropic", "openai"] as const;
 export type ProviderName = (typeof PROVIDERS)[number];
 
 /** Where each provider's key is read from. Nothing else is: no flag, no file, no input. */

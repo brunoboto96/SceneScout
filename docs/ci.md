@@ -112,6 +112,7 @@ And the action's own:
 | `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and on a recorded check `replay.html` with its `replay-frames/` and `replay-videos/` folders |
 | `artifact-retention-days` | empty | Days to keep the artifact, 1 to 90. Empty keeps the repository's artifact retention setting (the `scenescout-shots` branch has its own pruning, described with the `/scenescout qa` comment) |
 | `artifact-name` | `scenescout-check-<job id>` | A second use in the same job gets `-2`, a third `-3`. Jobs of a matrix share a job id, so give each cell its own name, e.g. `scenescout-check-${{ matrix.browser }}` |
+| `preflight` | `false` | Run `scenescout preflight` on `url`, with `storage-state` when set, before the browser is installed: a runner that cannot reach the app stops in seconds with the cause, such as DNS, a refused connection, TLS, an HTTP error, a bot challenge or an expired sign-in ([network requirements](guide/Network-requirements.md)) |
 | `upload-sarif` | `false` | Upload `check.sarif` to code scanning (below) |
 
 ### Outputs
