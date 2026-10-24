@@ -13,6 +13,7 @@ The exploratory side can run in CI too, with a model's API in place of a person 
 | 0 | Passed the gate | Pass |
 | 1 | Failed it: something at the `--fail-on` severity or worse | Fail: the app has a defect |
 | 2 | Could not run, or not all of it: a bad argument, an app that never answered, a start page that bot protection answered in the app's place (`blocked by bot protection (HTTP 403)`) or that answered any 4xx (the status is named), a saved session that no longer signs in, only the sign-in page reached, only a start page with at most one control reached (the app had not finished drawing), a saved flow that is not valid, or a flow step the write policy refused | Fail, and read it as a setup problem; with a refused flow step the report still has the rest's verdict |
+| 3 | Passed the gate on what loaded, but a request or page load reaching the app failed on the network (DNS, a refused or dropped connection, a timeout, TLS) at the gate's severity | Fail or run again: the verdict is incomplete ([Network requirements](guide/Network-requirements.md#failures-on-the-network-are-not-the-apps)) |
 
 ## GitHub Actions
 
@@ -551,7 +552,7 @@ jobs:
           path: scenescout-check
 ```
 
-In any system, treat exit code 2 differently from 1 if you can: 2 means the job never measured the app.
+In any system, treat exit code 2 differently from 1 if you can: 2 means the job never measured the app. Exit code 3 means the gate passed on what loaded while the network kept part of the app from loading, so running the job again is worth it ([Network requirements](guide/Network-requirements.md#failures-on-the-network-are-not-the-apps)).
 
 **A start page behind bot protection.** A runner's browser is often shown a bot challenge (Cloudflare, Akamai, DataDome, PerimeterX/HUMAN, AWS WAF, Imperva, Sucuri) instead of the app. The challenge has a checkbox and a link of its own, so a check that measured it would pass without testing anything. When the start page is a challenge, recognised by the vendor's header (`cf-mitigated: challenge`, `x-amzn-waf-action`) or by a 403, 429 or 503 carrying the vendor's markers, the check stops with exit 2: `could not run: blocked by bot protection (HTTP 403)`. Any other 4xx on the start page stops it the same way, naming the status. A 403 on a route inside an app whose start page loaded is that route's finding, as before. A route inside the app that the protection answered (rate limiting part-way through a crawl, say) is not measured and not filed: the report lists it under "Blocked by bot protection", and `check.json` under `blocked`. Let the runner through the protection (an allowlisted address, or the vendor's bypass for automated tests), or check a deployment without it. `scenescout ci` and a first run (`scenescout <url>`) stop the same way.
 

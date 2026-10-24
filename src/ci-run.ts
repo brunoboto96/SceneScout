@@ -88,6 +88,8 @@ import {
   type LanePlan,
 } from "./engine/ci-lanes.js";
 import { resolveTimeLimits } from "./engine/limits.js";
+import { oneLine } from "./engine/export.js";
+import { fetchFailureCause } from "./engine/network-failure.js";
 import { loadRunRecord, MEMORY_DIRNAME, noteFromRunOnDisk, readRunRecordsOnDisk, writeSelfIgnore, type Finding } from "./engine/memory.js";
 import {
   carryForward,
@@ -209,9 +211,7 @@ export class HttpModelClient implements ModelClient {
         if (isRedirectError(err)) throw new ProviderError("the API answered with a redirect, which is not followed");
         const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
         if (timedOut && wallDeadline - now() <= 0) throw new OutOfTime(`the time cap was reached during a model call (${attempts(made)})`);
-        last = timedOut
-          ? `the model call took longer than ${Math.round(attemptMs / 1000)}s`
-          : `the request failed (${err instanceof Error ? err.message : String(err)})`;
+        last = timedOut ? `the model call took longer than ${Math.round(attemptMs / 1000)}s` : `the request failed (${oneLine(fetchFailureCause(err), 300)})`;
       }
       if (status >= 300 && status < 400) throw new ProviderError(`HTTP ${status}: the API answered with a redirect, which is not followed`);
       if (status >= 200 && status < 300) {

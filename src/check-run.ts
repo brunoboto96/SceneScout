@@ -466,7 +466,7 @@ function retestOf(plan: ReturnType<typeof checkRetestPlan>, routes: readonly Rou
 
 /** The check's result, redacted, with its issues judged from what was measured, replayed and pictured. */
 function checkResultOf(
-  { options, engine, start }: CheckRun,
+  { options, engine, start, store }: CheckRun,
   inputs: CheckInputs,
   ran: {
     routes: RouteHealth[];
@@ -483,7 +483,16 @@ function checkResultOf(
   const pictured = baselines ? redactBaselineRun(baselines) : null;
   // Signed in only when given a session: with none, a route that sends the browser to sign-in needs one, and is not a lost session.
   const signedIn = options.storageStatePath !== undefined;
-  const { issues, worthALook, needsSignIn, blocked } = checkFindings(measured, start.origin, options.ignore, flows, pictured, options.ignorePaths, signedIn);
+  const { issues, worthALook, needsSignIn, blocked, network } = checkFindings(
+    measured,
+    start.origin,
+    options.ignore,
+    flows,
+    pictured,
+    options.ignorePaths,
+    signedIn,
+  );
+  const loadRetries = store.loadRetriesThisRun();
   return {
     url: redactRoute(options.url),
     generatedAt: new Date().toISOString(),
@@ -495,6 +504,8 @@ function checkResultOf(
     worthALook,
     ...(signedIn ? {} : { needsSignIn }),
     ...(blocked.length > 0 ? { blocked } : {}),
+    ...(network.length > 0 ? { network } : {}),
+    ...(loadRetries.length > 0 ? { loadRetries } : {}),
     // Routes that failed to load are issues already; "not visited" is only what --max-routes (or the time budget) left out.
     unvisited: options.paths ? [] : engine.crawlableRoutes().map(redactRoute),
     ...(options.timeBudgetMs !== undefined ? { timeBudget: { ms: options.timeBudgetMs, reached: timeLimitReached } } : {}),

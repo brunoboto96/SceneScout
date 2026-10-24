@@ -30,6 +30,7 @@ import * as firstRun from "./first-run.ts";
 import * as unload from "./unload.ts";
 import * as ciRun from "./ci.ts";
 import * as timeLimits from "./time-limits.ts";
+import * as network from "./network.ts";
 import * as snapshotContents from "./snapshot.ts";
 import * as refsAndDiffs from "./refs.ts";
 import * as targets from "./targets.ts";
@@ -81,6 +82,7 @@ export const suites: SmokeSuite[] = [
   maskedPictures,
   unload,
   timeLimits,
+  network,
   firstRun,
   ciRun,
   checkGate,

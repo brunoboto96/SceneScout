@@ -257,6 +257,16 @@ export function verdict({ exitCode, failing, failOn, url, error, passed, couldNo
       )}`,
     };
   }
+  // 3: the gate passed on what loaded, but the network kept part of the app from loading (DNS, a refused or dropped
+  // connection, a timeout, TLS): not a result about the app, and worth running again.
+  if (code === 3) {
+    return {
+      exit: 3,
+      annotation: `::error title=SceneScout check met network failures::${escapeAnnotation(
+        `On ${url}: the gate passed on what loaded, but part of the app failed to load on the network, not in the app, so the verdict is incomplete. See "Network failures" in report.md; SCENESCOUT_RETRY_NETWORK=on retries a failed page load once.`,
+      )}`,
+    };
+  }
   const why = String(error ?? "").trim() || (Number.isNaN(code) ? "the check did not start" : `it exited with code ${code}`);
   const incomplete = Number(couldNotRun) || 0;
   if (code === 2 && incomplete > 0 && (passed === "true" || passed === "false")) {
