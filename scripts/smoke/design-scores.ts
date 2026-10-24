@@ -216,4 +216,39 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
   }
+  await typeScalesAtWidths(baseUrl);
+}
+
+/**
+ * Deliberate type systems in test-app/design-type-scales.html, at a desktop
+ * width and a phone's: responsive calc(rem + vw) headings and a clamp() scale
+ * compute to sizes such as 27.6px under 1200px wide, and none of them is
+ * charged. The same page with three sizes picked one at a time is, at both.
+ */
+async function typeScalesAtWidths(baseUrl: string): Promise<void> {
+  const offScaleLine = (audit: string): string => audit.split("\n").find((l) => l.includes("off the type scale")) ?? "";
+  for (const width of [1280, 390]) {
+    console.log(`design scores: deliberate type scales at ${width}px wide`);
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-design-type-"));
+    const engine = new BrowserEngine();
+    engine.sessionKey = `design-type-${width}`;
+    try {
+      await engine.attach({ url: baseUrl, projectDir, mode: "read-only", viewport: { width, height: 900 } });
+      for (const scale of ["steps", "responsive", "fluid", "root18"]) {
+        await engine.navigate(`/design-type-scales.html?scale=${scale}`);
+        const audit = await engine.designAudit();
+        check(`${scale}'s scale names no size off it at ${width}px`, offScaleLine(audit) === "", offScaleLine(audit) || audit);
+      }
+      await engine.navigate("/design-type-scales.html?scale=strays");
+      const strays = offScaleLine(await engine.designAudit());
+      check(
+        `three sizes picked one at a time are named at ${width}px`,
+        strays.includes("3 sizes off the type scale") && strays.includes("15, 17, 19px"),
+        strays,
+      );
+    } finally {
+      await engine.close();
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  }
 }

@@ -2032,7 +2032,7 @@ export interface TypeScale {
   ratio: number | null;
   /** Distinct sizes of the text that matters, px, ascending. */
   sizes: number[];
-  /** Those that are neither a step of the scale, the base itself, nor on the 2px step grid. */
+  /** Whole-pixel sizes that are neither a step of the scale, the base itself, nor on a step grid (2px, or an eighth of the base). */
   offScale: number[];
 }
 
@@ -2057,7 +2057,20 @@ function typeScaleText(r: StyleRecord): boolean {
   return HEADING_TAGS.has(r.tag) || r.interactive || r.textLen >= TYPE_BODY_CHARS;
 }
 
-const onTypeGrid = (size: number): boolean => Math.abs(size - TYPE_GRID * Math.round(size / TYPE_GRID)) <= 0.25;
+const onStep = (size: number, step: number, within: number): boolean => Math.abs(size - step * Math.round(size / step)) <= within;
+/**
+ * Whether a size is on a step grid: the 2px one, or an eighth of the body size,
+ * which is 0.125rem where the body is set at the root (an 18px root's 1.5rem is
+ * 27px). Sizes are read to a tenth of a pixel, so the second allows that much.
+ */
+const onTypeGrid = (size: number, base: number): boolean => onStep(size, TYPE_GRID, 0.25) || onStep(size, base / 8, 0.06);
+/**
+ * A size that is not a whole pixel was computed, by a fluid formula (clamp(), a
+ * vw term such as responsive headings below a breakpoint) or a multiplier, and at one
+ * viewport the audit cannot tell that formula from a deliberate scale. Only a
+ * whole-pixel size is held to be picked one at a time.
+ */
+const wholePixel = (size: number): boolean => Number.isInteger(size);
 
 /** How far `size` is from the nearest step of `ratio` counted from `base`, as a share of that step; null when that step is past the ones counted. */
 function typeStepError(size: number, base: number, ratio: number): number | null {
@@ -2071,12 +2084,15 @@ function typeStepError(size: number, base: number, ratio: number): number | null
 /**
  * Whether a page's type follows a scale. The base is the size most of the
  * page's text that matters is set in (12–24px). A size is on the scale when
- * it is on the 2px step grid most systems use, or a step of one ratio
- * (TYPE_RATIOS) counted from the base. The ratio is inferred from the sizes
- * the grid does not explain: the one that explains the most of them, if it
- * explains at least two and more than it leaves out, so a fluid or
- * rem-based scale (16, 20, 25, 31.25px) reads as a scale while stray sizes
- * that happen to fit a ratio do not. What is left are the sizes off the scale.
+ * it is on the 2px step grid most systems use (or an eighth of the base, the
+ * same grid under another root size), or a step of one ratio (TYPE_RATIOS)
+ * counted from the base. The ratio is inferred from the sizes the grid does
+ * not explain: the one that explains the most of them, if it explains at
+ * least two and more than it leaves out, so a rem-based scale (16, 20, 25,
+ * 31.25px) reads as a scale while stray sizes that happen to fit a ratio do
+ * not. What is left, and is a whole pixel, is off the scale: a size with a
+ * fraction was computed (a fluid clamp() or vw size, a multiplier), and at
+ * one viewport that cannot be told from a deliberate scale.
  */
 export function typeScale(records: readonly StyleRecord[]): TypeScale {
   const chars = new Map<number, number>();
@@ -2088,7 +2104,7 @@ export function typeScale(records: readonly StyleRecord[]): TypeScale {
   const body = sizes.filter((s) => s >= TYPE_MIN_PX && s <= 24);
   if (body.length === 0) return { base: null, ratio: null, sizes, offScale: [] };
   const base = body.reduce((best, s) => (chars.get(s)! > chars.get(best)! ? s : best));
-  const offGrid = sizes.filter((s) => s !== base && !onTypeGrid(s));
+  const offGrid = sizes.filter((s) => s !== base && !onTypeGrid(s, base));
   let ratio: number | null = null;
   let best = { fits: 0, error: Infinity };
   for (const r of TYPE_RATIOS) {
@@ -2102,7 +2118,7 @@ export function typeScale(records: readonly StyleRecord[]): TypeScale {
   // A ratio must explain at least two sizes, and more than it leaves out: with seven ratios and a tolerance, two
   // stray sizes often fit one by chance, and a fourth stray must never excuse the first three.
   if (best.fits < TYPE_RATIO_MIN_FITS || best.fits <= offGrid.length - best.fits) ratio = null;
-  const offScale = offGrid.filter((s) => ratio === null || typeStepError(s, base, ratio) === null);
+  const offScale = offGrid.filter((s) => wholePixel(s) && (ratio === null || typeStepError(s, base, ratio) === null));
   return { base, ratio, sizes, offScale };
 }
 
@@ -2124,10 +2140,12 @@ function typographySection(records: StyleRecord[], sections: string[]): { sizes:
   const scale = typeScale(records);
   const offScale = scale.offScale.length >= TYPE_OFF_MIN ? scale.offScale : [];
   if (sizes.length > 7 || families.length > 2 || nearDupSizes.length > 0 || offScale.length > 0) {
+    const eighth = scale.base === null ? TYPE_GRID : Math.round((scale.base / 8) * 1000) / 1000;
+    const grid = eighth === TYPE_GRID ? `a ${TYPE_GRID}px step grid` : `a ${TYPE_GRID}px or ${eighth}px step grid`;
     const against =
       scale.ratio === null
-        ? `not on a ${TYPE_GRID}px step grid, and no ${TYPE_RATIOS[0]}–${TYPE_RATIOS[TYPE_RATIOS.length - 1]}× scale from the ${scale.base}px body size fits them`
-        : `neither steps of the ${scale.ratio}× scale from the ${scale.base}px body size nor on a ${TYPE_GRID}px step grid`;
+        ? `not on ${grid}, and no ${TYPE_RATIOS[0]}–${TYPE_RATIOS[TYPE_RATIOS.length - 1]}× scale from the ${scale.base}px body size fits them`
+        : `neither steps of the ${scale.ratio}× scale from the ${scale.base}px body size nor on ${grid}`;
     sections.push(
       `TYPOGRAPHY: ${sizes.length} distinct font sizes (${sizes.slice(0, 12).join(", ")}${sizes.length > 12 ? "…" : ""})` +
         (families.length > 2 ? ` · ${families.length} font families (${families.slice(0, 4).join(", ")})` : "") +
