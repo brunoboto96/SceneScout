@@ -4618,18 +4618,21 @@ test("config explain: a sign-in list only the project's file sets is shown as na
 });
 
 test("config explain: with no operator file, the project's own file is named as the project's", () => {
-  const files: Record<string, string> = { "/p/.scenescout/config.json": '{"maxMode":"observe"}' };
+  // Paths are resolved, so the stand-in reader is keyed the way the command joins them on every platform.
+  const projectDir = path.resolve("/p");
+  const launchDir = path.resolve("/launch");
+  const files: Record<string, string> = { [path.join(projectDir, ".scenescout", "config.json")]: '{"maxMode":"observe"}' };
   const reader = { exists: (f: string) => f in files, read: (f: string) => files[f], realpath: (f: string) => f };
   const run = () => {
     const out: string[] = [];
-    runConfigCommand(["explain", "--project", "/p"], { env: {}, launchDir: "/launch", reader, out: (l) => out.push(l), err: (l) => out.push(l) });
+    runConfigCommand(["explain", "--project", projectDir], { env: {}, launchDir, reader, out: (l) => out.push(l), err: (l) => out.push(l) });
     return out.join("\n");
   };
   const alone = run();
   assert.match(alone, /^ {2}maxMode +observe +\(project file\)$/m);
   assert.doesNotMatch(alone, /operator file/);
   // Contrast: an operator's file in the launch directory is the operator's, and the project's tightening is named as such.
-  files["/launch/.scenescout/config.json"] = '{"maxMode":"read-only"}';
+  files[path.join(launchDir, ".scenescout", "config.json")] = '{"maxMode":"read-only"}';
   assert.match(run(), /^ {2}maxMode +observe +\(project file, tightening the operator file\)$/m);
 });
 
