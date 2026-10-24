@@ -2276,16 +2276,131 @@ test("test plan: test.yml runs each job when the plan says, and the required che
   assert.equal(verdictStep.env?.NEEDS, "${{ toJSON(needs) }}");
 });
 
-test("test.yml: only a pull request's runs cancel each other; a push to main never cancels a main run", () => {
-  const workflow = parseYaml(readText(path.join(REPO, ".github", "workflows", "test.yml"))) as Record<string, any>;
-  assert.equal(workflow.concurrency["cancel-in-progress"], "${{ github.event_name == 'pull_request' }}");
-  assert.equal(
-    workflow.concurrency.group,
-    "test-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
-    "every other run has a group of its own",
-  );
+/**
+ * Evaluates the part of GitHub's expression language a concurrency block uses: context lookups, string and boolean
+ * literals, `==`, `!=`, `!`, `&&`, `||` (each returning an operand, as GitHub's do) and parentheses. A value is either
+ * one `${{ }}` (its result) or text with `${{ }}` spliced in (a string). Anything else throws, so a block that grows
+ * past this subset fails the test rather than being read wrongly.
+ */
+function evalGithubValue(value: string, context: Record<string, string>): string | boolean {
+  const evalExpr = (src: string): string | boolean => {
+    const tokens = src.match(/'(?:[^']|'')*'|==|!=|&&|\|\||[()!]|[A-Za-z_][\w.-]*|\S/g) ?? [];
+    let i = 0;
+    const truthy = (v: string | boolean) => v !== "" && v !== false;
+    const primary = (): string | boolean => {
+      const t = tokens[i++];
+      if (t === "(") {
+        const v = or();
+        assert.equal(tokens[i++], ")", src);
+        return v;
+      }
+      if (t === "!") return !truthy(primary());
+      if (t?.startsWith("'")) return t.slice(1, -1).replace(/''/g, "'");
+      if (t === "true" || t === "false") return t === "true";
+      if (t && /^[A-Za-z_]/.test(t)) {
+        assert.ok(t in context, `no value for ${t} in this test's context`);
+        return context[t];
+      }
+      throw new Error(`unexpected ${t} in ${src}`);
+    };
+    const compare = (): string | boolean => {
+      let v = primary();
+      while (tokens[i] === "==" || tokens[i] === "!=") {
+        const op = tokens[i++];
+        const w = primary();
+        v = op === "==" ? v === w : v !== w;
+      }
+      return v;
+    };
+    const and = (): string | boolean => {
+      let v = compare();
+      while (tokens[i] === "&&") {
+        i++;
+        const w = compare();
+        v = truthy(v) ? w : v;
+      }
+      return v;
+    };
+    const or = (): string | boolean => {
+      let v = and();
+      while (tokens[i] === "||") {
+        i++;
+        const w = and();
+        v = truthy(v) ? v : w;
+      }
+      return v;
+    };
+    const v = or();
+    assert.equal(i, tokens.length, `unread tokens in ${src}`);
+    return v;
+  };
+  const whole = /^\$\{\{([\s\S]*)\}\}$/.exec(value.trim());
+  if (whole && !whole[1].includes("}}")) return evalExpr(whole[1]);
+  return value.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, e: string) => String(evalExpr(e)));
+}
+
+test("test.yml: a pull request's and the version branch's runs cancel older ones; main keeps one running and the newest waiting", () => {
+  const workflow = readWorkflow("test.yml");
   assert.ok("workflow_dispatch" in workflow.on, "the release dispatches the full matrix");
   assert.deepEqual(workflow.on.push?.branches, ["main"]);
+  /** The run's group and whether a newer run in that group cancels the one in progress (ADR 26). */
+  const runOf = (event: string, ref: string, runId: string) => {
+    const context = { "github.event_name": event, "github.ref": ref, "github.run_id": runId };
+    return {
+      group: evalGithubValue(String(workflow.concurrency.group), context),
+      cancels: evalGithubValue(String(workflow.concurrency["cancel-in-progress"]), context),
+    };
+  };
+  const VERSION = "refs/heads/changeset-release/main";
+
+  // A pull request: one group per pull request, and a newer push cancels the run in flight.
+  const pr = runOf("pull_request", "refs/pull/7/merge", "101");
+  assert.deepEqual(pr, runOf("pull_request", "refs/pull/7/merge", "102"), "two pushes to one pull request share a group");
+  assert.equal(pr.cancels, true);
+  assert.notEqual(pr.group, runOf("pull_request", "refs/pull/8/merge", "103").group, "another pull request is never touched");
+
+  // Main: one group, so a newer push replaces the run still waiting; never cancelling, so the run going finishes.
+  const main = runOf("push", "refs/heads/main", "201");
+  assert.equal(main.group, runOf("push", "refs/heads/main", "202").group, "two pushes to main share a group");
+  assert.equal(main.cancels, false, "a push to main never cancels a main run in progress");
+
+  // The version branch: one group, and a newer dispatch cancels the older run, waiting or going.
+  const version = runOf("workflow_dispatch", VERSION, "301");
+  assert.equal(version.group, runOf("workflow_dispatch", VERSION, "302").group, "two dispatches on the version branch share a group");
+  assert.equal(version.cancels, true);
+
+  // Near misses: a dispatch anywhere else (by hand on main, or the weekly benchmark's results branch) is alone.
+  for (const ref of ["refs/heads/main", "refs/heads/bench/ci-results-123", "refs/heads/changeset-release/main-x"]) {
+    const other = runOf("workflow_dispatch", ref, "401");
+    assert.notEqual(other.group, runOf("workflow_dispatch", ref, "402").group, `${ref}: each dispatch has a group of its own`);
+    assert.equal(other.cancels, false, ref);
+  }
+  // No two kinds share a group: a version-branch run never cancels a main or pull-request run, nor the reverse.
+  const groups = [pr.group, main.group, version.group];
+  assert.equal(new Set(groups).size, groups.length, groups.join(", "));
+
+  // The evaluator itself, on the old block, which gave every run but a pull request's a group of its own.
+  const old = { "github.event_name": "push", "github.ref": "refs/heads/main", "github.run_id": "9" };
+  assert.equal(evalGithubValue("test-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}", old), "test-9");
+  assert.equal(evalGithubValue("${{ github.event_name == 'pull_request' }}", old), false);
+});
+
+test("release.yml and the other workflows keep their concurrency: the version branch's group is test.yml's alone", () => {
+  assert.deepEqual(readWorkflow("release.yml").concurrency, {
+    group: "${{ github.event_name == 'workflow_dispatch' && inputs.dry-run && 'release-rehearsal' || 'release' }}",
+    "cancel-in-progress": false,
+  });
+  assert.deepEqual(readWorkflow("wave-hold.yml").concurrency, {
+    group: "wave-hold-${{ github.event.pull_request.number || github.run_id }}",
+    "cancel-in-progress": true,
+  });
+  assert.deepEqual(readWorkflow("mod-check.yml").concurrency, {
+    group: "mod-check-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}",
+    "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+  });
+  // The release still dispatches the full suite on the version branch after each update.
+  const dispatch = (readWorkflow("release.yml").jobs as Record<string, WorkflowJob>)["test-version-pr"].steps!.map((s) => s.run);
+  assert.ok(dispatch.includes("gh workflow run test.yml --ref changeset-release/main"), dispatch.join("\n"));
 });
 
 test("every job that runs the browser suite in shards runs each shard it names", () => {
