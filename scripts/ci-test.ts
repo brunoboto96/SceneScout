@@ -4531,3 +4531,40 @@ test("from run: a continued run takes on its budget's worth of pages, says which
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── egress (issue #537) ──────────────────────────────────────────────────────
+
+test("egress: under the config's egress none, ci stops with exit 2 and its model API is never called, even with a key set", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ci-held-"));
+  const seen: string[] = [];
+  const { createServer } = await import("node:http");
+  const api = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.writeHead(500).end("{}");
+  });
+  await new Promise<void>((r) => api.listen(0, "127.0.0.1", r));
+  try {
+    const { port } = api.address() as { port: number };
+    fs.mkdirSync(path.join(dir, ".scenescout"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), '{"egress": "none"}');
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !/^(SCENESCOUT_|ANTHROPIC_|OPENAI_)/.test(k)) env[k] = v;
+    const r = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
+      const child = spawn(
+        process.execPath,
+        ["--import", import.meta.resolve("tsx"), path.join(REPO, "src", "cli.ts"), "ci", "http://127.0.0.1:9", "--base-url", `http://127.0.0.1:${port}/v1`],
+        { cwd: dir, env: { ...env, OPENAI_API_KEY: "held-key-0123456789abcdef" }, stdio: ["ignore", "ignore", "pipe"] },
+      );
+      let stderr = "";
+      child.stderr!.on("data", (c: Buffer) => (stderr += c.toString()));
+      child.on("exit", (status) => resolve({ status, stderr }));
+    });
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /egress "none" lets SceneScout send nothing off this machine, so scenescout ci is not run/);
+    assert.ok(!r.stderr.includes("held-key-0123456789abcdef"), "the key is never printed");
+    assert.deepEqual(seen, [], "no request reached the model's API");
+  } finally {
+    api.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

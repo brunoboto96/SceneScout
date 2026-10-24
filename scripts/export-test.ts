@@ -69,9 +69,10 @@ import {
 } from "../src/engine/export.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import { backoffMs } from "../src/engine/provider.ts";
-import { runExport, type ExportDeps } from "../src/export-run.ts";
+import { readFiledIssues, runExport, type ExportDeps } from "../src/export-run.ts";
+import { NO_POLICY, type LoadedPolicy } from "../src/engine/project-config.ts";
 import type { ConfirmFormOutcome } from "../src/engine/guided.ts";
-import { TICKET_ANSWER, TICKET_SAYS, ticketNoSignIn } from "../src/engine/guided-words.ts";
+import { TICKET_ANSWER, TICKET_EGRESS_REFUSED, TICKET_SAYS, ticketNoSignIn } from "../src/engine/guided-words.ts";
 import {
   checkPreview,
   checkTicketTarget,
@@ -1078,6 +1079,7 @@ async function exportOnce(args: string[], env: Record<string, string | undefined
   const o = options([...args, "--project", dir], env);
   const outcome = await runExport(o, {
     env,
+    config: NO_POLICY,
     log: (l) => out.push(l),
     error: (l) => err.push(l),
     wait: async (ms) => {
@@ -2945,8 +2947,12 @@ test("ticket preview: the server keeps at most twenty, each taken once, and forg
 });
 
 /** The deps a preview or a filing runs with against a stand-in: no pauses, a fixed clock unless given one. */
-function ticketDeps(env: Record<string, string | undefined>, now: () => number = () => Date.parse("2026-10-17T10:00:00.000Z")): TicketDeps {
-  return { env, pauseMs: 0, random: () => 0, timeoutMs: 5000, wait: async () => {}, now };
+function ticketDeps(
+  env: Record<string, string | undefined>,
+  now: () => number = () => Date.parse("2026-10-17T10:00:00.000Z"),
+  config: LoadedPolicy = NO_POLICY,
+): TicketDeps {
+  return { env, config, pauseMs: 0, random: () => 0, timeoutMs: 5000, wait: async () => {}, now };
 }
 
 /** A confirmation that records the forms it was shown and answers each with `answer`. */
@@ -3508,6 +3514,63 @@ test("ticket status: the five-minute limit holds across processes, a filing make
     assert.equal(due.fresh, true);
     assert.ok(gh.seen.length > seen, "read once due and free");
     assert.ok(!fs.readFileSync(path.join(dir, ".scenescout", TICKET_STATUS_FILE), "utf8").includes(GH_TOKEN));
+  } finally {
+    await gh.close();
+  }
+});
+
+// ── egress: the config's setting refuses every call to the tracker (issue #537) ─
+
+test("egress: an export, its dry run, a ticket preview, a filing and a status read reach no tracker unless egress allows it", async () => {
+  const gh = await standInGitHub();
+  try {
+    const env = { GH_TOKEN, GITHUB_API_URL: gh.url };
+    const dir = projectWith(THREE);
+    const held = (egress: "none" | "model-only"): LoadedPolicy => ({ policy: { egress }, sources: ["/srv/.scenescout/config.json"] });
+    for (const egress of ["none", "model-only"] as const) {
+      for (const args of [[...GH, "--yes"], GH]) {
+        const run = await exportOnce(args, env, dir, { config: held(egress) });
+        assert.equal(run.exitCode, EXIT_EXPORT.couldNotExport, `${egress} ${args.join(" ")}`);
+        assert.match(
+          run.err.join("\n"),
+          new RegExp(`^scenescout export: refused by the SceneScout config \\(/srv/\\.scenescout/config\\.json\\): egress "${egress}"`),
+        );
+        assert.doesNotMatch(run.err.join("\n"), /Do not retry/, "a person reads the command's refusal");
+      }
+      const store = new TicketPreviews();
+      const preview = await previewTickets({ ids: ["aaa0000001"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env, undefined, held(egress)));
+      assert.ok(!preview.ok && preview.error.includes(`egress "${egress}"`) && preview.error.includes(TICKET_EGRESS_REFUSED), JSON.stringify(preview));
+      // A status read answers the refusal, never a cached read from before the config tightened.
+      const reads = new TicketStatusReads();
+      reads.remember(dir, Date.parse("2026-10-17T09:59:00.000Z"), [], []);
+      const status = await ticketStatus(dir, reads, ticketDeps(env, undefined, held(egress)));
+      assert.deepEqual([status.tickets, status.fresh], [[], false]);
+      assert.match(status.problems.join(" "), new RegExp(`egress "${egress}"`));
+      // Reading back what was filed asks the tracker too.
+      await assert.rejects(
+        readFiledIssues(options([...GH, "--project", dir], env), ticketDeps(env, undefined, held(egress)), { aaa0000001: { ref: "#1", number: 1 } }),
+        new RegExp(`egress "${egress}"`),
+      );
+    }
+    assert.equal(gh.seen.length, 0, "nothing reached the tracker, not even a read");
+
+    // The contrast: the same preview under egress "all" is made, and a filing after the project's file tightened is refused before the form.
+    const store = new TicketPreviews();
+    const all: LoadedPolicy = { policy: { egress: "all" }, sources: ["/srv/.scenescout/config.json"] };
+    const got = await previewTickets({ ids: ["aaa0000001"], to: "github", target: "owner/app" }, dir, store, ticketDeps(env, undefined, all));
+    assert.ok(got.ok && got.preview.previewId, got.ok ? "" : got.error);
+    const asked = confirmWith(FILE_IT);
+    const filed = await fileTickets(
+      got.preview.previewId,
+      store,
+      asked.confirm,
+      ticketDeps(env, undefined, { policy: { egress: "none" }, sources: ["/p/.scenescout/config.json"] }),
+    );
+    assert.deepEqual([filed.filed, filed.outcome, filed.tellPerson, asked.forms.length], [false, "could-not-file", TICKET_EGRESS_REFUSED, 0]);
+    assert.match(filed.problems[0], /egress "none"/);
+    assert.equal(posts(gh).length, 0, "nothing was filed");
+    // The preview is used up by the refused attempt, as by any other.
+    assert.equal((await fileTickets(got.preview.previewId, store, confirmWith(FILE_IT).confirm, ticketDeps(env, undefined, all))).outcome, "unknown");
   } finally {
     await gh.close();
   }

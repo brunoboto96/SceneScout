@@ -75,6 +75,7 @@ const PAGE_NAMES = [
   "What-it-checks.md",
   "Signing-in.md",
   "Safety-model.md",
+  "What-leaves-the-machine.md",
   "Recipes.md",
   "Configuration-reference.md",
   "Measuring-it.md",
