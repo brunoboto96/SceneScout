@@ -322,7 +322,7 @@
         align-items: center;
         gap: 10px;
         font: 700 0.85rem var(--display);
-        letter-spacing: 0.06em;
+        letter-spacing: 0.04em;
         color: var(--gold);
       }
       .quest-start i {
@@ -421,10 +421,10 @@
         border-radius: 4px;
         overflow: hidden;
         aspect-ratio: 1060 / 640;
-        background: #f6f8fa;
       }
       /* The dashboard cropped to where the defects are: 1060×640 of the 1280×900 shot, from x=110. */
       .screen img {
+        background: #f6f8fa;
         width: 120.7547%;
         max-width: none;
         margin-left: -10.3774%;
@@ -692,11 +692,22 @@
           grid-template-columns: minmax(0, 1fr);
         }
       }
+      /* 24px, then 3vw from 800px, capped at 36px from 1200px: written as steps rather than clamp(), with the same result. */
       .class {
-        padding: clamp(24px, 3vw, 36px);
+        padding: 24px;
         display: grid;
         gap: 16px;
         align-content: start;
+      }
+      @media (min-width: 800px) {
+        .class {
+          padding: 3vw;
+        }
+      }
+      @media (min-width: 1200px) {
+        .class {
+          padding: 36px;
+        }
       }
       .class .role {
         font: 700 0.85rem/1 var(--display);
@@ -1009,7 +1020,13 @@
         display: grid;
         gap: 8px;
         align-content: start;
-        border-top: 3px solid var(--c);
+      }
+      /* Each zone's colour runs round the whole frame and tints the top of the panel, rather than a thick bar on one rounded edge; a browser without color-mix() keeps the gold frame. */
+      @supports (color: color-mix(in srgb, red 50%, blue)) {
+        .zone {
+          border-color: color-mix(in srgb, var(--c) 60%, transparent);
+          background: linear-gradient(180deg, color-mix(in srgb, var(--c) 14%, var(--panel-2)), var(--panel) 70%);
+        }
       }
       .zone .name {
         font: 700 1.05rem var(--display);
@@ -1173,7 +1190,7 @@
       }
       .allies-head > span {
         font: 700 0.8rem/1 var(--display);
-        letter-spacing: 0.08em;
+        letter-spacing: 0.04em;
         color: var(--gold);
       }
       /* Motion that runs on for more than five seconds has to be stoppable, by keyboard and touch as well as by hovering (WCAG 2.2.2). */
