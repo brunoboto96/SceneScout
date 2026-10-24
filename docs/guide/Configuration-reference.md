@@ -33,6 +33,7 @@ An option takes its value after a space or an equals sign: `--fail-on high` or `
 | `scenescout export --to <tracker>` | Files the project's open findings, or a `check.json` or `ci.json` (`--from`), as GitHub or Jira issues, each once; a dry run unless `--yes`; exit 0 done, 2 could not export |
 | `scenescout preflight <url>` | Whether this machine can reach what a run needs, with no browser: the app (DNS, connection, timeout, TLS, HTTP status, bot challenge), a saved sign-in's expiry and, when asked, the model's API; exit 0 ready, 2 could not run, 10 to 17 one per cause |
 | `scenescout policy explain <METHOD> <URL>` | Whether the write policy would let one request out in each mode, and the rule that decided; sends nothing; exit 0 explained, 2 could not |
+| `scenescout config explain` | Every setting of the config file as a run would use it, and where each value came from (a default, a preset, the operator's file, the project's file, an environment variable); sends nothing; exit 0 explained, 2 could not |
 | `scenescout status [path]` | What every session of a running engine is doing, as text |
 | `scenescout watch [path]` | Opens the live view in a browser |
 
@@ -194,6 +195,19 @@ npx -y scenescout policy explain POST https://app.example.com/api/things/3 --hea
 | `--body` | no body | A file holding the request body, read as text, at most 1 MB |
 | `--header` | none | A request header, `"Name: value"`, such as a method override. Repeat it for more |
 | `--app` | the request's origin | The address the server is attached to. A read `POST` or sign-in entry written as a path (`POST /api/search`) means this origin |
+
+### `scenescout config`
+
+`scenescout config explain` prints, for every key of the [config file](#the-config-file), the value a run would use and where it came from: `default` (no file sets it), the operator's file, a preset (`operator file's preset "strict"`), the project's own file (named only when it tightened the operator's value, since it can only tighten), or an environment variable (`SCENESCOUT_STRICT_WRITES`, `SCENESCOUT_REFUSE_DESTRUCTIVE_GETS`, `SCENESCOUT_AUTH_POSTS` and `SCENESCOUT_READ_POSTS`, where the file allows it). A last section lists what the file lowered or left out, such as environment entries a list does not allow. It reads the files exactly as `check` does (`SCENESCOUT_CONFIG`, else `.scenescout/config.json` in the directory it runs in, then the project's own file, after the `projectsRoot` check), starts no browser and sends nothing. An address in a printed entry or message loses its user name and password, and a token in its query is masked. Exit 0 explained, 2 could not: a file that is not valid (the message names the file and the key, as at an attach), a project folder outside `projectsRoot`, an environment value the server would refuse, or a bad argument.
+
+```bash
+npx -y scenescout config explain
+npx -y scenescout config explain --project ../other-app
+```
+
+| Option | Default | |
+|---|---|---|
+| `--project` | the current directory | The project whose own `.scenescout/config.json` is read after the operator's file |
 
 ### `scenescout preflight`
 
