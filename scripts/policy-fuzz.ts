@@ -153,7 +153,6 @@ export function fuzzCases(n = 2000, seed = 548): FuzzCase[] {
     () => ({
       url: `${HOST}/api/${pick(NOUNS)}s/${pick([
         "deletedAtFilter",
-        "deleteReasons",
         "removedItems",
         "purgeable",
         "archives",

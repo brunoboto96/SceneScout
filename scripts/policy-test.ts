@@ -158,7 +158,9 @@ const JOINED_VERB_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ["purgeCache", "purgeableItems"],
   ["archiveItem", "archives"],
   ["revokeAllTokens", "revokedTokens"],
-  ["DeleteUser", "deleteReasons"],
+  ["DeleteUser", "deletedUsers"],
+  ["deleteItems", "deletedItems"],
+  ["removeFilters", "removedFilters"],
   ["delete_all", "deleted_at"],
   ["wipe-all", "wiped-count"],
 ];
@@ -202,10 +204,20 @@ test("standard classifier: a verb joined to another word is read as a word of th
   // A verb then a noun reads as the verb and its object, joined or not: the standard classifier does not guess the noun is a record about the act.
   for (const path of ["/api/items/bulkDeleteHistory", "/api/items/bulk-delete-history", "/api/purgeReport", "/api/purge-report"])
     assert.equal(isDestructiveWire(path, null), true, path);
-  // Except request(s) and reason(s), the strict classifier's noun phrase, in a segment of its own words: the verb alone in a segment still counts.
-  for (const path of ["/api/deleteReasons", "/api/delete-requests", "/api/bulkDeleteRequests"]) assert.equal(isDestructiveWire(path, null), false, path);
-  for (const path of ["/api/items/3/delete/requests", "/api/x?action=delete&reason=spam", "/api/delete;requests"])
+  // With no exception for request(s) or reason(s): a POST to a "delete request" endpoint commonly files the deletion it names, so the
+  // standard classifier refuses it as it did before #684, joined or not. Only the strict classifier reads these as a noun phrase.
+  for (const path of [
+    "/api/delete-requests",
+    "/api/delete_requests",
+    "/api/deleteRequests",
+    "/api/deleteReasons",
+    "/api/bulkDeleteRequests",
+    "/api/items/3/delete/requests",
+    "/api/delete;requests",
+  ]) {
     assert.equal(isDestructiveWire(path, null), true, path);
+    assert.equal(isDestructiveRequest(`https://app.example.com${path}`, "{}", "strict"), path === "/api/items/3/delete/requests", `strict: ${path}`);
+  }
   // Every spelling of the same command.
   for (const path of [
     "/api/delete_all",
@@ -222,6 +234,87 @@ test("standard classifier: a verb joined to another word is read as a word of th
   assert.equal(isDestructiveWire("/api/items/cancelOrder", null), false);
   assert.equal(isDestructiveRequest("https://app.example.com/api/items/cancelOrder", "{}", "strict"), true);
   assert.equal(isDestructiveRequest("https://app.example.com/api/items/cancellationPolicy", "{}", "strict"), false);
+});
+
+test("standard classifier: ordinary read endpoints beside the new joined-verb refusals (#684)", () => {
+  const H = "https://app.example.com";
+  // Another form of a verb is a read and goes out; the verb itself, as the command, is refused.
+  for (const [plain, refused] of [
+    ["/api/deletedItems", "/api/deleteItems"],
+    ["/api/purgeable", "/api/purge"],
+    ["/api/removedFilters", "/api/removeFilters"],
+    ["/api/archivedStats", "/api/archiveStats"],
+  ]) {
+    assert.equal(isDestructiveRequest(`${H}${plain}`, "{}"), false, plain);
+    assert.equal(isDestructiveRequest(`${H}${refused}`, "{}"), true, refused);
+  }
+  // A verb then a noun is read as the verb and its object, so a statistics read named `archiveStats` is refused in read-only: a false
+  // alarm, kept because `archive-stats` was refused before #684 and the standard classifier does not guess which nouns are records.
+  assert.equal(isDestructiveRequest(`${H}/api/archive-stats`, "{}"), true);
+  // `cancel` is not a standard verb, in any form; the strict classifier refuses the command and lets out its past tense.
+  assert.equal(isDestructiveRequest(`${H}/reports/cancelled`, "{}"), false);
+  assert.equal(isDestructiveRequest(`${H}/reports/cancel`, "{}"), false);
+  assert.equal(isDestructiveRequest(`${H}/reports/cancelled`, "{}", "strict"), false);
+  assert.equal(isDestructiveRequest(`${H}/reports/cancel`, "{}", "strict"), true);
+});
+
+/** The standard classifier's path rule before #684, kept here as the floor the reading by words must not drop below. */
+const PATH_RULE_BEFORE_684 = /(\/|\b|_)(delete|remove|purge|destroy|archive|revoke|deactivate|wipe|discard|bulk[-_]?delete|force[-_]?delete)(\/|\b|_)/i;
+
+test("standard classifier: the path refuses everything the rule before #684 refused, on generated paths", () => {
+  let seed = 684;
+  const rand = (): number => {
+    seed = (seed + 0x6d2b79f5) >>> 0;
+    let t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)];
+  const words = [
+    "delete",
+    "DELETE",
+    "Delete",
+    "remove",
+    "purge",
+    "Archive",
+    "revoke",
+    "wipe",
+    "bulk",
+    "force",
+    "bulkdelete",
+    "requests",
+    "Reasons",
+    "All",
+    "items",
+    "2",
+    "v2",
+    "ed",
+    "able",
+  ];
+  // Separators include characters whose lower case is an ASCII letter (the Kelvin sign, a dotted capital I): they separate words for `\b`.
+  const seps = ["", "", "-", "_", ".", "/", "%20", "+", ":", "@", ",", "~", ";", "?", "=", "0", "\u212A", "\u0130", "\u00e9"];
+  let refusedBefore = 0;
+  for (let i = 0; i < 20000; i++) {
+    let path = "/";
+    for (let k = 1 + Math.floor(rand() * 6); k > 0; k--) path += pick(words) + pick(seps);
+    if (!PATH_RULE_BEFORE_684.test(path)) continue;
+    refusedBefore++;
+    assert.equal(isDestructiveWire(path, null), true, `refused before #684, let out now: ${JSON.stringify(path)}`);
+  }
+  assert.ok(refusedBefore > 5000, `${refusedBefore} paths refused before`);
+  // The cases that once got through: a noun phrase, and a character that lower-cases to an ASCII letter right after the verb.
+  for (const path of ["/api/delete-requests", "/api/delete\u212Arequests", "/api/delete\u0130reasons", "/api/stats\u212Aforcedelete;"])
+    assert.equal(isDestructiveWire(path, null), true, JSON.stringify(path));
+});
+
+test("strict classifier: splitting at digits never lets out what it refused before (#684)", () => {
+  const H = "https://app.example.com";
+  // `reasons0` was one word, so the verb before it was a command; split at the digit it would head a noun phrase.
+  for (const path of ["/api/items/delete-reasons0", "/api/deactivate%2Freason0", "/api/destroy-REQUESTS02"])
+    assert.equal(isDestructiveRequest(`${H}${path}`, "{}", "strict"), true, path);
+  assert.equal(isDestructiveRequest(`${H}/api/delete2`, "{}", "strict"), true);
+  assert.equal(isDestructiveRequest(`${H}/api/delete-reasons`, "{}", "strict"), false);
 });
 
 test("the body is only read up to a bound", () => {
@@ -2670,9 +2763,8 @@ test("strict classifier: a noun phrase and prose that looks like a command are n
   const H = "https://app.example.com";
   const harmless: Array<[string, string | null, string, boolean]> = [
     // url, body, what, what the standard classifier says today
-    // The standard classifier refused this until #684, and reads the noun phrase as the strict one does since.
-    [`${H}/api/delete-requests`, JSON.stringify({ reason: "moving" }), "a collection of deletion requests", false],
-    [`${H}/api/deleteReasons`, "{}", "the reasons offered for deleting, joined", false],
+    [`${H}/api/delete-requests`, JSON.stringify({ reason: "moving" }), "a collection of deletion requests", true],
+    [`${H}/api/deleteReasons`, "{}", "the reasons offered for deleting, joined", true],
     [`${H}/api/notes`, JSON.stringify({ note: "action: delete" }), "a note whose text looks like a command key", true],
     [`${H}/api/orders/3/cancel-reasons`, "{}", "the reasons offered for cancelling", false],
     [
@@ -2807,12 +2899,13 @@ test("fuzz: the strict classifier misses less and flags less than the standard o
       assert.equal(isDestructiveRequest(c.url, c.body, "strict"), true, `strict misses what standard catches: ${c.url} ${c.body}`);
 });
 
-test("fuzz: the standard classifier reads joined verbs, and no other form of a verb or noun phrase is among its false alarms (#684)", () => {
+test("fuzz: the standard classifier reads joined verbs, and no other form of a verb is among its false alarms (#684)", () => {
   const cases = fuzzCases(4000, 548);
   const standard = fuzzRates(cases, "standard");
-  // Its false alarms are the shapes it was always written to raise: a verb used as a noun, prose that looks like a command key, a harmless mutation naming verbs.
+  // Its false alarms are the shapes it was always written to raise: a verb used as a noun, a noun phrase (`delete-requests`), prose that looks like a command key, a harmless mutation naming verbs.
   assert.deepEqual(Object.keys(standard.falseAlarmShapes).sort(), [
     "harmless mutation with verbs in strings and fields",
+    "noun phrase path",
     "prose that looks like a command",
     "verb used as a noun",
   ]);

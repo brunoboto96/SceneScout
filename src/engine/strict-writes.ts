@@ -9,7 +9,8 @@
  * command's value or a noun-first GraphQL field (`productDelete`), a command
  * in the query (`?action=delete`), one past the first 2,000 characters of the
  * body, and verbs outside its list (cancel, refund, terminate, …). It also
- * flags prose that looks like a command key (`{"note":"action: delete"}`).
+ * flags a noun phrase (`/api/delete-requests`) and prose that looks like a
+ * command key (`{"note":"action: delete"}`).
  *
  * The strict classifier splits identifiers into words (on camelCase, dots,
  * dashes and underscores) before matching, reads the query's command keys and
@@ -19,9 +20,9 @@
  * `cancelReason`) and does not count.
  *
  * It is not a superset of the standard classifier, on purpose: it lets out
- * two shapes the standard one refuses, both false alarms there. Those are a
- * destructive word in a field that is not a command key
- * (`{"note":"action: delete"}`), and a
+ * three shapes the standard one refuses, all of them false alarms there.
+ * Those are a verb before `request(s)`/`reason(s)`, a destructive word in a
+ * field that is not a command key (`{"note":"action: delete"}`), and a
  * harmless mutation whose arguments or selections name a verb (`deletedAt`).
  * Everything else the standard classifier refuses, it refuses
  * (policy-test's fuzz holds it to that).
@@ -118,13 +119,14 @@ export function identifierWords(text: string, opts: { digits?: boolean } = {}): 
 }
 
 /** Whether these words hold a verb from `verbs` that is not the head of a noun phrase. */
-export function wordsCommand(words: readonly string[], verbs: ReadonlySet<string>): boolean {
+function wordsCommand(words: readonly string[], verbs: ReadonlySet<string>): boolean {
   return words.some((w, i) => verbs.has(w) && !NOUN_PHRASE_HEADS.has(words[i + 1] ?? ""));
 }
 
 /** Whether one identifier (a path segment, a command's value, a GraphQL field) names a destructive command. */
 export function identifierIsDestructive(text: string): boolean {
-  return wordsCommand(identifierWords(text, { digits: true }), STRICT_VERBS);
+  // Read with and without the split at digits: `delete-requests0` is a noun phrase only once `requests0` is split, so the reading without it keeps that refusal.
+  return wordsCommand(identifierWords(text), STRICT_VERBS) || wordsCommand(identifierWords(text, { digits: true }), STRICT_VERBS);
 }
 
 /** The query's command keys, read: `?action=delete`, `?op=cancelOrder`. */
