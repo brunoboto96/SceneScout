@@ -392,7 +392,7 @@ async function signInOnAnotherOrigin(baseUrl: string, foreignBaseUrl: string, au
       await engine.close().catch(() => {});
     }
   };
-  const authorize = "/sso-provider/authorize?state=smoke-state-value&return=x";
+  const authorize = "/sso-provider/authorize?client_id=smoke-app&state=smoke-state-value&return=x";
   const stale = await visit(deadState, authorize);
   check("the navigation returns before the page leaves for the provider", !stale.nav.includes("REDIRECTED"), stale.nav);
   check(
@@ -408,6 +408,12 @@ async function signInOnAnotherOrigin(baseUrl: string, foreignBaseUrl: string, au
     "the same page going to an ordinary page of another site is not a sign-in, and nothing is said",
     !/SIGNED OUT|NOT counted|AUTH LOST/.test(ordinary.snap),
     ordinary.snap,
+  );
+  const noRequest = await visit(deadState, "/sso-provider/authorize?state=smoke-state-value&return=x");
+  check(
+    "...nor is the same endpoint of another site asked no sign-in (a payment step's /authorize)",
+    !/SIGNED OUT|NOT counted|AUTH LOST/.test(noRequest.snap),
+    noRequest.snap,
   );
   const fresh = await visit(liveState, authorize);
   check("...and signed in, the page stays and nothing is said", !/SIGNED OUT|NOT counted|AUTH LOST/.test(fresh.snap), fresh.snap);

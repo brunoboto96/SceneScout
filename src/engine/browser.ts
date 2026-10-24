@@ -45,6 +45,7 @@ import {
   lateSignInBounce,
   lateSignInVerdict,
   leftSignIn,
+  signInLogUrl,
   signInPlace,
   UNAUTHENTICATED_STATUSES,
   type WatchedCall,
@@ -1045,7 +1046,6 @@ export class BrowserEngine {
     return authToRemember({ url: req.url(), baseUrl: this.baseUrl, headers: req.headers(), replay: this.replayRequests.has(req), frameUrl });
   }
 
-  /** Note the status of the page's own authorised script request to its origin; a replay's is not the page's. */
   /** When the app last answered requests as unauthenticated (authloss.ts actionSignInCause), with a sign-in held. */
   private unauthenticatedAt: number[] = [];
 
@@ -1055,6 +1055,7 @@ export class BrowserEngine {
     if (this.unauthenticatedAt.length > 20) this.unauthenticatedAt.splice(0, this.unauthenticatedAt.length - 20);
   }
 
+  /** Note the status of the page's own authorised script request to its origin; a replay's is not the page's. */
   private noteAuthAnswer(res: import("playwright").Response): void {
     const req = res.request();
     const type = req.resourceType();
@@ -2423,7 +2424,7 @@ export class BrowserEngine {
     this.seenUrl = now;
     const bounced = lateSignInBounce({ watching: this.watchesForBounce, seen, now, baseUrl: this.baseUrl });
     if (bounced === null) return "";
-    this.logAction({ action: "sign-in:late-redirect", target: bounced, url: now });
+    this.logAction({ action: "sign-in:late-redirect", target: bounced, url: signInLogUrl(now, this.baseUrl) });
     this.authLoss.clear();
     this.recordNavigationOutcome(bounced, now, true);
     const lead =
@@ -2454,15 +2455,24 @@ export class BrowserEngine {
     if (from === null) {
       if (this.authLoss.signedOut && !this.callIsBack && leftSignIn({ seen, now, baseUrl: this.baseUrl })) {
         this.authLoss.signInAgain();
-        this.logAction({ action: "sign-in:action-left", target: seen, url: now });
+        this.logAction({ action: "sign-in:action-left", target: signInLogUrl(seen, this.baseUrl), url: now });
       }
       return "";
     }
-    this.logAction({ action: "sign-in:action-landed", target: from, url: now });
+    this.logAction({ action: "sign-in:action-landed", target: from, url: signInLogUrl(now, this.baseUrl) });
     const went =
       `Note: this call went from ${normalizePath(from)} to the sign-in page ${signInPlace(now, this.baseUrl)}. An action can sign out or open sign-in on ` +
       `purpose, so this is not counted as a lost sign-in and ${normalizePath(from)} is not marked`;
-    const cause = actionSignInCause({ callStartedAt: this.callStartedAt, unauthenticatedAt: this.unauthenticatedAt, signInAt: this.signInReachedAt });
+    const cause = actionSignInCause({
+      callStartedAt: this.callStartedAt,
+      unauthenticatedAt: this.unauthenticatedAt,
+      signInAt: this.signInReachedAt,
+      back: this.callIsBack,
+    });
+    if (cause === "returned") {
+      // A back returned to a sign-in page the browser held: nobody signed out, so later bounces count as before.
+      return `${went}; if it was not meant to, the next navigation to a signed-in page shows whether the sign-in still holds.\n`;
+    }
     if (cause === "ran-out") {
       // The app refused the session's sign-in on the way there: not a sign-out, so later bounces count as before.
       return (

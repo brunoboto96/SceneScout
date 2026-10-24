@@ -107,6 +107,8 @@ import {
   leftSignIn,
   LOGIN_ROUTE_RE,
   shouldReattach,
+  SIGNED_OUT_ROUTES,
+  signInLogUrl,
   signInPlace,
 } from "../src/engine/authloss.ts";
 import {
@@ -388,7 +390,12 @@ test("a hash router's sign-in route and a provider's sign-in on another origin a
     [t.isLoginRedirect("/reports", `${BASE}/app#login`, BASE), false, "an in-page anchor is not a route"],
     [t.isLoginRedirect("/login", `${BASE}/app#/login`, BASE), false, "asking for the hash sign-in route (normalized) is not a bounce"],
     [t.isLoginRedirect("/#/login", `${BASE}/#/login`, BASE), false, "...nor asking for it as written"],
-    [t.isLoginRedirect("/reports", "https://idp.example/oauth2/authorize?state=s", BASE), true, "a provider's authorize endpoint on another origin"],
+    [
+      t.isLoginRedirect("/reports", "https://idp.example/oauth2/authorize?client_id=a&state=s", BASE),
+      true,
+      "a provider's authorize endpoint on another origin",
+    ],
+    [t.isLoginRedirect("/reports", "https://pay.example/payments/authorize?state=s", BASE), false, "...but not the same endpoint with no sign-in request"],
     [t.isLoginRedirect("/reports", "https://docs.example/guide", BASE), false, "an ordinary page of another site"],
     [t.isLoginRedirect("/reports", `${BASE}/authorize`, BASE), false, "the app's own /authorize page is not one of its sign-in shapes"],
   ];
@@ -406,27 +413,37 @@ test("a sign-in page: whole segments of the path or the hash route, and a provid
     [`${base}/#/blog/login-tips`, false, "a hash route whose segment only contains one"],
     [`${base}/docs#login`, false, "an anchor"],
     [`${base}/oauth2/authorize`, false, "a provider's shape on the app's own origin"],
-    ["https://idp.example/oauth2/authorize", true, "the same shape on another origin"],
-    ["https://idp.example/realms/x/protocol/openid-connect/auth", true, "an OpenID Connect provider"],
-    ["https://idp.example/saml2/idp/SSO", true, "a SAML provider"],
-    ["https://idp.example/adfs/ls/", true, "an ADFS provider"],
+    ["https://idp.example/oauth2/authorize?client_id=a&response_type=code", true, "the same shape on another origin, asked to sign in"],
+    ["https://idp.example/oauth2/authorize", false, "...but not without a sign-in request's parameters"],
+    ["https://idp.example/realms/x/protocol/openid-connect/auth?client_id=a&redirect_uri=x", true, "an OpenID Connect provider"],
+    ["https://idp.example/saml2/idp/SSO?SAMLRequest=fZ", true, "a SAML provider"],
+    ["https://idp.example/idp/profile/SAML2/Redirect/SSO?SAMLRequest=fZ&RelayState=r", true, "...whose segments are upper-case"],
+    ["https://idp.example/adfs/ls/?wa=wsignin1.0&wtrealm=urn", true, "an ADFS provider"],
+    ["https://docs.example/guides/sso", false, "a docs page about single sign-on"],
+    ["https://docs.example/sso/setup-guide?ref=nav", false, "...with a query that is no sign-in request"],
+    ["https://pay.example/checkout/authorize?amount=10", false, "a payment step that authorizes a charge"],
+    ["https://status.example/incidents/oauth", false, "a status page about a provider's outage"],
     ["https://idp.example/u/login", true, "a hosted sign-in page"],
     ["https://idp.example/#/login", true, "a hash route on another origin"],
     ["https://shop.example/authorized-dealers", false, "a segment that only starts like a provider's"],
-    ["https://idp.example/OAuth2/Authorize", false, "segments match by case, as on the app's own origin"],
+    ["https://idp.example/OAuth2/Authorize", false, "a provider's upper-case endpoint with no sign-in request"],
+    ["https://idp.example/Login", false, "a sign-in segment matches by case, as on the app's own origin"],
     [`${base}/Login`, false, "...where /Login is not /login either"],
     ["https://shop.example/products/7", false, "an ordinary page of another site"],
     ["about:blank", false, "not a page"],
     ["chrome-error://chromewebdata/", false, "an error page"],
   ];
   for (const [url, want, why] of cases) assert.equal(isSignInPage(url, base), want, why);
+  // The action log keeps a provider's address without its query (the sign-in request's state); the app's own as it is.
+  assert.equal(signInLogUrl("https://idp.example/oauth2/authorize?client_id=a&state=s3cr3t", base), "https://idp.example/oauth2/authorize");
+  assert.equal(signInLogUrl(`${base}/login?next=%2Freports`, base), `${base}/login?next=%2Freports`);
   assert.equal(hashRoute("#/login?next=%2F"), "/login");
   assert.equal(hashRoute("#!/login"), "/login");
   assert.equal(hashRoute("#login"), null);
   assert.equal(hashRoute(""), null);
   assert.equal(signInPlace(`${base}/app#/login?next=%2F`, base), "/app#/login", "a hash route, without its query");
   assert.equal(
-    signInPlace("https://idp.example/oauth2/authorize?state=secret", base),
+    signInPlace("https://idp.example/oauth2/authorize?client_id=a&state=secret", base),
     "https://idp.example/oauth2/authorize",
     "another origin, without the query",
   );
@@ -437,7 +454,7 @@ test("an action that leaves a sign-in page for a page of the app is a sign-in; a
   const left = (seen: string, now: string) => leftSignIn({ seen, now, baseUrl: base });
   const cases: Array<[boolean, boolean, string]> = [
     [left(`${base}/login`, `${base}/dashboard`), true, "from the app's sign-in into the app"],
-    [left("https://idp.example/oauth2/authorize", `${base}/dashboard`), true, "back from a provider's sign-in into the app"],
+    [left("https://idp.example/oauth2/authorize?client_id=a", `${base}/dashboard`), true, "back from a provider's sign-in into the app"],
     [left(`${base}/app#/login`, `${base}/app#/reports`), true, "a hash router's sign-in into the app"],
     [left(`${base}/login`, `${base}/login/mfa`), false, "from one sign-in page to another"],
     [left(`${base}/settings`, `${base}/dashboard`), false, "not from a sign-in page"],
@@ -512,6 +529,34 @@ test("after a sign-out of the session's own, bounces are not covered but raise n
   }
 });
 
+test("a sign-out explains a few routes that send the session to sign-in, not every route after it", () => {
+  const bounceAt = (t: AuthLossTracker, route: string) => {
+    t.record({ requestedRoute: route, landedRoute: "/login", bounced: true, role: "admin" });
+    return t.take();
+  };
+  // Contrastive pair: the same signed-out role session, revisiting the same few routes against reaching one more.
+  const few = new AuthLossTracker();
+  few.beginSession("role", "admin");
+  few.signOut("/account");
+  const routes = Array.from({ length: SIGNED_OUT_ROUTES }, (_, i) => `/r${i}`);
+  for (const r of [...routes, ...routes]) assert.ok(!bounceAt(few, r).includes("AUTH LOST"), `${r} is the sign-out's doing`);
+  assert.equal(few.signedOut, true, "revisiting the routes a sign-out explains keeps it");
+  assert.equal(few.takeReattach(), null);
+
+  const more = new AuthLossTracker();
+  more.beginSession("role", "admin");
+  more.signOut("/account");
+  for (const r of routes) bounceAt(more, r);
+  const next = bounceAt(more, "/one-more");
+  assert.ok(next.includes("more than signing out explains") && next.includes("SESSION AUTH LOST"), next);
+  assert.equal(more.signedOut, false, "the sign-out no longer explains the bounces");
+  assert.ok(next.includes(`${SIGNED_OUT_ROUTES + 1} consecutive`), "the routes the sign-out had explained count with it");
+  assert.equal(more.lost, true);
+  const plan = more.takeReattach();
+  assert.ok(plan !== null, "a role session re-attaches");
+  assert.equal(plan.returnTo, "/one-more");
+});
+
 test("an action that lands on sign-in is a sign-out unless the app refused the sign-in on the way there", () => {
   // Contrastive pairs: the same action and sign-in page, differing in when the app answered 401.
   const cause = (unauthenticatedAt: number[], signInAt = 1500) => actionSignInCause({ callStartedAt: 1000, unauthenticatedAt, signInAt });
@@ -521,6 +566,12 @@ test("an action that lands on sign-in is a sign-out unless the app refused the s
     [cause([1800]), "sign-out", "a 401 after the sign-in page loaded is that page asking who is signed in"],
     [cause([900]), "sign-out", "a 401 before the call is not this action's"],
     [cause([1200], 0), "ran-out", "with no sign-in page seen arriving, a 401 during the call counts"],
+    [actionSignInCause({ callStartedAt: 1000, unauthenticatedAt: [], signInAt: 1500, back: true }), "returned", "a back to a sign-in page signs nobody out"],
+    [
+      actionSignInCause({ callStartedAt: 1000, unauthenticatedAt: [1200], signInAt: 1500, back: true }),
+      "ran-out",
+      "...though a 401 on the way still says it ran out",
+    ],
   ];
   for (const [got, want, why] of cases) assert.equal(got, want, why);
 });

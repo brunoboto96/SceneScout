@@ -15,11 +15,26 @@
 export const LOGIN_ROUTE_RE = /\/(login|signin|sign-in|auth)(\/|$)/;
 
 /**
- * Paths an identity provider on another origin signs in at: the app's own shapes above, plus the common single sign-on
- * endpoints (`/authorize`, `/oauth2/…`, `/saml2/…`, `/sso/…`, `/adfs/…`, `/openid-connect/…`). Whole segments only, as
- * above. Judged only on another origin: on the app's own, `/authorize` or `/sso` can be an ordinary page of the app.
+ * The endpoints a single sign-on provider on another origin signs in at (`/authorize`, `/oauth2/…`, `/saml2/…`, `/sso/…`,
+ * `/adfs/…`, `/openid-connect/…`), by whole segment and in any case (`/idp/profile/SAML2/Redirect/SSO`). Judged only on
+ * another origin, where the app's own sign-in shapes (LOGIN_ROUTE_RE) count as well, and only with a sign-in request's
+ * parameters (IDP_REQUEST_PARAMS): on its own, such a segment is as likely a docs page (`/guides/sso`) or a payment step
+ * (`/authorize`).
  */
-export const IDP_ROUTE_RE = /\/(login|signin|sign-in|auth|authorize|oauth|oauth2|saml|saml2|sso|adfs|openid-connect)(\/|$)/;
+const IDP_ENDPOINT_RE = /\/(authorize|oauth|oauth2|saml|saml2|sso|adfs|openid-connect)(\/|$)/i;
+
+/**
+ * The query parameters that make a provider's endpoint a sign-in request: OAuth 2.0 and OpenID Connect (`client_id`,
+ * `redirect_uri`, `response_type`), SAML's redirect binding (`SAMLRequest`, `RelayState`) and WS-Federation (`wtrealm`).
+ * Only their names are read; their values are the sign-in's state and are never printed.
+ */
+const IDP_REQUEST_PARAMS: readonly string[] = ["client_id", "redirect_uri", "response_type", "SAMLRequest", "RelayState", "wtrealm"];
+
+/** Whether `u`, on another origin than the app's, is a provider's sign-in endpoint (IDP_ENDPOINT_RE) asked to sign in. */
+function isProviderSignIn(u: URL): boolean {
+  if (!IDP_ENDPOINT_RE.test(u.pathname)) return false;
+  return IDP_REQUEST_PARAMS.some((name) => u.searchParams.has(name));
+}
 
 /**
  * The route a hash router keeps in the address's fragment (`#/login`, `#!/login?next=…` gives `/login`), or null for a
@@ -35,7 +50,8 @@ export function hashRoute(hash: string): string | null {
 /**
  * Whether `url` is a sign-in page. On the app's own origin (`baseUrl`'s, or any when it is not given) its path, or the
  * route its fragment holds (a hash router's `/#/login`), has a sign-in segment (LOGIN_ROUTE_RE). On another origin, it
- * is an identity provider's sign-in, so the provider shapes count too (IDP_ROUTE_RE). Only http and https pages are.
+ * is an identity provider's sign-in, so a provider's endpoint asked to sign in counts too (isProviderSignIn). Only http
+ * and https pages are.
  */
 export function isSignInPage(url: string | URL, baseUrl = ""): boolean {
   let u: URL;
@@ -53,9 +69,9 @@ export function isSignInPage(url: string | URL, baseUrl = ""): boolean {
       own = true;
     }
   }
-  const rule = own ? LOGIN_ROUTE_RE : IDP_ROUTE_RE;
   const route = hashRoute(u.hash);
-  return rule.test(u.pathname) || (route !== null && rule.test(route));
+  if (LOGIN_ROUTE_RE.test(u.pathname) || (route !== null && LOGIN_ROUTE_RE.test(route))) return true;
+  return !own && isProviderSignIn(u);
 }
 
 /**
@@ -75,6 +91,15 @@ export function signInPlace(url: string, baseUrl: string): string {
 
 /** Consecutive login bounces before we stop assuming it is a permission wall. */
 export const AUTH_LOSS_STREAK = 3;
+
+/**
+ * How many different routes a sign-out of the session's own (AuthLossTracker.signOut) explains. Checking that a few
+ * signed-in pages now send the visitor to sign-in is what a sign-out test does; more than this, and the move to sign-in
+ * is as likely a sign-in that ran out with no refused request to show it (an app that checks its token's expiry in the
+ * page, or a "Log in" link clicked while signed in), so the next such route counts toward SESSION AUTH LOST with the
+ * ones before it.
+ */
+export const SIGNED_OUT_ROUTES = AUTH_LOSS_STREAK;
 
 /** How the session being tracked signed in (profiles.ts AttachAuth's kind). */
 export type SignInKind = "role" | "file" | "none";
@@ -106,9 +131,9 @@ export function shouldReattach(opts: { streak: number; signIn: SignInKind; alrea
  *
  * The sign-in page may be on another origin: an app that signs in through a
  * single sign-on provider sends a signed-out visitor to the provider's host.
- * There only an address shaped like a sign-in or a provider's endpoint counts
- * (IDP_ROUTE_RE), so a page that moved to an ordinary page of another site is
- * not a bounce.
+ * There only an address shaped like a sign-in, or a provider's endpoint asked
+ * to sign in, counts (isSignInPage), so a page that moved to an ordinary page of
+ * another site is not a bounce.
  *
  * Without a sign-in there is nothing to lose and nothing is judged. A session
  * that was already on a sign-in page (it asked for one, or a bounce was
@@ -142,12 +167,33 @@ export const UNAUTHENTICATED_STATUSES: ReadonlySet<number> = new Set([401, 419, 
  * answers: a request answered as unauthenticated (UNAUTHENTICATED_STATUSES) during the call (`unauthenticatedAt`, after
  * `callStartedAt`) and before the page reached the sign-in page (`signInAt`, 0 when not seen) means it ran out. A
  * sign-out's own requests succeed; the sign-in page asking the app whether anyone is signed in, after it has loaded,
- * is answered 401 and does not count.
+ * is answered 401 and does not count. A back (`back`) only returns to a sign-in page the browser already holds: it
+ * signs nobody out, so it is `returned`, and bounces after it count as before.
  */
-export function actionSignInCause(opts: { callStartedAt: number; unauthenticatedAt: readonly number[]; signInAt: number }): "sign-out" | "ran-out" {
+export function actionSignInCause(opts: {
+  callStartedAt: number;
+  unauthenticatedAt: readonly number[];
+  signInAt: number;
+  back?: boolean;
+}): "sign-out" | "ran-out" | "returned" {
   const { callStartedAt, unauthenticatedAt, signInAt } = opts;
   const ranOut = unauthenticatedAt.some((t) => t >= callStartedAt && (signInAt === 0 || t <= signInAt));
-  return ranOut ? "ran-out" : "sign-out";
+  if (ranOut) return "ran-out";
+  return opts.back ? "returned" : "sign-out";
+}
+
+/**
+ * A sign-in page's address as the action log keeps it: on the app's own origin as it is, on another origin its origin
+ * and path only. A provider's query carries the sign-in request's state (`state`, `SAMLRequest`, `RelayState`,
+ * `code_challenge`), which redaction does not recognise as secret, so it is not written at all.
+ */
+export function signInLogUrl(url: string, baseUrl: string): string {
+  try {
+    const u = new URL(url);
+    return new URL(baseUrl).origin === u.origin ? url : `${u.origin}${u.pathname}`;
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -229,8 +275,8 @@ export class AuthLossTracker {
   private lastClear: { route: string; streak: number; targets: string[] } | null = null;
   /** Where an action of the session's own went to a sign-in page from (a sign-out), until it signs in again. */
   private signedOutFrom: string | null = null;
-  /** The routes that bounced while signed out: one of them reached signed in shows the sign-in is back. */
-  private signedOutBounces = new Set<string>();
+  /** The routes that bounced while signed out, each with what was asked for: one reached signed in shows the sign-in is back. */
+  private signedOutBounces = new Map<string, string>();
 
   /**
    * Start tracking a newly attached session. An explicit attach is new
@@ -259,7 +305,8 @@ export class AuthLossTracker {
    * still recorded and its route is not covered, but none counts toward SESSION AUTH LOST, so the verdict is not raised
    * and a role session is not signed back in behind the tester's back. It lasts until the session signs in again: an
    * action takes it from a sign-in page into the app (signInAgain), or a route that bounced while signed out is reached
-   * signed in (record). A new attach ends it too.
+   * signed in (record). A new attach ends it too. It explains at most SIGNED_OUT_ROUTES different routes: the next
+   * one ends it, and it and those before it count toward the verdict.
    */
   signOut(from: string): void {
     this.signedOutFrom = from;
@@ -339,14 +386,25 @@ export class AuthLossTracker {
       return;
     }
     if (!bounced && this.signedOutBounces.has(requestedRoute)) this.signInAgain();
+    let ended = "";
     if (bounced && this.signedOutFrom !== null) {
-      // Signed out on purpose: the bounce is the sign-out's doing. Not covered, and not counted toward the verdict.
-      this.signedOutBounces.add(requestedRoute);
-      this.pending =
-        divergence +
-        `This session signed out on purpose (from ${this.signedOutFrom}), so this is not counted as a lost sign-in and it is not ` +
-        `signed back in. Re-attach to test signed in again.\n`;
-      return;
+      if (this.signedOutBounces.has(requestedRoute) || this.signedOutBounces.size < SIGNED_OUT_ROUTES) {
+        // Signed out on purpose: the bounce is the sign-out's doing. Not covered, and not counted toward the verdict.
+        this.signedOutBounces.set(requestedRoute, target);
+        this.pending =
+          divergence +
+          `This session signed out on purpose (from ${this.signedOutFrom}), so this is not counted as a lost sign-in and it is not ` +
+          `signed back in. Re-attach to test signed in again.\n`;
+        return;
+      }
+      // More routes than a sign-out explains: they count toward the verdict, this one with the ones before it.
+      ended =
+        `This session went to sign-in from ${this.signedOutFrom} by an action of its own, but ${this.signedOutBounces.size + 1} different ` +
+        `routes have sent it to sign-in since, more than signing out explains, so they count as a lost sign-in.\n`;
+      this.streak = this.signedOutBounces.size;
+      this.streakTargets = [...this.signedOutBounces.values()];
+      this.signedOutFrom = null;
+      this.signedOutBounces.clear();
     }
     if (bounced) {
       this.streak += 1;
@@ -361,7 +419,7 @@ export class AuthLossTracker {
       // has re-attached; if it never does (the call threw), the verdict stands.
       this.due = { returnTo: target, retry: [...new Set(this.streakTargets)].filter((t) => t !== target) };
     }
-    this.pending = this.banner() + divergence;
+    this.pending = ended + this.banner() + divergence;
   }
 
   /**
