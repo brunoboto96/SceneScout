@@ -1147,7 +1147,9 @@ test("a sweep's re-attach is said at the end of that sweep only", () => {
 test("the login pattern matches a segment, not a substring", () => {
   assert.equal(LOGIN_ROUTE_RE.test("/login"), true);
   assert.equal(LOGIN_ROUTE_RE.test("/auth/callback"), true);
-  assert.equal(LOGIN_ROUTE_RE.test("/login.html"), false, "an extension is not a login route segment");
+  assert.equal(LOGIN_ROUTE_RE.test("/login.html"), true, "a page extension after the segment is the same page");
+  assert.equal(LOGIN_ROUTE_RE.test("/login.json"), false, "an extension that is not a page is not");
+  assert.equal(LOGIN_ROUTE_RE.test("/login.html.bak"), false);
   assert.equal(LOGIN_ROUTE_RE.test("/logindetails"), false, "nor is a longer word starting with it");
 });
 
@@ -1159,6 +1161,9 @@ test("a sign-in segment in any case is a sign-in page to every caller: a navigat
     ["/Account/Login", "/Account/LoginHistory"],
     ["/#/Login", "/#/Loginhelp"],
     ["/SignIn", "/SignInStats"],
+    ["/Login.aspx", "/LoginHelp.aspx"],
+    ["/signin.php", "/signin-help.php"],
+    ["/account/login.html", "/account/login.html.bak"],
   ];
   for (const [signIn, nearMiss] of pairs) {
     // A navigation, a crawl step and the attach verdict all ask isLoginRedirect, with what they asked for and where it landed.
@@ -1174,6 +1179,10 @@ test("a sign-in segment in any case is a sign-in page to every caller: a navigat
   // Memory re-files an old landing on a sign-in page by the same pattern.
   assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Account/Login"), true);
   assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Account/LoginHistory"), false);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Login.aspx"), true);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/LoginHelp.aspx"), false);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/signin.php"), true);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/signin-help.php"), false);
 });
 
 test("another site's address is kept by its origin and path only; the app's own as it is", () => {

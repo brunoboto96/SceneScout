@@ -13,9 +13,9 @@
 
 /**
  * Paths that look like a login/auth screen — the landing place of a dead session. A whole segment, in any case: an app
- * may name it `/Account/Login` or route to `/#/SignIn`, while `/Account/LoginHistory` and `/#/Loginhelp` are not one.
+ * may name it `/Account/Login` or route to `/#/SignIn`, or give it a page extension (`/Login.aspx`, `/signin.php`, `/login.html`), while `/Account/LoginHistory`, `/LoginHelp.aspx` and `/#/Loginhelp` are not one.
  */
-export const LOGIN_ROUTE_RE = /\/(login|signin|sign-in|auth)(\/|$)/i;
+export const LOGIN_ROUTE_RE = /\/(login|signin|sign-in|auth)(\.(aspx|php|html|htm|jsp|do|action))?(\/|$)/i;
 
 /**
  * The endpoints a single sign-on provider on another origin signs in at (`/authorize`, `/oauth2/…`, `/saml2/…`, `/sso/…`,

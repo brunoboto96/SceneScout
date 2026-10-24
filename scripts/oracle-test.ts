@@ -1336,3 +1336,27 @@ test("OracleMonitor: a violation on another site's page names that page by its o
   page.emit("pageerror", new Error("boom"));
   assert.equal(monitor.drain()[0]?.url, "http://app.test/things?tab=open");
 });
+
+test("OracleMonitor: a failed request and an error status name another site's address by origin and path, the app's own with its query", () => {
+  const page = Object.assign(new EventEmitter(), { url: () => "http://app.test/things" });
+  const monitor = new OracleMonitor();
+  monitor.setPageAddress((url) => logAddress(url, "http://app.test"));
+  monitor.attach(page as unknown as Page);
+  const failed = (url: string) => ({ url: () => url, method: () => "GET", failure: () => ({ errorText: "net::ERR_CONNECTION_REFUSED" }), frame: () => null });
+  const answered = (url: string, status: number) => ({
+    url: () => url,
+    status: () => status,
+    request: () => ({ url: () => url, method: () => "GET", frame: () => null }),
+  });
+  page.emit("requestfailed", failed("https://idp.test/oauth2/authorize?client_id=app&state=provider-state-7f"));
+  page.emit("response", answered("https://idp.test/oauth2/token?code=one-time-code", 500));
+  page.emit("requestfailed", failed("http://app.test/api/things?page=2"));
+  page.emit("response", answered("http://app.test/api/things?page=3", 500));
+  const details = monitor.drain().map((v) => v.detail);
+  assert.deepEqual(details, [
+    "GET https://idp.test/oauth2/authorize → net::ERR_CONNECTION_REFUSED",
+    "GET https://idp.test/oauth2/token → HTTP 500",
+    "GET http://app.test/api/things?page=2 → net::ERR_CONNECTION_REFUSED",
+    "GET http://app.test/api/things?page=3 → HTTP 500",
+  ]);
+});

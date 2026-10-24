@@ -20,6 +20,7 @@ import {
   replayPlan,
   resolveFromRun,
 } from "../engine/from-run.js";
+import { logAddress } from "../engine/authloss.js";
 import { loadRunRecord } from "../engine/memory.js";
 import { formatCriteriaForLanes } from "../engine/tickets.js";
 
@@ -205,7 +206,9 @@ export function registerLaneTools(): void {
         const at = new Date().toISOString();
         // Marks the moment the lane's browser stopped being needed, so the pace
         // section can tell a lane still reporting from one waiting to be closed.
-        owner?.logAction({ action: "lane-report", url: engines.get(lane)?.currentUrl ?? "", session: lane });
+        // Another site's page (a sign-in provider's) is kept as its origin and path, as every address the memory holds is (authloss.ts logAddress).
+        const laneEngine = engines.get(lane);
+        owner?.logAction({ action: "lane-report", url: logAddress(laneEngine?.currentUrl ?? "", laneEngine?.baseUrl ?? ""), session: lane });
         const kept = owner
           ? owner.addLaneDecisions(
               lane,
