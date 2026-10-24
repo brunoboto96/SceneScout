@@ -188,9 +188,9 @@ export function echoesFailedLoads(engine: BrowserEngineName): boolean {
  * Whether a failed request's error text says the browser cancelled it: its document began to leave, or the page
  * aborted it. Each engine words it its own way, Chromium "net::ERR_ABORTED", Firefox "NS_BINDING_ABORTED" and WebKit
  * "cancelled" (the word Playwright itself reads a WebKit cancellation by, inside a longer message on some builds). A
- * refusal, a reset or a lost connection is not a cancellation. WebKit cancels a document's open requests as soon as a
- * navigation starts and reports the navigation's request after that, so the wait after an action or before a read
- * keeps a quiet window from a cancellation (settle.ts SettleState.sinceLastCancelMs).
+ * refusal, a reset or a lost connection is not a cancellation. WebKit and Firefox cancel a document's open requests as
+ * soon as a navigation starts and report the navigation's request after that, so the wait after an action or before a
+ * read keeps a quiet window from the cancellation of a request whose answer had arrived (settle.ts AnsweredCancels).
  */
 export function requestCancelled(engine: BrowserEngineName, errorText: string): boolean {
   if (engine === "chromium") return errorText === "net::ERR_ABORTED";
