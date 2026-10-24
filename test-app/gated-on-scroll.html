@@ -15,12 +15,15 @@
       // a sign-in page it ends on is the page going there on its own while the call ran. Signed in (the "smoke-auth"
       // flag a storage state sets), the page stays put.
       //
-      // The check is a request, started in the same task as the scroll, and the redirect starts on its answer while
-      // the request is still open (the server answers after 250 ms and holds its body back): the page is busy from the
-      // scroll to the sign-in page, so the scroll's wait for the page to settle sees it on any machine. (WebKit cancels
-      // the open request as the redirect starts and reports the redirect's own request after that; the wait keeps a
-      // quiet window from a cancellation for that gap.) A bare timer after the scroll event is not: a
-      // late frame can push it past that wait, and the next call's navigation then cancels the redirect.
+      // The check is a request, started in the same task as the scroll, and the redirect starts on its answer (the
+      // server answers after 250 ms and holds its body back for 500 ms more): the page is busy from the scroll to the
+      // sign-in page, so the scroll's wait for the page to settle sees it on any machine. The redirect's own request
+      // comes after the check has ended, in one of two orders: where the page is handed the answer as its headers
+      // arrive, the redirect starts with the body still open and the browser cancels the check (WebKit and Firefox
+      // report the redirect's request only after that); where it is handed the answer only once the body has ended
+      // (WebKit on Linux), the check has finished before the redirect starts. The wait keeps a quiet window from the
+      // end of an answered request for that gap, either way. A bare timer after the scroll event is not: a late frame
+      // can push it past that wait, and the next call's navigation then cancels the redirect.
       history.scrollRestoration = "manual";
       var checked = false;
       function checkSession() {

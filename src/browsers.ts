@@ -190,7 +190,7 @@ export function echoesFailedLoads(engine: BrowserEngineName): boolean {
  * "cancelled" (the word Playwright itself reads a WebKit cancellation by, inside a longer message on some builds). A
  * refusal, a reset or a lost connection is not a cancellation. WebKit and Firefox cancel a document's open requests as
  * soon as a navigation starts and report the navigation's request after that, so the wait after an action or before a
- * read keeps a quiet window from the cancellation of a request whose answer had arrived (settle.ts AnsweredCancels).
+ * read keeps a quiet window from the cancellation of a request whose answer had arrived (settle.ts AnsweredEnds).
  */
 export function requestCancelled(engine: BrowserEngineName, errorText: string): boolean {
   if (engine === "chromium") return errorText === "net::ERR_ABORTED";
