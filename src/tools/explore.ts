@@ -7,6 +7,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { BrowserEngine } from "../engine/browser.js";
+import { siteAuditSection } from "../engine/design.js";
+import { normalizePath } from "../engine/fingerprint.js";
 import { describeMerge, FINDING_CATEGORIES, isWorthALook, mergeableCategories, type FiledFinding } from "../engine/memory.js";
 import { LANE_CONVENTION_MAX } from "../engine/lane.js";
 import { FIXTURE_KINDS, type FixtureKind } from "../engine/fixtures.js";
@@ -39,7 +41,7 @@ import {
   guidedSessions,
   policyFor,
 } from "../server-context.js";
-import { egressRefusal, uploadRefusal } from "../engine/project-config.js";
+import { conversationPictureRefusal, uploadRefusal } from "../engine/project-config.js";
 import { planUploadOptions } from "../engine/uploads.js";
 import { writeDocumentSync } from "../engine/owner-file.js";
 
@@ -538,12 +540,19 @@ export function registerExploreTools(): void {
     "scout_design_audit",
     {
       description:
-        "Computed-style design audit of the current page — a design connoisseur's read WITHOUT screenshots. Measurable defects (⚠): WCAG contrast, tiny targets, clipped text, aspect-distorted images, horizontal overflow, sibling cards touching with no gap (naming their parent), missing keyboard-focus indicators (sampled with real Tab presses). Craft suggestions (→): line measure and line-height rhythm, spacing-scale adherence, typography entropy, palette discipline (gray census, accent hue families, pure-#000 body text), elevation/control consistency, heading structure, indistinguishable links, and AI-slop tells (gradient text, glassmorphism, side-stripe borders, neon glows, violet gradients, identical card grids). Ends with a SYSTEM SUMMARY of design-system coherence and a PAGE SCORE whose why: line lists the largest deductions behind it. Run once per representative page; the → tier is improvement feedback — file genuine opportunities as ux-polish findings with the concrete numbers, not just defects.",
+        "Computed-style design audit of the current page — a design connoisseur's read WITHOUT screenshots. Measurable defects (⚠): WCAG contrast, tiny targets, clipped text, aspect-distorted images, horizontal overflow, sibling cards touching with no gap (naming their parent), missing keyboard-focus indicators (sampled with real Tab presses). Craft suggestions (→): line measure and line-height rhythm, spacing-scale adherence, typography entropy, palette discipline (gray census, accent hue families, pure-#000 body text), elevation/control consistency, heading structure, indistinguishable links, and AI-slop tells (gradient text, glassmorphism, side-stripe borders, neon glows, violet gradients, identical card grids). Ends with a SYSTEM SUMMARY of design-system coherence and a PAGE SCORE whose why: line lists the largest deductions behind it; once four pages are audited, a SITE CONSISTENCY block sets this page's button heights, radii, headers, tabs and grays beside the other pages' and names the values only one page uses. Run once per representative page; the → tier is improvement feedback — file genuine opportunities as ux-polish findings with the concrete numbers, not just defects.",
       inputSchema: { session: sessionParam },
     },
     serializedPerSession("scout_design_audit", async (_args: { session?: string }, session) => {
       try {
-        return text(await engineFor(session).designAudit(), session);
+        const engine = engineFor(session);
+        const audit = await engine.designAudit();
+        // The audited page set beside every other page with a score (design.ts siteAuditSection), read now rather than
+        // stored: which pages were audited decides it. The audit's own lines begin with the URL it measured; a sign-in
+        // notice may come before them, so the line is found anywhere in the text.
+        const url = /^URL: (\S+)/m.exec(audit)?.[1];
+        const site = url && engine.memory ? siteAuditSection(engine.memory.pageScores, normalizePath(url)) : "";
+        return text(site ? `${audit}\n\n${site}` : audit, session);
       } catch (err) {
         return errorText(err);
       }
@@ -624,8 +633,8 @@ export function registerExploreTools(): void {
     serializedPerSession("scout_screenshot", async (_args: { session?: string }, session) => {
       try {
         const eng = engineFor(session);
-        // egress "none": a picture of the page is not returned into the conversation, as a finding's is kept to a file.
-        const refused = egressRefusal(policyFor(eng), "model", "scout_screenshot");
+        // egress "none", or evidence capped at "file" or "off": a picture of the page is not returned into the conversation.
+        const refused = conversationPictureRefusal(policyFor(eng), "scout_screenshot", "scout_capture saves a picture of one element to a file instead");
         if (refused) throw new Error(refused);
         const { base64, mimeType } = await eng.screenshot();
         return { content: [{ type: "image", data: base64, mimeType }] };

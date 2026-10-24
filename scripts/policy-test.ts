@@ -32,6 +32,8 @@ import {
   projectFolderRefusal,
   readLaunchPolicy,
   uploadRefusal,
+  conversationPictureRefusal,
+  writeRulesNote,
   writeRulesSettings,
   refusalText,
   resolveSettings,
@@ -147,6 +149,7 @@ import {
   formatExplanation,
   parsePolicyArgs,
   policySettingsFrom,
+  runPolicyCommand,
   type ExplainOutcome,
 } from "../src/engine/policy-explain.ts";
 
@@ -2302,6 +2305,7 @@ function guardRig(
     classifier?: WriteClassifier;
     refuseGets?: boolean;
     authPosts?: string[];
+    narrowOnly?: boolean;
   } = {},
 ) {
   const calls: GuardCall[] = [];
@@ -2333,6 +2337,7 @@ function guardRig(
     writeClassifier: () => opts.classifier ?? "standard",
     refuseDestructiveGets: () => opts.refuseGets ?? false,
     authPosts: () => (opts.authPosts ? readPostEntries(opts.authPosts).entries : null),
+    authPostsNarrowOnly: () => opts.narrowOnly === true,
   };
   const guard = new RouteGuard(host);
   const send = (
@@ -3024,19 +3029,42 @@ test("guided gate: while a guided plan is open, the environment's read POSTs are
   }
 });
 
-test("guided gate: while a guided plan is open, the operator's sign-in list is not read, so it cannot loosen observe (#549)", () => {
+test("guided gate: while a guided plan is open, the operator's sign-in list only narrows the path rule, so it cannot loosen observe (#549)", () => {
   const plans = new GuidedPlans();
-  assert.equal(
-    "operatorAuthPosts" in guidedAttachVerdict(plans, { mode: "observe", url: "https://staging.example.com" }),
-    false,
-    "no plan: the attach reads it",
-  );
+  const free = guidedAttachVerdict(plans, { mode: "observe", url: "https://staging.example.com" });
+  assert.ok(free.ok);
+  assert.equal("guided" in free, false, "no plan: the list replaces the path rule, as before");
   const built = guidedPlan({ address: "https://staging.example.com", areas: ["forms"], care: "look-only" });
   assert.ok(built.ok);
   const p = plans.add(built.plan);
   const verdict = guidedAttachVerdict(plans, { planId: p.planId, mode: "observe", url: "https://staging.example.com" });
   assert.ok(verdict.ok);
-  assert.equal(verdict.operatorAuthPosts, false);
+  assert.equal(verdict.guided, true);
+  // What the attach makes of it: the environment's list is kept, but a listed POST must also look like a sign-in by its path.
+  const env = { SCENESCOUT_AUTH_POSTS: "POST /api/login, POST /api/orders" };
+  const rules = writeRulesSettings({}, env, verdict.guided === true);
+  const list = (url: string) => ({
+    entries: readPostEntries(rules.authPosts!.entries).entries,
+    appUrl: "https://staging.example.com",
+    url,
+    andSignInPath: true,
+  });
+  assert.equal(isAuthExempt("observe", "POST", "/api/login", false, list("https://staging.example.com/api/login")), true);
+  assert.equal(
+    isAuthExempt("observe", "POST", "/api/orders", false, list("https://staging.example.com/api/orders")),
+    false,
+    "listed, but not a sign-in by its path",
+  );
+  // The contrast: with no plan the same list lets /api/orders out as a sign-in.
+  const unguided = writeRulesSettings({}, env, false);
+  assert.equal(
+    isAuthExempt("observe", "POST", "/api/orders", false, {
+      entries: readPostEntries(unguided.authPosts!.entries).entries,
+      appUrl: "https://staging.example.com",
+      url: "https://staging.example.com/api/orders",
+    }),
+    true,
+  );
 });
 
 test("guided gate: an accepted plan is spent when no session carries it any more, so a later check asks again", () => {
@@ -3129,6 +3157,7 @@ test("config: the strict preset expands to every lock, and a key beside it repla
     dedup: "rule",
     evidence: "file",
     uploads: "fixtures",
+    refuseDestructiveGets: true,
   });
   const loosened = parsed('{"preset": "strict", "maxMode": "read-only", "readPosts": ["POST /api/search"]}');
   assert.equal(loosened.maxMode, "read-only");
@@ -3486,15 +3515,11 @@ test("config: check, ci and a first look stop with exit 2 on a --mode above the 
   }
 });
 
-test("config: uploads and projectsRoot are checked like every key, and the locks not enforced yet are still unknown keys", () => {
+test("config: uploads and projectsRoot are checked like every key", () => {
   const refused: Array<[string, RegExp]> = [
     ['{"uploads": "none"}', /"uploads" must be one of "fixtures", "project", not "none"/],
     ['{"projectsRoot": "projects"}', /"projectsRoot" must be the absolute path of a folder, not "projects"/],
     ['{"projectsRoot": ["/srv/projects"]}', /"projectsRoot" must be the absolute path of a folder/],
-    // Their rule exists (writeRulesSettings), but the browser engine reads them from its environment: a key that did nothing would look like a lock.
-    ['{"writeClassifier": "strict"}', /unknown key "writeClassifier"/],
-    ['{"refuseDestructiveGets": true}', /unknown key "refuseDestructiveGets"/],
-    ['{"authPosts": ["POST /api/login"]}', /unknown key "authPosts"/],
   ];
   for (const [text, why] of refused) {
     const r = parsePolicy(text, "config.json");
@@ -3613,7 +3638,7 @@ test("write rules: the file and the environment each turn the strict classifier 
   const on = { SCENESCOUT_STRICT_WRITES: "1", SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1" };
   // Nothing set: today's defaults.
   const none = writeRulesSettings({}, {}, false);
-  assert.deepEqual(none, { writeClassifier: "standard", refuseDestructiveGets: false, authPosts: null, notes: [] });
+  assert.deepEqual(none, { writeClassifier: "standard", refuseDestructiveGets: false, authPosts: null, notes: [], from: {} });
   // The file stricter than the environment: on, with the environment unset or off.
   for (const env of [{}, { SCENESCOUT_STRICT_WRITES: "0", SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "off" }]) {
     const r = writeRulesSettings({ writeClassifier: "strict", refuseDestructiveGets: true }, env, false);
@@ -3627,7 +3652,13 @@ test("write rules: the file and the environment each turn the strict classifier 
   assert.match(envWins.notes.join("; "), /writeClassifier "strict": SCENESCOUT_STRICT_WRITES is stricter than the config's "standard"/);
   assert.match(envWins.notes.join("; "), /refuseDestructiveGets: SCENESCOUT_REFUSE_DESTRUCTIVE_GETS is stricter than the config's false/);
   // The environment alone: as today.
-  assert.deepEqual(writeRulesSettings({}, on, false), { writeClassifier: "strict", refuseDestructiveGets: true, authPosts: null, notes: [] });
+  assert.deepEqual(writeRulesSettings({}, on, false), {
+    writeClassifier: "strict",
+    refuseDestructiveGets: true,
+    authPosts: null,
+    notes: [],
+    from: { writeClassifier: "SCENESCOUT_STRICT_WRITES", refuseDestructiveGets: "SCENESCOUT_REFUSE_DESTRUCTIVE_GETS" },
+  });
   // An environment value that cannot be read is an error naming it, as the attach reports it today.
   assert.throws(() => writeRulesSettings({ writeClassifier: "strict" }, { SCENESCOUT_STRICT_WRITES: "yes" }, false), /SCENESCOUT_STRICT_WRITES must be 1 or 0/);
 });
@@ -3655,6 +3686,302 @@ test("write rules: the file's authPosts is the most the environment may name, an
   // A guided check keeps the list, and asks the path rule as well, rather than dropping it.
   assert.deepEqual(writeRulesSettings(file, {}, true).authPosts, { entries: file.authPosts, andSignInPath: true });
   assert.deepEqual(writeRulesSettings({}, { SCENESCOUT_AUTH_POSTS: "POST /api/login" }, true).authPosts, { entries: ["POST /api/login"], andSignInPath: true });
+});
+
+// ── The write-judgement keys in the config: writeClassifier, refuseDestructiveGets, authPosts (#546) ──
+
+test("config: writeClassifier, refuseDestructiveGets and authPosts are keys, checked like every other", () => {
+  assert.deepEqual(
+    parsed('{"writeClassifier": "strict", "refuseDestructiveGets": true, "authPosts": ["POST /api/login", " POST https://idp.example.com/oauth/token "]}'),
+    {
+      writeClassifier: "strict",
+      refuseDestructiveGets: true,
+      authPosts: ["POST /api/login", "POST https://idp.example.com/oauth/token"],
+    },
+  );
+  assert.deepEqual(parsed('{"writeClassifier": "standard", "refuseDestructiveGets": false, "authPosts": []}'), {
+    writeClassifier: "standard",
+    refuseDestructiveGets: false,
+    authPosts: [],
+  });
+  const refused: Array<[string, RegExp]> = [
+    ['{"writeClassifier": "paranoid"}', /"writeClassifier" must be one of "standard", "strict", not "paranoid"/],
+    ['{"writeClassifier": true}', /"writeClassifier" must be one of "standard", "strict", not true/],
+    ['{"refuseDestructiveGets": "yes"}', /"refuseDestructiveGets" must be true or false/],
+    ['{"authPosts": "POST /api/login"}', /"authPosts" must be a list of strings/],
+    ['{"authPosts": ["GET /api/login"]}', /"authPosts" has entries that are not valid: "GET \/api\/login"/],
+    ['{"authPosts": ["POST /api/login?next=/"]}', /"authPosts" has entries that are not valid/],
+    ['{"authPost": ["POST /api/login"]}', /unknown key "authPost"/],
+  ];
+  for (const [text, why] of refused) {
+    const r = parsePolicy(text, "config.json");
+    assert.ok(!r.ok && why.test(r.error), `${text}: ${r.ok ? "taken" : r.error}`);
+  }
+  assert.ok(
+    !parsePolicy(JSON.stringify({ authPosts: Array.from({ length: 21 }, (_, i) => `POST /api/login${i}`) }), "c.json").ok,
+    "at most 20, as the read POSTs",
+  );
+});
+
+test("config: the strict preset refuses destructive page loads, sets no classifier or sign-in list, and a key beside it replaces its value", () => {
+  const strict = parsed('{"preset": "strict"}');
+  assert.equal(strict.refuseDestructiveGets, true);
+  assert.equal(strict.writeClassifier, undefined, "the strict classifier refuses writes the standard one lets out: a team turns it on by name");
+  assert.equal(strict.authPosts, undefined, "a sign-in list names one app's endpoints");
+  assert.equal(parsed('{"preset": "strict", "refuseDestructiveGets": false}').refuseDestructiveGets, false);
+  // What the session gets from the preset, against the same environment with no file.
+  assert.equal(writeRulesSettings(strict, {}, false).refuseDestructiveGets, true);
+  assert.equal(writeRulesSettings({}, {}, false).refuseDestructiveGets, false);
+});
+
+test("config: the write-judgement locks hold against the environment and the project's own file, and either may only tighten them", () => {
+  const lock: Policy = { writeClassifier: "strict", refuseDestructiveGets: true, authPosts: ["POST /api/login"] };
+  // The environment turned off, or naming more sign-ins: the file's values hold.
+  const off = { SCENESCOUT_STRICT_WRITES: "0", SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "0", SCENESCOUT_AUTH_POSTS: "POST /api/login, POST /api/orders" };
+  const held = writeRulesSettings(lock, off, false);
+  assert.equal(held.writeClassifier, "strict");
+  assert.equal(held.refuseDestructiveGets, true);
+  assert.deepEqual(held.authPosts?.entries, ["POST /api/login"]);
+  assert.deepEqual(held.from, {
+    writeClassifier: "the SceneScout config",
+    refuseDestructiveGets: "the SceneScout config",
+    authPosts: "the SceneScout config, narrowed by SCENESCOUT_AUTH_POSTS",
+  });
+  // The contrast: with no file, the same environment is what the session runs with.
+  const free = writeRulesSettings({}, off, false);
+  assert.equal(free.writeClassifier, "standard");
+  assert.equal(free.refuseDestructiveGets, false);
+  assert.deepEqual(free.authPosts?.entries, ["POST /api/login", "POST /api/orders"]);
+  assert.equal(free.from.authPosts, "SCENESCOUT_AUTH_POSTS");
+
+  // A project's own file: it cannot loosen the operator's, and it may tighten each.
+  const looser: Policy = { writeClassifier: "standard", refuseDestructiveGets: false, authPosts: ["POST /api/login", "POST /api/orders"] };
+  assert.deepEqual(tightenPolicy(lock, looser), lock);
+  assert.deepEqual(tightenPolicy({ writeClassifier: "standard", refuseDestructiveGets: false, authPosts: ["POST /api/login", "POST /api/sso"] }, lock), lock);
+  assert.deepEqual(tightenPolicy({}, lock), { ...lock, authPostsNarrowOnly: true }, "the operator set none: the project's own apply, its list only narrowing");
+  assert.deepEqual(tightenPolicy({ authPosts: [] }, { authPosts: ["POST /api/login"] }).authPosts, [], "[] allows none, whatever the project lists");
+  // The same over a stand-in disk, as an attach reads it.
+  const at = (dir: string): string => path.join(dir, ".scenescout", "config.json");
+  const files = new Map<string, string>([[at("/srv/app"), JSON.stringify(looser)]]);
+  const disk = { exists: (f: string) => files.has(f), read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+  const joined = withProjectPolicy(loadedOf(lock), "/srv/app", disk);
+  assert.ok(joined.ok);
+  assert.equal(joined.loaded.policy.writeClassifier, "strict");
+  assert.equal(joined.loaded.policy.refuseDestructiveGets, true);
+  assert.deepEqual(joined.loaded.policy.authPosts, ["POST /api/login"]);
+  // No tool argument names any of the three: scout_attach takes them from here and the environment only (mcp-check holds its schema).
+});
+
+test("config: a project's own sign-in list, where the operator set none, only narrows the path rule, so it cannot let a write out as a sign-in", () => {
+  const app = "https://app.example.com";
+  const at = (dir: string): string => path.join(dir, ".scenescout", "config.json");
+  const project: Policy = { authPosts: ["POST /api/login", "POST /api/orders"] };
+  const files = new Map<string, string>([[at("/srv/app"), JSON.stringify(project)]]);
+  const disk = { exists: (f: string) => files.has(f), read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+  const exempt = (rules: ReturnType<typeof writeRulesSettings>, pathname: string, mode: WriteMode = "observe") =>
+    isAuthExempt(mode, "POST", pathname, false, {
+      entries: readPostEntries(rules.authPosts!.entries).entries,
+      appUrl: app,
+      url: `${app}${pathname}`,
+      andSignInPath: rules.authPosts!.andSignInPath,
+    });
+  // No operator file and no environment list: without the project's file the path rule refuses POST /api/orders in observe.
+  assert.equal(isAuthExempt("observe", "POST", "/api/orders", false, null), false);
+  const joined = withProjectPolicy(NO_POLICY, "/srv/app", disk);
+  assert.ok(joined.ok);
+  const rules = writeRulesSettings(joined.loaded.policy, {}, false);
+  assert.equal(rules.authPosts?.andSignInPath, true, "the project's list is joined to the path rule, not put in its place");
+  for (const mode of ["observe", "read-only", "safe-write"] as const)
+    assert.equal(exempt(rules, "/api/orders", mode), false, `${mode}: a listed write is not a sign-in`);
+  assert.equal(exempt(rules, "/api/login"), true, "listed and a sign-in by its path: out, as without the file");
+  // The contrast: the same list in the operator's own file replaces the path rule, the operator's choice.
+  const operator = writeRulesSettings(project, {}, false);
+  assert.equal(operator.authPosts?.andSignInPath, false);
+  assert.equal(exempt(operator, "/api/orders"), true);
+  // The operator's environment list beside the project's: their intersection, within what the operator listed, so no extra narrowing.
+  const withEnv = writeRulesSettings(joined.loaded.policy, { SCENESCOUT_AUTH_POSTS: "POST /api/orders" }, false);
+  assert.deepEqual(withEnv.authPosts, { entries: ["POST /api/orders"], andSignInPath: false });
+  // Both files list: the intersection, which is within the operator's list.
+  assert.deepEqual(tightenPolicy({ authPosts: ["POST /api/orders"] }, project), { authPosts: ["POST /api/orders"] });
+  // policy explain, with SCENESCOUT_CONFIG naming the operator's file and the project's in the folder it runs in, judges the same way.
+  const explainFiles = new Map<string, string>([
+    ["/op/config.json", JSON.stringify({ maxMode: "safe-write" })],
+    [at("/launch"), JSON.stringify(project)],
+  ]);
+  const reader = { exists: (f: string) => explainFiles.has(f), read: (f: string) => explainFiles.get(f)!, realpath: (f: string) => f };
+  const explain = (url: string): string => {
+    const out: string[] = [];
+    runPolicyCommand(["explain", "POST", url, "--mode", "observe"], {
+      env: { SCENESCOUT_CONFIG: "/op/config.json" },
+      readBody: () => "",
+      out: (line) => void out.push(line),
+      err: (line) => void out.push(line),
+      config: { launchDir: "/launch", reader },
+    });
+    return out.join("\n");
+  };
+  assert.match(explain(`${app}/api/orders`), /^ {2}observe +refused /m);
+  assert.match(explain(`${app}/api/login`), /^ {2}observe +allowed +a sign-in POST listed in /m);
+});
+
+test("a sign-in list joined to the path rule can only refuse more than the path rule alone, in every mode and on every path", () => {
+  const app = "https://app.example.com";
+  const paths = [
+    "/api/login",
+    "/api/orders",
+    "/api/auth/refresh",
+    "/oauth/token",
+    "/u/login/password",
+    "/account/password",
+    "/api/session/123/delete",
+    "/api/login/../users/delete",
+    "/api/login/%2e%2e/users/delete",
+    "/api/graphql",
+    "/logout",
+    "/api/things",
+  ];
+  const lists = [[], ["POST /api/login"], ["POST /api/orders", "POST /api/graphql"], ["POST /*/*"], ["POST /*", "POST /*/*", "POST /*/*/*"]];
+  let narrowedOut = 0;
+  for (const mode of ["observe", "read-only", "safe-write"] as const)
+    for (const entries of lists)
+      for (const p of paths)
+        for (const destructiveWire of [false, true]) {
+          const url = new URL(p, app).href;
+          const pathname = new URL(url).pathname;
+          const list = { entries: readPostEntries(entries).entries, appUrl: app, url };
+          const narrowed = isAuthExempt(mode, "POST", pathname, destructiveWire, { ...list, andSignInPath: true });
+          const pathRule = isAuthExempt(mode, "POST", pathname, destructiveWire, null);
+          if (narrowed) assert.equal(pathRule, true, `${mode} ${JSON.stringify(entries)} ${p}: let out by the list but not by the path rule`);
+          // The contrast: the same list in place of the path rule does let some of these out.
+          if (!pathRule && isAuthExempt(mode, "POST", pathname, destructiveWire, list)) narrowedOut++;
+        }
+  assert.ok(narrowedOut > 0, "a list in place of the path rule lets out POSTs the path rule refuses, so the check above can fail");
+});
+
+test("config: what the write-judgement locks did is said on the attach's and a command's Config line", () => {
+  const lock: Policy = { writeClassifier: "strict", refuseDestructiveGets: true, authPosts: ["POST /api/login"] };
+  const note = writeRulesNote(lock, writeRulesSettings(lock, {}, false)).join("; ");
+  assert.match(note, /writeClassifier "strict": writes are judged by the strict classifier/);
+  assert.match(note, /refuseDestructiveGets: page loads whose address is a destructive command are refused in observe and read-only/);
+  assert.match(note, /authPosts: only "POST \/api\/login" counts as signing in/);
+  assert.match(
+    writeRulesNote(lock, writeRulesSettings(lock, {}, true)).join("; "),
+    /and only when it also looks like a sign-in by its path \(a guided check\)/,
+  );
+  assert.match(writeRulesNote({ authPosts: [] }, writeRulesSettings({ authPosts: [] }, {}, false)).join("; "), /authPosts: no POST counts as signing in/);
+  // The environment's own settings are not the config's: nothing is said for them beyond what lost to the file.
+  assert.deepEqual(writeRulesNote({}, writeRulesSettings({}, { SCENESCOUT_STRICT_WRITES: "1" }, false)), []);
+  const applied = applyToCommand(loadedOf(lock), {}, [], { mode: "observe" });
+  assert.ok(applied.ok);
+  assert.equal(applied.writeRules?.writeClassifier, "strict");
+  assert.equal(applied.writeRules?.refuseDestructiveGets, true);
+  assert.deepEqual(applied.writeRules?.authPosts, { entries: ["POST /api/login"], andSignInPath: false });
+  assert.match(applied.note, /^Config: \/srv\/\.scenescout\/config\.json; writeClassifier "strict"/);
+  // An environment value the session cannot read stops the command, naming it.
+  const bad = applyToCommand(loadedOf(lock), { SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "maybe" }, [], { mode: "observe" });
+  assert.ok(!bad.ok && /SCENESCOUT_REFUSE_DESTRUCTIVE_GETS must be 1 or 0/.test(bad.error));
+  // No file: the command passes nothing, and the session reads the environment as before.
+  const none = applyToCommand(NO_POLICY, {}, [], { mode: "observe" });
+  assert.ok(none.ok && none.writeRules === undefined);
+});
+
+test("RouteGuard: a sign-in list in a guided check only narrows the path rule; outside one it replaces it", async () => {
+  const listed = { authPosts: ["POST /api/login", "POST /api/orders"] };
+  {
+    const { send } = guardRig("observe", { ...listed, narrowOnly: true });
+    assert.equal(await send("POST", "/api/login", { body: "{}" }).done, "fallback", "listed and a sign-in by its path");
+    assert.equal(await send("POST", "/api/orders", { body: "{}" }).done, "fulfill 403", "listed, but not a sign-in by its path");
+    assert.equal(await send("POST", "/api/auth/refresh", { body: "{}" }).done, "fulfill 403", "a sign-in by its path, but not listed");
+  }
+  {
+    const { send } = guardRig("observe", listed);
+    assert.equal(await send("POST", "/api/orders", { body: "{}" }).done, "fallback", "the list alone decides");
+  }
+});
+
+test("config: requireGuidedPlan holds an unattended ci run to observe before it starts; a person's command is not held", () => {
+  const gated = loadedOf({ requireGuidedPlan: true });
+  const flag = applyToCommand(gated, {}, ["--mode", "read-only"], { mode: "read-only", agentDriven: true });
+  assert.ok(!flag.ok);
+  assert.match(
+    flag.error,
+    /mode "read-only" needs a guided plan the person accepts \(the config's requireGuidedPlan\), which an unattended run cannot have: use --mode observe/,
+  );
+  assert.doesNotMatch(flag.error, /Do not retry/);
+  const lowered = applyToCommand(gated, {}, [], { mode: "read-only", agentDriven: true });
+  assert.ok(lowered.ok);
+  assert.equal(lowered.mode, "observe");
+  assert.match(lowered.note, /mode "observe": the default "read-only" needs a guided plan the person accepts/);
+  assert.ok(applyToCommand(gated, {}, ["--mode", "observe"], { mode: "observe", agentDriven: true }).ok, "observe needs no plan");
+  // The contrasts: a command a person runs (check, a first look), and ci with no requireGuidedPlan, keep their mode.
+  const person = applyToCommand(gated, {}, ["--mode", "read-only"], { mode: "read-only" });
+  assert.ok(person.ok && person.mode === "read-only");
+  const ungated = applyToCommand(loadedOf({}), {}, ["--mode", "read-only"], { mode: "read-only", agentDriven: true });
+  assert.ok(ungated.ok && ungated.mode === "read-only");
+});
+
+test("config: a command's refusal names the flag to pass, an attach's the mode to attach in", () => {
+  const capped = loadedOf({ maxMode: "observe" });
+  const command = applyToCommand(capped, {}, ["--mode", "read-only"], { mode: "read-only" });
+  assert.ok(!command.ok);
+  assert.match(command.error, /mode "read-only" is above the config's maxMode "observe": use --mode observe/);
+  assert.doesNotMatch(command.error, /attach in/);
+  const attach = resolveSettings(capped, {}, { mode: "read-only" }, DEFAULTS);
+  assert.match(attach.refused[0].why, /: attach in "observe"$/);
+  const middle = applyToCommand(loadedOf({ maxMode: "read-only" }), {}, ["--mode", "destructive"], { mode: "destructive" });
+  assert.ok(!middle.ok && /use --mode read-only or a stricter mode/.test(middle.error));
+});
+
+test("config: evidence capped at file or off keeps scout_screenshot's and scout_cards' pictures out of the conversation; inline does not", () => {
+  for (const evidence of ["file", "off"] as const) {
+    const why = conversationPictureRefusal(loadedOf({ evidence }), "scout_screenshot", "scout_capture saves a picture of one element to a file instead");
+    assert.match(
+      why ?? "",
+      new RegExp(`evidence "${evidence}" keeps pictures of the app out of the conversation, so scout_screenshot is not run: scout_capture saves`),
+    );
+  }
+  assert.equal(conversationPictureRefusal(loadedOf({ evidence: "inline" }), "scout_screenshot"), null);
+  assert.equal(conversationPictureRefusal(loadedOf({}), "scout_screenshot"), null, "a config that leaves evidence out");
+  assert.equal(conversationPictureRefusal(NO_POLICY, "scout_screenshot"), null, "no config");
+  assert.match(conversationPictureRefusal(loadedOf(PRESET_POLICY.strict), "scout_screenshot") ?? "", /evidence "file"/, "the strict preset");
+  assert.match(
+    conversationPictureRefusal(loadedOf({ egress: "none", evidence: "inline" }), "scout_screenshot") ?? "",
+    /egress "none"/,
+    "egress still refuses it",
+  );
+  // A project's file that lowers evidence lowers it here too; one that raises it does not.
+  assert.notEqual(conversationPictureRefusal(loadedOf(tightenPolicy({ evidence: "inline" }, { evidence: "file" })), "scout_screenshot"), null);
+  assert.notEqual(conversationPictureRefusal(loadedOf(tightenPolicy({ evidence: "file" }, { evidence: "inline" })), "scout_screenshot"), null);
+});
+
+test("policy explain: the config's write-judgement locks decide the verdict, as an attach would, and are named", () => {
+  const run = (config: Policy | null, env: Record<string, string> = {}): string => {
+    const files = new Map<string, string>(config ? [[path.join("/launch", ".scenescout", "config.json"), JSON.stringify(config)]] : []);
+    const reader = { exists: (f: string) => files.has(f), read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+    const out: string[] = [];
+    runPolicyCommand(["explain", "GET", "https://app.example.com/things/9/delete", "--mode", "observe"], {
+      env,
+      readBody: () => "",
+      out: (line) => void out.push(line),
+      err: (line) => void out.push(line),
+      config: { launchDir: "/launch", reader },
+    });
+    return out.join("\n");
+  };
+  const locked = run({ refuseDestructiveGets: true }, { SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "0" });
+  assert.match(locked, /^  observe +refused +as a page load: its address is a destructive command, and the SceneScout config turns that refusal on/m);
+  assert.match(locked, /Settings read from this environment and the config: refuseDestructiveGets \(the SceneScout config\)/);
+  // The contrasts: no file, and a file that leaves it out, let the page load out.
+  assert.match(run(null), /^  observe +allowed /m);
+  assert.match(run({ maxMode: "observe" }), /^  observe +allowed /m);
+  // The environment still turns it on where the file is silent, and is named as the source.
+  assert.match(run({ maxMode: "observe" }, { SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1" }), /SCENESCOUT_REFUSE_DESTRUCTIVE_GETS turns that refusal on/);
+  const strict = run({ writeClassifier: "strict" });
+  assert.match(strict, /writeClassifier "strict" \(the SceneScout config\)/);
+  // policySettingsFrom with the rules: the classifier and sign-in list are the config's, the environment's ignored where it is looser.
+  const settings = policySettingsFrom({ SCENESCOUT_STRICT_WRITES: "0" }, writeRulesSettings({ writeClassifier: "strict", authPosts: [] }, {}, false));
+  assert.equal(settings.classifier, "strict");
+  assert.deepEqual(settings.authPosts, []);
 });
 
 // ── scenescout policy explain (#538) ──────────────────────────────────────────
@@ -3806,14 +4133,30 @@ test("policy explain: its verdicts are the route handler's on the same request, 
     { method: "PUT", path: "/api/things/3", body: "{}" },
     { method: "PATCH", path: "/api/things/3", body: "{}" },
     { method: "DELETE", path: "/api/things/3" },
+    // A listed sign-in path reached by another request: a dot segment, an encoded one, a query override, a header override.
+    { method: "POST", path: "/api/session-start/../things/3/delete", body: "{}" },
+    { method: "POST", path: "/api/session-start/%2e%2e/things/3/delete", body: "{}" },
+    { method: "POST", path: "/api/session-start?_method=DELETE", body: "{}" },
+    { method: "POST", path: "/api/session-start", body: "{}", headers: { "x-http-method-override": "DELETE" } },
+    { method: "POST", path: "/api/auth/login", body: '{"_method":"DELETE"}', headers: { "content-type": "application/json" } },
   ];
   for (const classifier of ["standard", "strict"] as const)
     for (const refuseGets of [false, true])
-      for (const authPosts of [undefined, ["POST /api/session-start"]])
+      for (const [authPosts, narrowOnly] of [
+        [undefined, false],
+        [["POST /api/session-start"], false],
+        [["POST /api/session-start", "POST /api/auth/login"], true],
+      ] as const)
         for (const rule of ["observe", "read-only", "safe-write"] as const)
           for (const owned of [false, true])
             for (const r of requests) {
-              const handler = await guardRig(rule, { classifier, refuseGets, authPosts, owned: () => owned }).send(r.method, r.path, {
+              const handler = await guardRig(rule, {
+                classifier,
+                refuseGets,
+                authPosts: authPosts ? [...authPosts] : undefined,
+                narrowOnly,
+                owned: () => owned,
+              }).send(r.method, r.path, {
                 type: r.type ?? "xhr",
                 body: r.body ?? null,
                 headers: r.headers ?? {},
@@ -3829,10 +4172,11 @@ test("policy explain: its verdicts are the route handler's on the same request, 
                   classifier,
                   refuseDestructiveGets: refuseGets,
                   authPosts: authPosts ? readPostEntries(authPosts).entries : null,
+                  authPostsNarrowOnly: narrowOnly,
                 },
               }).verdicts;
               const explained = v.outcome === "depends" ? (owned ? "allowed" : "refused") : v.outcome;
-              const label = `${classifier} gets=${refuseGets} auth=${authPosts ?? "path rule"} ${rule} owned=${owned} ${r.method} ${r.path} ${JSON.stringify(r.headers ?? {})}`;
+              const label = `${classifier} gets=${refuseGets} auth=${authPosts ?? "path rule"} narrow=${narrowOnly} ${rule} owned=${owned} ${r.method} ${r.path} ${JSON.stringify(r.headers ?? {})}`;
               assert.equal(explained, handler === "fallback" ? "allowed" : "refused", `${label}: handler ${handler}, explain ${v.outcome} (${v.rule})`);
             }
 });

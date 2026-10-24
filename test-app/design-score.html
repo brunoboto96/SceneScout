@@ -46,6 +46,8 @@
        ?with=heights gives the six buttons six heights, ?with=grays writes the
        notes in twelve grays. ?with=touching,heights,grays is all three.
        ?with=scrolled drops the gap in a stack below a scroll pane's fold.
+       ?section=n makes it another route with its own heading, so several
+       pages can be compared with each other.
        The list group, the chat bubbles and the carousel's slides are joined on
        purpose in every variant and are never touching. -->
   <main>
@@ -99,6 +101,9 @@
   </main>
   <script>
     const wanted = (new URLSearchParams(location.search).get("with") || "").split(",");
+    // ?section=n is part of the route, so one page can stand for several: each names its own heading.
+    const section = new URLSearchParams(location.search).get("section");
+    if (section) document.querySelector("h1").textContent = "Account settings, part " + section;
     if (wanted.includes("touching")) document.body.classList.add("touching");
     if (wanted.includes("scrolled")) document.body.classList.add("scrolled");
     if (wanted.includes("heights")) {

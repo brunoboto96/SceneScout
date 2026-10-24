@@ -34,7 +34,7 @@ import {
   type ReadPost,
   type WriteMode,
 } from "./policy.js";
-import { applyToCommand, readLaunchPolicy, withProjectPolicy, type PolicyReader } from "./project-config.js";
+import { applyToCommand, readLaunchPolicy, withProjectPolicy, type PolicyReader, type SessionWriteRules, type WriteRulesSources } from "./project-config.js";
 import { redactRoute } from "./redact.js";
 import { pathnameOf, routedWriteVerdict } from "./route-guard.js";
 import {
@@ -172,17 +172,33 @@ export interface PolicySettings {
   refuseDestructiveGets: boolean;
   /** SCENESCOUT_READ_POSTS, parsed. */
   readPosts: readonly ReadPost[];
-  /** SCENESCOUT_AUTH_POSTS, parsed, or null when unset (the path rule decides). */
+  /** The config's authPosts or SCENESCOUT_AUTH_POSTS, parsed, or null when neither sets a list (the path rule decides). */
   authPosts: readonly ReadPost[] | null;
+  /** True: a listed POST must also look like a sign-in by its path (a list only a project's own file set; project-config.ts writeRulesSettings). */
+  authPostsNarrowOnly?: boolean;
+  /** What turned each write-judgement setting on, when the operator's config was read (project-config.ts writeRulesSettings). Absent: the environment. */
+  from?: WriteRulesSources;
 }
 
-/** The settings from an environment, with the same parsers the server uses; a value the server would refuse throws as it would. */
-export function policySettingsFrom(env: Record<string, string | undefined>): PolicySettings {
+/**
+ * The settings from an environment, with the same parsers the server uses; a value the server would refuse throws as it would.
+ * `rules`: the write-judgement settings with the operator's config applied, as an attach takes them; absent, the environment's alone.
+ */
+export function policySettingsFrom(env: Record<string, string | undefined>, rules?: SessionWriteRules): PolicySettings {
+  if (!rules)
+    return {
+      classifier: writeClassifierSetting(env),
+      refuseDestructiveGets: refuseDestructiveGetsSetting(env),
+      readPosts: readPostEntries(readPostsSetting(undefined, env[READ_POSTS_ENV])).entries,
+      authPosts: authPostsSetting(env[AUTH_POSTS_ENV])?.entries ?? null,
+    };
   return {
-    classifier: writeClassifierSetting(env),
-    refuseDestructiveGets: refuseDestructiveGetsSetting(env),
+    classifier: rules.writeClassifier,
+    refuseDestructiveGets: rules.refuseDestructiveGets,
     readPosts: readPostEntries(readPostsSetting(undefined, env[READ_POSTS_ENV])).entries,
-    authPosts: authPostsSetting(env[AUTH_POSTS_ENV])?.entries ?? null,
+    authPosts: rules.authPosts ? readPostEntries(rules.authPosts.entries).entries : null,
+    authPostsNarrowOnly: rules.authPosts?.andSignInPath === true,
+    from: rules.from,
   };
 }
 
@@ -233,7 +249,7 @@ function verdictFor(
       return {
         mode,
         outcome: "refused",
-        rule: `as a page load: its address is a destructive command, and ${REFUSE_DESTRUCTIVE_GETS_ENV} is on (a script's ${method} is not judged by this rule and goes out)`,
+        rule: `as a page load: its address is a destructive command, and ${settings.from?.refuseDestructiveGets ?? REFUSE_DESTRUCTIVE_GETS_ENV} turns that refusal on (a script's ${method} is not judged by this rule and goes out)`,
         source: "strict-writes.ts destructiveGet",
       };
     return { mode, outcome: "allowed", rule: `${method} is a read, which every mode lets out`, source: "unload.ts isReadMethod" };
@@ -251,7 +267,7 @@ function verdictFor(
     foreign: null,
     offApp: null,
     readPost: readPost !== null,
-    authList: settings.authPosts ? { entries: settings.authPosts, appUrl, url: input.url } : null,
+    authList: settings.authPosts ? { entries: settings.authPosts, appUrl, url: input.url, andSignInPath: settings.authPostsNarrowOnly === true } : null,
   });
   if (verdict.kind === "refuse") return { mode, outcome: "refused", rule: verdict.why, source: "route-guard.ts routedWriteVerdict" };
   if (verdict.kind === "auth")
@@ -259,7 +275,7 @@ function verdictFor(
       mode,
       outcome: "allowed",
       rule: settings.authPosts
-        ? `a sign-in POST listed in ${AUTH_POSTS_ENV}`
+        ? `a sign-in POST listed in ${settings.from?.authPosts ?? AUTH_POSTS_ENV}${settings.authPostsNarrowOnly ? " that also looks like a sign-in by its path" : ""}`
         : mode === "observe"
           ? "a sign-in, sign-out or token refresh by its path (observe's narrow sign-in rule)"
           : "an auth or session request by its path",
@@ -315,7 +331,7 @@ export function formatExplanation(url: string, e: PolicyExplanation, settings: P
   if (isReadMethod(e.judgedAs)) {
     lines.push(
       e.destructiveAddress
-        ? `Its address reads as a destructive command (strict-writes.ts destructiveGet).${settings.refuseDestructiveGets ? "" : ` A page load of it is refused in observe and read-only only when ${REFUSE_DESTRUCTIVE_GETS_ENV}=1.`}`
+        ? `Its address reads as a destructive command (strict-writes.ts destructiveGet).${settings.refuseDestructiveGets ? "" : ` A page load of it is refused in observe and read-only only when ${REFUSE_DESTRUCTIVE_GETS_ENV}=1 or the config sets refuseDestructiveGets.`}`
         : "Its address does not read as a destructive command.",
     );
   } else {
@@ -325,13 +341,24 @@ export function formatExplanation(url: string, e: PolicyExplanation, settings: P
   }
   const width = Math.max(...e.verdicts.map((v) => v.mode.length));
   for (const v of e.verdicts) lines.push(`  ${v.mode.padEnd(width)}  ${v.outcome.padEnd(8)}  ${v.rule}  [${v.source}]`);
+  const from = settings.from ?? {};
+  const byConfig = (source: string | undefined): boolean => source !== undefined && source.startsWith("the SceneScout config");
   const on = [
-    settings.classifier === "strict" ? `${STRICT_WRITES_ENV}=1` : "",
-    settings.refuseDestructiveGets ? `${REFUSE_DESTRUCTIVE_GETS_ENV}=1` : "",
+    settings.classifier === "strict" ? (byConfig(from.writeClassifier) ? `writeClassifier "strict" (${from.writeClassifier})` : `${STRICT_WRITES_ENV}=1`) : "",
+    settings.refuseDestructiveGets
+      ? byConfig(from.refuseDestructiveGets)
+        ? `refuseDestructiveGets (${from.refuseDestructiveGets})`
+        : `${REFUSE_DESTRUCTIVE_GETS_ENV}=1`
+      : "",
     settings.readPosts.length > 0 ? `${READ_POSTS_ENV} (${settings.readPosts.length})` : "",
-    settings.authPosts ? `${AUTH_POSTS_ENV} (${settings.authPosts.length})` : "",
+    settings.authPosts
+      ? byConfig(from.authPosts)
+        ? `authPosts (${settings.authPosts.length}, ${from.authPosts})`
+        : `${AUTH_POSTS_ENV} (${settings.authPosts.length})`
+      : "",
   ].filter(Boolean);
-  lines.push(`Settings read from this environment: ${on.length > 0 ? on.join(", ") : "none (the defaults)"}.`);
+  const anyConfig = [from.writeClassifier, from.refuseDestructiveGets, from.authPosts].some(byConfig);
+  lines.push(`Settings read from this environment${anyConfig ? " and the config" : ""}: ${on.length > 0 ? on.join(", ") : "none (the defaults)"}.`);
   lines.push(
     `Assumed: the app is ${e.appUrl} (--app to change it), and its own top page sent the request. ` +
       "A write sent from another site's embedded frame is judged by the embed rules instead (refused below destructive, except on the app's sign-in page and for an origin trusted in safe-write), " +
@@ -377,6 +404,7 @@ export function runPolicyCommand(
   }
   let env = io.env;
   let configNote = "";
+  let rules: SessionWriteRules | undefined;
   if (io.config) {
     // As configureCommand reads it, short of the projectsRoot fence: nothing is opened or written, so no folder is out of bounds.
     const launch = readLaunchPolicy(io.env, io.config.launchDir, io.config.reader);
@@ -385,11 +413,12 @@ export function runPolicyCommand(
     const applied = applyToCommand(loaded.loaded, io.env, [], { mode: "observe" });
     if (!applied.ok) return fail(applied.error);
     if (applied.readPosts !== undefined) env = { ...io.env, [READ_POSTS_ENV]: applied.readPosts.join("\n") };
+    rules = applied.writeRules;
     configNote = applied.note;
   }
   let settings: PolicySettings;
   try {
-    settings = policySettingsFrom(env);
+    settings = policySettingsFrom(env, rules);
   } catch (err) {
     return fail(err instanceof Error ? err.message : String(err));
   }

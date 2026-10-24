@@ -1287,6 +1287,31 @@ export interface DesignScore {
   clarity: number;
   /** Every deduction behind the numbers, largest first (scoreFrom). */
   deductions: ScoreDeduction[];
+  /** The design-system values the page uses, kept with its score so pages can be compared (siteConsistency). */
+  system?: DesignSystemSample;
+}
+
+/**
+ * The design-system values one page uses outside the shell's landmarks, as
+ * the audit measured them. Each list is distinct values, sorted. Kept with the
+ * page's score so the report can set the pages of a run side by side
+ * (siteConsistency).
+ */
+export interface DesignSystemSample {
+  /** Button heights, px, rounded to 2px as the CONSISTENCY line counts them. */
+  buttonHeights: number[];
+  /** Corner radii of buttons 12–80px tall: "6px", or "pill" for one at least half the height. */
+  buttonRadii: string[];
+  /** The h1's treatment: "28px 700". */
+  headers: string[];
+  /** A tab's treatment ([role=tab]): "36px tall, 6px radius". */
+  tabs: string[];
+  /** The gray census's steps: "rgb(64, 64, 64)". */
+  grays: string[];
+  /** Font sizes of text, px. */
+  fontSizes: number[];
+  /** Padding values used at least twice on the page, px. */
+  spacing: number[];
 }
 
 /** An image the audit measured: its natural size, its rendered box and its computed object-fit. */
@@ -1439,7 +1464,7 @@ export interface ScoreDeduction {
 }
 
 /** "-16 touching containers ×2": a deduction as the report prints it. */
-export function formatDeduction(d: ScoreDeduction): string {
+export function formatDeduction(d: Pick<ScoreDeduction, "label" | "count" | "points">): string {
   return `-${d.points} ${d.label}${d.count > 1 ? ` ×${d.count}` : ""}`;
 }
 
@@ -1483,6 +1508,274 @@ export function scoreFrom(deductions: readonly ScoreDeduction[]): DesignScore {
     clarity: sub("clarity"),
     deductions: sorted,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Consistency across pages: each page's design-system values set beside the
+// other audited pages', and a page charged for a value no other page uses.
+// ---------------------------------------------------------------------------
+
+/** Pages that must carry a sample, and use a property, before that property is compared across them (memory.ts CHROME_MIN_ROUTES). */
+export const SITE_MIN_PAGES = 4;
+/** A value is the site's convention when at least this share of the pages using the property use it. */
+const SITE_DOMINANT_SHARE = 0.6;
+/** Listed points per value a page alone uses, and the most one property may cost, before the suggestion weight halves them. */
+const SITE_EACH = 4;
+const SITE_PROPERTY_CAP = 8;
+/** The most the whole comparison may take off one page, after the weight. */
+const SITE_CAP = 10;
+
+type SiteKey = keyof DesignSystemSample;
+
+/** How one property of the sample is compared. */
+interface SiteRule {
+  key: SiteKey;
+  /** Plural and singular nouns, as a line names them. */
+  noun: string;
+  one: string;
+  /** Appended to a list of numbers. */
+  unit: string;
+  /**
+   * The count the page's own rule allows before it charges (the SYSTEM
+   * SUMMARY's healthy range): values past it were already paid for on the
+   * page, so that many of the page's lone values are not charged again.
+   * Null where no per-page rule counts the property.
+   */
+  healthy: number | null;
+  /**
+   * Charged, or reported only. Type sizes and paddings are listed but not
+   * charged: a home page's display heading and a component's own padding are
+   * ordinary values one page alone uses.
+   */
+  scored: boolean;
+  /** Two values that count as one; exact match when absent. */
+  near?: (a: string, b: string) => boolean;
+  /** The values compared; every value when absent. */
+  compared?: (value: string) => boolean;
+}
+
+/** Grays within GRAY_STEP in every channel are one step, across pages as within one (grayCensus). */
+const nearGray = (a: string, b: string): boolean => {
+  const p = parseRgb(a);
+  const q = parseRgb(b);
+  return !!p && !!q && [0, 1, 2].every((i) => Math.abs(p[i] - q[i]) <= GRAY_STEP);
+};
+
+/**
+ * A pale tint: light (every channel at least PALE_FLOOR) and visibly tinted
+ * (channels more than TINT_SPREAD apart). The census counts it as a gray, but
+ * a pale green, blue or amber surface is a status chip or a highlighted row,
+ * and it belongs to the page that shows that status. On the demo app and two
+ * public sites every gray one page alone used was such a tint, so across pages
+ * they are left out; a slate or zinc scale, tinted but not pale, is compared.
+ */
+const PALE_FLOOR = 200;
+const TINT_SPREAD = 12;
+const notPaleTint = (value: string): boolean => {
+  const p = parseRgb(value);
+  if (!p) return false;
+  const [lo, hi] = [Math.min(p[0], p[1], p[2]), Math.max(p[0], p[1], p[2])];
+  return !(lo >= PALE_FLOOR && hi - lo > TINT_SPREAD);
+};
+
+const SITE_RULES: readonly SiteRule[] = [
+  { key: "buttonHeights", noun: "button heights", one: "button height", unit: "px", healthy: 3, scored: true },
+  { key: "buttonRadii", noun: "button radii", one: "button radius", unit: "", healthy: 2, scored: true },
+  { key: "headers", noun: "page headers (h1)", one: "page header (h1)", unit: "", healthy: null, scored: true },
+  { key: "tabs", noun: "tab styles", one: "tab style", unit: "", healthy: null, scored: true },
+  { key: "grays", noun: "grays", one: "gray", unit: "", healthy: 6, scored: true, near: nearGray, compared: notPaleTint },
+  { key: "fontSizes", noun: "font sizes", one: "font size", unit: "px", healthy: 7, scored: false, near: (a, b) => Math.abs(Number(a) - Number(b)) < 0.5 },
+  { key: "spacing", noun: "spacing steps", one: "spacing step", unit: "px", healthy: null, scored: false },
+];
+
+/** One value of a property and the pages that use it. */
+export interface SiteValue {
+  value: string;
+  routes: string[];
+}
+
+/** One property across the audited pages. */
+export interface SiteProperty {
+  key: SiteKey;
+  noun: string;
+  unit: string;
+  scored: boolean;
+  /** Pages that use the property at all. */
+  pages: number;
+  /** Every distinct value, the most widely used first. */
+  values: SiteValue[];
+  /** The value at least SITE_DOMINANT_SHARE of those pages use; null when none does, or too few pages use the property to say. */
+  dominant: string | null;
+  /** Route → the values only that page uses, where the property has a dominant value. */
+  outliers: Record<string, string[]>;
+}
+
+/** The audited pages' design-system values side by side, and what each page is charged for its lone values. */
+export interface SiteConsistency {
+  /** Pages with a sample. */
+  pages: number;
+  properties: SiteProperty[];
+  /** Route → its site deductions (dimension "consistency"); a page with none is absent. */
+  deductions: Record<string, ScoreDeduction[]>;
+}
+
+/** A list of values as a line prints it: "28, 32, 36px". */
+const listValues = (values: readonly string[], unit: string): string => (values.length === 0 ? "" : `${values.join(", ")}${unit}`);
+
+/**
+ * Set every audited page's design-system values beside the others'. Null
+ * until SITE_MIN_PAGES pages carry a sample. A property is compared once that
+ * many pages use it and one value is used on SITE_DOMINANT_SHARE of them:
+ * then a page pays, at the suggestion weight, for each value of a scored
+ * property that no other page uses ("a button height used only here"), less
+ * the values its own per-page rule already charged it for, capped per
+ * property and in all. The result depends on which pages were audited, so it
+ * is computed when it is read, never stored with a page's own score.
+ */
+export function siteConsistency(pages: Readonly<Record<string, { system?: DesignSystemSample }>>): SiteConsistency | null {
+  const sampled = Object.entries(pages)
+    .filter((e): e is [string, { system: DesignSystemSample }] => !!e[1].system)
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  if (sampled.length < SITE_MIN_PAGES) return null;
+  const properties: SiteProperty[] = [];
+  const charged = new Map<string, ScoreDeduction[]>();
+  for (const rule of SITE_RULES) {
+    // Each page's distinct values, as strings; then values that count as one (near) joined, the most widely used first.
+    const perRoute = sampled
+      .map(([route, p]) => [route, [...new Set((p.system[rule.key] ?? []).map(String))].filter((v) => !rule.compared || rule.compared(v))] as const)
+      .filter(([, v]) => v.length > 0);
+    const byValue = new Map<string, Set<string>>();
+    for (const [route, values] of perRoute) for (const v of values) byValue.set(v, (byValue.get(v) ?? new Set()).add(route));
+    const clusters: Array<{ value: string; routes: Set<string> }> = [];
+    for (const [value, routes] of [...byValue].sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0], "en", { numeric: true }))) {
+      const into = rule.near && clusters.find((c) => rule.near!(c.value, value));
+      if (into) for (const r of routes) into.routes.add(r);
+      else clusters.push({ value, routes: new Set(routes) });
+    }
+    // Joining near values can make a later cluster the widest, so the order is taken again after the join.
+    clusters.sort((a, b) => b.routes.size - a.routes.size || a.value.localeCompare(b.value, "en", { numeric: true }));
+    const using = perRoute.length;
+    const top = clusters[0];
+    const dominant = using >= SITE_MIN_PAGES && top && top.routes.size >= SITE_DOMINANT_SHARE * using ? top.value : null;
+    const outliers: Record<string, string[]> = {};
+    if (dominant !== null) {
+      for (const c of clusters) {
+        if (c.routes.size !== 1) continue;
+        const [route] = c.routes;
+        (outliers[route] ??= []).push(c.value);
+      }
+    }
+    properties.push({
+      key: rule.key,
+      noun: rule.noun,
+      unit: rule.unit,
+      scored: rule.scored,
+      pages: using,
+      values: clusters.map((c) => ({ value: c.value, routes: [...c.routes].sort() })),
+      dominant,
+      outliers,
+    });
+    if (!rule.scored) continue;
+    for (const [route, lone] of Object.entries(outliers)) {
+      const own = sampled.find(([r]) => r === route)![1].system[rule.key]?.length ?? 0;
+      const paid = rule.healthy === null ? 0 : Math.max(0, own - rule.healthy);
+      const count = Math.max(0, lone.length - paid);
+      const points = Math.round(Math.min(SITE_PROPERTY_CAP, count * SITE_EACH) * SUGGESTION_WEIGHT);
+      if (count === 0 || points === 0) continue;
+      const shown = rule.unit ? [...lone].sort((a, b) => Number(a) - Number(b)) : lone;
+      const label = `${lone.length > 1 ? rule.noun : rule.one} only on this page: ${listValues(shown.slice(0, 4), rule.unit)}`;
+      const list = charged.get(route) ?? [];
+      list.push({ dimension: "consistency", label, count, points });
+      charged.set(route, list);
+    }
+  }
+  // The cap in all: the largest first, the last one cut to what is left.
+  const deductions: Record<string, ScoreDeduction[]> = {};
+  for (const [route, list] of [...charged].sort((a, b) => a[0].localeCompare(b[0]))) {
+    let left = SITE_CAP;
+    const kept: ScoreDeduction[] = [];
+    for (const d of [...list].sort((a, b) => b.points - a.points || a.label.localeCompare(b.label))) {
+      const points = Math.min(d.points, left);
+      if (points <= 0) break;
+      kept.push({ ...d, points });
+      left -= points;
+    }
+    deductions[route] = kept;
+  }
+  return { pages: sampled.length, properties, deductions };
+}
+
+/** A page's score with its site deductions added to its own: what the report ranks by once the site is compared. */
+export function siteScore(
+  score: { deductions?: ReadonlyArray<{ dimension: string; label: string; count: number; points: number }> },
+  site: SiteConsistency,
+  route: string,
+): DesignScore {
+  const own = (score.deductions ?? []).map((d) => ({ ...d, dimension: d.dimension as ScoreDimension }));
+  return scoreFrom([...own, ...(site.deductions[route] ?? [])]);
+}
+
+/** Routes named after a value, at most this many. */
+const SITE_ROUTES_SHOWN = 3;
+
+/**
+ * The comparison as lines: per property, every distinct value and how many
+ * pages use it, the dominant one, and the pages holding a value no other page
+ * uses.
+ */
+export function formatSiteConsistency(site: SiteConsistency, routeText: (route: string) => string = (r) => r): string[] {
+  const lines: string[] = [];
+  for (const p of site.properties) {
+    if (p.pages === 0) continue;
+    const numeric = p.unit !== "";
+    const shown = numeric ? [...p.values].sort((a, b) => Number(a.value) - Number(b.value)) : p.values;
+    const values = shown.slice(0, 12).map((v) => v.value);
+    const more = shown.length > 12 ? ` (+${shown.length - 12} more)` : "";
+    const head = `${p.noun}: ${p.values.length} value${p.values.length === 1 ? "" : "s"} (${listValues(values, p.unit)}${more}) across ${p.pages} page${p.pages === 1 ? "" : "s"}`;
+    const verdict =
+      p.pages < SITE_MIN_PAGES
+        ? ` — not compared under ${SITE_MIN_PAGES} pages`
+        : p.dominant === null
+          ? ` — no value on ${Math.round(SITE_DOMINANT_SHARE * 100)}% of them`
+          : ` — dominant ${p.dominant}${numeric ? p.unit : ""}`;
+    const lone = Object.entries(p.outliers).sort((a, b) => a[0].localeCompare(b[0]));
+    const where = lone
+      .slice(0, SITE_ROUTES_SHOWN)
+      .map(([route, v]) => `${routeText(route)} (${listValues(v.slice(0, 3), p.unit)})`)
+      .join(", ");
+    const tail =
+      lone.length === 0 ? "" : `; only one page uses: ${where}${lone.length > SITE_ROUTES_SHOWN ? `, +${lone.length - SITE_ROUTES_SHOWN} more` : ""}`;
+    lines.push(`${p.dominant !== null && lone.length > 0 ? "→" : "·"} ${head}${verdict}${tail}${p.scored ? "" : " (listed, not scored)"}`);
+  }
+  return lines;
+}
+
+/**
+ * The audit's SITE CONSISTENCY block: the comparison across every page with a
+ * sample, and where the audited route stands against it. Empty until
+ * SITE_MIN_PAGES pages carry a sample.
+ */
+export function siteAuditSection(
+  pages: Readonly<
+    Record<string, { system?: DesignSystemSample; deductions?: ReadonlyArray<{ dimension: string; label: string; count: number; points: number }> }>
+  >,
+  route: string,
+): string {
+  const site = siteConsistency(pages);
+  if (!site) return "";
+  const own = pages[route];
+  const lines = formatSiteConsistency(site).map((l) => `  ${l}`);
+  const charged = site.deductions[route] ?? [];
+  const against =
+    own && own.system
+      ? charged.length === 0
+        ? `  this page (${route}): no value only it uses; its score stands at ${siteScore(own, site, route).overall}/100`
+        : `  this page (${route}) against the site: ${siteScore(own, site, route).overall}/100 — ${charged.map(formatDeduction).join(" · ")}`
+      : "";
+  return (
+    `SITE CONSISTENCY (${site.pages} audited pages; the page score above is the page alone, these values are compared at read time):\n` +
+    [...lines, ...(against ? [against] : [])].join("\n")
+  );
 }
 
 /**
@@ -1601,7 +1894,7 @@ export function analyzeDesign(
   add("defect", "clarity", "sideways scroll", page.scrollW > viewport.width + 8 ? 1 : 0, 12, 12);
   add("suggestion", "clarity", "task-effort issues", effort.length, 6, 18);
   add("suggestion", "clarity", "heading structure", structure.length, 3, 9);
-  const score = scoreFrom(ded);
+  const score: DesignScore = { ...scoreFrom(ded), system: systemSample(allRecords.filter((r) => !r.shell)) };
   const { overall, a11y: a11yScore, craft: craftScore, consistency: consistencyScore, clarity: clarityScore } = score;
   const grade = overall >= 90 ? "A" : overall >= 80 ? "B" : overall >= 70 ? "C" : overall >= 60 ? "D" : "E";
   const top = score.deductions.slice(0, TOP_DEDUCTIONS).map(formatDeduction);
@@ -1644,6 +1937,43 @@ export function analyzeDesign(
     ...chromeDefects,
   ];
   return { report, score, signatures, defects };
+}
+
+/**
+ * The design-system values a page uses (DesignSystemSample), each list
+ * distinct, sorted and capped. Read from every record outside the shell's
+ * landmarks, the census's chrome included: the census learns as pages are
+ * audited, so leaving its chrome out would make a page's values depend on when
+ * it was audited, and chrome is on most pages, so it is never a value one page
+ * alone uses.
+ */
+function systemSample(records: readonly StyleRecord[]): DesignSystemSample {
+  const CAP = 16;
+  const distinct = (values: string[]): string[] => [...new Set(values)].sort((a, b) => a.localeCompare(b, "en", { numeric: true })).slice(0, CAP);
+  // Radii of control-sized buttons only, the 12–80px the heights are counted over: a button drawn as a card (a
+  // sign-in page's role tiles) carries the card's radius, and is not a control whose radius one page alone uses.
+  const { buttonHeights, buttonRadii } = buttonSystem(records.filter((r) => r.tag !== "button" || (r.rect.h >= 12 && r.rect.h <= 80)));
+  const padUse = new Map<number, number>();
+  for (const v of records.flatMap((r) => r.padding)) if (v > 0) padUse.set(Math.round(v), (padUse.get(Math.round(v)) ?? 0) + 1);
+  const sizes = [...new Set(records.filter((r) => r.text).map((r) => Math.round(r.fontSize * 10) / 10))].sort((a, b) => a - b);
+  return {
+    buttonHeights: buttonHeights.slice(0, CAP),
+    buttonRadii: distinct(buttonRadii),
+    headers: distinct(records.filter((r) => r.tag === "h1" && r.text).map((r) => `${Math.round(r.fontSize * 10) / 10}px ${r.fontWeight}`)),
+    tabs: distinct(records.filter((r) => r.role === "tab").map((r) => `${Math.round(r.rect.h / 2) * 2}px tall, ${radiusLabel(r)} radius`)),
+    // The commonest steps when there are more than the cap (grayCensus lists them commonest first).
+    grays: distinct(
+      grayCensus(paintedColours(records))
+        .slice(0, CAP)
+        .map((g) => `rgb(${g.rgb.join(", ")})`),
+    ),
+    fontSizes: sizes.slice(0, CAP),
+    spacing: [...padUse]
+      .filter(([, n]) => n >= 2)
+      .map(([v]) => v)
+      .sort((a, b) => a - b)
+      .slice(0, CAP),
+  };
 }
 
 /** Section 1 of the audit, CONTRAST: the page's WCAG contrast failures. */
@@ -1871,13 +2201,10 @@ function consistencySection(
   // ---- 8. CONSISTENCY: one control system, one elevation system.
   //      Radii ≥ half the element height render as a pill regardless of raw value (9999px, Chromium's 16777200px clamp).
   const consistency: string[] = [];
-  const radiusLabel = (r: StyleRecord): string => (r.radius >= r.rect.h / 2 && r.radius > 0 ? "pill" : `${r.radius}px`);
-  const buttons = records.filter((r) => r.interactive && r.tag === "button");
-  const buttonRadii = [...new Set(buttons.map(radiusLabel))];
+  const { buttonRadii, buttonHeights } = buttonSystem(records);
   if (buttonRadii.length > 2) {
     consistency.push(`→ buttons use ${buttonRadii.length} different corner radii (${buttonRadii.slice(0, 6).join(", ")}) — pick one radius per control tier`);
   }
-  const buttonHeights = [...new Set(buttons.filter((b) => b.rect.h >= 12 && b.rect.h <= 80).map((b) => Math.round(b.rect.h / 2) * 2))].sort((a, b) => a - b);
   if (buttonHeights.length > 3) {
     consistency.push(
       `→ buttons render at ${buttonHeights.length} different heights (${buttonHeights.slice(0, 8).join(", ")}px) — 1–2 control sizes read as a system`,
@@ -1898,6 +2225,30 @@ function consistencySection(
   return { consistency, buttonRadii, buttonHeights, shadows };
 }
 
+/** A corner radius as the audit names it: "pill" at half the height or more (9999px, Chromium's 16777200px clamp), else its px. */
+const radiusLabel = (r: StyleRecord): string => (r.radius >= r.rect.h / 2 && r.radius > 0 ? "pill" : `${r.radius}px`);
+
+/** The buttons' distinct corner radii, and their distinct heights between 12 and 80px rounded to 2px, ascending. */
+function buttonSystem(records: readonly StyleRecord[]): { buttonRadii: string[]; buttonHeights: number[] } {
+  const buttons = records.filter((r) => r.interactive && r.tag === "button");
+  return {
+    buttonRadii: [...new Set(buttons.map(radiusLabel))],
+    buttonHeights: [...new Set(buttons.filter((b) => b.rect.h >= 12 && b.rect.h <= 80).map((b) => Math.round(b.rect.h / 2) * 2))].sort((a, b) => a - b),
+  };
+}
+
+/** Every text and background colour the records paint, as RGB: what the gray census and the hue families count. */
+function paintedColours(records: readonly StyleRecord[]): Array<[number, number, number]> {
+  const colours: Array<[number, number, number]> = [];
+  for (const r of records) {
+    for (const c of [r.color, r.bg]) {
+      const p = parseRgb(c);
+      if (p) colours.push([p[0], p[1], p[2]]);
+    }
+  }
+  return colours;
+}
+
 /** Section 9 of the audit, PALETTE: pure black body text, the gray scale and the accent hues. */
 function paletteSection(
   records: StyleRecord[],
@@ -1913,18 +2264,12 @@ function paletteSection(
     );
   }
   const hueFamilies = new Map<number, number>();
-  const colours: Array<[number, number, number]> = [];
-  for (const r of records) {
-    for (const c of [r.color, r.bg]) {
-      const p = parseRgb(c);
-      if (!p) continue;
-      const rgb: [number, number, number] = [p[0], p[1], p[2]];
-      colours.push(rgb);
-      const hue = hueOf(rgb);
-      if (hue !== null) {
-        const bucket = (Math.round(hue / 30) * 30) % 360;
-        hueFamilies.set(bucket, (hueFamilies.get(bucket) ?? 0) + 1);
-      }
+  const colours = paintedColours(records);
+  for (const rgb of colours) {
+    const hue = hueOf(rgb);
+    if (hue !== null) {
+      const bucket = (Math.round(hue / 30) * 30) % 360;
+      hueFamilies.set(bucket, (hueFamilies.get(bucket) ?? 0) + 1);
     }
   }
   const grays = grayCensus(colours);

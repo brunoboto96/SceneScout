@@ -26,11 +26,11 @@
  * The reading is passed in (fsPolicyReader is the real one), so every rule
  * is table-tested in policy-test.
  *
- * Three more locks have their rule here but are not keys yet, because the
- * session reads them from the environment where the browser engine starts
- * (writeRulesSettings: `writeClassifier`, `refuseDestructiveGets` and
- * `authPosts`). Until the engine takes them from the attach, a file naming
- * them is refused as unknown, as ADR 25 asks of a lock that is not enforced.
+ * The write-judgement locks (`writeClassifier`, `refuseDestructiveGets` and
+ * `authPosts`) are joined with their environment variables by
+ * writeRulesSettings, and the result is handed to the browser engine through
+ * the attach (or a command's check options), so the engine never reads those
+ * variables on its own once a caller passes them.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -58,6 +58,9 @@ export const CONFIG_ENV = "SCENESCOUT_CONFIG";
 /** Where the config file sits in a directory: beside the project's other SceneScout files. */
 export const CONFIG_FILE = path.join(MEMORY_DIRNAME, CONFIG_FILE_NAME);
 
+/** The write classifiers a file may name, from the one that lets the most out to the one that lets the least. */
+export const WRITE_CLASSIFIERS = ["standard", "strict"] as const satisfies readonly WriteClassifier[];
+
 /** The presets a file may start from. */
 export const PRESETS = ["strict"] as const;
 export type Preset = (typeof PRESETS)[number];
@@ -74,6 +77,9 @@ export const CONFIG_KEYS = [
   "uploads",
   "egress",
   "projectsRoot",
+  "writeClassifier",
+  "refuseDestructiveGets",
+  "authPosts",
 ] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 
@@ -127,10 +133,30 @@ export function egressRefusal(loaded: LoadedPolicy, via: EgressPath, what: strin
 }
 
 /**
+ * Why the config refuses a tool that returns a picture of the app into the
+ * conversation (`scout_screenshot`, `scout_cards` with inline pictures), or
+ * null: egress that sends nothing to a model, or `evidence` capped at "file"
+ * or "off", which keep pictures out of the conversation. scout_capture, which
+ * saves its picture to a file, is not refused.
+ */
+export function conversationPictureRefusal(loaded: LoadedPolicy, what: string, instead?: string): string | null {
+  const egress = egressRefusal(loaded, "model", what);
+  if (egress) return egress;
+  const evidence = loaded.policy.evidence;
+  if (evidence === undefined || evidence === "inline") return null;
+  return refusalText(loaded, [
+    {
+      key: "evidence",
+      why: `evidence "${evidence}" keeps pictures of the app out of the conversation, so ${what} is not run${instead ? `: ${instead}` : ""}`,
+    },
+  ]);
+}
+
+/**
  * What a config file sets, after its preset is expanded. A key that is
  * undefined leaves the setting as it is without a file.
  */
-export interface Policy {
+export interface Policy extends WriteRulesPolicy {
   /** The loosest write mode any attach or command may run in. */
   maxMode?: WriteMode;
   /** Open the guided gate (ADR 24) as the server starts: an attach above observe needs an accepted guided plan. */
@@ -168,10 +194,12 @@ export const NO_POLICY: LoadedPolicy = { policy: {}, sources: [] };
 
 /**
  * What a preset sets: every key but projectsRoot, which names a folder on one
- * machine, and egress, which no preset sets so that adopting one never stops
- * an export or a `ci` run that worked before.
+ * machine; egress, which no preset sets so that adopting one never stops an
+ * export or a `ci` run that worked before; and writeClassifier and authPosts,
+ * which no preset sets because the strict classifier refuses writes the
+ * standard one lets out and a sign-in list names one app's endpoints.
  */
-export type PresetPolicy = Required<Omit<Policy, "projectsRoot" | "egress">>;
+export type PresetPolicy = Required<Omit<Policy, "projectsRoot" | "egress" | "writeClassifier" | "authPosts" | "authPostsNarrowOnly">>;
 
 /** What each preset sets. A key the file sets beside the preset replaces the preset's value for that key. */
 export const PRESET_POLICY: Record<Preset, PresetPolicy> = {
@@ -183,6 +211,7 @@ export const PRESET_POLICY: Record<Preset, PresetPolicy> = {
     dedup: "rule",
     evidence: "file",
     uploads: "fixtures",
+    refuseDestructiveGets: true,
   },
 };
 
@@ -285,6 +314,11 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
   if (root !== undefined && (typeof root !== "string" || !path.isAbsolute(root.trim())))
     return bad(`"projectsRoot" must be the absolute path of a folder, not ${JSON.stringify(root)}`);
   if (obj.requireGuidedPlan !== undefined && typeof obj.requireGuidedPlan !== "boolean") return bad(`"requireGuidedPlan" must be true or false`);
+  if (obj.refuseDestructiveGets !== undefined && typeof obj.refuseDestructiveGets !== "boolean") return bad(`"refuseDestructiveGets" must be true or false`);
+  const writeClassifier = oneOf("writeClassifier", WRITE_CLASSIFIERS);
+  if (!writeClassifier.ok) return writeClassifier;
+  const authPosts = list("authPosts", MAX_READ_POSTS, (entries) => readPostEntries(entries).rejected);
+  if (!authPosts.ok) return authPosts;
   const readPosts = list("readPosts", MAX_READ_POSTS, (entries) => readPostEntries(entries).rejected);
   if (!readPosts.ok) return readPosts;
   const trustedEmbeds = list("trustedEmbeds", MAX_TRUSTED_EMBEDS, (entries) => trustedEmbedOrigins(entries).rejected);
@@ -301,6 +335,9 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
     uploads: uploads.value,
     egress: egress.value,
     projectsRoot: typeof root === "string" ? path.resolve(root.trim()) : undefined,
+    writeClassifier: writeClassifier.value,
+    refuseDestructiveGets: obj.refuseDestructiveGets as boolean | undefined,
+    authPosts: authPosts.value,
   };
   for (const [k, v] of Object.entries(set)) if (v !== undefined) (base as Record<string, unknown>)[k] = v;
   return { ok: true, policy: base };
@@ -326,7 +363,13 @@ function intersect(inner: readonly string[], outer: readonly string[], key: (e: 
 /**
  * Two policies as one, each setting the stricter of the two. The project's
  * own file is joined to the operator's this way, so it can tighten what the
- * operator's file allows and never loosen it.
+ * operator's file allows and never loosen it: `a` is the operator's, `b` the
+ * project's.
+ *
+ * A sign-in list replaces the path rule, so one only the project lists would
+ * let out as a sign-in a POST the path rule refuses. It is kept as a narrowing
+ * of the path rule instead (`authPostsNarrowOnly`): a POST must be listed and
+ * also look like a sign-in by its path.
  */
 export function tightenPolicy(a: Policy, b: Policy): Policy {
   const out: Policy = {};
@@ -340,6 +383,11 @@ export function tightenPolicy(a: Policy, b: Policy): Policy {
   if (a.evidence || b.evidence) out.evidence = a.evidence && b.evidence ? below(EVIDENCE_ORDER, a.evidence, b.evidence) : (a.evidence ?? b.evidence);
   if (a.uploads || b.uploads) out.uploads = a.uploads && b.uploads ? below(UPLOAD_ORDER, a.uploads, b.uploads) : (a.uploads ?? b.uploads);
   if (a.egress || b.egress) out.egress = a.egress && b.egress ? below(EGRESS_ORDER, a.egress, b.egress) : (a.egress ?? b.egress);
+  if (a.writeClassifier || b.writeClassifier) out.writeClassifier = a.writeClassifier === "strict" || b.writeClassifier === "strict" ? "strict" : "standard";
+  if (a.refuseDestructiveGets !== undefined || b.refuseDestructiveGets !== undefined)
+    out.refuseDestructiveGets = a.refuseDestructiveGets === true || b.refuseDestructiveGets === true;
+  if (a.authPosts || b.authPosts) out.authPosts = a.authPosts && b.authPosts ? intersect(b.authPosts, a.authPosts, readPostKey) : (a.authPosts ?? b.authPosts);
+  if (a.authPosts ? a.authPostsNarrowOnly === true : b.authPosts !== undefined) out.authPostsNarrowOnly = true;
   // The operator's only: withProjectPolicy refuses a project's file that sets it.
   if (a.projectsRoot) out.projectsRoot = a.projectsRoot;
   return out;
@@ -511,9 +559,8 @@ export function uploadRefusal(loaded: LoadedPolicy, filePath: string | undefined
 }
 
 /**
- * The write-judgement locks a config file will set once the browser engine
- * takes them from the attach, rather than reading its environment itself.
- * Until then they are not keys: parsePolicy refuses them as unknown.
+ * The write-judgement locks a config file sets. The browser engine takes the
+ * settings writeRulesSettings makes of them from the attach.
  */
 export interface WriteRulesPolicy {
   /** The least strict classifier any session judges writes with: "strict" turns it on whatever SCENESCOUT_STRICT_WRITES says. */
@@ -522,6 +569,12 @@ export interface WriteRulesPolicy {
   refuseDestructiveGets?: boolean;
   /** The only POSTs that may count as signing in. SCENESCOUT_AUTH_POSTS may narrow it. [] allows none. */
   authPosts?: string[];
+  /**
+   * Not a key, so no file sets it: true when `authPosts` came from a project's
+   * own file alone (tightenPolicy), so the list only narrows the path rule
+   * unless SCENESCOUT_AUTH_POSTS, the operator's, also lists the entry.
+   */
+  authPostsNarrowOnly?: boolean;
 }
 
 /** The sign-in allowlist a session judges by: its entries, and whether a POST must also look like a sign-in (policy.ts isAuthExempt). */
@@ -529,6 +582,25 @@ export interface AuthPostsSetting {
   entries: string[];
   andSignInPath: boolean;
 }
+
+/** What turned each write-judgement setting on, as the attach names it: the config or the environment variable. Absent: not on. */
+export interface WriteRulesSources {
+  writeClassifier?: string;
+  refuseDestructiveGets?: string;
+  authPosts?: string;
+}
+
+/** The write-judgement settings a session runs with (writeRulesSettings), as the browser engine takes them from the attach. */
+export interface SessionWriteRules {
+  writeClassifier: WriteClassifier;
+  refuseDestructiveGets: boolean;
+  authPosts: AuthPostsSetting | null;
+  notes: string[];
+  from: WriteRulesSources;
+}
+
+/** How the attach names the config as the source of a setting. */
+const BY_CONFIG = "the SceneScout config";
 
 /**
  * The write-judgement settings a session runs with: the file's, then the
@@ -542,16 +614,14 @@ export interface AuthPostsSetting {
  * - While a guided plan is open (`guided`), a POST must be both listed and
  *   look like a sign-in to the path rule, so an operator's stricter list stays
  *   strict, and the list cannot let out a POST the path rule would refuse.
- *   With no list, the path rule decides, as before.
+ *   With no list, the path rule decides, as before. A list only a project's
+ *   own file set (`authPostsNarrowOnly`) is held the same way in every
+ *   session, unless SCENESCOUT_AUTH_POSTS lists the entries too.
  *
  * Throws, naming the variable, on an environment value strict-writes.ts
  * cannot read, as the attach does today.
  */
-export function writeRulesSettings(
-  file: WriteRulesPolicy,
-  env: Record<string, string | undefined>,
-  guided: boolean,
-): { writeClassifier: WriteClassifier; refuseDestructiveGets: boolean; authPosts: AuthPostsSetting | null; notes: string[] } {
+export function writeRulesSettings(file: WriteRulesPolicy, env: Record<string, string | undefined>, guided: boolean): SessionWriteRules {
   const notes: string[] = [];
   const envClassifier = writeClassifierSetting(env);
   const envGets = refuseDestructiveGetsSetting(env);
@@ -570,7 +640,33 @@ export function writeRulesSettings(
       if (dropped.length > 0) notes.push(`${AUTH_POSTS_ENV} entries the config does not list were left out: ${quoted(dropped)}`);
     }
   } else if (fromEnv.length > 0) entries = fromEnv;
-  return { writeClassifier, refuseDestructiveGets, authPosts: entries === null ? null : { entries, andSignInPath: guided }, notes };
+  const from: WriteRulesSources = {};
+  if (writeClassifier === "strict") from.writeClassifier = file.writeClassifier === "strict" ? BY_CONFIG : STRICT_WRITES_ENV;
+  if (refuseDestructiveGets) from.refuseDestructiveGets = file.refuseDestructiveGets === true ? BY_CONFIG : REFUSE_DESTRUCTIVE_GETS_ENV;
+  if (entries !== null) from.authPosts = file.authPosts ? (fromEnv.length > 0 ? `${BY_CONFIG}, narrowed by ${AUTH_POSTS_ENV}` : BY_CONFIG) : AUTH_POSTS_ENV;
+  const andSignInPath = guided || (file.authPostsNarrowOnly === true && fromEnv.length === 0);
+  return { writeClassifier, refuseDestructiveGets, authPosts: entries === null ? null : { entries, andSignInPath }, notes, from };
+}
+
+/**
+ * What the config's write-judgement locks did, for the attach's and a
+ * command's "Config:" line: each lock the config turned on, then the notes
+ * writeRulesSettings made (an environment value the config lowered or lost
+ * to). Empty when the config sets none of them.
+ */
+export function writeRulesNote(policy: WriteRulesPolicy, rules: SessionWriteRules): string[] {
+  const out: string[] = [];
+  if (policy.writeClassifier === "strict") out.push(`writeClassifier "strict": writes are judged by the strict classifier`);
+  if (policy.refuseDestructiveGets === true)
+    out.push("refuseDestructiveGets: page loads whose address is a destructive command are refused in observe and read-only");
+  if (policy.authPosts && rules.authPosts) {
+    const { entries, andSignInPath } = rules.authPosts;
+    const which = entries.length === 0 ? "no POST counts" : `only ${quoted(entries)} ${entries.length === 1 ? "counts" : "count"}`;
+    out.push(
+      `authPosts: ${which} as signing in${andSignInPath && entries.length > 0 ? `, and only when it also looks like a sign-in by its path (${policy.authPostsNarrowOnly === true ? "the list is the project's own" : "a guided check"})` : ""}`,
+    );
+  }
+  return [...out, ...rules.notes];
 }
 
 /** What an attach or a command asked for, before the config is applied. Undefined: not asked. */
@@ -621,6 +717,8 @@ export function resolveSettings(
   env: Record<string, string | undefined>,
   asked: AskedSettings,
   defaults: Defaults,
+  /** Who asked: an attach is told the mode to attach in, a command the flag to pass. */
+  surface: "attach" | "command" = "attach",
 ): { settings: EffectiveSettings; refused: Refusal[]; notes: string[] } {
   const { policy } = loaded;
   const refused: Refusal[] = [];
@@ -632,7 +730,7 @@ export function resolveSettings(
     if (asked.mode !== undefined && stricterMode(asked.mode, max) !== asked.mode)
       refused.push({
         key: "mode",
-        why: `mode "${asked.mode}" is above the config's maxMode "${max}": attach in "${max}"${max === "observe" ? "" : " or a stricter mode"}`,
+        why: `mode "${asked.mode}" is above the config's maxMode "${max}": ${surface === "attach" ? `attach in "${max}"` : `use --mode ${max}`}${max === "observe" ? "" : " or a stricter mode"}`,
       });
     else if (asked.mode === undefined && stricterMode(defaults.mode, max) !== defaults.mode) {
       settings.mode = max;
@@ -741,17 +839,34 @@ export function applyToCommand(
   loaded: LoadedPolicy,
   env: Record<string, string | undefined>,
   args: readonly string[],
-  options: { mode: WriteMode; dedup?: DedupMode; sends?: { via: EgressPath; what: string } },
-): { ok: true; mode: WriteMode; dedup?: DedupMode; readPosts?: string[]; note: string } | { ok: false; error: string } {
+  options: CommandOptions,
+): { ok: true; mode: WriteMode; dedup?: DedupMode; readPosts?: string[]; writeRules?: SessionWriteRules; note: string } | { ok: false; error: string } {
   const egress = options.sends ? egressRefusal(loaded, options.sends.via, options.sends.what) : null;
   if (egress) return { ok: false, error: forCommand(egress) };
   if (loaded.sources.length === 0) return { ok: true, mode: options.mode, dedup: options.dedup, note: "" };
   const asked: AskedSettings = { mode: flagGiven(args, "mode") ? options.mode : undefined };
   if (options.dedup !== undefined && flagGiven(args, "dedup")) asked.dedup = options.dedup;
-  const r = resolveSettings(loaded, env, asked, { mode: options.mode, evidence: () => "off" });
+  // An agent-driven command (`ci`) has no person to accept a guided plan, so requireGuidedPlan holds it to observe, as the
+  // gate holds an attach that names no plan: said here, before it starts, rather than at the agent's first attach.
+  const gateNotes: string[] = [];
+  let mode = options.mode;
+  if (options.agentDriven === true && loaded.policy.requireGuidedPlan === true && mode !== "observe") {
+    const why = "needs a guided plan the person accepts (the config's requireGuidedPlan), which an unattended run cannot have";
+    if (asked.mode !== undefined)
+      return { ok: false, error: forCommand(refusalText(loaded, [{ key: "mode", why: `mode "${mode}" ${why}: use --mode observe` }])) };
+    gateNotes.push(`mode "observe": the default "${mode}" ${why}`);
+    mode = "observe";
+  }
+  const r = resolveSettings(loaded, env, asked, { mode, evidence: () => "off" }, "command");
   if (r.refused.length > 0) return { ok: false, error: forCommand(refusalText(loaded, r.refused)) };
+  let writeRules: SessionWriteRules;
+  try {
+    writeRules = writeRulesSettings(loaded.policy, env, false);
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
   const dedup = options.dedup === undefined ? undefined : (r.settings.dedup ?? options.dedup);
-  const notes = [...r.notes];
+  const notes = [...gateNotes, ...r.notes, ...writeRulesNote(loaded.policy, writeRules)];
   // Said once: resolveSettings already said so when the environment asked for the judge.
   if (options.dedup !== undefined && dedup !== options.dedup && !notes.some((n) => n.startsWith("dedup ")))
     notes.push(`dedup "${dedup}": the default "${options.dedup}" is above the config's dedup`);
@@ -761,8 +876,17 @@ export function applyToCommand(
     mode: r.settings.mode,
     dedup,
     readPosts: r.settings.readPosts,
+    writeRules,
     note: `Config: ${loaded.sources.join(", ")}${notes.length > 0 ? `; ${notes.join("; ")}` : ""}.`,
   };
+}
+
+/** What a command asks of the config: its mode and dedup, the path it sends data by, and whether a model drives it (`ci`). */
+export interface CommandOptions {
+  mode: WriteMode;
+  dedup?: DedupMode;
+  sends?: { via: EgressPath; what: string };
+  agentDriven?: boolean;
 }
 
 /**
@@ -795,9 +919,9 @@ export function configureCommand(
   launchDir: string,
   projectDir: string,
   args: readonly string[],
-  options: { mode: WriteMode; dedup?: DedupMode; sends?: { via: EgressPath; what: string } },
+  options: CommandOptions,
   fsx: PolicyReader,
-): { ok: true; mode: WriteMode; dedup?: DedupMode; note: string; readPostsEnv?: string } | { ok: false; error: string } {
+): { ok: true; mode: WriteMode; dedup?: DedupMode; note: string; readPostsEnv?: string; writeRules?: SessionWriteRules } | { ok: false; error: string } {
   const loaded = readCommandPolicy(env, launchDir, projectDir, fsx);
   if (!loaded.ok) return loaded;
   const applied = applyToCommand(loaded.loaded, env, args, options);

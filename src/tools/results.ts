@@ -66,7 +66,7 @@ import {
   PKG_VERSION,
   policyFor,
 } from "../server-context.js";
-import { egressRefusal } from "../engine/project-config.js";
+import { conversationPictureRefusal } from "../engine/project-config.js";
 
 /** A PlainCard, as scout_cards' structuredContent carries it. */
 const PLAIN_CARD_OUTPUT = z.object({
@@ -538,8 +538,8 @@ export function registerResultTools(): void {
         const eng = projectEngine();
         const memory = eng?.memory;
         if (!eng || !memory) throw new Error("No project is open yet: findings are read from the project a session attached to, so attach first.");
-        // egress "none": pictures are named by their files, never returned into the conversation.
-        const refused = pictures === "inline" ? egressRefusal(policyFor(eng), "model", 'scout_cards with pictures: "inline"') : null;
+        // egress "none", or evidence capped at "file" or "off": pictures are named by their files, never returned into the conversation.
+        const refused = pictures === "inline" ? conversationPictureRefusal(policyFor(eng), 'scout_cards with pictures: "inline"') : null;
         if (refused) throw new Error(`${refused} Ask with pictures: "files" instead.`);
         const chosen = selectCards(memory.findings, { filter, ids, limit });
         const mode = pictures ?? "files";

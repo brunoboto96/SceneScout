@@ -274,7 +274,7 @@ It is the **Technical details** part, folded under the Summary and the Evidence 
 |---|---|
 | **Run metrics** | Open findings, route coverage, design audits, oracle violations, and how many errors the write policy itself caused (these are not counted as the app's) |
 | **Acceptance criteria** | On a run given tickets, each criterion's verdict with the confidence the agent stated, the ids of the findings it linked, its reason and the sessions that judged it |
-| **Page quality scores** | 0 to 100 per audited route, for accessibility, craft, consistency and task clarity, worst first |
+| **Page quality scores** | 0 to 100 per audited route, for accessibility, craft, consistency and task clarity, worst first, with the two largest deductions behind each; from four audited pages, each is also scored against the others, and a section lists the values only one page uses |
 | **Gap ledger** | What was not tested. Treat it as the honest limit of the run, not as noise |
 | **Findings** | Each with a severity, category, the evidence as a machine signature (`GET /api/orders?status=archived → HTTP 500`), where it happened, a repro trace of the last actions and a Playwright regression-test skeleton |
 | **Worth a look** | Observations that are defects only under a convention the run cannot see, such as a 4px spacing scale. They are listed and never counted as defects |

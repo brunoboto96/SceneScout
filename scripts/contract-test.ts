@@ -2330,3 +2330,59 @@ test("a frame's controls are listed in the page's coordinates, masked when anoth
   frame.detached = true;
   assert.throws(() => collector.scopeOf(inFrame), /has gone/);
 });
+
+test("the report ranks pages against each other once four carry their values, and names the outlier page", () => {
+  const store = freshStore();
+  const system = (heights: number[]) => ({
+    buttonHeights: heights,
+    buttonRadii: ["6px"],
+    headers: ["28px 700"],
+    tabs: [],
+    grays: ["rgb(64, 64, 64)"],
+    fontSizes: [14, 16],
+    spacing: [8],
+  });
+  const at = new Date().toISOString();
+  const score = (route: string, heights: number[]) =>
+    store.setPageScore(route, {
+      overall: 97,
+      a11y: 100,
+      craft: 100,
+      consistency: 94,
+      clarity: 100,
+      deductions: [{ dimension: "consistency", label: "near-miss alignments", count: 1, points: 3 }],
+      system: system(heights),
+      at,
+      url: `http://app.test${route}`,
+    });
+  score("/a", [36]);
+  score("/b", [36]);
+  score("/c", [36]);
+  const three = generateReport(store, [], { routesVisited: 3, routesTotal: 3, designAudits: 3 }, { write: false }).markdown;
+  assert.ok(!three.includes("## Design consistency across pages"), "three pages are not compared");
+  assert.match(three, /\| `\/a` \| \*\*97\*\* \| 100 \| 100 \| 94 \| 100 \| -3 near-miss alignments \|/);
+  score("/d", [44]);
+  const four = generateReport(store, [], { routesVisited: 4, routesTotal: 4, designAudits: 4 }, { write: false }).markdown;
+  // The outlier ranks first, its own score in brackets, and its Why names the value only it uses.
+  const rows = four.match(/^\| `\/[a-d]`[^\n]*/gm) ?? [];
+  assert.match(
+    rows[0] ?? "",
+    /^\| `\/d` \| \*\*95\*\* \(97\) \| 100 \| 100 \| 90 \| 100 \| -3 near-miss alignments · -2 button height only on this page: 44px \|/,
+    rows.join("\n"),
+  );
+  assert.match(rows[1] ?? "", /^\| `\/a` \| \*\*97\*\* \|/);
+  assert.match(four, /## Design consistency across pages/);
+  assert.match(four, /^- → button heights: 2 values \(36, 44px\) across 4 pages — dominant 36px; only one page uses: `\/d` \(44px\)$/m);
+  // The page's own score, as measured, is kept as it was.
+  assert.equal(store.pageScores["/d"].overall, 97);
+});
+
+test("a route holding a pipe stays in its own cell of the score table", () => {
+  const store = freshStore();
+  const at = new Date().toISOString();
+  const route = "/files/a|b";
+  store.setPageScore(route, { overall: 97, a11y: 100, craft: 100, consistency: 94, clarity: 100, deductions: [], at, url: `http://app.test${route}` });
+  const md = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1 }, { write: false }).markdown;
+  const row = md.split("\n").find((l) => l.includes("/files/a")) ?? "";
+  assert.deepEqual(tableCells(row).slice(0, 2), ["`/files/a|b`", "**97**"], row);
+});

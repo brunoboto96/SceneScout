@@ -35,7 +35,16 @@ import { chooseProjectFolder, PROJECTS_DIR_ENV, workspaceFromRoots } from "../en
 import { RECORD_MAX_FRAMES } from "../engine/replay.js";
 import { describePace, normalizePace } from "../engine/settle.js";
 import { formatScan, scanProject } from "../scan.js";
-import { fsPolicyReader, policyNote, projectFolderRefusal, refusalText, resolveSettings, withProjectPolicy } from "../engine/project-config.js";
+import {
+  fsPolicyReader,
+  policyNote,
+  projectFolderRefusal,
+  refusalText,
+  resolveSettings,
+  withProjectPolicy,
+  writeRulesNote,
+  writeRulesSettings,
+} from "../engine/project-config.js";
 import { areaRefusal, CHECK_AREAS, guidedAttachVerdict, holdGuidedPlan, type CheckArea } from "../engine/guided.js";
 import { AREA_LABEL } from "../engine/guided-words.js";
 import { nowSentence } from "../engine/progress.js";
@@ -432,7 +441,7 @@ export function registerSessionTools(): void {
             { mode: "read-only", evidence: () => evidenceSettings(undefined, process.env).mode },
           );
           if (resolved.refused.length > 0) return errorText(new Error(`scout_attach ${refusalText(config.loaded, resolved.refused)}`));
-          const configNote = policyNote(config.loaded, resolved.notes);
+
           mode = resolved.settings.mode;
           // Then the guided gate: while a guided plan is open, nothing above observe starts without the person's confirmation (ADR 24).
           // It judges what the agent passed, so readPosts and trustedEmbeds the config lists are not refused as the agent's.
@@ -442,6 +451,10 @@ export function registerSessionTools(): void {
               : guidedPlans;
           const guided = guidedAttachVerdict(gate, { planId, mode, url, readPosts, trustedEmbeds });
           if (!guided.ok) return errorText(new Error(`scout_attach refused: ${guided.why}`));
+          // The write-judgement locks: the config's joined with the environment's, the stricter winning; in a guided check a
+          // sign-in list only narrows the path rule. An environment value that cannot be read refuses the attach.
+          const writeRules = writeRulesSettings(config.loaded.policy, process.env, guided.guided === true);
+          const configNote = policyNote(config.loaded, [...resolved.notes, ...writeRulesNote(config.loaded.policy, writeRules)]);
           readPosts = resolved.settings.readPosts;
           trustedEmbeds = resolved.settings.trustedEmbeds;
           dedup = resolved.settings.dedup;
@@ -539,8 +552,7 @@ export function registerSessionTools(): void {
             trustedEmbeds,
             // While a guided plan is open this is an empty list, so SCENESCOUT_READ_POSTS is not read either (ADR 24).
             readPosts: guided.readPosts ?? readPosts,
-            // Likewise SCENESCOUT_AUTH_POSTS is not read while a guided plan is open: its entries go out of observe as sign-ins.
-            operatorAuthPosts: guided.operatorAuthPosts,
+            writeRules,
             actionTimeoutMs,
             navTimeoutMs,
             memoryStore: store,
