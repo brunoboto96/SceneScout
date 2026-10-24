@@ -347,7 +347,7 @@ test("flows: id, requirements and a step's expected are accepted, and checked li
     return r.ok ? "ok" : r.error;
   };
   assert.equal(bad({ id: "", steps: [nav] }), "f.json: id is the test's identifier");
-  assert.equal(bad({ requirements: "REQ-1", steps: [nav] }), "f.json: requirements Expected array, received string");
+  assert.equal(bad({ requirements: "REQ-1", steps: [nav] }), "f.json: requirements Invalid input: expected array, received string");
   assert.equal(bad({ steps: [{ ...nav, expected: " " }] }), "f.json: steps[0].expected is the result the step should bring about, in words");
   assert.equal(bad({ steps: [{ ...nav, expectd: "typo" }] }), 'f.json: steps[0] unknown field(s) "expectd"');
   assert.equal(bad({ steps: [nav], extra: 1 }), 'f.json: (the whole file) unknown field(s) "extra"');

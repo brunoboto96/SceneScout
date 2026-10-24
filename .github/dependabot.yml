@@ -1,7 +1,7 @@
 # Version updates. Security updates are enabled separately in the repository
 # settings. The two major-version ignores below may also hold back a security
 # fix that only exists in that next major, so watch Dependabot ALERTS for
-# typescript and zod rather than relying on a pull request appearing.
+# typescript rather than relying on a pull request appearing.
 version: 2
 updates:
   - package-ecosystem: npm
@@ -21,9 +21,6 @@ updates:
       # Types must describe the OLDEST supported Node (engines: >=20), or the
       # compiler stops flagging APIs that do not exist there.
       - dependency-name: "@types/node"
-        update-types: ["version-update:semver-major"]
-      # @modelcontextprotocol/sdk builds its tool schemas against zod v3's API.
-      - dependency-name: zod
         update-types: ["version-update:semver-major"]
       # Playwright 1.64 hangs a click whose navigation is answered with 204 No
       # Content (#487). Remove this once a release fixes it.

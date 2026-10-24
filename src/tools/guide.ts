@@ -150,7 +150,7 @@ async function judgedNow(plan: GuidedPlan): Promise<GuidedPlan> {
 
 const GUIDED_CALL_OUTPUT = z.object({
   tool: z.enum(["scout_login", "scout_attach", "scout_tickets", "scout_session", "scout_verify"]),
-  args: z.record(z.unknown()),
+  args: z.record(z.string(), z.unknown()),
 });
 
 /** A guided choice set, as a plan and a saved check carry it. */

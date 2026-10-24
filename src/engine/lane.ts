@@ -97,14 +97,14 @@ export const LaneDecision = z
   .strict()
   .superRefine((d, ctx) => {
     if (d.verdict === "defect" && (d.severity === null || d.category === null)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a defect needs a severity and a category" });
+      ctx.addIssue({ code: "custom", message: "a defect needs a severity and a category" });
     }
     if (d.verdict === "worth_a_look") {
       if (d.convention === undefined || d.convention === null || d.convention.trim() === "") {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a worth_a_look must name the convention that would decide it", path: ["convention"] });
+        ctx.addIssue({ code: "custom", message: "a worth_a_look must name the convention that would decide it", path: ["convention"] });
       } else if (d.convention.length > LANE_CONVENTION_MAX) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           message: `a convention is at most ${LANE_CONVENTION_MAX} characters`,
           path: ["convention"],
         });
@@ -125,15 +125,15 @@ export const LaneReport = z
   .strict()
   .superRefine((r, ctx) => {
     if (r.status === "blocked" && r.blocked_by === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a blocked lane must say what blocked it", path: ["blocked_by"] });
+      ctx.addIssue({ code: "custom", message: "a blocked lane must say what blocked it", path: ["blocked_by"] });
     }
     if (r.status === "complete" && r.blocked_by !== null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "a complete lane cannot also have been blocked", path: ["blocked_by"] });
+      ctx.addIssue({ code: "custom", message: "a complete lane cannot also have been blocked", path: ["blocked_by"] });
     }
     const seen = new Set<string>();
     r.decisions.forEach((d, i) => {
       if (seen.has(d.observation)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `observation "${d.observation}" is judged twice`, path: ["decisions", i, "observation"] });
+        ctx.addIssue({ code: "custom", message: `observation "${d.observation}" is judged twice`, path: ["decisions", i, "observation"] });
       }
       seen.add(d.observation);
     });

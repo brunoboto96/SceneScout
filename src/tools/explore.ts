@@ -402,7 +402,7 @@ export function registerExploreTools(): void {
         method: z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]).optional().describe("Default GET"),
         body: z.string().max(20000).optional().describe("Request body, sent as application/json unless a content-type header is given"),
         headers: z
-          .record(z.string().max(2000))
+          .record(z.string(), z.string().max(2000))
           .optional()
           .describe(
             "Extra headers. One given here wins over the app's own, which is how a session tests a different or absent credential. A method override (X-HTTP-Method-Override, X-HTTP-Method, X-Method-Override, or _method in the path's query or the body) is judged by the write policy as the method it names.",

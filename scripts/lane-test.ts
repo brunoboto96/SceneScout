@@ -29,6 +29,7 @@ import {
   LANE_STATUSES,
   LANE_VERDICTS,
   LaneLedger,
+  LaneReport,
   laneCloseGuard,
   decodedEntitiesNote,
   ignoredConventionsNote,
@@ -221,6 +222,27 @@ test("lane: every cap the parser enforces refuses at cap+1 and accepts at the ca
   refused(laneReport({ routes: Array.from({ length: LANE_MAX_ITEMS + 1 }, (_, i) => `/r${i}`) }), /at routes$/, "too many routes");
   // The regression the caps were sized from: a descriptive self-assigned id and a real signature both fit.
   assert.ok(parseLaneReport(laneReport({}, { observation: "order-detail-save-notes-covered-by-stickybar" })).ok);
+});
+
+test("lane: a list past its cap is refused on its length alone, before any element is read (GHSA-mrhx-c7xc-m3w5)", () => {
+  // Every element is wrong. A parser that read them anyway (every zod before 4.6.6) builds one issue per element, which is what exhausts memory.
+  const bad = (n: number) => Array.from({ length: n }, () => 7);
+  const report = (field: "decisions" | "routes", n: number) => JSON.parse(laneReport({ [field]: bad(n) })) as unknown;
+  for (const field of ["decisions", "routes"] as const) {
+    const over = LaneReport.safeParse(report(field, LANE_MAX_ITEMS * 400));
+    assert.ok(!over.success);
+    assert.deepEqual(
+      over.error.issues.map((i) => [i.code, i.path.join(".")]),
+      [["too_big", field]],
+      `${field} past the cap: only its length is reported`,
+    );
+    refused(JSON.stringify(report(field, LANE_MAX_ITEMS * 400)), new RegExp(`at ${field}$`), `oversized ${field}`);
+    // The contrast: at the cap the elements are read, one issue each.
+    const at = LaneReport.safeParse(report(field, LANE_MAX_ITEMS));
+    assert.ok(!at.success);
+    assert.equal(at.error.issues.length, LANE_MAX_ITEMS, `${field} at the cap: every element is read`);
+    assert.equal(at.error.issues[0].path.join("."), `${field}.0`);
+  }
 });
 
 test("lane: a decision may name the finding it was filed as, or leave it null or out; an empty one is refused", () => {

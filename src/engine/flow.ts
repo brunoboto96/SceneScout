@@ -224,7 +224,7 @@ const target = z
     const parsed = parseTarget(t);
     if (parsed?.by === "role" && !ARIA_ROLES.has(parsed.role)) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         message: `names the role "${parsed.role}", which is not an ARIA role (e.g. button, link, textbox, checkbox, tab)`,
       });
     }
@@ -324,7 +324,7 @@ const flowSchema = z
       .superRefine((role, ctx) => {
         if (role === undefined) return;
         const checked = validateRoleName(role);
-        if (!checked.ok) ctx.addIssue({ code: z.ZodIssueCode.custom, message: checked.error });
+        if (!checked.ok) ctx.addIssue({ code: "custom", message: checked.error });
       }),
     steps: z.array(stepSchema).min(1, "needs at least one step").max(MAX_FLOW_STEPS, `holds at most ${MAX_FLOW_STEPS} steps`),
   })
@@ -332,7 +332,7 @@ const flowSchema = z
   .superRefine((flow, ctx) => {
     // A flow starts from a page it names, never from wherever the crawl left the browser.
     if (flow.steps[0] && flow.steps[0].action !== "navigate") {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["steps", 0, "action"], message: 'must be "navigate": a flow starts from a page it names' });
+      ctx.addIssue({ code: "custom", path: ["steps", 0, "action"], message: 'must be "navigate": a flow starts from a page it names' });
     }
   });
 
@@ -350,16 +350,17 @@ export interface Flow {
 }
 
 /** `steps[2].target`, the way a person would look for it in the file. Shared with the baselines' targets file (baseline.ts). */
-export function fieldPath(p: ReadonlyArray<string | number>): string {
+export function fieldPath(p: ReadonlyArray<PropertyKey>): string {
   if (p.length === 0) return "(the whole file)";
-  return p.map((part, i) => (typeof part === "number" ? `[${part}]` : i === 0 ? part : `.${part}`)).join("");
+  return p.map((part, i) => (typeof part === "number" ? `[${part}]` : i === 0 ? String(part) : `.${String(part)}`)).join("");
 }
 
 /** One schema problem as a person reads it. Shared with the baselines' targets file (baseline.ts). */
 export function issueMessage(issue: z.ZodIssue): string {
   if (issue.code === "unrecognized_keys") return `unknown field(s) ${issue.keys.map((k) => `"${k}"`).join(", ")}`;
-  if (issue.code === "invalid_union_discriminator") return `must be one of ${FLOW_ACTIONS.join(", ")}`;
-  if (issue.code === "invalid_type" && issue.received === "undefined") return "is required";
+  if (issue.code === "invalid_union" && "note" in issue && issue.note === "No matching discriminator") return `must be one of ${FLOW_ACTIONS.join(", ")}`;
+  // Parsed with reportInput, so a field that is absent carries `input: undefined` (an absent enum is an invalid_value, not an invalid_type).
+  if ((issue.code === "invalid_type" || issue.code === "invalid_value") && "input" in issue && issue.input === undefined) return "is required";
   return issue.message;
 }
 
@@ -375,7 +376,7 @@ export function parseJsonFile<T extends z.ZodTypeAny>(text: string, file: string
   } catch (err) {
     return { ok: false, error: `${file}: not valid JSON (${err instanceof Error ? err.message : String(err)})` };
   }
-  const parsed = schema.safeParse(json);
+  const parsed = schema.safeParse(json, { reportInput: true });
   if (!parsed.success) {
     const issues = parsed.error.issues.slice(0, 5).map((i) => `${fieldPath(i.path)} ${issueMessage(i)}`);
     const more = parsed.error.issues.length > 5 ? ` (and ${parsed.error.issues.length - 5} more)` : "";
