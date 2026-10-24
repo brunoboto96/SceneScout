@@ -1,0 +1,33 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-29-0-9",
+  "date": "2026-10-24",
+  "note": "Unattended scenescout ci run (dispatched) of v3.29.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Fines page shows an empty list when the fines request is forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; empty fines list shown"
+    },
+    {
+      "title": "Account data export link is clipped and unreachable",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "account export link fully clipped by overflow-hidden ancestor on /account.html"
+    },
+    {
+      "title": "Overdue status text has insufficient contrast on loans page",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "loans page overdue label contrast 1.84:1 rgba(238,163,147,1) on rgb(253,241,238)"
+    },
+    {
+      "title": "Loans page lacks a visually prominent next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "loans page task-efficiency: no visually dominant action; 2 renewal buttons"
+    }
+  ],
+  "decisions": []
+}

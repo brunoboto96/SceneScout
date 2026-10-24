@@ -1,0 +1,45 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-29-0-8",
+  "date": "2026-10-24",
+  "note": "Unattended scenescout ci run (dispatched) of v3.29.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Home notices request fails with HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Fines request refusal is presented as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; empty fines-rows without load error"
+    },
+    {
+      "title": "Account export link is clipped and unreachable",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "account-export UNREACHABLE overflow-hidden ancestor"
+    },
+    {
+      "title": "Rapid double-click submits event join twice",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/events/1/join fired twice on rapid double-click"
+    },
+    {
+      "title": "Event confirmation page has no way back to library",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /events-joined.html renders zero interactable elements"
+    },
+    {
+      "title": "Hold drop buttons have no accessible names",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "holds-drop-32 and holds-drop-34 buttons have empty accessible names"
+    }
+  ],
+  "decisions": []
+}

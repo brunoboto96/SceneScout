@@ -1,0 +1,71 @@
+{
+  "app": "demo",
+  "run": "ci-demo-3-29-0-10",
+  "date": "2026-10-24",
+  "note": "Unattended scenescout ci run (dispatched) of v3.29.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard weekly chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard action links overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard e16 All orders overlaps e17 New: bulk import (85%)"
+    },
+    {
+      "title": "Inventory page has no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory.html task-efficiency no visually dominant action"
+    },
+    {
+      "title": "Approvals spacing uses ad-hoc padding values",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "approvals.html padding 10px×22,14px×22; 0% 4px-grid",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Empty order submission gives no validation feedback",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "evidence": "orders-new.html empty Create order submission zero requests and no status change"
+    },
+    {
+      "title": "Optional confirmation email field has placeholder-only label",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new.html new-order-email placeholder-only label"
+    },
+    {
+      "title": "Sticky bar covers Save notes button on order details",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order.html#1042 e157 Save notes covered by order-stickybar"
+    },
+    {
+      "title": "New order helper text has insufficient contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new.html helper text contrast 1.73:1 rgba(184,192,202,1) on rgb(246,248,250)"
+    },
+    {
+      "title": "Export CSV crashes when report rows are undefined",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports.html Export CSV page_error Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "Scheduled reports page is a dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html main contains heading+2 paragraphs, zero interactables"
+    }
+  ],
+  "decisions": []
+}

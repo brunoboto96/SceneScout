@@ -1,0 +1,85 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-29-0-7",
+  "date": "2026-10-24",
+  "note": "Unattended scenescout ci run (dispatched) of v3.29.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Account export link is clipped and unreachable",
+      "severity": "high",
+      "category": "visual",
+      "evidence": "account-export UNREACHABLE overflow-hidden /account.html"
+    },
+    {
+      "title": "Fines request is refused while the page presents an empty fines list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403"
+    },
+    {
+      "title": "Account export link lacks visible link styling",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "account-export un-underlined body-color /account.html"
+    },
+    {
+      "title": "Notices request fails and its empty state hides the failure",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Members list request returns 403 for member session",
+      "severity": "low",
+      "category": "network",
+      "evidence": "GET /api/members 403"
+    },
+    {
+      "title": "Home page spacing uses ad-hoc values rather than a consistent 4px rhythm",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "home spacing audit: padding 0% on 4px grid; margin 75% off-grid"
+    },
+    {
+      "title": "Book detail padding values do not follow a consistent 4px spacing grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "book detail spacing audit: padding 0% on 4px grid"
+    },
+    {
+      "title": "Book links in loan rows have no test IDs",
+      "severity": "low",
+      "category": "missing-testid",
+      "evidence": "loans page book links /book.html?id=2 and /book.html?id=1 lack testid",
+      "tier": "worth_a_look",
+      "convention": "test IDs on every interactive control"
+    },
+    {
+      "title": "Loans page has no visually dominant next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "loans audit: no dominant action; 58% padding off 4px grid"
+    },
+    {
+      "title": "Rapid double-click sends duplicate event-join requests",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/events/1/join fired twice on double-click"
+    },
+    {
+      "title": "Navigation links blend into body text without underlines",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared shell audit: links no underline, body text rgba(93, 99, 87, 1)",
+      "tier": "worth_a_look",
+      "convention": "navigation links should be visually distinguishable from body text"
+    },
+    {
+      "title": "Successful event join leaves user on a page with no navigation",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "events-joined.html has 0 interactable elements after successful join"
+    }
+  ],
+  "decisions": []
+}

@@ -1,0 +1,67 @@
+{
+  "app": "demo",
+  "run": "ci-demo-3-29-0-8",
+  "date": "2026-10-24",
+  "note": "Unattended scenescout ci run (dispatched) of v3.29.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard actions overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard /: dash-all-orders overlaps dash-new-badge 85%"
+    },
+    {
+      "title": "Shared navigation links lack visual distinction from body text",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "shared shell links color rgba(91, 102, 117, 1), text-decoration none",
+      "tier": "worth_a_look",
+      "convention": "Links in navigation should be visually distinguishable from body text"
+    },
+    {
+      "title": "Inventory page spacing is inconsistent with a 4px grid",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "inventory spacing: 96% off 4px grid; 14px×50, 10px×46",
+      "tier": "worth_a_look",
+      "convention": "A consistent 4px spacing grid"
+    },
+    {
+      "title": "Export CSV crashes with undefined rows",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv throws TypeError: Cannot read properties of undefined (reading 'rows')"
+    },
+    {
+      "title": "Optional confirmation email field has no persistent accessible label",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "new-order-email placeholder-only label on /orders-new.html"
+    },
+    {
+      "title": "New-order helper text has insufficient contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "orders-new helper text contrast 1.73:1 rgba(184,192,202,1) on rgb(246,248,250)"
+    },
+    {
+      "title": "Empty order submission gives no validation feedback",
+      "severity": "medium",
+      "category": "ux-confusing",
+      "evidence": "POST /orders empty form: no request and no validation message"
+    },
+    {
+      "title": "Scheduled reports page has no way to proceed or return",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders 0 interactables; reached via reports-scheduled-link"
+    }
+  ],
+  "decisions": []
+}

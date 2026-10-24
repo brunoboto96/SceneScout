@@ -1,0 +1,51 @@
+{
+  "app": "demo",
+  "run": "ci-demo-3-29-0-6",
+  "date": "2026-10-24",
+  "note": "Unattended scenescout ci run (dispatched) of v3.29.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Dashboard orders chart image returns 404",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard links overlap the bulk-import badge",
+      "severity": "low",
+      "category": "visual",
+      "evidence": "dashboard All orders overlaps New: bulk import 85%"
+    },
+    {
+      "title": "Order notes report saved after the save request is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "PUT /api/orders/1042 403 → order notes status says Saved"
+    },
+    {
+      "title": "Optional confirmation email has no persistent accessible label",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "new-order-email placeholder-only label; helper text contrast 1.73:1"
+    },
+    {
+      "title": "Approval queue lacks a visually dominant next step",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "approvals.html task-efficiency audit: no visually dominant action"
+    },
+    {
+      "title": "Export CSV crashes when report rows are missing",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports.html Export CSV: TypeError reading undefined.rows"
+    },
+    {
+      "title": "Scheduled reports route is a dead end from the Reports page",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /reports-scheduled.html renders zero interactables and only terminal static content"
+    }
+  ],
+  "decisions": []
+}
