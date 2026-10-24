@@ -260,6 +260,18 @@ page is closed only once the route handler has answered every request it sent
 unload smoke suite leaves and closes 80 popups on Firefox and asserts none of
 their writes arrives.
 
+Chromium has the same lateness at the browser level: the interception can hear
+a beacon sent on `pagehide` after the navigation to `about:blank` has returned
+(10 of 240 leaves under load), and a round trip to the page is not ordered with
+it. The write was still refused, under the flow's rule that `WriteRule` holds
+for a moment, but a refusal heard after a flow had handed back was missing from
+the flow's list. Before a flow leaves a page, the engine therefore has the page
+beacon a marker of its own as the last thing it does on `pagehide`
+(`LEAVE_MARKER_PATH` in `unload.ts`), and waits, up to a second, until the
+interception hears it. What one page sends as it is left is heard in the order
+it was sent (240 of 240 under load), so every write before the marker is then
+being judged. The marker itself is failed unjudged and never leaves the browser.
+
 ## Consequences
 
 A refusal is a tool result the agent must respect and cannot route around, and

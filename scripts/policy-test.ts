@@ -120,6 +120,9 @@ import {
   bodyDigest,
   headerOf,
   judgeUnseenWrite,
+  LEAVE_MARKER_PATH,
+  leaveMarkerToken,
+  leaveMarkerUrl,
   pausedRequestBody,
   pausedRequestBytes,
   ROUTED_WRITE_TTL_MS,
@@ -1737,6 +1740,22 @@ test("a paused request's body is read from its base64 entries, else its postData
   assert.equal(headerOf({ Origin: "http://app.test" }, "origin"), "http://app.test");
   assert.equal(headerOf({ referer: "http://app.test/a" }, "Referer"), "http://app.test/a");
   assert.equal(headerOf(undefined, "origin"), undefined);
+});
+
+test("a leave marker is sent to the page's own origin, only from a web page, and known again by its path alone", () => {
+  const url = leaveMarkerUrl("http://app.test:8080/things/7?tab=a#x", "tok-1");
+  assert.equal(url, `http://app.test:8080${LEAVE_MARKER_PATH}tok-1`);
+  assert.equal(leaveMarkerToken(url!), "tok-1");
+  assert.equal(leaveMarkerUrl("about:blank", "t"), null, "a page with no origin is not armed");
+  assert.equal(leaveMarkerUrl("data:text/html,<p>x</p>", "t"), null);
+  assert.equal(leaveMarkerUrl("not a url", "t"), null);
+  // Contrastive: the app's own writes, however near the marker's path, are judged as writes.
+  assert.equal(leaveMarkerToken("http://app.test/api/leave"), null);
+  assert.equal(leaveMarkerToken("http://app.test/api__scenescout_left__/x"), null, "only at the start of the path");
+  assert.equal(leaveMarkerToken(`http://app.test/app${LEAVE_MARKER_PATH}x`), null);
+  assert.equal(leaveMarkerToken(`http://app.test${LEAVE_MARKER_PATH}`), "", "the marker's path with no token is still the engine's");
+  assert.equal(leaveMarkerToken(`http://app.test${LEAVE_MARKER_PATH}%E0%A4%A`), "", "a token that cannot be decoded");
+  assert.equal(leaveMarkerToken("garbage"), null);
 });
 
 test("a write refused at the browser level is recognised when the driver reports it, by method and URL, and only for a while", () => {

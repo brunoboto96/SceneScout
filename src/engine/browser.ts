@@ -459,6 +459,8 @@ const HOVER_REVEAL_WINDOW_MS = 2500;
  * WebKit reports it within milliseconds of the throw; the limit is spent only when it never comes.
  */
 const LATE_ANSWER_MS = 1000;
+/** How long the hand-back waits for a page it left to be heard beaconing its leave marker (armLeaveMarker). */
+const LEAVE_MARKER_WAIT_MS = 1000;
 
 /** A navigation's main document, watched while it loads (BrowserEngine.watchMainDocument). */
 interface MainDocumentWatch {
@@ -5953,7 +5955,10 @@ export class BrowserEngine {
       await bestEffort(this.settle());
       const late = ownRefusals();
       collect();
-      await bestEffort((this.page ?? page).goto("about:blank"));
+      const leaving = this.page ?? page;
+      const heard = await this.armLeaveMarker(leaving);
+      await bestEffort(leaving.goto("about:blank"));
+      await heard();
       await bestEffort(this.settle());
       // What the page sent as it was left (a beacon on pagehide) can still be being judged: wait for the verdict, so a
       // refusal the policy reports late is counted here rather than after the flow has handed back.
@@ -5975,7 +5980,16 @@ export class BrowserEngine {
       // a tab from included (a popup adopted as the session's page leaves it running), so nothing a page the flow used
       // does runs on under the crawl's rule. Only then is the crawl's rule restored, and WriteRule keeps the flow's for
       // a moment longer, for a write a page sent as it was left that the engine hears of late.
-      await settleWithin(Promise.allSettled(context.pages().map((p) => BrowserEngine.leave(p))), 5000);
+      await settleWithin(
+        Promise.allSettled(
+          context.pages().map(async (p) => {
+            const heard = await this.armLeaveMarker(p);
+            await BrowserEngine.leave(p);
+            await heard();
+          }),
+        ),
+        5000,
+      );
       // The driven page's own leaving writes are judged before the flow's refusals are closed. A refusal reported only
       // now (a step failed before the flow left the page, or the verdict came late) is listed with the flow's
       // background requests rather than dropped: the flow's outcome is already decided, and nothing past this is charged.
@@ -6761,13 +6775,50 @@ export class BrowserEngine {
   }
 
   /**
+   * Before a page is left, where the browser-level interception judges what it sends on its way out (Chromium): have it
+   * beacon a marker as the last thing it does on pagehide (unload.ts LEAVE_MARKER_PATH), and return the wait for that
+   * marker to be heard, which once it returns means what the page sent before it is in unseenInFlight. The browser can
+   * report a pagehide beacon after the navigation away has returned (measured: in 10 of 240 leaves under load), and a
+   * round trip to the page is not ordered with that report. Bounded: a page whose content policy stops the marker, or
+   * that cannot be armed, costs the bound once, and a page with nothing to leave is not armed.
+   */
+  private async armLeaveMarker(page: Page): Promise<() => Promise<void>> {
+    const none = async (): Promise<void> => {};
+    if (unloadWriteInterception(this.engineName) !== "browser-fetch" || page.isClosed()) return none;
+    const marker = this.guard.leaveMarker(page.url());
+    if (!marker) return none;
+    // Registered now, after every listener the app has added, so it runs after them on the way out.
+    let armed = false;
+    await settleWithin(
+      page
+        .evaluate((url) => {
+          addEventListener("pagehide", () => {
+            try {
+              navigator.sendBeacon(url, "");
+            } catch {
+              /* nothing to wait for: the bound ends the wait */
+            }
+          });
+        }, marker.url)
+        .then(() => {
+          armed = true;
+        }),
+      LEAVE_MARKER_WAIT_MS,
+    );
+    if (!armed) {
+      await marker.heard(0);
+      return none;
+    }
+    return () => marker.heard(LEAVE_MARKER_WAIT_MS);
+  }
+
+  /**
    * Wait, after a page has been left, for the write policy's verdict on what the page sent on its way out, on every
    * engine: a round trip to the page first, so what it sent before it went has reached the policy, then the judgements
    * still pending, the route handler's for this page and the browser-level interception's. Bounded: a page that
    * cannot answer has nothing more to send, and a judgement never takes the bound. The browser-level interception hears
-   * of a request on its own CDP session, which the round trip is not ordered with: a pause event still undelivered when
-   * the round trip returns is not waited for (measured: Chromium pauses a pagehide beacon before the navigation away
-   * returns, so this covers a slow verdict rather than a slow event).
+   * of a request on its own CDP session, which the round trip is not ordered with: that a page's leaving writes have
+   * been heard there at all is armLeaveMarker's wait, before this one.
    */
   private async leavingWritesJudged(page: Page): Promise<void> {
     if (page.isClosed()) return;
