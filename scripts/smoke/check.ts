@@ -1392,6 +1392,8 @@ async function flowWriteEdges({
     const refusedLate = () => (lateEngine as unknown as { blockedRequests: Array<{ sig: string }> }).blockedRequests.some((b) => /\/api\/leave\b/.test(b.sig));
     let lateReplay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
     let judged = false;
+    let refused = false;
+    let notice = "";
     try {
       const project = path.join(work, "flow-leave-beacon-later-than-the-hold");
       fs.mkdirSync(project, { recursive: true });
@@ -1405,13 +1407,21 @@ async function flowWriteEdges({
         "observe",
       );
       judged = await eventually(() => refusedLate() || writes("POST /api/leave") > lateLeavesBefore, LATE_MS + 5000);
+      refused = refusedLate();
+      // The next action's notice: named by the rule that refused the beacon, the flow's, not the session's read-only.
+      notice = (lateEngine as unknown as { drainBlocked(): string }).drainBlocked();
     } finally {
       await lateEngine.close();
     }
     check(
-      `${BROWSER}: a beacon the flow's page sent as it was left, heard ${LATE_MS / 1000} s later, is refused under the flow's rule and listed, though the session's read-only would let it out; nothing reaches the server`,
-      judged && lateReplay?.outcome.status === "passed" && lateEngine.mode === "read-only" && refusedLate() && writes("POST /api/leave") === lateLeavesBefore,
-      `${JSON.stringify(lateReplay?.outcome)} judged=${judged} refused=${refusedLate()} writes=${JSON.stringify(stats.writes)}`,
+      `${BROWSER}: a beacon the flow's page sent as it was left, heard ${LATE_MS / 1000} s later, is refused under the flow's rule, listed, and named as observe's refusal, though the session's read-only would let it out; nothing reaches the server`,
+      judged &&
+        lateReplay?.outcome.status === "passed" &&
+        lateEngine.mode === "read-only" &&
+        refused &&
+        /WRITE-POLICY blocked \(observe\): [^\n]*\/api\/leave/.test(notice) &&
+        writes("POST /api/leave") === lateLeavesBefore,
+      `${JSON.stringify(lateReplay?.outcome)} judged=${judged} refused=${refused} notice=${JSON.stringify(notice.slice(0, 200))} writes=${JSON.stringify(stats.writes)}`,
     );
 
     const ownLeavesBefore = writes("POST /api/leave");
@@ -1520,12 +1530,6 @@ async function flowWriteEdges({
 }
 
 /**
- * A recorded check with a report template (--record --template): the report
- * the template names, beside replay.html, with the failed step as a deviation,
- * the flow's test ID and requirements, and a manifest whose hashes are those of
- * the files on disk. Without --record the check stops before it starts.
- */
-/**
  * Attach `engine` to `url` read-only with the browser-level interception (Chromium) hearing every `/api/leave` beacon `lateMs`
  * late, and the leave marker a page sends after it no sooner, as what one page sent is heard in the order it was sent.
  */
@@ -1559,6 +1563,12 @@ async function attachHearingBeaconsLate(engine: BrowserEngine, url: string, proj
   }
 }
 
+/**
+ * A recorded check with a report template (--record --template): the report
+ * the template names, beside replay.html, with the failed step as a deviation,
+ * the flow's test ID and requirements, and a manifest whose hashes are those of
+ * the files on disk. Without --record the check stops before it starts.
+ */
 async function templateReport({
   project,
   checkWith,

@@ -77,6 +77,8 @@ export interface BlockedRequest {
   answered: boolean;
   why?: string;
   type?: string;
+  /** The rule that refused it, which a page a flow left may hold after the session's own has loosened (RouteGuard `rule`). */
+  rule?: WriteMode;
 }
 
 /** What the guard needs from the engine that drives the session. */
@@ -99,12 +101,12 @@ export interface RouteGuardHost {
   notePolicyBlock(): void;
   /** Record a write that went out without passing the route handler (Chromium's browser-level interception). */
   noteSentWrite(entry: { at: number; sig: string }): void;
-  /** The foreign origin behind a write headed outside the app, or null. */
-  foreignWriteOf(req: Request): string | null;
+  /** The foreign origin behind a write headed outside the app under `rule`, or null. */
+  foreignWriteOf(req: Request, rule: WriteMode): string | null;
   /** Whether a document request is a frame's escape out of the app (WebKit's dropped sandbox). */
   embedEscapeNavigation(req: Request): boolean;
-  /** What a document request loads into: a frame of another origin, a frame of the app's, or neither. */
-  frameDocumentKind(req: Request): "foreign" | "app" | null;
+  /** What a document request loads into under `rule`: a frame of another origin, a frame of the app's, or neither. */
+  frameDocumentKind(req: Request, rule: WriteMode): "foreign" | "app" | null;
   /** Whether the driven page sent `req` from its top document. */
   sentByMainFrame(req: Request): boolean;
   /** The read-POST entry that lets this request out under `rule`, or null. */
@@ -350,6 +352,10 @@ export class RouteGuard {
     this.routedWrites.clear();
     this.unseenRefusals.clear();
     this.leftPages.clear();
+    // The closed browser's pages send no more markers: a wait still on one ends, and none is kept.
+    for (const resolve of this.leaveMarkers.values()) resolve();
+    this.leaveMarkers.clear();
+    this.issuedMarkers.clear();
   }
 
   /** The route handler: judge one request, recorded against the page that sent it until it is answered. */
@@ -412,7 +418,7 @@ export class RouteGuard {
     if (sent === "GET" && req.resourceType() === "document" && this.host.embedEscapeNavigation(req)) {
       const why = ESCAPE_REFUSAL;
       // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
-      this.host.noteBlocked({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType() });
+      this.host.noteBlocked({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType(), rule });
       this.host.logAction({ action: "write-policy:blocked", target: `navigation to ${req.url().slice(0, 140)} (${why})`, url: this.host.pageUrl() ?? "" });
       this.refusedByPolicy.add(req);
       this.host.notePolicyBlock();
@@ -430,7 +436,7 @@ export class RouteGuard {
       const answered = answersWithRefusal(req.resourceType());
       if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url))
         this.host.noteObserveRefusedPost(url, req.postData(), this.host.sentByMainFrame(req) ? req.headers()["referer"] : undefined);
-      this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered, why, type: req.resourceType() });
+      this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered, why, type: req.resourceType(), rule });
       this.host.logAction({
         action: "write-policy:blocked",
         target: `${label} ${pathname}${judged.via ? ` (${judged.via})` : ""}${why ? ` (${why})` : ""}`,
@@ -454,7 +460,7 @@ export class RouteGuard {
       }
     }
     // A frame document carrying an override that names a write is judged below as that write, not loaded as a frame.
-    const frameDoc = sent === "GET" && isReadMethod(method) && req.resourceType() === "document" ? this.host.frameDocumentKind(req) : null;
+    const frameDoc = sent === "GET" && isReadMethod(method) && req.resourceType() === "document" ? this.host.frameDocumentKind(req, rule) : null;
     // A document loading into a frame of another origin gets the sandbox
     // that forbids popups and top-window navigation (policy.ts says why).
     if (frameDoc === "foreign") {
@@ -511,7 +517,7 @@ export class RouteGuard {
       pathname,
       destructiveWire,
       // An embedded widget from another site writes to that site, not to the app under test.
-      foreign: this.host.foreignWriteOf(req),
+      foreign: this.host.foreignWriteOf(req, rule),
       // An embed moved the session's page off the app: its writes out are not the app's, a sign-in excepted.
       offApp: offAppPageWrite(this.host.appUrl(), this.host.pageUrl(), url, this.host.movedByEmbed()),
       readPost: readPost !== null,
@@ -643,7 +649,7 @@ export class RouteGuard {
         if (!refuseLoad) return await answer(true);
         this.unseenRefusals.note(sent, url);
         await answer(false);
-        this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered: false, why: DESTRUCTIVE_GET_REFUSAL, type: "document" });
+        this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered: false, why: DESTRUCTIVE_GET_REFUSAL, type: "document", rule });
         this.host.logAction({
           action: "write-policy:blocked",
           target: `${label} ${pathnameOf(url)} (${DESTRUCTIVE_GET_REFUSAL})`,
@@ -709,6 +715,7 @@ export class RouteGuard {
         answered: false,
         why: verdict.why,
         type: (event.resourceType ?? "other").toLowerCase(),
+        rule,
       });
       this.host.logAction({
         action: "write-policy:blocked",

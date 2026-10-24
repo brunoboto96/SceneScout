@@ -137,7 +137,7 @@ import {
 } from "../src/engine/unload.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 import type { Request, Route } from "playwright";
-import { marksRouteExercised, pathnameOf, RouteGuard, routedWriteVerdict, type RouteGuardHost } from "../src/engine/route-guard.ts";
+import { marksRouteExercised, pathnameOf, RouteGuard, routedWriteVerdict, type BlockedRequest, type RouteGuardHost } from "../src/engine/route-guard.ts";
 import { settleWithin } from "../src/engine/best-effort.ts";
 import {
   destructiveGet,
@@ -2356,9 +2356,12 @@ function guardRig(
     /** The session's rule read afresh on every request, where a test changes it as it goes; else `rule`. */
     ruleNow?: () => (typeof WRITE_MODES)[number];
     leftPageRuleCapMs?: number;
+    /** The host's foreign-frame answer as a function of the rule it is asked under (a sign-in page lets one out in read-only, never in observe); else `foreign`. */
+    foreignUnder?: (rule: (typeof WRITE_MODES)[number]) => string | null;
   } = {},
 ) {
   const calls: GuardCall[] = [];
+  const blocked: BlockedRequest[] = [];
   const owned = new Set<string>();
   const host: RouteGuardHost = {
     appUrl: () => "https://app.example.com",
@@ -2366,11 +2369,14 @@ function guardRig(
     pageUrl: () => "https://app.example.com/things",
     trustedEmbeds: () => new Set(),
     movedByEmbed: () => null,
-    noteBlocked: (e) => void calls.push(`noteBlocked ${e.sig} answered=${e.answered}${e.why ? ` why=${e.why}` : ""}`),
+    noteBlocked: (e) => {
+      blocked.push(e);
+      calls.push(`noteBlocked ${e.sig} answered=${e.answered}${e.why ? ` why=${e.why}` : ""}`);
+    },
     logAction: (e) => void calls.push(`log ${e.action}`),
     notePolicyBlock: () => void calls.push("notePolicyBlock"),
     noteSentWrite: () => void calls.push("noteSentWrite"),
-    foreignWriteOf: () => opts.foreign ?? null,
+    foreignWriteOf: (_req, r) => (opts.foreignUnder ? opts.foreignUnder(r) : (opts.foreign ?? null)),
     embedEscapeNavigation: () => false,
     frameDocumentKind: () => opts.frameDoc ?? null,
     sentByMainFrame: () => true,
@@ -2422,7 +2428,7 @@ function guardRig(
     const done = guard.handle(route as unknown as Route).then(() => outcome);
     return { request: request as unknown as Request, done };
   };
-  return { calls, guard, send };
+  return { calls, guard, send, blocked };
 }
 
 test("RouteGuard: each verdict is applied to the request, and a refusal is recorded and reported", async () => {
@@ -2824,6 +2830,7 @@ test("RouteGuard: a page a flow left keeps the flow's rule for what the browser 
     rig.calls.some((c) => c.startsWith("noteBlocked POST https://app.example.com/api/leave")),
     rig.calls.join(" | "),
   );
+  assert.equal(rig.blocked.at(-1)?.rule, "observe", "the refusal is recorded with the rule that refused it, not the session's read-only");
   // Its marker heard: what the page sent before it has been judged, and the crawl's rule is the crawl's again.
   assert.equal(await beacon(rig, marker.url), "Fetch.failRequest", "the marker itself is never sent");
   await pause(0);
@@ -2852,6 +2859,57 @@ test("RouteGuard: a page a flow left keeps the flow's rule for what the browser 
   tighter.guard.leaveMarker("https://app.example.com/things");
   session = "observe";
   assert.equal(tighter.guard.rule(), "observe");
+});
+
+test("RouteGuard: while a left page holds the flow's rule, the route handler judges a write wholly under it, foreign-ness included, and records that rule", async () => {
+  let session: (typeof WRITE_MODES)[number] = "observe";
+  // As the engine's host answers: on the app's sign-in page a foreign frame's write is let out in read-only, never in observe.
+  const rig = guardRig("observe", { ruleNow: () => session, foreignUnder: (r) => (r === "observe" ? "https://idp.example.com" : null) });
+  const marker = rig.guard.leaveMarker("https://app.example.com/things")!;
+  await marker.heard(0);
+  session = "read-only";
+  const held = rig.send("POST", "/api/auth/login", { body: "{}" });
+  assert.equal(await held.done, "fulfill 403", "judged as observe judges it: a foreign frame's write, refused, not a sign-in observe lets out");
+  assert.deepEqual(
+    rig.blocked.map((b) => [b.why, b.rule]),
+    [["sent from a frame of https://idp.example.com", "observe"]],
+  );
+  // Contrast: once the marker is heard, the session's read-only judges the same write wholly, and lets it out.
+  await (rig.guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+    { send: async () => {} },
+    { requestId: "m", resourceType: "Ping", request: { url: marker.url, method: "POST", postData: "" } },
+  );
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(await rig.send("POST", "/api/auth/login", { body: "{}" }).done, "fallback");
+});
+
+test("RouteGuard: a closed browser's markers are forgotten with its held rules, and a wait on one ends", async () => {
+  let session: (typeof WRITE_MODES)[number] = "observe";
+  const rig = guardRig("observe", { ruleNow: () => session });
+  const marker = rig.guard.leaveMarker("https://app.example.com/things")!;
+  session = "read-only";
+  const waiting = marker.heard(60000);
+  rig.guard.clear();
+  assert.equal(await Promise.race([waiting.then(() => "ended"), new Promise((r) => setTimeout(() => r("still waiting"), 200))]), "ended");
+  assert.equal(rig.guard.rule(), "read-only");
+  const sent: string[] = [];
+  await (rig.guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+    { send: async (cmd: string) => void sent.push(cmd) },
+    { requestId: "m", resourceType: "Ping", request: { url: marker.url, method: "POST", headers: { Origin: "https://app.example.com" }, postData: "" } },
+  );
+  assert.deepEqual(sent, ["Fetch.continueRequest"], "no longer this guard's marker: judged as any same-origin beacon read-only lets out");
+});
+
+test("BlockNotices.noticeByRule names each refusal by the rule that refused it, strictest first", () => {
+  const notice = new BlockNotices().noticeByRule("read-only", [
+    { sig: "POST https://app.example.com/api/a", late: true, rule: "observe" },
+    { sig: "POST https://app.example.com/api/b", late: false },
+  ]);
+  const observeAt = notice.indexOf("WRITE-POLICY blocked (observe): POST https://app.example.com/api/a");
+  const readOnlyAt = notice.indexOf("WRITE-POLICY blocked (read-only): POST https://app.example.com/api/b");
+  assert.ok(observeAt >= 0 && readOnlyAt > observeAt, notice);
+  assert.ok(!/\(read-only\): [^\n]*api\/a/.test(notice), "a write the flow's rule refused is not named under the session's");
+  assert.equal(new BlockNotices().noticeByRule("read-only", []), "");
 });
 
 test("RouteGuard: the route handler aborts only the leave marker the guard issued", async () => {

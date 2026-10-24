@@ -285,6 +285,9 @@ rule in force then is the strictest either judge applies (`LeftPageRules` in
 `unload.ts`, read through `RouteGuard.rule`), however late the browser reports
 what the page sent and whatever the session's rule has become; once the marker
 is heard, the rule is let go when the judgements already pending have settled.
+Every part of a verdict reads that one rule, whether a write is a foreign
+frame's included, and a refusal is reported under the rule that refused it, not
+the session's.
 Judging by the sending document instead was measured and is not possible: the
 browser-level pause names only the frame, whose id survives the navigation to
 `about:blank`, with no loader id, and the route handler's frame is the same
