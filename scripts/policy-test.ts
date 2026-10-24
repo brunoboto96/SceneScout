@@ -147,6 +147,9 @@ import {
   abortCodeFor,
   answersWithPage,
   headVerdict,
+  cookieLineAfter,
+  cookieLineFor,
+  crossSite,
   withoutAppHeader,
   forOwnSend,
   APP_HEADER_ENV,
@@ -4388,6 +4391,44 @@ test("allowlist header: a page load is asked by HEAD whether it is a page or a f
   // A 404 page is a page: sent with the header, as before.
   assert.deepEqual(verdict(404, { "content-type": "text/html" }), { kind: "page" });
   assert.deepEqual(withoutAppHeader({ accept: "*/*", "X-CI-Allow": "t" }, { name: "x-ci-allow", value: "t" }), { accept: "*/*" });
+});
+
+test("allowlist header: SceneScout's send in the browser's place carries the cookies the browser would, never a SameSite one it withholds from another site", () => {
+  const app = "https://app.example.com/page";
+  assert.equal(crossSite(undefined, app), false, "no Referer: a load SceneScout started, or one whose page sends none");
+  assert.equal(crossSite("https://app.example.com/a", app), false);
+  assert.equal(crossSite("https://www.example.com/a", app), false, "another host of the same site");
+  assert.equal(crossSite("https://evil.example.net/", app), true);
+  assert.equal(crossSite("http://app.example.com/a", app), true, "another scheme is another site");
+  assert.equal(crossSite("http://localhost:5000/", "http://127.0.0.1:5001/x"), true);
+  assert.equal(crossSite("http://127.0.0.1:5000/", "http://127.0.0.1:5001/x"), false, "the port does not make a site");
+  assert.equal(crossSite("http://10.0.0.2/", "http://10.0.0.1/x"), true, "an address is its own site");
+  assert.equal(crossSite("not a url", app), false);
+  const jar = [
+    { name: "none", value: "1", sameSite: "None" },
+    { name: "lax", value: "2", sameSite: "Lax" },
+    { name: "strict", value: "3", sameSite: "Strict" },
+  ];
+  assert.equal(cookieLineFor(jar, false, true), "none=1; lax=2; strict=3");
+  assert.equal(cookieLineFor(jar, false, false), "none=1; lax=2; strict=3");
+  assert.equal(cookieLineFor(jar, true, true), "none=1; lax=2", "another site's link: Lax goes with a top-level load, Strict never");
+  assert.equal(cookieLineFor(jar, true, false), "none=1", "another site's frame or request: neither Lax nor Strict");
+  assert.equal(cookieLineFor([], true, true), "");
+});
+
+test("allowlist header: a HEAD's next hop within the app carries the cookies the earlier hops set, as the browser will", () => {
+  const now = Date.parse("2026-10-24T12:00:00Z");
+  assert.equal(cookieLineAfter("sid=1", ["step=1; Path=/"], "/next", now), "sid=1; step=1");
+  assert.equal(cookieLineAfter("sid=1; step=0", ["step=2"], "/next", now), "sid=1; step=2", "a cookie set again replaces the jar's");
+  assert.equal(cookieLineAfter("sid=1; step=0", ["step=; Max-Age=0"], "/next", now), "sid=1", "expired by Max-Age");
+  assert.equal(cookieLineAfter("sid=1; step=0", ["step=x; Expires=Thu, 01 Jan 1970 00:00:00 GMT"], "/next", now), "sid=1", "expired by Expires");
+  assert.equal(cookieLineAfter("sid=1", ["step=1; Expires=Sun, 01 Jan 2040 00:00:00 GMT"], "/next", now), "sid=1; step=1");
+  // Path: a cookie for /files reaches /files and /files/a, never /filesx or /next.
+  assert.equal(cookieLineAfter("", ["f=1; Path=/files"], "/files/a", now), "f=1");
+  assert.equal(cookieLineAfter("", ["f=1; Path=/files"], "/files", now), "f=1");
+  assert.equal(cookieLineAfter("", ["f=1; Path=/files"], "/filesx", now), "");
+  assert.equal(cookieLineAfter("", ["f=1; Path=/files"], "/next", now), "");
+  assert.equal(cookieLineAfter("sid=1", [], "/next", now), "sid=1");
 });
 
 test("allowlist header: the HEAD a page load is asked by carries the request's headers, less those Node sets itself and the cookie the jar supplies", () => {

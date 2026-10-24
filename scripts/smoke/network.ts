@@ -207,7 +207,23 @@ export async function run(_ctx: SmokeContext): Promise<void> {
       res.end();
       return;
     }
-    if (url === "/report.pdf") {
+    if (url === "/report-after-cookie") {
+      // A redirect within the app that sets the cookie its target needs to answer with the file.
+      res.writeHead(302, { location: "/report-if-cookie", "set-cookie": "step=1; Path=/", connection: "close" });
+      res.end();
+      return;
+    }
+    if (url === "/report-if-cookie" && !(req.headers.cookie ?? "").includes("step=1")) {
+      res.writeHead(200, { "content-type": "text/html", connection: "close" });
+      res.end("<p>no step cookie</p>");
+      return;
+    }
+    if (url === "/strict-set") {
+      res.writeHead(200, { "content-type": "text/html", "set-cookie": "strict=1; SameSite=Strict; Path=/", connection: "close" });
+      res.end("<p>strict set</p>");
+      return;
+    }
+    if (url === "/report.pdf" || url === "/report-if-cookie") {
       // A file that streams for longer than a navigation should take to hand it over: the browser must get it as it
       // comes, never after SceneScout has read it whole.
       res.writeHead(200, { "content-type": "application/pdf", "content-disposition": 'attachment; filename="report.pdf"', connection: "close" });
@@ -323,12 +339,12 @@ export async function run(_ctx: SmokeContext): Promise<void> {
       );
       // A page load that answers with a file, behind a redirect within the app: handed back to the browser without the
       // header, so it behaves as with none and is never read whole first. The contrast is the same load with no header.
-      const fileLoad = async (vars: Record<string, string>) =>
+      const fileLoad = async (vars: Record<string, string>, at = "/report-moved") =>
         withEnv(vars, async () => {
           await engine.attach({ url: `${app.base}/`, projectDir });
           app.seen.length = 0;
           const started = Date.now();
-          const error = await errorOf(() => engine.navigate(`${app.base}/report-moved`));
+          const error = await errorOf(() => engine.navigate(`${app.base}${at}`));
           return { ms: Date.now() - started, error: error.split("\n")[0], seen: [...app.seen] };
         });
       const withHeader = await fileLoad(header);
@@ -344,6 +360,49 @@ export async function run(_ctx: SmokeContext): Promise<void> {
           withHeader.ms < FILE_STREAM_MS &&
           (withHeader.error === "") === (without.error === ""),
         JSON.stringify({ withHeader, without: { ms: without.ms, error: without.error } }),
+      );
+      // The same, when the redirect sets the cookie its target answers with the file by: the HEAD's next hop carries it,
+      // as the browser's does, so the file is still handed back rather than read whole behind a page load that waits.
+      const cookieWithHeader = await fileLoad(header, "/report-after-cookie");
+      const cookieWithout = await fileLoad({}, "/report-after-cookie");
+      check(
+        "...and when that redirect sets the cookie its target answers with the file by, the HEAD's next hop carries it and the load still returns as it does with no header",
+        cookieWithHeader.seen.some((s) => s.method === "HEAD" && s.url === "/report-if-cookie" && (s.cookie ?? "").includes("step=1")) &&
+          cookieWithHeader.seen.filter((s) => s.method === "GET" && s.url === "/report-if-cookie").every((s) => s.header === null) &&
+          cookieWithHeader.ms < FILE_STREAM_MS &&
+          (cookieWithHeader.error === "") === (cookieWithout.error === ""),
+        JSON.stringify({ cookieWithHeader, without: { ms: cookieWithout.ms, error: cookieWithout.error } }),
+      );
+      // A page load another site starts: the browser withholds a SameSite=Strict cookie, and so must SceneScout's send of it
+      // and the HEAD before it.
+      const strictSeen = await withEnv(header, async () => {
+        await engine.attach({ url: `${app.base}/strict-set`, projectDir });
+        const page = (engine as unknown as { page: Page }).page;
+        // localhost is another site than 127.0.0.1, whatever the port.
+        await page.goto(`http://localhost:${other.port}/`);
+        app.seen.length = 0;
+        // A link the person follows: a navigation the page's script starts here is not treated as another site's by Chromium.
+        await page.evaluate((to) => {
+          const link = document.createElement("a");
+          link.id = "to-app";
+          link.href = to;
+          link.textContent = "to the app";
+          document.body.append(link);
+        }, `${app.base}/from-another-site`);
+        await page.click("#to-app");
+        for (let i = 0; i < 100 && !app.seen.some((s) => s.method === "GET" && s.url === "/from-another-site"); i++)
+          await new Promise((r) => setTimeout(r, 50));
+        return app.seen.filter((s) => s.url === "/from-another-site");
+      });
+      const strictHead = strictSeen.find((s) => s.method === "HEAD");
+      const strictGet = strictSeen.find((s) => s.method === "GET");
+      check(
+        "a page load another site starts goes, and is asked about by HEAD, without the SameSite=Strict cookie the browser withholds from it",
+        strictHead !== undefined &&
+          strictGet !== undefined &&
+          !(strictGet.cookie ?? "").includes("strict=1") &&
+          (strictHead.cookie ?? "") === (strictGet.cookie ?? ""),
+        JSON.stringify(strictSeen),
       );
       const recorded = filesUnder(projectDir).filter((f) => fs.readFileSync(f, "utf8").includes(SECRET));
       check("...and its value is in no file the session wrote", recorded.length === 0, recorded.join(", "));

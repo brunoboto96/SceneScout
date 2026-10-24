@@ -208,6 +208,9 @@ import {
   withoutAppHeader,
   forOwnSend,
   headVerdict,
+  cookieLineAfter,
+  cookieLineFor,
+  crossSite,
   APP_HEADER_HEAD_MS,
   type AppHeader,
 } from "./app-header.js";
@@ -4809,7 +4812,11 @@ export class BrowserEngine {
       // shown as it is behaves as with no header, and is never read whole first (headVerdict).
       if (req.resourceType() === "document" && req.method() === "GET" && (await this.appDocumentKind(req, header, timeout)) === "file")
         return this.passOn(route, { headers: withoutAppHeader(req.headers(), header) });
-      response = await route.fetch({ headers: withAppHeader(req.headers(), header), maxRedirects: 0, timeout });
+      // The cookies as the browser sends them: Playwright's send would otherwise add every cookie the jar holds, a
+      // SameSite one the browser withholds from another site's request included (an empty line stops that).
+      const sent = req.headers();
+      const own = Object.keys(sent).some((name) => name.toLowerCase() === "cookie") ? sent : { ...sent, cookie: await this.sentCookieLine(req) };
+      response = await route.fetch({ headers: withAppHeader(own, header), maxRedirects: 0, timeout });
       // A redirect within the app: the browser would follow it unrouted, without the header (appRedirectPlan).
       let at = req.url();
       for (let hop = 0; hop < APP_HEADER_MAX_HOPS; hop++) {
@@ -4840,27 +4847,44 @@ export class BrowserEngine {
     });
   }
 
+  /** The Cookie line the browser sends with this request of the app's: its own, or else the jar's as cookieLineFor reads it. */
+  private async sentCookieLine(req: Request): Promise<string> {
+    const own = Object.entries(await req.allHeaders()).find(([name]) => name.toLowerCase() === "cookie");
+    if (own) return own[1];
+    let topLevel = false;
+    try {
+      topLevel = req.isNavigationRequest() && req.frame().parentFrame() === null;
+    } catch {
+      /* a service worker's request has no frame: not a page load */
+    }
+    return cookieLineFor(await this.context!.cookies(req.url()), crossSite(req.headers()["referer"], req.url()), topLevel);
+  }
+
   /**
    * What a page load carrying the header answers with, asked by HEAD through its redirects within the app (headVerdict).
    * Node's fetch, which settles on the answer's headers: a server that holds a HEAD open as it would the file's GET
-   * does not hold the load. The context's cookies for each address go with it. A HEAD that fails or does not answer
-   * within the bound says nothing ("unknown"): the load is then sent with the header as any other request.
+   * does not hold the load. The first HEAD carries the Cookie line the browser sends with the load itself (sentCookieLine,
+   * so never a SameSite cookie it withholds); each later hop the context's cookies for its address, with those the earlier hops
+   * set over them (cookieLineAfter). A HEAD that fails, or a chain that does not answer within the bound, says nothing
+   * ("unknown"): the load is then sent with the header as any other request.
    */
   private async appDocumentKind(req: Request, header: AppHeader, timeout: number): Promise<"page" | "file" | "unknown"> {
     let at = req.url();
     const base = forOwnSend(withAppHeader(req.headers(), header));
+    // One bound for the whole chain, not one per hop.
+    const signal = AbortSignal.timeout(Math.min(timeout, APP_HEADER_HEAD_MS));
+    const set: string[] = [];
     for (let hop = 0; hop <= APP_HEADER_MAX_HOPS; hop++) {
       let verdict: ReturnType<typeof headVerdict>;
       try {
-        const jar = (await this.context!.cookies(at)).map((c) => `${c.name}=${c.value}`).join("; ");
-        const head = await fetch(at, {
-          method: "HEAD",
-          headers: jar ? { ...base, cookie: jar } : base,
-          redirect: "manual",
-          signal: AbortSignal.timeout(Math.min(timeout, APP_HEADER_HEAD_MS)),
-        });
+        const jar =
+          hop === 0
+            ? await this.sentCookieLine(req)
+            : cookieLineAfter((await this.context!.cookies(at)).map((c) => `${c.name}=${c.value}`).join("; "), set, new URL(at).pathname);
+        const head = await fetch(at, { method: "HEAD", headers: jar ? { ...base, cookie: jar } : base, redirect: "manual", signal });
         const headers: Record<string, string> = {};
         head.headers.forEach((value, name) => (headers[name] = value));
+        set.push(...head.headers.getSetCookie());
         await head.body?.cancel().catch(() => {});
         verdict = headVerdict({ status: head.status, headers, requestUrl: at, appUrl: this.baseUrl });
       } catch {

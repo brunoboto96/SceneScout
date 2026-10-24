@@ -171,7 +171,85 @@ export function forOwnSend(headers: Readonly<Record<string, string>>): Record<st
   return out;
 }
 
-/** The longest a page load's HEAD may take (never longer than the page-load limit): past it, nothing is learnt and the load goes as any other. */
+/**
+ * Whether a request whose page is at `referer` comes from another site than
+ * `url`: another scheme, or another registrable domain, read as the last two
+ * labels of the host (an address or a one-label host such as localhost is its
+ * own site). Without a public-suffix list, two sites under one public
+ * suffix (shop.example.co.uk and news.other.co.uk) read as one, so the error
+ * is to send a cookie, as before, never to withhold one the browser sends. No Referer, or one that is not a URL: not known to be
+ * another site's.
+ */
+export function crossSite(referer: string | undefined, url: string): boolean {
+  let from: URL;
+  let to: URL;
+  try {
+    from = new URL(referer ?? "");
+    to = new URL(url);
+  } catch {
+    return false;
+  }
+  if (from.protocol !== to.protocol) return true;
+  if (from.hostname === to.hostname) return false;
+  const address = (host: string) => host.includes(":") || host.split(".").every((label) => label !== "" && [...label].every((ch) => ch >= "0" && ch <= "9"));
+  const site = (host: string) => (address(host) || !host.includes(".") ? host : host.split(".").slice(-2).join("."));
+  return site(from.hostname) !== site(to.hostname);
+}
+
+/**
+ * The Cookie line the browser sends with a request of the app's, built from
+ * its jar for that address when the request shows none at the time it is
+ * routed (Chromium adds cookies, and its Sec-Fetch-Site, only after the
+ * route handler has run): what SceneScout sends in the browser's place. A
+ * request another site's page started (crossSite) goes without a
+ * SameSite=Strict cookie and, unless it is a top-level page load, without a
+ * Lax one too, as the browser sends it.
+ */
+export function cookieLineFor(jar: readonly { name: string; value: string; sameSite?: string }[], fromAnotherSite: boolean, topLevelLoad: boolean): string {
+  return jar
+    .filter((c) => !fromAnotherSite || (c.sameSite !== "Strict" && (topLevelLoad || c.sameSite !== "Lax")))
+    .map((c) => `${c.name}=${c.value}`)
+    .join("; ");
+}
+
+/**
+ * The Cookie line the next hop of a page load's HEAD carries: `line` (the
+ * browser's jar for that address) with the cookies the earlier hops' answers
+ * set put over it, as the browser will hold them when it follows the same
+ * redirects. A cookie whose Path does not cover `pathname` is left out, and one
+ * set to expire (Max-Age 0 or less, or an Expires before `now`) is removed.
+ * Only for the HEAD's own question: the browser's jar is not changed.
+ */
+export function cookieLineAfter(line: string, setCookies: readonly string[], pathname: string, now = Date.now()): string {
+  const jar = new Map<string, string>();
+  for (const pair of line.split(";")) {
+    const eq = pair.indexOf("=");
+    const name = eq < 0 ? "" : pair.slice(0, eq).trim();
+    if (name) jar.set(name, pair.slice(eq + 1).trim());
+  }
+  for (const set of setCookies) {
+    const [first, ...attrs] = set.split(";");
+    const eq = first.indexOf("=");
+    const name = eq < 0 ? "" : first.slice(0, eq).trim();
+    if (!name) continue;
+    let gone = false;
+    let path = "/";
+    for (const attr of attrs) {
+      const at = attr.indexOf("=");
+      const key = (at < 0 ? attr : attr.slice(0, at)).trim().toLowerCase();
+      const value = at < 0 ? "" : attr.slice(at + 1).trim();
+      if (key === "max-age" && Number(value) <= 0) gone = true;
+      if (key === "expires" && Date.parse(value) < now) gone = true;
+      if (key === "path" && value.startsWith("/")) path = value;
+    }
+    if (pathname !== path && !pathname.startsWith(path.endsWith("/") ? path : `${path}/`)) continue;
+    if (gone) jar.delete(name);
+    else jar.set(name, first.slice(eq + 1).trim());
+  }
+  return [...jar].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+/** The longest a page load's HEADs may take, all hops together (never longer than the page-load limit): past it, nothing is learnt and the load goes as any other. */
 export const APP_HEADER_HEAD_MS = 5000;
 
 /**
