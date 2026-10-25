@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving (for a page that never answers)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="leaves-held-heading">Leaving</h1>
+    </main>
+    <script>
+      // Moves itself, just after load, to a page the fixture server holds back (held=1) until the suite releases it:
+      // a navigation that never answers. Its twin, leaves-for-page.html, moves to the same page answered at once.
+      setTimeout(function () {
+        location.href = "/page2.html?held=1";
+      }, 40);
+    </script>
+  </body>
+</html>

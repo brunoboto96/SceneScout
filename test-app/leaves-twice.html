@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving (twice)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="leaves-twice-heading">Leaving</h1>
+    </main>
+    <script>
+      // Moves itself, just after load, to leaves-for-held.html, which lands and then moves itself on again to a page
+      // that never answers: two hops, the second started a moment after the first lands.
+      setTimeout(function () {
+        location.href = "/leaves-for-held.html";
+      }, 40);
+    </script>
+  </body>
+</html>

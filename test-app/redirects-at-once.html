@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Moved (redirects as it loads)</title>
+    <script>
+      // Moves itself while it is still loading, before its own load has finished: a browser may then fail the load it
+      // was asked for as interrupted by this one. `?to=` names the path it moves to (same origin only), /page2.html
+      // by default.
+      (function () {
+        var to = new URLSearchParams(location.search).get("to") || "/page2.html";
+        if (to.charAt(0) !== "/" || to.charAt(1) === "/") to = "/page2.html";
+        location.replace(to);
+      })();
+    </script>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="redirects-at-once-heading">Moved</h1>
+    </main>
+  </body>
+</html>

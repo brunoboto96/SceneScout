@@ -19,7 +19,10 @@ import {
   formatLoadRetries,
   isTimeoutMessage,
   LIMIT_BOUNDS,
+  interruptedBy,
+  interruptedByOwnNavigation,
   limitHint,
+  loadInterrupted,
   LOAD_RETRIES,
   LOAD_RETRY_MIN_MS,
   loadRetryCause,
@@ -28,6 +31,7 @@ import {
   loadRetryPauseMs,
   LOAD_RETRY_PAUSE_MS,
   NETWORK_RETRY_ENV,
+  stillNavigating,
   NETWORK_RETRY_PAUSE_MS,
   readNetworkRetry,
   retriedLoadFailure,
@@ -329,4 +333,74 @@ test("a retry that failed again says so on the first line its callers show, keep
   assert.match((explainTimeout(timedOut, "nav", 20_000) as Error).message.split("\n")[0], /retried after ERR_NO_BUFFER_SPACE.*page-load limit/);
   // Not an Error: passed on as it is.
   assert.equal(retriedLoadFailure("odd", "ERR_NO_BUFFER_SPACE"), "odd");
+});
+
+test("a page load another navigation took the place of is the page moving on, not a failure; a real failure is still one (#674)", () => {
+  // Firefox under load fails page.goto this way when the page's own redirect lands before the asked-for load finishes.
+  // Contrastive pairs: the same load failing on the network or on its limit, and the same words in an address or in
+  // the call log, which are the app's and not the browser's.
+  for (const moved of [
+    'page.goto: Navigation to "http://127.0.0.1:1/a" is interrupted by another navigation to "http://127.0.0.1:1/b"',
+    'page.goto: Navigation to "http://127.0.0.1:1/a" is interrupted by another navigation to "http://127.0.0.1:1/login"\nCall log:\n  - navigating to "http://127.0.0.1:1/a", waiting until "domcontentloaded"',
+    'Navigation to "/a" is interrupted by another navigation to "/b"',
+  ]) {
+    assert.equal(loadInterrupted(moved), true, moved);
+  }
+  for (const failed of [
+    "page.goto: net::ERR_EMPTY_RESPONSE at http://127.0.0.1:1/a",
+    "page.goto: NS_ERROR_NET_RESET",
+    "page.goto: Timeout 20000ms exceeded.",
+    "page.goto: net::ERR_ABORTED at http://127.0.0.1:1/a",
+    // The words inside the address a failure names, or in its call log, are the app's.
+    "page.goto: net::ERR_EMPTY_RESPONSE at http://127.0.0.1:1/?q=is interrupted by another navigation",
+    'page.goto: Timeout 20000ms exceeded.\nCall log:\n  - Navigation to "/a" is interrupted by another navigation to "/b"',
+    "",
+  ]) {
+    assert.equal(loadInterrupted(failed), false, failed);
+  }
+});
+
+test("a page still moving on at the limit says where it was going, which limit ran out and how to raise it (#674)", () => {
+  const said = stillNavigating("http://127.0.0.1:1/next", "nav", 15000);
+  assert.match(said, /^the page moved itself on to http:\/\/127\.0\.0\.1:1\/next, which had not loaded when the page-load limit \(15000 ms\) ran out/);
+  assert.ok(said.includes("navTimeoutMs") && said.includes("--nav-timeout-ms") && said.includes("SCENESCOUT_NAV_TIMEOUT_MS"), said);
+});
+
+test("an interruption is the page moving on only when the navigation that took the load's place started after it (#674)", () => {
+  const message = 'page.goto: Navigation to "http://127.0.0.1:1/a" is interrupted by another navigation to "http://127.0.0.1:1/login?r=1"\nCall log:';
+  assert.equal(interruptedBy(message), "http://127.0.0.1:1/login?r=1");
+  assert.equal(interruptedBy("page.goto: net::ERR_ABORTED at http://127.0.0.1:1/a"), null);
+  // The load itself, started at 1000 and answered at 1200: the document whose script may move the page on.
+  const load = { url: "http://127.0.0.1:1/a", at: 1000, answeredAt: 1200 };
+  const login = "http://127.0.0.1:1/login?r=1";
+  // Contrastive pair: the same address, started after the load (the page's own redirect) and before it (an earlier
+  // load committing late, which is not the page moving on from this one).
+  assert.equal(interruptedByOwnNavigation(login, [load, { url: login, at: 1300 }], 1000), true);
+  assert.equal(interruptedByOwnNavigation(login, [{ url: login, at: 999 }, load], 1000), false);
+  // Contrastive pair: the same address started after the load, once the load was answered (its page moved on) and
+  // before it was (the page the load was leaving moved on by its own timer, and the load never reached its page).
+  const unanswered = { url: "http://127.0.0.1:1/a", at: 1000 };
+  assert.equal(interruptedByOwnNavigation(login, [unanswered, { url: login, at: 1300 }], 1000), false);
+  assert.equal(
+    interruptedByOwnNavigation(
+      login,
+      [
+        { ...unanswered, answeredAt: 1400 },
+        { url: login, at: 1300 },
+      ],
+      1000,
+    ),
+    false,
+  );
+  // The interrupting navigation's own answer is never the load's, however soon it came.
+  assert.equal(interruptedByOwnNavigation(login, [unanswered, { url: login, at: 1300, answeredAt: 1300 }], 1000), false);
+  // Nor is the answer to a page loaded before this load began.
+  assert.equal(
+    interruptedByOwnNavigation(login, [{ url: "http://127.0.0.1:1/old", at: 500, answeredAt: 600 }, unanswered, { url: login, at: 1300 }], 1000),
+    false,
+  );
+  // Another address started after the load is not the one named.
+  assert.equal(interruptedByOwnNavigation(login, [load, { url: "http://127.0.0.1:1/other", at: 2000 }], 1000), false);
+  // A fragment is never sent, so it is not compared.
+  assert.equal(interruptedByOwnNavigation("http://127.0.0.1:1/b#top", [load, { url: "http://127.0.0.1:1/b", at: 2000 }], 1000), true);
 });

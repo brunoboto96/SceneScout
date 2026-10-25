@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Page } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { URL_NAVIGATING_CAP_MS } from "../../dist/engine/settle.js";
 import { check, type ServerStats, type SmokeContext } from "./harness.ts";
@@ -72,6 +73,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     await attachVerdictWaitsForLateSignIn(baseUrl, authProject, deadState);
     await hashRoutedSignIn(baseUrl, authProject, deadState);
     await navigationToAFileIsNotWaitedFor(baseUrl, stats, authProject, deadState);
+    await interruptedLoadIsWhereThePageWent(baseUrl, authProject, deadState);
     await signInOnAnotherOrigin(baseUrl, foreignBaseUrl, authProject, deadState);
     await crawlJudgesAnotherOriginsSignIn(baseUrl, foreignBaseUrl, deadState);
   } finally {
@@ -97,6 +99,95 @@ async function navigationToAFileIsNotWaitedFor(baseUrl: string, stats: ServerSta
     console.log(`  (navigation to a page that moves itself to a file: ${ms} ms)`);
     check("a navigation whose page moves itself to a file returns before the cap for a navigation on its way", ms < URL_NAVIGATING_CAP_MS, `${ms} ms\n${out}`);
     check("...while that file was still arriving", stillSending > 0, `files still sending: ${stillSending}`);
+  } finally {
+    await engine.close().catch(() => {});
+  }
+}
+
+/**
+ * Firefox under load fails page.goto with "Navigation to … is interrupted by another navigation to …" when the page's
+ * own redirect (redirects-at-once.html moves itself on as it loads) lands before the asked-for load finishes; the call
+ * used to throw that. Where the page went is now reported, and judged: a redirect to sign-in is a bounce. The browser's
+ * interruption is made certain here, on every browser, by failing the load as Firefox does once the page has committed
+ * (the redirect is the page's own, and real). Contrastive pair: a load that really failed is still a failure.
+ */
+async function interruptedLoadIsWhereThePageWent(baseUrl: string, authProject: string, deadState: string): Promise<void> {
+  console.log("auth loss: a load the page's own redirect interrupted reports where the page went, and a bounce is judged");
+  const engine = new BrowserEngine();
+  try {
+    await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: deadState });
+    const page = (engine as unknown as { page: Page }).page;
+    const pageProto = Object.getPrototypeOf(page) as { goto: Page["goto"] };
+    const real = pageProto.goto;
+    let interrupted = 0;
+    pageProto.goto = async function (this: Page, url: string, options?: Parameters<Page["goto"]>[1]) {
+      const stale = url.includes("/page2.html?stale=1");
+      if (url.includes("/page2.html?leaving=1")) {
+        // The page being left moves itself on to sign-in after this load began and before it was answered (its own
+        // timer), and the load is failed as WebKit fails it then: the load never reached its page, so nothing redirected it.
+        interrupted += 1;
+        const to = new URL("/login?from=leaving", url).href;
+        await this.evaluate(`setTimeout(() => { location.href = ${JSON.stringify(to)}; }, 0)`);
+        await this.waitForURL(/\/login\?from=leaving/, { waitUntil: "commit" });
+        throw new Error(`page.goto: Navigation to "${url}" is interrupted by another navigation to "${to}"`);
+      }
+      if (!url.includes("/redirects-at-once.html") && !stale) return real.call(this, url, options);
+      await real.call(this, url, { ...options, waitUntil: "commit" });
+      interrupted += 1;
+      // A stale interruption names a page the session loaded before this load began, as an earlier load committing late does.
+      const to = stale ? "/covered.html" : (new URL(url).searchParams.get("to") ?? "/page2.html");
+      throw new Error(`page.goto: Navigation to "${url}" is interrupted by another navigation to "${new URL(to, url).href}"`);
+    };
+    try {
+      const outcome = async (target: string): Promise<string> => {
+        try {
+          return await engine.navigate(target);
+        } catch (err) {
+          return `THREW ${err instanceof Error ? err.message : String(err)}`;
+        }
+      };
+      const toLogin = await outcome(`${baseUrl}/redirects-at-once.html?to=/login`);
+      check(
+        "a load the page's redirect to sign-in interrupted is a bounce to sign-in, not a failed call",
+        interrupted === 1 && toLogin.includes("REDIRECTED") && toLogin.includes("NOT counted as covered"),
+        `interrupted ${interrupted}\n${toLogin}`,
+      );
+      const toPage = await outcome(`${baseUrl}/redirects-at-once.html`);
+      check(
+        "...and one its redirect to another page interrupted reports that page as where it landed",
+        interrupted === 2 && /landed on \/page2\.html/.test(toPage) && !toPage.includes("NOT counted as covered") && !toPage.startsWith("THREW"),
+        `interrupted ${interrupted}\n${toPage}`,
+      );
+      const stale = await outcome(`${baseUrl}/page2.html?stale=1`);
+      check(
+        "a load interrupted by an earlier navigation committing late is still the load's failure, not a redirect to it",
+        interrupted === 3 && stale.startsWith("THREW") && stale.includes("interrupted by another navigation") && !stale.includes("REDIRECTED"),
+        `interrupted ${interrupted}\n${stale}`,
+      );
+      const crawled = await engine.crawl(["/redirects-at-once.html"]);
+      check(
+        "a crawled route whose own redirect interrupted its load is read where it landed, not a failed load",
+        interrupted === 4 && !crawled.includes("LOAD FAILED") && /\/redirects-at-once\.html — moved on by the page/.test(crawled),
+        `interrupted ${interrupted}\n${crawled}`,
+      );
+      const dropped = await outcome(`${baseUrl}/drop-connection`);
+      check(
+        "a load that really failed is still reported as a failure (the contrast)",
+        dropped.startsWith("THREW") && !dropped.includes("moved itself on"),
+        dropped,
+      );
+      // Contrastive with the first check: the same interruption naming sign-in, started after the load began, but by
+      // the page the load was leaving, before anything the load asked for had been answered.
+      await outcome(`${baseUrl}/covered.html`);
+      const leaving = await outcome(`${baseUrl}/page2.html?leaving=1`);
+      check(
+        "a load interrupted by the page it was leaving moving itself on is still the load's failure, not a bounce to sign-in",
+        interrupted === 5 && leaving.startsWith("THREW") && leaving.includes("interrupted by another navigation") && !leaving.includes("REDIRECTED"),
+        `interrupted ${interrupted}\n${leaving}`,
+      );
+    } finally {
+      pageProto.goto = real;
+    }
   } finally {
     await engine.close().catch(() => {});
   }

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving (for a page that answers)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="leaves-page-heading">Leaving</h1>
+    </main>
+    <script>
+      // Moves itself, just after load, to a page answered at once. Its twin, leaves-for-held.html, moves to the same
+      // page held back so it never answers.
+      setTimeout(function () {
+        location.href = "/page2.html";
+      }, 40);
+    </script>
+  </body>
+</html>
