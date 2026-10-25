@@ -241,7 +241,7 @@ import {
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { bestEffort, settleWithin } from "./best-effort.js";
-import { marksRouteExercised, pathnameOf, RouteGuard, type BlockedRequest } from "./route-guard.js";
+import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { readMachineSockets } from "./tcp-table.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
@@ -4910,6 +4910,8 @@ export class BrowserEngine {
     let at = req.url();
     let answer: globalThis.Response;
     let plan: ReturnType<typeof documentAnswerPlan>;
+    // The next hop, when it is a page load the write policy refuses for its address: never sent from here.
+    let refusedHop: string | null = null;
     try {
       for (let hop = 0; ; hop++) {
         // Each later hop: the jar's cookies for its address as the browser sends them on a load another site may have
@@ -4925,6 +4927,12 @@ export class BrowserEngine {
         answer = await fetch(at, { method: "GET", headers: cookie ? { ...base, cookie } : base, redirect: "manual", signal });
         plan = documentAnswerPlan({ status: answer.status, headers: Object.fromEntries(answer.headers), requestUrl: at, appUrl: this.baseUrl });
         if (plan.kind !== "stand-in" || hop >= APP_HEADER_MAX_HOPS) break;
+        // These hops are sent here, never routed, so the route handler's refusal of a page load by its address is
+        // asked first: the browser's own redirect is refused the same way (route-guard.ts refusedPageLoad).
+        if (refusedPageLoad(this.writeRule.at(), this.refuseDestructiveGets, plan.url)) {
+          refusedHop = plan.url;
+          break;
+        }
         hopsSet.push({ url: at, lines: answer.headers.getSetCookie() });
         await answer.body?.cancel().catch(() => {});
         at = plan.url;
@@ -4933,6 +4941,14 @@ export class BrowserEngine {
       return fail(err);
     }
     const setCookies = answer.headers.getSetCookie();
+    if (refusedHop !== null) {
+      // Answered with a page that loads that hop itself: a load the route handler sees, and refuses unsent.
+      this.appHeaderAnswers.set(req, { lines: [...hopsSet.flatMap((h) => h.lines), ...setCookies], handedBack: false });
+      await answer.body?.cancel().catch(() => {});
+      await this.storeAppCookies([...hopsSet, { url: at, lines: setCookies }]);
+      await route.fulfill({ status: 200, contentType: "text/html", body: redirectStandIn(refusedHop) }).catch(() => {});
+      return;
+    }
     const keep = hopsSet.length > 0 ? redirectsEndPlan({ status: answer.status, headers: Object.fromEntries(answer.headers) }) : null;
     // The body is read only for an answer handed to the browser, which stores what it sets; what the hops within the app
     // set, and what an answer the browser is not handed set, goes in its jar here.

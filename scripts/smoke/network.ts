@@ -37,7 +37,7 @@ const HEADER = "x-ci-allow";
 const FILE_STREAM_MS = 6000;
 const SECRET = "ci-allow-5e3f9a0c71";
 const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SCENESCOUT_PROXY"];
-const OWN_VARS = ["SCENESCOUT_APP_HEADER", "SCENESCOUT_RETRY_NETWORK"];
+const OWN_VARS = ["SCENESCOUT_APP_HEADER", "SCENESCOUT_RETRY_NETWORK", "SCENESCOUT_REFUSE_DESTRUCTIVE_GETS"];
 
 interface Seen {
   method: string;
@@ -195,7 +195,7 @@ export async function run(_ctx: SmokeContext): Promise<void> {
   const DROP_WINDOW_MS = 1000;
   let dropFrom = 0;
   // What the app did: how many times /count and /small.csv ran, and how each send of /export.csv ended.
-  const ran = { count: 0, small: 0 };
+  const ran = { count: 0, small: 0, deleted: 0 };
   const exports: { header: string | null; cookie: string | null; endedMs: number; finished: boolean }[] = [];
   const app = await server((req, res, seen) => {
     const url = req.url ?? "";
@@ -205,6 +205,18 @@ export async function run(_ctx: SmokeContext): Promise<void> {
       ran.count += 1;
       res.writeHead(200, { "content-type": "text/html", connection: "close" });
       res.end(`<!doctype html><title>Counted</title><p>run ${ran.count}</p>`);
+      return;
+    }
+    if (url === "/next-step") {
+      // A redirect within the app to an address that is a destructive command.
+      res.writeHead(302, { location: "/items/3/delete", connection: "close" });
+      res.end();
+      return;
+    }
+    if (url === "/items/3/delete") {
+      ran.deleted += 1;
+      res.writeHead(200, { "content-type": "text/html", connection: "close" });
+      res.end("<!doctype html><title>Deleted</title><p>deleted</p>");
       return;
     }
     if (url === "/small.csv") {
@@ -442,6 +454,25 @@ export async function run(_ctx: SmokeContext): Promise<void> {
         "a page load whose address does something runs it exactly once with the header on, carrying the header, as it runs once with it off",
         countWith.runs === 1 && countWith.error === "" && countWith.seen[0]?.header === SECRET && countWithout.runs === 1,
         JSON.stringify({ countWith, countWithout }),
+      );
+      // A redirect within the app to a destructive command, with the refusal of such page loads turned on: SceneScout
+      // sends the hops itself, so it must ask the policy before sending that one, as the route handler would. The contrast
+      // is the same load with the refusal off, which reaches it.
+      const deleteRuns = async (vars: Record<string, string>) =>
+        withEnv(vars, async () => {
+          await engine.attach({ url: `${app.base}/`, projectDir });
+          ran.deleted = 0;
+          const out = await errorOf(() => engine.navigate(`${app.base}/next-step`));
+          // The stand-in page's own load of the hop is asynchronous: give a load that is let out the time to arrive.
+          for (let i = 0; i < 40 && ran.deleted === 0; i++) await new Promise((r) => setTimeout(r, 50));
+          return { runs: ran.deleted, out: out.split("\n")[0], seen: app.seen.slice(-4).map((s) => `${s.method} ${s.url}`) };
+        });
+      const deleteRefused = await deleteRuns({ ...header, SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1" });
+      const deleteAllowed = await deleteRuns(header);
+      check(
+        "with destructive page loads refused, a redirect within the app to one is never sent with the header on, as one with the refusal off is",
+        deleteRefused.runs === 0 && deleteAllowed.runs === 1,
+        JSON.stringify({ deleteRefused, deleteAllowed }),
       );
       // A short file that declares its length is read whole and handed over: fetched once, with the header.
       const smallWith = await (async () => {

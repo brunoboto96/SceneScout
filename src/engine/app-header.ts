@@ -409,11 +409,13 @@ export function jarChanges(
     let secure = false;
     let sameSite: JarCookie["sameSite"];
     let refused = false;
+    let domainNamed = false;
     for (const attr of attrs) {
       const sign = attr.indexOf("=");
       const key = (sign < 0 ? attr : attr.slice(0, sign)).trim().toLowerCase();
       const val = sign < 0 ? "" : attr.slice(sign + 1).trim();
       if (key === "domain" && val !== "") {
+        domainNamed = true;
         const d = (val.startsWith(".") ? val.slice(1) : val).toLowerCase();
         // An address is its own host only; a name's Domain covers it and its subdomains.
         if (d === host) domain = address || !host.includes(".") ? host : `.${d}`;
@@ -432,10 +434,11 @@ export function jarChanges(
       }
     }
     if (refused || (secure && at.protocol !== "https:" && !local) || (sameSite === "None" && !secure)) continue;
-    // The name prefixes a browser holds a cookie to: __Secure- needs Secure; __Host- also a host-only cookie at Path=/.
+    // The name prefixes a browser holds a cookie to: __Secure- needs Secure; __Host- also Path=/ and no Domain at all,
+    // not even one naming the host itself.
     const lower = name.toLowerCase();
     if ((lower.startsWith("__secure-") || lower.startsWith("__host-")) && !secure) continue;
-    if (lower.startsWith("__host-") && (domain !== host || path !== "/")) continue;
+    if (lower.startsWith("__host-") && (domainNamed || path !== "/")) continue;
     accepted.push(line);
     // Max-Age wins over Expires.
     if (maxAge !== null ? maxAge <= 0 : expires !== -1 && expires * 1000 <= now) {

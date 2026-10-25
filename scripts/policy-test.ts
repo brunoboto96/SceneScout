@@ -137,7 +137,7 @@ import {
 } from "../src/engine/unload.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 import type { Request, Route } from "playwright";
-import { marksRouteExercised, pathnameOf, RouteGuard, routedWriteVerdict, type RouteGuardHost } from "../src/engine/route-guard.ts";
+import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, routedWriteVerdict, type RouteGuardHost } from "../src/engine/route-guard.ts";
 import { settleWithin } from "../src/engine/best-effort.ts";
 import {
   destructiveGet,
@@ -3029,6 +3029,18 @@ test("destructive page loads: void, reject, approve and close count as a whole s
   }
 });
 
+test("refusedPageLoad: a destructive command's page load is refused only in observe and read-only, and only when turned on", () => {
+  const command = "https://app.example.com/items/3/delete";
+  const page = "https://app.example.com/items/3";
+  for (const rule of ["observe", "read-only"] as const) {
+    assert.equal(refusedPageLoad(rule, true, command), true, rule);
+    assert.equal(refusedPageLoad(rule, true, page), false, rule);
+    assert.equal(refusedPageLoad(rule, false, command), false, rule);
+  }
+  assert.equal(refusedPageLoad("safe-write", true, command), false);
+  assert.equal(refusedPageLoad("destructive", true, command), false);
+});
+
 test("strict settings: read from the environment, off by default, and a value that is not on or off is an error", () => {
   assert.equal(writeClassifierSetting({}), "standard");
   assert.equal(writeClassifierSetting({ SCENESCOUT_STRICT_WRITES: "1" }), "strict");
@@ -4963,6 +4975,9 @@ test("allowlist header: the Set-Cookie lines of a load handed back to the browse
   assert.deepEqual(jarChanges(["__Host-a=1; Secure; Path=/"], at, now).accepted, ["__Host-a=1; Secure; Path=/"]);
   assert.deepEqual(jarChanges(["__Host-a=1; Secure; Path=/files"], at, now).add, [], "__Host- needs Path=/");
   assert.deepEqual(jarChanges(["__Host-a=1; Secure; Path=/; Domain=example.com"], at, now).add, [], "__Host- needs a host-only cookie");
+  // A Domain naming the host itself still breaks __Host-, where the host has no dot and the cookie would stay host-only.
+  assert.deepEqual(jarChanges(["__Host-a=1; Secure; Path=/; Domain=localhost"], "http://localhost:3000/", now).add, [], "__Host- takes no Domain");
+  assert.equal(jarChanges(["__Host-a=1; Secure; Path=/"], "http://localhost:3000/", now).add.length, 1);
   assert.deepEqual(jarChanges(["__Secure-a=1"], at, now).add, [], "__Secure- needs Secure");
   assert.equal(jarChanges(["__Secure-a=1; Secure"], at, now).add.length, 1);
   // What is refused is not among the lines a Cookie line is built from.
