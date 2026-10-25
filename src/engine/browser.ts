@@ -1943,6 +1943,7 @@ export class BrowserEngine {
       this.noteDocumentLoad(res.request());
       this.watchResponse(res.request(), res.status());
       this.pageRequests.answered(res.request(), res.status(), Date.now(), this.guard.refused(res.request()));
+      this.noteNavigationAnswered(res.request());
     });
     context.on("request", (req) => {
       // Who moved the driven page, decided on its navigation's first request
@@ -1952,7 +1953,9 @@ export class BrowserEngine {
           if (this.page && req.frame() === this.page.mainFrame()) {
             this.embedMoves.navigationStarted(req.url(), req.headers()["referer"], this.embeddedSites());
             this.pageRequests.loaded(req.url(), Date.now());
-            this.mainNavigationStarts.push({ url: req.url(), at: Date.now() });
+            const start: NavigationStart = { url: req.url(), at: Date.now() };
+            this.mainNavigationStarts.push(start);
+            this.mainNavigationOf.set(req, start);
             if (this.mainNavigationStarts.length > 20) this.mainNavigationStarts.shift();
             // The current input moved the page to a new document: what is sent from here on is not its own write.
             if (this.inputSince !== null && this.documentLoadSince === null && this.inputSince >= this.actionStartedAt) this.documentLoadSince = Date.now();
@@ -2605,6 +2608,16 @@ export class BrowserEngine {
   private lastRequestStart = 0;
   /** The driven page's latest navigations, by their first request (limits.ts interruptedByOwnNavigation). */
   private mainNavigationStarts: NavigationStart[] = [];
+  /** Each of those navigations by its first request, so an answer to it or to a redirect it followed is dated on it. */
+  private mainNavigationOf = new WeakMap<Request, NavigationStart>();
+
+  /** Date the first answer to one of the driven page's navigations (NavigationStart.answeredAt). */
+  private noteNavigationAnswered(req: Request): void {
+    let first = req;
+    for (let from = first.redirectedFrom(); from; from = from.redirectedFrom()) first = from;
+    const start = this.mainNavigationOf.get(first);
+    if (start && start.answeredAt === undefined) start.answeredAt = Date.now();
+  }
   /** When a request whose answer had arrived was last cancelled, or finished on an answer a page may move on (settle.ts). */
   private answered = new AnsweredEnds<Request>();
   /**

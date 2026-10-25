@@ -201,20 +201,27 @@ export function interruptedBy(message: string): string | null {
 /** How long an interrupted load waits for the request of the navigation that took its place, when it has not been seen yet. */
 export const INTERRUPTION_GRACE_MS = 1000;
 
-/** A main-frame navigation's first request: where it went and when it started. */
+/** A main-frame navigation's first request: where it went, when it started and, once it was, when it was answered. */
 export interface NavigationStart {
   url: string;
   at: number;
+  /** When the first answer to it (or to a redirect it followed) arrived; unset while none has. */
+  answeredAt?: number;
 }
 
 /**
  * Whether an interrupted load (interruptedBy) is the page moving itself on: the navigation that took its place started
- * at or after the load did. One that started before is a navigation from earlier (the previous load committing late),
- * and the page has not moved on from the asked-for load at all, so the load's error stands. Fragments are not compared.
+ * at or after the load did, and after a navigation begun since the load (the load itself) had been answered, since only
+ * a document that arrived can run the script that moves the page on. One that started before the load is a navigation
+ * from earlier (the previous load committing late); one that started after it while nothing begun since had been
+ * answered came from the page the load was leaving (its own timer moving it on), and the load never reached its page.
+ * In both the page has not moved on from the asked-for load, so the load's error stands. Fragments are not compared.
  */
 export function interruptedByOwnNavigation(target: string, starts: readonly NavigationStart[], loadStartedAt: number): boolean {
   const bare = (u: string): string => u.split("#")[0];
-  return starts.some((s) => s.at >= loadStartedAt && bare(s.url) === bare(target));
+  const answeredBefore = (s: NavigationStart): boolean =>
+    starts.some((a) => a !== s && a.at >= loadStartedAt && a.at <= s.at && a.answeredAt !== undefined && a.answeredAt <= s.at);
+  return starts.some((s) => s.at >= loadStartedAt && bare(s.url) === bare(target) && answeredBefore(s));
 }
 
 const HINT_MARK = "ran out. If the machine is loaded";

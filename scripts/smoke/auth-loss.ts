@@ -121,6 +121,15 @@ async function interruptedLoadIsWhereThePageWent(baseUrl: string, authProject: s
     let interrupted = 0;
     pageProto.goto = async function (this: Page, url: string, options?: Parameters<Page["goto"]>[1]) {
       const stale = url.includes("/page2.html?stale=1");
+      if (url.includes("/page2.html?leaving=1")) {
+        // The page being left moves itself on to sign-in after this load began and before it was answered (its own
+        // timer), and the load is failed as WebKit fails it then: the load never reached its page, so nothing redirected it.
+        interrupted += 1;
+        const to = new URL("/login?from=leaving", url).href;
+        await this.evaluate(`setTimeout(() => { location.href = ${JSON.stringify(to)}; }, 0)`);
+        await this.waitForURL(/\/login\?from=leaving/, { waitUntil: "commit" });
+        throw new Error(`page.goto: Navigation to "${url}" is interrupted by another navigation to "${to}"`);
+      }
       if (!url.includes("/redirects-at-once.html") && !stale) return real.call(this, url, options);
       await real.call(this, url, { ...options, waitUntil: "commit" });
       interrupted += 1;
@@ -165,6 +174,15 @@ async function interruptedLoadIsWhereThePageWent(baseUrl: string, authProject: s
         "a load that really failed is still reported as a failure (the contrast)",
         dropped.startsWith("THREW") && !dropped.includes("moved itself on"),
         dropped,
+      );
+      // Contrastive with the first check: the same interruption naming sign-in, started after the load began, but by
+      // the page the load was leaving, before anything the load asked for had been answered.
+      await outcome(`${baseUrl}/covered.html`);
+      const leaving = await outcome(`${baseUrl}/page2.html?leaving=1`);
+      check(
+        "a load interrupted by the page it was leaving moving itself on is still the load's failure, not a bounce to sign-in",
+        interrupted === 5 && leaving.startsWith("THREW") && leaving.includes("interrupted by another navigation") && !leaving.includes("REDIRECTED"),
+        `interrupted ${interrupted}\n${leaving}`,
       );
     } finally {
       pageProto.goto = real;

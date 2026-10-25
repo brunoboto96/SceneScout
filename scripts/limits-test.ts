@@ -370,12 +370,37 @@ test("an interruption is the page moving on only when the navigation that took t
   const message = 'page.goto: Navigation to "http://127.0.0.1:1/a" is interrupted by another navigation to "http://127.0.0.1:1/login?r=1"\nCall log:';
   assert.equal(interruptedBy(message), "http://127.0.0.1:1/login?r=1");
   assert.equal(interruptedBy("page.goto: net::ERR_ABORTED at http://127.0.0.1:1/a"), null);
+  // The load itself, started at 1000 and answered at 1200: the document whose script may move the page on.
+  const load = { url: "http://127.0.0.1:1/a", at: 1000, answeredAt: 1200 };
+  const login = "http://127.0.0.1:1/login?r=1";
   // Contrastive pair: the same address, started after the load (the page's own redirect) and before it (an earlier
   // load committing late, which is not the page moving on from this one).
-  assert.equal(interruptedByOwnNavigation("http://127.0.0.1:1/login?r=1", [{ url: "http://127.0.0.1:1/login?r=1", at: 1000 }], 1000), true);
-  assert.equal(interruptedByOwnNavigation("http://127.0.0.1:1/login?r=1", [{ url: "http://127.0.0.1:1/login?r=1", at: 999 }], 1000), false);
+  assert.equal(interruptedByOwnNavigation(login, [load, { url: login, at: 1300 }], 1000), true);
+  assert.equal(interruptedByOwnNavigation(login, [{ url: login, at: 999 }, load], 1000), false);
+  // Contrastive pair: the same address started after the load, once the load was answered (its page moved on) and
+  // before it was (the page the load was leaving moved on by its own timer, and the load never reached its page).
+  const unanswered = { url: "http://127.0.0.1:1/a", at: 1000 };
+  assert.equal(interruptedByOwnNavigation(login, [unanswered, { url: login, at: 1300 }], 1000), false);
+  assert.equal(
+    interruptedByOwnNavigation(
+      login,
+      [
+        { ...unanswered, answeredAt: 1400 },
+        { url: login, at: 1300 },
+      ],
+      1000,
+    ),
+    false,
+  );
+  // The interrupting navigation's own answer is never the load's, however soon it came.
+  assert.equal(interruptedByOwnNavigation(login, [unanswered, { url: login, at: 1300, answeredAt: 1300 }], 1000), false);
+  // Nor is the answer to a page loaded before this load began.
+  assert.equal(
+    interruptedByOwnNavigation(login, [{ url: "http://127.0.0.1:1/old", at: 500, answeredAt: 600 }, unanswered, { url: login, at: 1300 }], 1000),
+    false,
+  );
   // Another address started after the load is not the one named.
-  assert.equal(interruptedByOwnNavigation("http://127.0.0.1:1/login?r=1", [{ url: "http://127.0.0.1:1/other", at: 2000 }], 1000), false);
+  assert.equal(interruptedByOwnNavigation(login, [load, { url: "http://127.0.0.1:1/other", at: 2000 }], 1000), false);
   // A fragment is never sent, so it is not compared.
-  assert.equal(interruptedByOwnNavigation("http://127.0.0.1:1/b#top", [{ url: "http://127.0.0.1:1/b", at: 2000 }], 1000), true);
+  assert.equal(interruptedByOwnNavigation("http://127.0.0.1:1/b#top", [load, { url: "http://127.0.0.1:1/b", at: 2000 }], 1000), true);
 });
