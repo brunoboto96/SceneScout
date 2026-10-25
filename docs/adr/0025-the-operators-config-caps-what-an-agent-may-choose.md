@@ -131,3 +131,39 @@ disagree, the file wins and the argument is refused.
 - **`evidence` capped at `file` or `off` refuses the tools that return a
   picture into the conversation** (`scout_screenshot`, `scout_cards` with
   inline pictures), as `egress: "none"` does.
+
+## Amendment: `redactPageText`, personal data masked before the agent reads it (issue #537)
+
+- **`redactPageText` is `off` or `pii`, and unset is `off`.** With `pii`, every
+  tool's result is masked on its way to the agent, in one place: the MCP
+  server wraps each tool's handler as it is registered (`server-context.ts`),
+  so a tool added later is covered without being told. Text parts (and an
+  embedded resource's text), every string value of structured content (not
+  its keys) and an error's message are masked; pictures are not. Reports,
+  SARIF and `check`'s own output are not: they are not returned to an agent,
+  and what they keep is redacted as before.
+- **It reuses `redactPersonal` (sensitive.ts)**: email addresses, a phone
+  number after a word for one, and card numbers, with the markers stored
+  findings already carry. No new pattern is written, so ADR 28's linear-time
+  engine and its bounds hold, and a title the agent copies from masked text
+  dedups with the stored one.
+- **The engine reads the page as it is.** Oracles (claims, echoes, secrets in
+  the page) run in the engine before anything is returned, so masking never
+  changes what they find. What the agent judges from the content is what it
+  loses, and the guide says so.
+- **Only the file sets it, and masking wins** (`tightenRedactPageText`): a
+  project's own file may turn it on and never off. Every call is masked
+  while any open session's config masks, a call naming a session whose own
+  project leaves it off included: a result can carry another session's page
+  (the session list names each session's address, and a call naming none may
+  read any project), so masking per named session let a masking project's
+  text out. Masking a second project more than it asked costs that run some
+  content; masking it less sends what the first project kept back.
+- **JSON a tool quotes keeps its escapes.** An API body or a console line
+  writes a newline as `\n`; the mask reads each run of text between escapes
+  on its own, so `\nme@host` keeps its `\n` and stays valid JSON, and an
+  `@` written as `\u0040` is read as an `@`.
+- **No preset sets it.** It changes what the agent reads, not what it may do,
+  and turning it on for every `strict` team would hide content bugs they test
+  for today.
+

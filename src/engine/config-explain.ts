@@ -85,6 +85,7 @@ const UNSET: Record<ConfigKey, string> = {
   writeClassifier: "standard",
   refuseDestructiveGets: "false",
   authPosts: "no list (sign-in is recognised by its path)",
+  redactPageText: "off",
 };
 
 /** One layer of the config: a file, the keys it sets itself and the preset it started from. */

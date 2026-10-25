@@ -24,6 +24,9 @@ import {
   EGRESS_PATHS,
   egressAllows,
   egressRefusal,
+  pageTextMaskedFor,
+  REDACT_PAGE_TEXT_MODES,
+  redactPageTextNote,
   readCommandPolicy,
   fsPolicyReader,
   CONFIG_KEYS,
@@ -125,6 +128,8 @@ import {
   headerOf,
   judgeUnseenWrite,
   LEAVE_MARKER_PATH,
+  LEFT_PAGE_RULE_CAP_MS,
+  LeftPageRules,
   leaveMarkerToken,
   leaveMarkerUrl,
   pausedRequestBody,
@@ -137,7 +142,15 @@ import {
 } from "../src/engine/unload.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 import type { Request, Route } from "playwright";
-import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, routedWriteVerdict, type RouteGuardHost } from "../src/engine/route-guard.ts";
+import {
+  marksRouteExercised,
+  pathnameOf,
+  refusedPageLoad,
+  RouteGuard,
+  routedWriteVerdict,
+  type BlockedRequest,
+  type RouteGuardHost,
+} from "../src/engine/route-guard.ts";
 import { settleWithin } from "../src/engine/best-effort.ts";
 import {
   destructiveGet,
@@ -1148,7 +1161,9 @@ test("a sweep's re-attach is said at the end of that sweep only", () => {
 test("the login pattern matches a segment, not a substring", () => {
   assert.equal(LOGIN_ROUTE_RE.test("/login"), true);
   assert.equal(LOGIN_ROUTE_RE.test("/auth/callback"), true);
-  assert.equal(LOGIN_ROUTE_RE.test("/login.html"), false, "an extension is not a login route segment");
+  assert.equal(LOGIN_ROUTE_RE.test("/login.html"), true, "a page extension after the segment is the same page");
+  assert.equal(LOGIN_ROUTE_RE.test("/login.json"), false, "an extension that is not a page is not");
+  assert.equal(LOGIN_ROUTE_RE.test("/login.html.bak"), false);
   assert.equal(LOGIN_ROUTE_RE.test("/logindetails"), false, "nor is a longer word starting with it");
 });
 
@@ -1160,6 +1175,9 @@ test("a sign-in segment in any case is a sign-in page to every caller: a navigat
     ["/Account/Login", "/Account/LoginHistory"],
     ["/#/Login", "/#/Loginhelp"],
     ["/SignIn", "/SignInStats"],
+    ["/Login.aspx", "/LoginHelp.aspx"],
+    ["/signin.php", "/signin-help.php"],
+    ["/account/login.html", "/account/login.html.bak"],
   ];
   for (const [signIn, nearMiss] of pairs) {
     // A navigation, a crawl step and the attach verdict all ask isLoginRedirect, with what they asked for and where it landed.
@@ -1175,6 +1193,10 @@ test("a sign-in segment in any case is a sign-in page to every caller: a navigat
   // Memory re-files an old landing on a sign-in page by the same pattern.
   assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Account/Login"), true);
   assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Account/LoginHistory"), false);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/Login.aspx"), true);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/LoginHelp.aspx"), false);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/signin.php"), true);
+  assert.equal(LOGIN_ROUTE_RE_STORAGE.test("/signin-help.php"), false);
 });
 
 test("another site's address is kept by its origin and path only; the app's own as it is", () => {
@@ -2418,23 +2440,32 @@ function guardRig(
     refuseGets?: boolean;
     authPosts?: string[];
     narrowOnly?: boolean;
+    /** The session's rule read afresh on every request, where a test changes it as it goes; else `rule`. */
+    ruleNow?: () => (typeof WRITE_MODES)[number];
+    leftPageRuleCapMs?: number;
+    /** The host's foreign-frame answer as a function of the rule it is asked under (a sign-in page lets one out in read-only, never in observe); else `foreign`. */
+    foreignUnder?: (rule: (typeof WRITE_MODES)[number]) => string | null;
     escape?: boolean;
   } = {},
 ) {
   const calls: GuardCall[] = [];
+  const blocked: BlockedRequest[] = [];
   const logged: string[] = [];
   const owned = new Set<string>();
   const host: RouteGuardHost = {
     appUrl: () => "https://app.example.com",
-    rule: () => rule,
+    rule: () => opts.ruleNow?.() ?? rule,
     pageUrl: () => "https://app.example.com/things",
     trustedEmbeds: () => new Set(),
     movedByEmbed: () => null,
-    noteBlocked: (e) => void calls.push(`noteBlocked ${e.sig} answered=${e.answered}${e.why ? ` why=${e.why}` : ""}`),
+    noteBlocked: (e) => {
+      blocked.push(e);
+      calls.push(`noteBlocked ${e.sig} answered=${e.answered}${e.why ? ` why=${e.why}` : ""}`);
+    },
     logAction: (e) => void (calls.push(`log ${e.action}`), logged.push(e.target)),
     notePolicyBlock: () => void calls.push("notePolicyBlock"),
     noteSentWrite: () => void calls.push("noteSentWrite"),
-    foreignWriteOf: () => opts.foreign ?? null,
+    foreignWriteOf: (_req, r) => (opts.foreignUnder ? opts.foreignUnder(r) : (opts.foreign ?? null)),
     embedEscapeNavigation: () => opts.escape === true,
     frameDocumentKind: () => opts.frameDoc ?? null,
     sentByMainFrame: () => true,
@@ -2453,7 +2484,7 @@ function guardRig(
     authPosts: () => (opts.authPosts ? readPostEntries(opts.authPosts).entries : null),
     authPostsNarrowOnly: () => opts.narrowOnly === true,
   };
-  const guard = new RouteGuard(host);
+  const guard = new RouteGuard(host, opts.leftPageRuleCapMs);
   const send = (
     method: string,
     path: string,
@@ -2487,7 +2518,7 @@ function guardRig(
     const done = guard.handle(route as unknown as Route).then(() => outcome);
     return { request: request as unknown as Request, done };
   };
-  return { calls, logged, guard, send };
+  return { calls, logged, guard, send, blocked };
 }
 
 test("RouteGuard: an embed's escape to another site is logged by that site's origin and path, never its query", async () => {
@@ -2853,6 +2884,132 @@ test("RouteGuard: only a leave marker the guard issued is failed unjudged; the s
   assert.deepEqual([carried.sent, carried.heard], ["Fetch.failRequest", false], "carrying the marker is not hearing it");
   const other = await unseen("destructive", "https://app.example.com/csp-report", report.replace("ISSUED", `https://app.example.com${LEAVE_MARKER_PATH}x`));
   assert.equal(other.sent, "Fetch.continueRequest");
+});
+
+test("LeftPageRules: a page left under a rule holds it until its marker is heard, or the cap passes", () => {
+  const left = new LeftPageRules(30000);
+  assert.equal(left.at(0), null, "nothing left, nothing held");
+  left.left("a", "observe", 1000);
+  assert.equal(left.at(1000 + 7000), "observe", "a marker unheard 7 s on still holds: no time-based guess short of the cap");
+  left.left("b", "read-only", 2000);
+  assert.equal(left.at(3000), "observe", "the strictest of the pages left holds");
+  left.heard("a");
+  assert.equal(left.at(3000), "read-only", "a heard page lets its rule go; another still unheard keeps its own");
+  left.heard("b");
+  assert.equal(left.at(3000), null);
+  // The cap: a marker never heard (a content policy stopped it) is let go after LEFT_PAGE_RULE_CAP_MS, and only then.
+  const capped = new LeftPageRules();
+  capped.left("c", "observe", 0);
+  assert.equal(capped.at(LEFT_PAGE_RULE_CAP_MS), "observe");
+  assert.equal(capped.at(LEFT_PAGE_RULE_CAP_MS + 1), null);
+  capped.left("d", "observe", 0);
+  capped.clear();
+  assert.equal(capped.at(0), null, "a closed browser holds nothing");
+});
+
+test("RouteGuard: a page a flow left keeps the flow's rule for what the browser level hears until its marker is heard, however late", async () => {
+  let session: (typeof WRITE_MODES)[number] = "observe";
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const beacon = async (rig: ReturnType<typeof guardRig>, url = "https://app.example.com/api/leave") => {
+    const sent: string[] = [];
+    await (rig.guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+      { send: async (cmd: string) => void sent.push(cmd) },
+      { requestId: "1", resourceType: "Ping", request: { url, method: "POST", headers: { Origin: "https://app.example.com" }, postData: "{}" } },
+    );
+    return sent[0];
+  };
+  // The flow's page is left under observe; its marker's wait gives up; the crawl's read-only comes back. The same-origin
+  // beacon is reported after that: read-only alone would let it out (the contrast below), the left page's rule refuses it.
+  const rig = guardRig("observe", { ruleNow: () => session });
+  const marker = rig.guard.leaveMarker("https://app.example.com/things")!;
+  await marker.heard(0);
+  session = "read-only";
+  assert.equal(rig.guard.rule(), "observe");
+  assert.equal(await beacon(rig), "Fetch.failRequest", "the left page's beacon, however late, is judged under the flow's rule");
+  assert.ok(
+    rig.calls.some((c) => c.startsWith("noteBlocked POST https://app.example.com/api/leave")),
+    rig.calls.join(" | "),
+  );
+  assert.equal(rig.blocked.at(-1)?.rule, "observe", "the refusal is recorded with the rule that refused it, not the session's read-only");
+  // Its marker heard: what the page sent before it has been judged, and the crawl's rule is the crawl's again.
+  assert.equal(await beacon(rig, marker.url), "Fetch.failRequest", "the marker itself is never sent");
+  await pause(0);
+  assert.equal(rig.guard.rule(), "read-only");
+  assert.equal(await beacon(rig), "Fetch.continueRequest", "after the marker, a beacon is the crawl's and read-only lets it out");
+  // Contrast: no flow left a page, so the session's rule alone judges.
+  session = "read-only";
+  assert.equal(await beacon(guardRig("read-only")), "Fetch.continueRequest");
+  // A page the marker could not be put on sends none: its rule is let go at once (WriteRule's hold still covers it).
+  const unarmed = guardRig("observe", { ruleNow: () => session });
+  session = "observe";
+  unarmed.guard.leaveMarker("https://app.example.com/things")!.unarmed();
+  session = "read-only";
+  assert.equal(unarmed.guard.rule(), "read-only");
+  // Never looser than before: a marker never heard is let go at the cap, and the session's own rule judges again.
+  session = "observe";
+  const capped = guardRig("observe", { ruleNow: () => session, leftPageRuleCapMs: 20 });
+  capped.guard.leaveMarker("https://app.example.com/things");
+  session = "read-only";
+  assert.equal(await beacon(capped), "Fetch.failRequest");
+  await pause(40);
+  assert.equal(await beacon(capped), "Fetch.continueRequest");
+  // A left page holds only a stricter rule: a session that tightened since keeps its own.
+  session = "read-only";
+  const tighter = guardRig("read-only", { ruleNow: () => session });
+  tighter.guard.leaveMarker("https://app.example.com/things");
+  session = "observe";
+  assert.equal(tighter.guard.rule(), "observe");
+});
+
+test("RouteGuard: while a left page holds the flow's rule, the route handler judges a write wholly under it, foreign-ness included, and records that rule", async () => {
+  let session: (typeof WRITE_MODES)[number] = "observe";
+  // As the engine's host answers: on the app's sign-in page a foreign frame's write is let out in read-only, never in observe.
+  const rig = guardRig("observe", { ruleNow: () => session, foreignUnder: (r) => (r === "observe" ? "https://idp.example.com" : null) });
+  const marker = rig.guard.leaveMarker("https://app.example.com/things")!;
+  await marker.heard(0);
+  session = "read-only";
+  const held = rig.send("POST", "/api/auth/login", { body: "{}" });
+  assert.equal(await held.done, "fulfill 403", "judged as observe judges it: a foreign frame's write, refused, not a sign-in observe lets out");
+  assert.deepEqual(
+    rig.blocked.map((b) => [b.why, b.rule]),
+    [["sent from a frame of https://idp.example.com", "observe"]],
+  );
+  // Contrast: once the marker is heard, the session's read-only judges the same write wholly, and lets it out.
+  await (rig.guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+    { send: async () => {} },
+    { requestId: "m", resourceType: "Ping", request: { url: marker.url, method: "POST", postData: "" } },
+  );
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(await rig.send("POST", "/api/auth/login", { body: "{}" }).done, "fallback");
+});
+
+test("RouteGuard: a closed browser's markers are forgotten with its held rules, and a wait on one ends", async () => {
+  let session: (typeof WRITE_MODES)[number] = "observe";
+  const rig = guardRig("observe", { ruleNow: () => session });
+  const marker = rig.guard.leaveMarker("https://app.example.com/things")!;
+  session = "read-only";
+  const waiting = marker.heard(60000);
+  rig.guard.clear();
+  assert.equal(await Promise.race([waiting.then(() => "ended"), new Promise((r) => setTimeout(() => r("still waiting"), 200))]), "ended");
+  assert.equal(rig.guard.rule(), "read-only");
+  const sent: string[] = [];
+  await (rig.guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+    { send: async (cmd: string) => void sent.push(cmd) },
+    { requestId: "m", resourceType: "Ping", request: { url: marker.url, method: "POST", headers: { Origin: "https://app.example.com" }, postData: "" } },
+  );
+  assert.deepEqual(sent, ["Fetch.continueRequest"], "no longer this guard's marker: judged as any same-origin beacon read-only lets out");
+});
+
+test("BlockNotices.noticeByRule names each refusal by the rule that refused it, strictest first", () => {
+  const notice = new BlockNotices().noticeByRule("read-only", [
+    { sig: "POST https://app.example.com/api/a", late: true, rule: "observe" },
+    { sig: "POST https://app.example.com/api/b", late: false },
+  ]);
+  const observeAt = notice.indexOf("WRITE-POLICY blocked (observe): POST https://app.example.com/api/a");
+  const readOnlyAt = notice.indexOf("WRITE-POLICY blocked (read-only): POST https://app.example.com/api/b");
+  assert.ok(observeAt >= 0 && readOnlyAt > observeAt, notice);
+  assert.ok(!/\(read-only\): [^\n]*api\/a/.test(notice), "a write the flow's rule refused is not named under the session's");
+  assert.equal(new BlockNotices().noticeByRule("read-only", []), "");
 });
 
 test("RouteGuard: the route handler aborts only the leave marker the guard issued", async () => {
@@ -4579,6 +4736,67 @@ test("config: ci and export stop with exit 2 under egress none before any key or
   }
 });
 
+// ── redactPageText: personal data in the page's text masked before the agent reads it (issue #537) ──────
+
+test("config: redactPageText is checked like every key, no preset sets it, and a project's file can turn it on and never off", () => {
+  assert.deepEqual([...REDACT_PAGE_TEXT_MODES], ["off", "pii"]);
+  const r = parsePolicy('{"redactPageText": "all"}', "config.json");
+  assert.ok(!r.ok && /"redactPageText" must be one of "off", "pii", not "all"/.test(r.error), r.ok ? "taken" : r.error);
+  assert.ok(!parsePolicy('{"redactPageText": true}', "config.json").ok, "a boolean is not a mode");
+  assert.deepEqual(parsed('{"redactPageText": "pii"}'), { redactPageText: "pii" });
+  assert.deepEqual(parsed('{"redactPageText": "off"}'), { redactPageText: "off" });
+  assert.equal(parsed('{"preset": "strict"}').redactPageText, undefined, "strict changes what the agent may do, not what it reads");
+  assert.equal(tightenPolicy({ redactPageText: "off" }, { redactPageText: "pii" }).redactPageText, "pii", "the project's file turns it on");
+  assert.equal(tightenPolicy({ redactPageText: "pii" }, { redactPageText: "off" }).redactPageText, "pii", "and cannot turn the operator's off");
+  assert.equal(tightenPolicy({}, { redactPageText: "pii" }).redactPageText, "pii");
+  assert.equal(tightenPolicy({ redactPageText: "off" }, {}).redactPageText, "off");
+  assert.equal("redactPageText" in tightenPolicy({}, {}), false);
+});
+
+test("config: which calls' results are masked, each rule beside the case it does not cover", () => {
+  const on: Policy = { redactPageText: "pii" };
+  const off: Policy = { redactPageText: "off" };
+  // The operator's file masks every call.
+  assert.equal(pageTextMaskedFor(on, []), true);
+  assert.equal(pageTextMaskedFor(on, [off]), true);
+  // With the operator's off, any open session's config masks every call, a call naming an unmasked session too: its
+  // result can carry the masking session's page (the session list names each session's address).
+  assert.equal(pageTextMaskedFor({}, [off, on]), true);
+  assert.equal(pageTextMaskedFor(off, [{}, on]), true);
+  assert.equal(pageTextMaskedFor({}, [{}, off]), false, "no open session masks");
+  assert.equal(pageTextMaskedFor({}, []), false, "no file: today's behaviour");
+});
+
+test("config: redactPageText says so on the Config line of an attach, a command and policy explain, and only when on", () => {
+  assert.deepEqual(redactPageTextNote({}), []);
+  assert.deepEqual(redactPageTextNote({ redactPageText: "off" }), []);
+  assert.match(redactPageTextNote({ redactPageText: "pii" }).join(""), /^redactPageText "pii": email addresses, phone numbers and card numbers/);
+  const masked = applyToCommand(loadedOf({ redactPageText: "pii" }), {}, ["http://localhost:3000"], { mode: "observe" });
+  assert.ok(masked.ok && /^Config: \/srv\/\.scenescout\/config\.json; redactPageText "pii": /.test(masked.note), JSON.stringify(masked));
+  const plain = applyToCommand(loadedOf({ redactPageText: "off" }), {}, ["http://localhost:3000"], { mode: "observe" });
+  assert.ok(plain.ok && !plain.note.includes("redactPageText"), JSON.stringify(plain));
+  // policy explain prints the note applyToCommand makes, read from the launch directory's file.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-redact-explain-"));
+  try {
+    fs.mkdirSync(path.join(dir, ".scenescout"));
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), '{"redactPageText": "pii"}');
+    const lines: string[] = [];
+    runPolicyCommand(["explain", "GET", `${EXPLAIN_APP}/things`], {
+      env: {},
+      out: (l: string) => lines.push(l),
+      err: (l: string) => lines.push(l),
+      readBody: () => "",
+      config: { launchDir: dir, reader: fsPolicyReader },
+    });
+    assert.ok(
+      lines.some((l) => /redactPageText "pii"/.test(l)),
+      lines.join("\n"),
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // scenescout config explain: where each resolved value came from.
 const layer = (label: string, file: string, text: string): ConfigLayer => {
   const parsed = parsePolicy(text, file);
@@ -4607,7 +4825,7 @@ test("config explain: a value is a default, a preset's, the operator's file's or
   // No file at all: every row is a default.
   const none = explainConfig({ loaded: NO_POLICY, env: {} });
   assert.ok(none.rows.every((r) => r.source === "default"));
-  assert.equal(none.rows.length, 13);
+  assert.equal(none.rows.length, 14);
   assert.match(formatConfigExplanation(none)[0], /^Config files: none/);
 });
 
@@ -4709,6 +4927,37 @@ test("config explain: a sign-in list only the project's file sets is shown as na
     "POST /api/signin",
   );
   assert.equal(rowOf(explainConfig({ project, loaded, env: { SCENESCOUT_AUTH_POSTS: "POST /api/signin" } }), "authPosts").value, "POST /api/signin");
+});
+
+test("config explain: redactPageText is off by default, the operator's file's, or the project's own file turning it on", () => {
+  // Keyed by resolved path, so the stand-in files are found however the command joins its paths on this platform.
+  const files: Record<string, string> = {};
+  const key = (f: string) => path.resolve(f);
+  const reader = { exists: (f: string) => key(f) in files, read: (f: string) => files[key(f)] ?? "", realpath: (f: string) => f };
+  const run = () => {
+    const out: string[] = [];
+    runConfigCommand(["explain", "--project", path.resolve("/p")], {
+      env: {},
+      launchDir: path.resolve("/launch"),
+      reader,
+      out: (l) => out.push(l),
+      err: (l) => out.push(l),
+    });
+    return out.join("\n");
+  };
+  assert.match(run(), /^ {2}redactPageText +off +\(default\)$/m);
+  files[key("/launch/.scenescout/config.json")] = '{"redactPageText":"pii"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
+  // A project's file that says "off" cannot turn the operator's off: the value stays the operator's.
+  files[key("/p/.scenescout/config.json")] = '{"redactPageText":"off"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(operator file\)$/m);
+  // The project's own file turns it on over the operator's "off", and is named as tightening it.
+  files[key("/launch/.scenescout/config.json")] = '{"redactPageText":"off"}';
+  files[key("/p/.scenescout/config.json")] = '{"redactPageText":"pii"}';
+  assert.match(run(), /^ {2}redactPageText +pii +\(project file, tightening the operator file\)$/m);
+  // With no operator file, the project's own file is the source.
+  delete files[key("/launch/.scenescout/config.json")];
+  assert.match(run(), /^ {2}redactPageText +pii +\(project file\)$/m);
 });
 
 test("config explain: with no operator file, the project's own file is named as the project's", () => {
