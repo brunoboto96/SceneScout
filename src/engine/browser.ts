@@ -208,14 +208,16 @@ import {
   withAppHeader,
   withoutAppHeader,
   forOwnSend,
-  headVerdict,
+  documentAnswerPlan,
+  redirectsEndPlan,
+  fulfilHeaders,
+  jarChanges,
   cookieLineAfter,
   cookieLineFor,
   crossSite,
-  APP_HEADER_HEAD_MS,
   type AppHeader,
 } from "./app-header.js";
-import { startLoadHint } from "./network-failure.js";
+import { fetchFailureCause, startLoadHint } from "./network-failure.js";
 import { browserProxy, readProxy, type BrowserProxy } from "./proxy.js";
 import {
   DEFAULT_TIME_LIMITS,
@@ -239,7 +241,7 @@ import {
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { bestEffort, settleWithin } from "./best-effort.js";
-import { marksRouteExercised, pathnameOf, RouteGuard, type BlockedRequest } from "./route-guard.js";
+import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { readMachineSockets } from "./tcp-table.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
@@ -4813,14 +4815,13 @@ export class BrowserEngine {
   private async sendWithAppHeader(route: Route, header: AppHeader): Promise<void> {
     const req = route.request();
     if (!appHeaderCarried(req.resourceType())) return this.passOn(route);
-    let response: APIResponse;
     // Bounded by the page-load limit, as the load it serves is; running out is the app's slowness (abortCodeFor).
     const timeout = this.limits.navMs;
+    // A page load is sent once, by Node's fetch, which settles on the answer's headers: a file is known for one before
+    // its body is read (loadWithAppHeader).
+    if (req.resourceType() === "document" && req.method() === "GET") return this.loadWithAppHeader(route, header, timeout);
+    let response: APIResponse;
     try {
-      // A page load that answers with a file goes back to the browser without the header, so a download or a file
-      // shown as it is behaves as with no header, and is never read whole first (headVerdict).
-      if (req.resourceType() === "document" && req.method() === "GET" && (await this.appDocumentKind(req, header, timeout)) === "file")
-        return this.passOn(route, { headers: withoutAppHeader(req.headers(), header) });
       // The cookies as the browser sends them: Playwright's send would otherwise add every cookie the jar holds, a
       // SameSite one the browser withholds from another site's request included (an empty line stops that).
       const sent = req.headers();
@@ -4850,7 +4851,7 @@ export class BrowserEngine {
       await route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
       return;
     }
-    this.appHeaderAnswers.set(req, response);
+    this.appHeaderAnswers.set(req, { lines: BrowserEngine.fetchedSetCookies(response), handedBack: false });
     await route.fulfill({ response }).catch(() => {
       /* the page went away before its answer */
     });
@@ -4860,49 +4861,165 @@ export class BrowserEngine {
   private async sentCookieLine(req: Request): Promise<string> {
     const own = Object.entries(await req.allHeaders()).find(([name]) => name.toLowerCase() === "cookie");
     if (own) return own[1];
-    let topLevel = false;
+    return cookieLineFor(await this.context!.cookies(req.url()), crossSite(req.headers()["referer"], req.url()), BrowserEngine.topLevelLoad(req));
+  }
+
+  /** Whether a request is a load of a top-level page. */
+  private static topLevelLoad(req: Request): boolean {
     try {
-      topLevel = req.isNavigationRequest() && req.frame().parentFrame() === null;
+      return req.isNavigationRequest() && req.frame().parentFrame() === null;
     } catch {
-      /* a service worker's request has no frame: not a page load */
+      return false; // a service worker's request has no frame: not a page load
     }
-    return cookieLineFor(await this.context!.cookies(req.url()), crossSite(req.headers()["referer"], req.url()), topLevel);
   }
 
   /**
-   * What a page load carrying the header answers with, asked by HEAD through its redirects within the app (headVerdict).
-   * Node's fetch, which settles on the answer's headers: a server that holds a HEAD open as it would the file's GET
-   * does not hold the load. The first HEAD carries the Cookie line the browser sends with the load itself (sentCookieLine,
-   * so never a SameSite cookie it withholds); each later hop the context's cookies for its address, with those the earlier hops
-   * set over them (cookieLineAfter). A HEAD that fails, or a chain that does not answer within the bound, says nothing
-   * ("unknown"): the load is then sent with the header as any other request.
+   * A page load (a GET of a document) carrying the header, sent once by Node's fetch with the Cookie line the browser
+   * sends with it (sentCookieLine), no redirect followed, and settled on the answer's headers (documentAnswerPlan):
+   * - a page, an error, a redirect away from the app or a short file is read whole and handed to the browser with its
+   *   Set-Cookie lines, which the browser stores;
+   * - a redirect within the app is followed here, each hop sent once with the header and the cookies the earlier hops
+   *   set (cookieLineAfter), and what those hops set is put in the browser's jar. Where the hops end in a page, it is
+   *   read and kept, and the load is answered with a stand-in page that loads that address, a new page load answered
+   *   from what was kept rather than sent again. Where they end in a file, the load is answered with a redirect to it,
+   *   which the browser follows without the header (redirectsEndPlan);
+   * - a streamed or long file is not read: its body is cancelled, what its Set-Cookie lines set is put in the browser's
+   *   jar, and the load is handed back to the browser without the header, which fetches the file as it does with none.
+   *   Playwright cannot hand the browser a body as it streams, so a file the browser is to have unread is the one
+   *   address the app sees twice.
+   * One bound for the whole load, the page-load limit; a send that fails, or does not answer within it, aborts with the
+   * network's code (abortCodeFor).
    */
-  private async appDocumentKind(req: Request, header: AppHeader, timeout: number): Promise<"page" | "file" | "unknown"> {
+  private async loadWithAppHeader(route: Route, header: AppHeader, timeout: number): Promise<void> {
+    const req = route.request();
+    const kept = this.keptAppAnswers.get(withoutFragment(req.url()));
+    if (kept) {
+      this.keptAppAnswers.delete(withoutFragment(req.url()));
+      if (kept.until > Date.now()) {
+        this.appHeaderAnswers.set(req, { lines: kept.setCookies, handedBack: false });
+        await route.fulfill({ status: kept.status, headers: kept.headers, body: kept.body }).catch(() => {});
+        return;
+      }
+    }
+    const signal = AbortSignal.timeout(timeout);
+    const fail = async (err: unknown) => {
+      await route.abort(abortCodeFor(err instanceof Error ? fetchFailureCause(err) : String(err))).catch(() => {});
+    };
+    // Only the encodings Node's fetch decodes, so the body handed on is the one the headers describe.
+    const base: Record<string, string> = { ...forOwnSend(withAppHeader(req.headers(), header)), "accept-encoding": "gzip, deflate, br" };
+    const hopsSet: { url: string; lines: string[] }[] = [];
     let at = req.url();
-    const base = forOwnSend(withAppHeader(req.headers(), header));
-    // One bound for the whole chain, not one per hop.
-    const signal = AbortSignal.timeout(Math.min(timeout, APP_HEADER_HEAD_MS));
-    const set: string[] = [];
-    for (let hop = 0; hop <= APP_HEADER_MAX_HOPS; hop++) {
-      let verdict: ReturnType<typeof headVerdict>;
-      try {
-        const jar =
+    let answer: globalThis.Response;
+    let plan: ReturnType<typeof documentAnswerPlan>;
+    // The next hop, when it is a page load the write policy refuses for its address: never sent from here.
+    let refusedHop: string | null = null;
+    try {
+      for (let hop = 0; ; hop++) {
+        // Each later hop: the jar's cookies for its address as the browser sends them on a load another site may have
+        // started, with what the earlier hops set put over them.
+        const cookie =
           hop === 0
             ? await this.sentCookieLine(req)
-            : cookieLineAfter((await this.context!.cookies(at)).map((c) => `${c.name}=${c.value}`).join("; "), set, new URL(at).pathname);
-        const head = await fetch(at, { method: "HEAD", headers: jar ? { ...base, cookie: jar } : base, redirect: "manual", signal });
-        const headers: Record<string, string> = {};
-        head.headers.forEach((value, name) => (headers[name] = value));
-        set.push(...head.headers.getSetCookie());
-        await head.body?.cancel().catch(() => {});
-        verdict = headVerdict({ status: head.status, headers, requestUrl: at, appUrl: this.baseUrl });
-      } catch {
-        return "unknown";
+            : cookieLineAfter(
+                cookieLineFor(await this.context!.cookies(at), crossSite(req.headers()["referer"], at), BrowserEngine.topLevelLoad(req)),
+                hopsSet.flatMap((h) => h.lines),
+                new URL(at).pathname,
+              );
+        answer = await fetch(at, { method: "GET", headers: cookie ? { ...base, cookie } : base, redirect: "manual", signal });
+        plan = documentAnswerPlan({ status: answer.status, headers: Object.fromEntries(answer.headers), requestUrl: at, appUrl: this.baseUrl });
+        if (plan.kind !== "stand-in" || hop >= APP_HEADER_MAX_HOPS) break;
+        // These hops are sent here, never routed, so the route handler's refusal of a page load by its address is
+        // asked first: the browser's own redirect is refused the same way (route-guard.ts refusedPageLoad).
+        if (refusedPageLoad(this.writeRule.at(), this.refuseDestructiveGets, plan.url)) {
+          refusedHop = plan.url;
+          break;
+        }
+        hopsSet.push({ url: at, lines: answer.headers.getSetCookie() });
+        await answer.body?.cancel().catch(() => {});
+        at = plan.url;
       }
-      if (verdict.kind !== "next") return verdict.kind;
-      at = verdict.url;
+    } catch (err) {
+      return fail(err);
     }
-    return "unknown";
+    const setCookies = answer.headers.getSetCookie();
+    if (refusedHop !== null) {
+      // Answered with a page that loads that hop itself: a load the route handler sees, and refuses unsent.
+      this.appHeaderAnswers.set(req, { lines: [...hopsSet.flatMap((h) => h.lines), ...setCookies], handedBack: false });
+      await answer.body?.cancel().catch(() => {});
+      await this.storeAppCookies([...hopsSet, { url: at, lines: setCookies }]);
+      await route.fulfill({ status: 200, contentType: "text/html", body: redirectStandIn(refusedHop) }).catch(() => {});
+      return;
+    }
+    const keep = hopsSet.length > 0 ? redirectsEndPlan({ status: answer.status, headers: Object.fromEntries(answer.headers) }) : null;
+    // The body is read only for an answer handed to the browser, which stores what it sets; what the hops within the app
+    // set, and what an answer the browser is not handed set, goes in its jar here.
+    const read = plan.kind === "fulfil" && keep !== "redirect";
+    // For the refresh broker: what this load's answers set. A kept answer's lines are its own load's.
+    const hopLines = hopsSet.flatMap((h) => h.lines);
+    this.appHeaderAnswers.set(req, { lines: keep === "stand-in" && read ? hopLines : [...hopLines, ...setCookies], handedBack: plan.kind === "hand-back" });
+    if (!read) await answer.body?.cancel().catch(() => {});
+    await this.storeAppCookies(read ? hopsSet : [...hopsSet, { url: at, lines: setCookies }]);
+    if (plan.kind === "stand-in") {
+      // More hops within the app than a browser follows: the browser follows the last one, without the header, and fails as it would.
+      await route.fulfill({ status: answer.status, headers: { location: plan.url } }).catch(() => {});
+      return;
+    }
+    if (keep === "redirect") {
+      await route.fulfill({ status: 302, headers: { location: at } }).catch(() => {});
+      return;
+    }
+    if (plan.kind === "hand-back") {
+      const sent = withoutAppHeader(req.headers(), header);
+      // A browser that put its Cookie line on the request before routing it sends that line: it gets what was just set.
+      const line = Object.keys(sent).find((name) => name.toLowerCase() === "cookie");
+      if (line !== undefined) sent[line] = cookieLineAfter(sent[line], jarChanges(setCookies, req.url()).accepted, new URL(req.url()).pathname);
+      return this.passOn(route, { headers: sent });
+    }
+    let body: Buffer;
+    try {
+      body = Buffer.from(await answer.arrayBuffer());
+    } catch (err) {
+      return fail(err);
+    }
+    const headers = fulfilHeaders(answer.headers);
+    if (keep === "stand-in") {
+      // Kept for the stand-in's own load of that address, which comes at once; past the page-load limit it is sent again.
+      for (const [url, old] of this.keptAppAnswers) if (old.until <= Date.now()) this.keptAppAnswers.delete(url);
+      this.keptAppAnswers.set(withoutFragment(at), { status: answer.status, headers, body, setCookies, until: Date.now() + timeout });
+      await route.fulfill({ status: 200, contentType: "text/html", body: redirectStandIn(at) }).catch(() => {});
+      return;
+    }
+    await route.fulfill({ status: answer.status, headers, body }).catch(() => {
+      /* the page went away before its answer */
+    });
+  }
+
+  /**
+   * Answers to page loads at the end of redirects within the app, read with the header and kept for the stand-in
+   * page's own load of that address (loadWithAppHeader), by address. Each is used once.
+   */
+  private readonly keptAppAnswers = new Map<string, { status: number; headers: Record<string, string>; body: Buffer; setCookies: string[]; until: number }>();
+
+  /** Put in the browser's jar what the Set-Cookie lines of answers it was not handed set (jarChanges). A failure is logged: the load goes on. */
+  private async storeAppCookies(answers: readonly { url: string; lines: readonly string[] }[]): Promise<void> {
+    for (const { url, lines } of answers) {
+      if (lines.length === 0) continue;
+      try {
+        const { add, remove } = jarChanges(lines, url);
+        for (const gone of remove) await this.context!.clearCookies(gone);
+        // One at a time, so a cookie the browser refuses loses only itself.
+        for (const cookie of add)
+          await this.context!.addCookies([cookie]).catch((err: unknown) =>
+            this.logAction({
+              action: "app-header:cookies",
+              target: `${cookie.name} not stored (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`,
+              url,
+            }),
+          );
+      } catch (err) {
+        this.logAction({ action: "app-header:cookies", target: `not stored (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`, url });
+      }
+    }
   }
 
   /** Hand a request on as it is, or with overrides. A request the page has already cancelled rejects this; nothing is left to send then. */
@@ -4964,12 +5081,16 @@ export class BrowserEngine {
    * Chromium leaves Set-Cookie out of the headers it reports for a handed-over answer, so the refresh broker reads
    * a rotation from the answer that was fetched.
    */
-  private readonly appHeaderAnswers = new WeakMap<Request, APIResponse>();
+  private readonly appHeaderAnswers = new WeakMap<Request, { lines: string[]; handedBack: boolean }>();
 
-  /** A response's Set-Cookie lines, from the answer fetched with the allowlist header when it was one. */
+  /**
+   * A response's Set-Cookie lines, from the answer fetched with the allowlist header when it was one. A page load
+   * handed back to the browser had two answers: SceneScout's, and the browser's own, which the browser reports.
+   */
   private async setCookiesOf(res: Response): Promise<string[]> {
     const fetched = this.appHeaderAnswers.get(res.request());
-    return fetched ? BrowserEngine.fetchedSetCookies(fetched) : res.headerValues("set-cookie");
+    if (!fetched) return res.headerValues("set-cookie");
+    return fetched.handedBack ? [...fetched.lines, ...(await res.headerValues("set-cookie"))] : fetched.lines;
   }
 
   /**

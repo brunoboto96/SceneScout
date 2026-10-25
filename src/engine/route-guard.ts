@@ -71,6 +71,16 @@ export function pathnameOf(url: string): string {
   }
 }
 
+/**
+ * Whether a page load of this address is refused for what it names: a destructive command (strict-writes.ts
+ * destructiveGet), in observe and read-only, when that refusal is turned on. Asked by the route handler, by the
+ * browser-level check of a redirect's later hops, and by the allowlist header's own sends of a redirect's hops within
+ * the app (browser.ts loadWithAppHeader), so none of them sends a load the others refuse.
+ */
+export function refusedPageLoad(rule: WriteMode, refuseDestructiveGets: boolean, url: string): boolean {
+  return (rule === "observe" || rule === "read-only") && refuseDestructiveGets && destructiveGet(url);
+}
+
 /** A write the policy refused, as the engine's next notice reports it. */
 export interface BlockedRequest {
   at: number;
@@ -458,7 +468,7 @@ export class RouteGuard {
     };
     if (isReadMethod(method)) {
       // Opt-in: a page load whose address is a destructive command (`/items/3/delete`) is refused where the mode keeps data.
-      if ((rule === "observe" || rule === "read-only") && req.resourceType() === "document" && this.host.refuseDestructiveGets() && destructiveGet(url)) {
+      if (req.resourceType() === "document" && refusedPageLoad(rule, this.host.refuseDestructiveGets(), url)) {
         // At most a few kept: a navigation reads its own at once, and a click's is never asked about.
         if (this.refusedLoads.size >= 20) this.refusedLoads.clear();
         this.refusedLoads.add(url);
@@ -647,11 +657,7 @@ export class RouteGuard {
       label = writeMethodLabel(sent, judged);
       if (isReadMethod(method)) {
         // A later hop of a redirect is a page load the route handler never saw: refused here when it is a destructive command (opt-in).
-        const refuseLoad =
-          (rule === "observe" || rule === "read-only") &&
-          (event.resourceType ?? "").toLowerCase() === "document" &&
-          this.host.refuseDestructiveGets() &&
-          destructiveGet(url);
+        const refuseLoad = (event.resourceType ?? "").toLowerCase() === "document" && refusedPageLoad(rule, this.host.refuseDestructiveGets(), url);
         if (!refuseLoad) return await answer(true);
         this.unseenRefusals.note(sent, url);
         await answer(false);

@@ -142,7 +142,15 @@ import {
 } from "../src/engine/unload.ts";
 import { LOGIN_ROUTE_RE_STORAGE } from "../src/engine/memory.ts";
 import type { Request, Route } from "playwright";
-import { marksRouteExercised, pathnameOf, RouteGuard, routedWriteVerdict, type BlockedRequest, type RouteGuardHost } from "../src/engine/route-guard.ts";
+import {
+  marksRouteExercised,
+  pathnameOf,
+  refusedPageLoad,
+  RouteGuard,
+  routedWriteVerdict,
+  type BlockedRequest,
+  type RouteGuardHost,
+} from "../src/engine/route-guard.ts";
 import { settleWithin } from "../src/engine/best-effort.ts";
 import {
   destructiveGet,
@@ -166,7 +174,11 @@ import {
 import {
   abortCodeFor,
   answersWithPage,
-  headVerdict,
+  documentAnswerPlan,
+  redirectsEndPlan,
+  fulfilHeaders,
+  jarChanges,
+  APP_HEADER_FILE_READ_MAX,
   cookieLineAfter,
   cookieLineFor,
   crossSite,
@@ -3174,6 +3186,18 @@ test("destructive page loads: void, reject, approve and close count as a whole s
   }
 });
 
+test("refusedPageLoad: a destructive command's page load is refused only in observe and read-only, and only when turned on", () => {
+  const command = "https://app.example.com/items/3/delete";
+  const page = "https://app.example.com/items/3";
+  for (const rule of ["observe", "read-only"] as const) {
+    assert.equal(refusedPageLoad(rule, true, command), true, rule);
+    assert.equal(refusedPageLoad(rule, true, page), false, rule);
+    assert.equal(refusedPageLoad(rule, false, command), false, rule);
+  }
+  assert.equal(refusedPageLoad("safe-write", true, command), false);
+  assert.equal(refusedPageLoad("destructive", true, command), false);
+});
+
 test("strict settings: read from the environment, off by default, and a value that is not on or off is an error", () => {
   assert.equal(writeClassifierSetting({}), "standard");
   assert.equal(writeClassifierSetting({ SCENESCOUT_STRICT_WRITES: "1" }), "strict");
@@ -5027,6 +5051,11 @@ test("allowlist header: a send that failed aborts with the network's code, so th
     ["apiRequestContext.fetch: Timeout 20000ms exceeded.", "failed"],
     ["apiRequestContext.fetch: certificate has expired", "failed"],
     ["Target page, context or browser has been closed", "failed"],
+    // Node's fetch, which a page load is sent with: the reason is in its cause (fetchFailureCause).
+    ["fetch failed: UND_ERR_SOCKET other side closed", "connectionclosed"],
+    ["fetch failed: ECONNREFUSED connect ECONNREFUSED 127.0.0.1:443", "connectionrefused"],
+    ["fetch failed: UND_ERR_CONNECT_TIMEOUT Connect Timeout Error", "timedout"],
+    ["The operation was aborted due to timeout", "failed"],
   ];
   for (const [message, code] of cases) assert.equal(abortCodeFor(message), code, message);
 });
@@ -5119,7 +5148,7 @@ test("allowlist header: a redirect within the app is followed with it, a page lo
   assert.ok(!page.includes("</script><script>alert"), "the address stays a string inside the script");
 });
 
-test("allowlist header: a page load is asked by HEAD whether it is a page or a file, through redirects within the app; a file goes back to the browser without the header", () => {
+test("allowlist header: a page load is sent once and decided from its answer's headers; only a streamed or long file goes back to the browser, without the header", () => {
   assert.ok(answersWithPage({ "content-type": "text/html; charset=utf-8" }));
   assert.ok(answersWithPage({ "Content-Type": "application/xhtml+xml" }));
   assert.ok(answersWithPage({}), "no type: the browser sniffs it, as a page");
@@ -5130,20 +5159,108 @@ test("allowlist header: a page load is asked by HEAD whether it is a page or a f
     "an attachment is a download, whatever its type",
   );
   const app = "https://app.example.com";
-  const verdict = (status: number, headers: Record<string, string>) => headVerdict({ status, headers, requestUrl: `${app}/start`, appUrl: app });
-  assert.deepEqual(verdict(200, { "content-type": "text/html" }), { kind: "page" });
-  assert.deepEqual(verdict(200, { "content-type": "application/pdf" }), { kind: "file" });
-  assert.deepEqual(verdict(302, { location: "/report.pdf" }), { kind: "next", url: `${app}/report.pdf` });
-  assert.deepEqual(
-    verdict(302, { location: "https://files.example.net/r.pdf" }),
-    { kind: "unknown" },
-    "a redirect away from the app is the browser's, without the header",
+  const plan = (status: number, headers: Record<string, string>) => documentAnswerPlan({ status, headers, requestUrl: `${app}/start`, appUrl: app });
+  assert.deepEqual(plan(200, { "content-type": "text/html" }), { kind: "fulfil" }, "a page is read whole: the app sees the load once");
+  // A 404 page, or an error of any type, is the answer the browser shows: read whole.
+  assert.deepEqual(plan(404, { "content-type": "text/html" }), { kind: "fulfil" });
+  assert.deepEqual(plan(500, { "content-type": "application/json" }), { kind: "fulfil" });
+  // A file: by the length it declares. The contrast is one byte either side of the bound, and none declared.
+  const pdf = { "content-type": "application/pdf" };
+  assert.deepEqual(plan(200, { ...pdf, "content-length": "20" }), { kind: "fulfil" }, "a short file is read whole, so it is not asked for twice");
+  assert.deepEqual(plan(200, { ...pdf, "Content-Length": String(APP_HEADER_FILE_READ_MAX) }), { kind: "fulfil" });
+  assert.deepEqual(plan(200, { ...pdf, "content-length": String(APP_HEADER_FILE_READ_MAX + 1) }), { kind: "hand-back" }, "a long file is the browser's");
+  assert.deepEqual(plan(200, pdf), { kind: "hand-back" }, "a stream declares no length: never read whole behind a waiting load");
+  assert.deepEqual(plan(200, { ...pdf, "content-length": "20, 20" }), { kind: "hand-back" }, "a length that is not one number is none");
+  assert.deepEqual(plan(200, { "content-type": "text/html", "content-disposition": "attachment" }), { kind: "hand-back" });
+  // A compressed file's length is not what it decodes to: never read whole by it.
+  assert.deepEqual(plan(200, { ...pdf, "content-length": "20", "content-encoding": "gzip" }), { kind: "hand-back" });
+  assert.deepEqual(plan(200, { ...pdf, "content-length": "20", "content-encoding": "identity" }), { kind: "fulfil" });
+  // Redirects: within the app a stand-in page loads the next address as a new, routed load; away from it the browser follows it without the header.
+  assert.deepEqual(plan(302, { location: "/report.pdf" }), { kind: "stand-in", url: `${app}/report.pdf` });
+  assert.deepEqual(plan(302, { Location: "/report.pdf" }), { kind: "stand-in", url: `${app}/report.pdf` });
+  assert.deepEqual(plan(302, { location: "https://files.example.net/r.pdf" }), { kind: "fulfil" });
+  assert.deepEqual(plan(304, {}), { kind: "fulfil" }, "a redirect status with no Location is an answer as it is");
+  // Where redirects SceneScout followed within the app end: a page is kept for a stand-in's load of it; a file is the browser's to follow to.
+  assert.equal(redirectsEndPlan({ status: 200, headers: { "content-type": "text/html" } }), "stand-in");
+  assert.equal(redirectsEndPlan({ status: 404, headers: { "content-type": "application/json" } }), "stand-in", "an error is shown at its address");
+  assert.equal(
+    redirectsEndPlan({ status: 302, headers: { location: "https://idp.example.net/" } }),
+    "stand-in",
+    "a redirect away is followed from its own address",
   );
-  assert.deepEqual(verdict(405, {}), { kind: "unknown" });
-  assert.deepEqual(verdict(501, {}), { kind: "unknown" });
-  // A 404 page is a page: sent with the header, as before.
-  assert.deepEqual(verdict(404, { "content-type": "text/html" }), { kind: "page" });
+  assert.equal(redirectsEndPlan({ status: 200, headers: { "content-type": "application/pdf", "content-length": "20" } }), "redirect");
+  assert.equal(redirectsEndPlan({ status: 200, headers: { "content-type": "text/html", "content-disposition": "attachment" } }), "redirect");
   assert.deepEqual(withoutAppHeader({ accept: "*/*", "X-CI-Allow": "t" }, { name: "x-ci-allow", value: "t" }), { accept: "*/*" });
+});
+
+test("allowlist header: an answer read by Node's fetch is handed to the browser without the headers its decoded body no longer matches, and with each Set-Cookie on its own line", () => {
+  assert.deepEqual(
+    fulfilHeaders([
+      ["Content-Type", "text/html"],
+      ["content-encoding", "gzip"],
+      ["content-length", "120"],
+      ["transfer-encoding", "chunked"],
+      ["connection", "close"],
+      ["set-cookie", "a=1; Path=/"],
+      ["set-cookie", "b=2; HttpOnly"],
+      ["vary", "accept"],
+      ["Vary", "cookie"],
+    ]),
+    { "content-type": "text/html", "set-cookie": "a=1; Path=/\nb=2; HttpOnly", vary: "accept, cookie" },
+  );
+  assert.deepEqual(fulfilHeaders([]), {});
+});
+
+test("allowlist header: the Set-Cookie lines of a load handed back to the browser reach its jar as the browser would store them", () => {
+  const now = Date.parse("2026-10-24T12:00:00Z");
+  const sec = Math.floor(now / 1000);
+  const at = "https://app.example.com/files/report";
+  assert.deepEqual(jarChanges(["sid=abc; Path=/; HttpOnly; Secure; SameSite=Lax"], at, now), {
+    add: [{ name: "sid", value: "abc", domain: "app.example.com", path: "/", expires: -1, httpOnly: true, secure: true, sameSite: "Lax" }],
+    remove: [],
+    accepted: ["sid=abc; Path=/; HttpOnly; Secure; SameSite=Lax"],
+  });
+  // Name prefixes, each beside the line that keeps the rule.
+  assert.deepEqual(jarChanges(["__Host-a=1; Secure; Path=/"], at, now).accepted, ["__Host-a=1; Secure; Path=/"]);
+  assert.deepEqual(jarChanges(["__Host-a=1; Secure; Path=/files"], at, now).add, [], "__Host- needs Path=/");
+  assert.deepEqual(jarChanges(["__Host-a=1; Secure; Path=/; Domain=example.com"], at, now).add, [], "__Host- needs a host-only cookie");
+  // A Domain naming the host itself still breaks __Host-, where the host has no dot and the cookie would stay host-only.
+  assert.deepEqual(jarChanges(["__Host-a=1; Secure; Path=/; Domain=localhost"], "http://localhost:3000/", now).add, [], "__Host- takes no Domain");
+  assert.equal(jarChanges(["__Host-a=1; Secure; Path=/"], "http://localhost:3000/", now).add.length, 1);
+  assert.deepEqual(jarChanges(["__Secure-a=1"], at, now).add, [], "__Secure- needs Secure");
+  assert.equal(jarChanges(["__Secure-a=1; Secure"], at, now).add.length, 1);
+  // What is refused is not among the lines a Cookie line is built from.
+  assert.deepEqual(jarChanges(["ok=1", "bad=1; Domain=other.com", "s=1; Secure"], "http://app.example.com/", now).accepted, ["ok=1"]);
+  // Default path: the address's directory.
+  assert.equal(jarChanges(["a=1"], at, now).add[0].path, "/files");
+  assert.equal(jarChanges(["a=1"], "https://app.example.com/report", now).add[0].path, "/");
+  // Domain: shared with subdomains when it covers the host; refused when it does not.
+  assert.equal(jarChanges(["a=1; Domain=example.com"], at, now).add[0].domain, ".example.com");
+  assert.equal(jarChanges(["a=1; Domain=.app.example.com"], at, now).add[0].domain, ".app.example.com");
+  assert.deepEqual(jarChanges(["a=1; Domain=other.com"], at, now).add, [], "a Domain that does not cover the host is refused");
+  assert.deepEqual(jarChanges(["a=1; Domain=com"], at, now).add, [], "a bare suffix is refused");
+  assert.equal(jarChanges(["a=1; Domain=127.0.0.1"], "http://127.0.0.1:8080/x", now).add[0].domain, "127.0.0.1", "an address is host-only");
+  // Lifetime: Max-Age wins over Expires; zero or past removes.
+  assert.equal(jarChanges(["a=1; Max-Age=60; Expires=Thu, 01 Jan 1970 00:00:00 GMT"], at, now).add[0].expires, sec + 60);
+  assert.equal(jarChanges(["a=1; Expires=Sun, 01 Jan 2040 00:00:00 GMT"], at, now).add[0].expires, Date.parse("2040-01-01T00:00:00Z") / 1000);
+  assert.deepEqual(jarChanges(["a=; Max-Age=0; Path=/"], at, now), {
+    add: [],
+    remove: [{ name: "a", domain: "app.example.com", path: "/" }],
+    accepted: ["a=; Max-Age=0; Path=/"],
+  });
+  assert.deepEqual(jarChanges(["a=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/"], at, now).remove, [{ name: "a", domain: "app.example.com", path: "/" }]);
+  // What a browser refuses: Secure over plain http (localhost aside), SameSite=None without Secure, no name.
+  assert.deepEqual(jarChanges(["a=1; Secure"], "http://app.example.com/", now).add, []);
+  assert.equal(jarChanges(["a=1; Secure"], "http://localhost:3000/", now).add.length, 1);
+  assert.deepEqual(jarChanges(["a=1; SameSite=None"], at, now).add, []);
+  assert.equal(jarChanges(["a=1; SameSite=None; Secure"], at, now).add[0].sameSite, "None");
+  assert.deepEqual(jarChanges(["=1", "novalue"], at, now).add, []);
+  assert.deepEqual(jarChanges(["a=1"], "not a url", now), { add: [], remove: [], accepted: [] });
+  // Several lines, in order.
+  assert.deepEqual(
+    jarChanges(["a=1", "b=2; Path=/x"], at, now).add.map((c) => `${c.name}=${c.value}@${c.path}`),
+    ["a=1@/files", "b=2@/x"],
+  );
 });
 
 test("allowlist header: SceneScout's send in the browser's place carries the cookies the browser would, never a SameSite one it withholds from another site", () => {
@@ -5169,7 +5286,7 @@ test("allowlist header: SceneScout's send in the browser's place carries the coo
   assert.equal(cookieLineFor([], true, true), "");
 });
 
-test("allowlist header: a HEAD's next hop within the app carries the cookies the earlier hops set, as the browser will", () => {
+test("allowlist header: a load handed back to the browser with a Cookie line of its own carries what the single send's answer set", () => {
   const now = Date.parse("2026-10-24T12:00:00Z");
   assert.equal(cookieLineAfter("sid=1", ["step=1; Path=/"], "/next", now), "sid=1; step=1");
   assert.equal(cookieLineAfter("sid=1; step=0", ["step=2"], "/next", now), "sid=1; step=2", "a cookie set again replaces the jar's");
@@ -5184,7 +5301,7 @@ test("allowlist header: a HEAD's next hop within the app carries the cookies the
   assert.equal(cookieLineAfter("sid=1", [], "/next", now), "sid=1");
 });
 
-test("allowlist header: the HEAD a page load is asked by carries the request's headers, less those Node sets itself and the cookie the jar supplies", () => {
+test("allowlist header: the single send of a page load carries the request's headers, less those Node sets itself and the cookie the jar supplies", () => {
   assert.deepEqual(forOwnSend({ accept: "text/html", Cookie: "sid=1", host: "x", connection: "keep-alive", ":authority": "x", "x-ci-allow": "t" }), {
     accept: "text/html",
     "x-ci-allow": "t",

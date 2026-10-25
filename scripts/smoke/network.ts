@@ -21,7 +21,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Page } from "playwright";
+import type { BrowserContext, Page } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { checkFindings } from "../../dist/engine/check.js";
 import { BROWSER, check, type SmokeContext } from "./harness.ts";
@@ -37,7 +37,7 @@ const HEADER = "x-ci-allow";
 const FILE_STREAM_MS = 6000;
 const SECRET = "ci-allow-5e3f9a0c71";
 const PROXY_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy", "SCENESCOUT_PROXY"];
-const OWN_VARS = ["SCENESCOUT_APP_HEADER", "SCENESCOUT_RETRY_NETWORK"];
+const OWN_VARS = ["SCENESCOUT_APP_HEADER", "SCENESCOUT_RETRY_NETWORK", "SCENESCOUT_REFUSE_DESTRUCTIVE_GETS"];
 
 interface Seen {
   method: string;
@@ -194,8 +194,68 @@ export async function run(_ctx: SmokeContext): Promise<void> {
   // send a load once more themselves on a dropped connection, at once, and the engine's retry waits longer than this.
   const DROP_WINDOW_MS = 1000;
   let dropFrom = 0;
+  // What the app did: how many times /count and /small.csv ran, and how each send of /export.csv ended.
+  const ran = { count: 0, small: 0, deleted: 0 };
+  const exports: { header: string | null; cookie: string | null; endedMs: number; finished: boolean }[] = [];
   const app = await server((req, res, seen) => {
     const url = req.url ?? "";
+    if (url === "/count") {
+      // An address that does something when opened (a one-time link, a sign-out): it runs for any method, as a framework
+      // that answers a HEAD by running the GET handler does.
+      ran.count += 1;
+      res.writeHead(200, { "content-type": "text/html", connection: "close" });
+      res.end(`<!doctype html><title>Counted</title><p>run ${ran.count}</p>`);
+      return;
+    }
+    if (url === "/next-step") {
+      // A redirect within the app to an address that is a destructive command.
+      res.writeHead(302, { location: "/items/3/delete", connection: "close" });
+      res.end();
+      return;
+    }
+    if (url === "/items/3/delete") {
+      ran.deleted += 1;
+      res.writeHead(200, { "content-type": "text/html", connection: "close" });
+      res.end("<!doctype html><title>Deleted</title><p>deleted</p>");
+      return;
+    }
+    if (url === "/small.csv") {
+      // A short file that does something when fetched, declaring its length.
+      ran.small += 1;
+      const body = "a,b\n1,2\n";
+      res.writeHead(200, {
+        "content-type": "text/csv",
+        "content-disposition": 'attachment; filename="small.csv"',
+        "content-length": String(Buffer.byteLength(body)),
+        "set-cookie": "small=1; Path=/",
+        connection: "close",
+      });
+      res.end(body);
+      return;
+    }
+    if (url === "/export.csv") {
+      // A file streamed for longer than a navigation should wait, declaring no length, from a server that, like Node's,
+      // sends a HEAD's headers only when the handler ends.
+      const started = Date.now();
+      const entry = { header: (req.headers[HEADER] as string | undefined) ?? null, cookie: req.headers.cookie ?? null, endedMs: -1, finished: false };
+      exports.push(entry);
+      res.writeHead(200, {
+        "content-type": "text/csv",
+        "content-disposition": 'attachment; filename="export.csv"',
+        "set-cookie": "exported=1; Path=/",
+        connection: "close",
+      });
+      if (req.method !== "HEAD") res.write("a,b\n");
+      const timer = setTimeout(() => {
+        entry.finished = true;
+        res.end(req.method === "HEAD" ? undefined : "1,2\n");
+      }, FILE_STREAM_MS);
+      res.on("close", () => {
+        clearTimeout(timer);
+        entry.endedMs = Date.now() - started;
+      });
+      return;
+    }
     if (url === "/flaky" && dropFrom >= 0 && (dropFrom === 0 || Date.now() - dropFrom < DROP_WINDOW_MS)) {
       if (dropFrom === 0) dropFrom = Date.now();
       // No answer at all: the connection is dropped, as a load balancer restarting under it would.
@@ -319,10 +379,13 @@ export async function run(_ctx: SmokeContext): Promise<void> {
         return "";
       });
       const api = app.seen.find((s) => s.url === "/api/data");
-      const hops = app.seen.filter((s) => s.url === "/home" || s.url === "/signin" || s.url === "/api/moved");
+      // Up to the load of /go: what a browser does with the page it leaves is its own.
+      const goAt = app.seen.findIndex((s) => s.url === "/go");
+      const hops = app.seen.slice(0, goAt < 0 ? undefined : goAt).filter((s) => s.url === "/home" || s.url === "/signin" || s.url === "/api/moved");
       check(
-        "a redirect within the app keeps the header on its next hop, for a page load and for a fetch",
-        hops.some((s) => s.url === "/signin") &&
+        "a redirect within the app keeps the header on its next hop, for a page load and for a fetch, and each hop of the page load is sent once",
+        hops.filter((s) => s.url === "/signin").length === 1 &&
+          hops.filter((s) => s.url === "/home").length === 1 &&
           hops.every((s) => s.header === SECRET) &&
           app.seen.filter((s) => s.url === "/api/data").every((s) => s.header === SECRET),
         `${signedInAt} ${String(fetched)} ${JSON.stringify(app.seen)}`,
@@ -337,8 +400,9 @@ export async function run(_ctx: SmokeContext): Promise<void> {
         other.seen.some((s) => s.url.startsWith("/pixel.png")) && other.seen.some((s) => s.url === "/landed") && other.seen.every((s) => s.header === null),
         JSON.stringify(other.seen),
       );
-      // A page load that answers with a file, behind a redirect within the app: handed back to the browser without the
-      // header, so it behaves as with none and is never read whole first. The contrast is the same load with no header.
+      // A page load that answers with a streamed file, behind a redirect within the app: sent once with the header, read
+      // no further than its headers, and handed back to the browser without the header, so it behaves as with none. The
+      // contrast is the same load with no header.
       const fileLoad = async (vars: Record<string, string>, at = "/report-moved") =>
         withEnv(vars, async () => {
           await engine.attach({ url: `${app.base}/`, projectDir });
@@ -350,31 +414,107 @@ export async function run(_ctx: SmokeContext): Promise<void> {
       const withHeader = await fileLoad(header);
       const without = await fileLoad({});
       const fileGets = withHeader.seen.filter((s) => s.method === "GET" && s.url === "/report.pdf");
-      const heads = withHeader.seen.filter((s) => s.method === "HEAD");
       check(
-        "a page load that redirects within the app to a file is handed back to the browser: the file is fetched without the header, and the load returns as it does with no header",
-        fileGets.length > 0 &&
-          fileGets.every((s) => s.header === null) &&
-          heads.length > 0 &&
-          heads.every((s) => s.header === SECRET) &&
+        "a page load that redirects within the app to a streamed file is sent once with the header, then handed back to the browser, which fetches the file without it, and the load returns as it does with no header",
+        fileGets.length === 2 &&
+          fileGets[0].header === SECRET &&
+          fileGets[1].header === null &&
+          withHeader.seen.every((s) => s.method !== "HEAD") &&
           withHeader.ms < FILE_STREAM_MS &&
           (withHeader.error === "") === (without.error === ""),
         JSON.stringify({ withHeader, without: { ms: without.ms, error: without.error } }),
       );
-      // The same, when the redirect sets the cookie its target answers with the file by: the HEAD's next hop carries it,
-      // as the browser's does, so the file is still handed back rather than read whole behind a page load that waits.
+      // The same, when the redirect sets the cookie its target answers with the file by: the stand-in's answer hands the
+      // cookie to the browser, so the next load carries it and the file is still handed back.
       const cookieWithHeader = await fileLoad(header, "/report-after-cookie");
       const cookieWithout = await fileLoad({}, "/report-after-cookie");
+      const cookieGets = cookieWithHeader.seen.filter((s) => s.url === "/report-if-cookie");
       check(
-        "...and when that redirect sets the cookie its target answers with the file by, the HEAD's next hop carries it and the load still returns as it does with no header",
-        cookieWithHeader.seen.some((s) => s.method === "HEAD" && s.url === "/report-if-cookie" && (s.cookie ?? "").includes("step=1")) &&
-          cookieWithHeader.seen.filter((s) => s.method === "GET" && s.url === "/report-if-cookie").every((s) => s.header === null) &&
+        "...and when that redirect sets the cookie its target answers with the file by, the next load carries it and still returns as it does with no header",
+        cookieGets.length > 0 &&
+          cookieGets.every((s) => s.method === "GET" && (s.cookie ?? "").includes("step=1")) &&
+          cookieGets.slice(1).every((s) => s.header === null) &&
           cookieWithHeader.ms < FILE_STREAM_MS &&
           (cookieWithHeader.error === "") === (cookieWithout.error === ""),
         JSON.stringify({ cookieWithHeader, without: { ms: cookieWithout.ms, error: cookieWithout.error } }),
       );
-      // A page load another site starts: the browser withholds a SameSite=Strict cookie, and so must SceneScout's send of it
-      // and the HEAD before it.
+      // An address that does something when opened runs once per page load with the header on, as with it off: the
+      // load is sent once, never asked about by a HEAD first.
+      const countRuns = async (vars: Record<string, string>) =>
+        withEnv(vars, async () => {
+          await engine.attach({ url: `${app.base}/`, projectDir });
+          app.seen.length = 0;
+          ran.count = 0;
+          const error = await errorOf(() => engine.navigate(`${app.base}/count`));
+          return { runs: ran.count, error: error.split("\n")[0], seen: app.seen.filter((s) => s.url === "/count") };
+        });
+      const countWith = await countRuns(header);
+      const countWithout = await countRuns({});
+      check(
+        "a page load whose address does something runs it exactly once with the header on, carrying the header, as it runs once with it off",
+        countWith.runs === 1 && countWith.error === "" && countWith.seen[0]?.header === SECRET && countWithout.runs === 1,
+        JSON.stringify({ countWith, countWithout }),
+      );
+      // A redirect within the app to a destructive command, with the refusal of such page loads turned on: SceneScout
+      // sends the hops itself, so it must ask the policy before sending that one, as the route handler would. The contrast
+      // is the same load with the refusal off, which reaches it.
+      const deleteRuns = async (vars: Record<string, string>) =>
+        withEnv(vars, async () => {
+          await engine.attach({ url: `${app.base}/`, projectDir });
+          ran.deleted = 0;
+          const out = await errorOf(() => engine.navigate(`${app.base}/next-step`));
+          // The stand-in page's own load of the hop is asynchronous: give a load that is let out the time to arrive.
+          for (let i = 0; i < 40 && ran.deleted === 0; i++) await new Promise((r) => setTimeout(r, 50));
+          return { runs: ran.deleted, out: out.split("\n")[0], seen: app.seen.slice(-4).map((s) => `${s.method} ${s.url}`) };
+        });
+      const deleteRefused = await deleteRuns({ ...header, SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1" });
+      const deleteAllowed = await deleteRuns(header);
+      check(
+        "with destructive page loads refused, a redirect within the app to one is never sent with the header on, as one with the refusal off is",
+        deleteRefused.runs === 0 && deleteAllowed.runs === 1,
+        JSON.stringify({ deleteRefused, deleteAllowed }),
+      );
+      // A short file that declares its length is read whole and handed over: fetched once, with the header.
+      const smallWith = await (async () => {
+        ran.small = 0;
+        const out = await fileLoad(header, "/small.csv");
+        return { ...out, runs: ran.small };
+      })();
+      const smallCookies = await (engine as unknown as { context: BrowserContext }).context.cookies(app.base);
+      const smallWithout = await fileLoad({}, "/small.csv");
+      check(
+        "a page load answered with a short file of declared length is sent once, with the header, its Set-Cookie reaches the jar, and it behaves as with no header",
+        smallWith.runs === 1 &&
+          smallCookies.some((c) => c.name === "small" && c.value === "1") &&
+          smallWith.seen.filter((s) => s.url === "/small.csv").every((s) => s.method === "GET" && s.header === SECRET) &&
+          (smallWith.error === "") === (smallWithout.error === ""),
+        JSON.stringify({ smallWith, without: { ms: smallWithout.ms, error: smallWithout.error }, cookies: smallCookies.map((c) => c.name) }),
+      );
+      // A file streamed for longer than 5 s, from a server that holds a HEAD's headers until the handler ends: the
+      // load returns before the file has arrived, SceneScout's own send of it is closed unread once its headers are
+      // in, and what that answer set is in the browser's jar, carried by the browser's own fetch of the file.
+      exports.length = 0;
+      const slow = await fileLoad(header, "/export.csv");
+      const jar = await (engine as unknown as { context: BrowserContext }).context.cookies(app.base);
+      const ownSend = exports.find((e) => e.header === SECRET);
+      const browserSend = exports.find((e) => e.header === null);
+      check(
+        "a page load answered with a file streamed for longer than 5 s returns before the file has arrived, and SceneScout's send of it is closed unread",
+        slow.ms < FILE_STREAM_MS - 1000 &&
+          slow.seen.filter((s) => s.url === "/export.csv").every((s) => s.method === "GET") &&
+          ownSend !== undefined &&
+          !ownSend.finished &&
+          ownSend.endedMs >= 0 &&
+          ownSend.endedMs < FILE_STREAM_MS - 1000 &&
+          browserSend !== undefined,
+        JSON.stringify({ slow, exports }),
+      );
+      check(
+        "...and the Set-Cookie of that one answer reaches the browser's jar, and the browser's own fetch of the file carries it",
+        jar.some((c) => c.name === "exported" && c.value === "1") && (browserSend?.cookie ?? "").includes("exported=1"),
+        JSON.stringify({ jar: jar.map((c) => `${c.name}@${c.domain}${c.path}`), exports }),
+      );
+      // A page load another site starts: the browser withholds a SameSite=Strict cookie, and so must SceneScout's send of it.
       const strictSeen = await withEnv(header, async () => {
         await engine.attach({ url: `${app.base}/strict-set`, projectDir });
         const page = (engine as unknown as { page: Page }).page;
@@ -394,14 +534,10 @@ export async function run(_ctx: SmokeContext): Promise<void> {
           await new Promise((r) => setTimeout(r, 50));
         return app.seen.filter((s) => s.url === "/from-another-site");
       });
-      const strictHead = strictSeen.find((s) => s.method === "HEAD");
       const strictGet = strictSeen.find((s) => s.method === "GET");
       check(
-        "a page load another site starts goes, and is asked about by HEAD, without the SameSite=Strict cookie the browser withholds from it",
-        strictHead !== undefined &&
-          strictGet !== undefined &&
-          !(strictGet.cookie ?? "").includes("strict=1") &&
-          (strictHead.cookie ?? "") === (strictGet.cookie ?? ""),
+        "a page load another site starts is sent once, with the header and without the SameSite=Strict cookie the browser withholds from it",
+        strictSeen.length === 1 && strictGet !== undefined && strictGet.header === SECRET && !(strictGet.cookie ?? "").includes("strict=1"),
         JSON.stringify(strictSeen),
       );
       const recorded = filesUnder(projectDir).filter((f) => fs.readFileSync(f, "utf8").includes(SECRET));

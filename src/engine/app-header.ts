@@ -123,7 +123,8 @@ export function appHeaderLine(header: AppHeader, appUrl: string): string {
 
 /**
  * Whether a request of this resource type is sent with the header. Each one
- * that is, SceneScout sends itself (route.fetch, with no redirect followed) and
+ * that is, SceneScout sends itself, with no redirect followed (a page load by
+ * Node's fetch, decided by documentAnswerPlan; any other by route.fetch), and
  * hands the answer to the browser, so the header never follows a redirect the
  * browser takes; a redirect within the app is followed with it (appRedirectPlan).
  * An event stream never ends, so it cannot be sent that way; it goes as the
@@ -147,8 +148,9 @@ export function abortCodeFor(message: string): AbortCode {
   if (["ENOTFOUND", "EAI_AGAIN", "EAI_NODATA", "EAI_NONAME", "EAI_FAIL"].some((w) => words.has(w))) return "namenotresolved";
   if (words.has("ECONNREFUSED")) return "connectionrefused";
   if (words.has("ECONNRESET") || words.has("EPIPE")) return "connectionreset";
-  if (words.has("ETIMEDOUT")) return "timedout";
-  if (message.includes("socket hang up")) return "connectionclosed";
+  if (words.has("ETIMEDOUT") || words.has("UND_ERR_CONNECT_TIMEOUT")) return "timedout";
+  // Playwright's send says "socket hang up"; Node's fetch names undici's socket error.
+  if (message.includes("socket hang up") || words.has("UND_ERR_SOCKET")) return "connectionclosed";
   // SceneScout's own limit on the send (the page-load limit) ran out: the app was slow, as a page load past that limit
   // would be without the header. A plain failure, never the network's timeout.
   return "failed";
@@ -213,12 +215,12 @@ export function cookieLineFor(jar: readonly { name: string; value: string; sameS
 }
 
 /**
- * The Cookie line the next hop of a page load's HEAD carries: `line` (the
- * browser's jar for that address) with the cookies the earlier hops' answers
- * set put over it, as the browser will hold them when it follows the same
- * redirects. A cookie whose Path does not cover `pathname` is left out, and one
- * set to expire (Max-Age 0 or less, or an Expires before `now`) is removed.
- * Only for the HEAD's own question: the browser's jar is not changed.
+ * The Cookie line a page load handed back to the browser carries when the
+ * request already showed one as it was routed (Firefox adds cookies before the
+ * route handler runs): `line`, with the cookies SceneScout's own send of it was
+ * answered with put over it, as the browser's jar now holds them. A cookie
+ * whose Path does not cover `pathname` is left out, and one set to expire
+ * (Max-Age 0 or less, or an Expires before `now`) is removed.
  */
 export function cookieLineAfter(line: string, setCookies: readonly string[], pathname: string, now = Date.now()): string {
   const jar = new Map<string, string>();
@@ -249,9 +251,6 @@ export function cookieLineAfter(line: string, setCookies: readonly string[], pat
   return [...jar].map(([name, value]) => `${name}=${value}`).join("; ");
 }
 
-/** The longest a page load's HEADs may take, all hops together (never longer than the page-load limit): past it, nothing is learnt and the load goes as any other. */
-export const APP_HEADER_HEAD_MS = 5000;
-
 /**
  * Whether an answer's headers say it is a page the browser shows, rather than
  * a file it downloads or displays as it is: not an attachment, and HTML (or no
@@ -269,28 +268,187 @@ export function answersWithPage(headers: Readonly<Record<string, string>>): bool
 }
 
 /**
- * What a page load carrying the header is, learned by HEAD before any body is
- * read (SceneScout sends the header's requests itself, and its send reads the
- * whole answer, so a file would arrive whole before the browser saw it):
- * - "page": an HTML page, perhaps behind redirects within the app: sent with the header;
- * - "file": a download or a file shown as it is, perhaps behind redirects within
- *   the app: handed back to the browser without the header, so it behaves as with none;
- * - "unknown": HEAD is not answered (405, 501), or a redirect leaves the app:
- *   sent with the header as any other request.
- * `next` is the address of the hop to ask next, when the answer is a redirect within the app.
+ * The largest file a page load carrying the header is read whole for and
+ * handed to the browser as one answer, by the length its answer declares. A
+ * larger one, or one that declares none (a stream), is handed back instead
+ * (documentAnswerPlan).
  */
-export function headVerdict(input: {
+export const APP_HEADER_FILE_READ_MAX = 1024 * 1024;
+
+/**
+ * What to do with the answer to a page load SceneScout sent once, with the
+ * header, decided from its status and headers before any of its body is read.
+ * Playwright can hand the browser only a whole body, never a stream, so:
+ * - "fulfil": a page, an error, a redirect away from the app (the browser
+ *   follows it without the header) or a file that declares a length of at most
+ *   APP_HEADER_FILE_READ_MAX, sent uncompressed, is read whole and handed to
+ *   the browser, and the app sees the load once;
+ * - "stand-in": a redirect within the app is answered with a page that loads
+ *   the next address itself (redirectStandIn), as a new page load, routed and
+ *   sent with the header in its turn;
+ * - "hand-back": a file that declares no length (a stream), a longer one, or a
+ *   compressed one (its length is not what it decodes to) is not read: its body is cancelled once its headers are in, and the load is
+ *   handed back to the browser, which sends it again without the header, so a
+ *   slow or large file arrives as it does with no header rather than whole
+ *   after a wait. The app sees that address twice.
+ */
+export function documentAnswerPlan(input: {
   status: number;
   headers: Readonly<Record<string, string>>;
   requestUrl: string;
   appUrl: string;
-}): { kind: "page" | "file" | "unknown" } | { kind: "next"; url: string } {
-  if (input.status === 405 || input.status === 501) return { kind: "unknown" };
+}): { kind: "fulfil" | "hand-back" } | { kind: "stand-in"; url: string } {
+  const header = (name: string) =>
+    Object.entries(input.headers)
+      .find(([n]) => n.toLowerCase() === name)?.[1]
+      ?.trim();
   if (input.status >= 300 && input.status < 400) {
-    const plan = appRedirectPlan({ ...input, location: input.headers["location"], method: "GET", resourceType: "fetch" });
-    return plan && plan.kind === "follow" ? { kind: "next", url: plan.url } : { kind: "unknown" };
+    const plan = appRedirectPlan({ ...input, location: header("location"), method: "GET", resourceType: "document" });
+    return plan && plan.kind === "stand-in" ? { kind: "stand-in", url: plan.url } : { kind: "fulfil" };
   }
-  return { kind: answersWithPage(input.headers) ? "page" : "file" };
+  if (input.status < 200 || input.status >= 300 || answersWithPage(input.headers)) return { kind: "fulfil" };
+  // A length counts only for a body sent as it is: a compressed one is read decoded, at a size its length does not say.
+  const encoded = (header("content-encoding") ?? "").toLowerCase();
+  if (encoded !== "" && encoded !== "identity") return { kind: "hand-back" };
+  const length = header("content-length") ?? "";
+  return /^\d{1,15}$/.test(length) && Number(length) <= APP_HEADER_FILE_READ_MAX ? { kind: "fulfil" } : { kind: "hand-back" };
+}
+
+/**
+ * How a page load is answered when SceneScout followed redirects within the
+ * app itself (documentAnswerPlan's "stand-in") and they ended in this answer:
+ * - "stand-in": a page (or an error, or a redirect away from the app) is kept
+ *   and the load is answered with a stand-in page that loads its address, so
+ *   the browser shows it at its own address, answered from what was kept;
+ * - "redirect": a file is not kept: the load is answered with a redirect to its
+ *   address, which the browser follows without the header, as it would the
+ *   app's own redirect, so a download starts as it does with no header rather
+ *   than from a page that has already loaded.
+ */
+export function redirectsEndPlan(input: { status: number; headers: Readonly<Record<string, string>> }): "stand-in" | "redirect" {
+  return input.status >= 200 && input.status < 300 && !answersWithPage(input.headers) ? "redirect" : "stand-in";
+}
+
+/** Headers the decoded, whole body handed to the browser no longer matches, or that only the connection the answer came on had. */
+const FULFIL_DROPPED = new Set(["content-encoding", "content-length", "transfer-encoding", "connection", "keep-alive", "trailer", "upgrade"]);
+
+/**
+ * The headers an answer SceneScout read itself (Node's fetch, which decodes a
+ * compressed body) is handed to the browser with: as they came, less those the
+ * decoded, whole body no longer matches, and with each Set-Cookie on a line of
+ * its own (Playwright passes the lines to the browser as separate headers,
+ * and the browser stores what they set).
+ */
+export function fulfilHeaders(entries: Iterable<readonly [string, string]>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [raw, value] of entries) {
+    const name = raw.toLowerCase();
+    if (FULFIL_DROPPED.has(name)) continue;
+    const sep = name === "set-cookie" ? "\n" : ", ";
+    out[name] = name in out ? `${out[name]}${sep}${value}` : value;
+  }
+  return out;
+}
+
+/** A cookie as Playwright's BrowserContext.addCookies takes one. */
+export interface JarCookie {
+  name: string;
+  value: string;
+  /** A leading dot for a cookie its Domain shares with subdomains; the bare host for a host-only one. */
+  domain: string;
+  path: string;
+  /** Seconds since the epoch; -1 for a cookie that lasts the session. */
+  expires: number;
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite?: "Strict" | "Lax" | "None";
+}
+
+/**
+ * What the Set-Cookie lines of an answer to `url` change in the browser's jar,
+ * read as a browser reads them (RFC 6265), for an answer the browser never saw:
+ * the cookies to add, and those to remove (Max-Age 0 or less, or an Expires
+ * not after `now`). A line the browser would refuse is left out: no name, a
+ * Domain that does not cover the host, Secure over plain http (localhost
+ * aside), SameSite=None without Secure, or a __Secure- or __Host- name whose
+ * rules it breaks. `accepted` is the lines the browser would keep. Used when a page load's answer is
+ * handed back to the browser unread (documentAnswerPlan), so the jar holds what
+ * the app set in answer to the load it saw, and the browser's own send of it
+ * carries that.
+ */
+export function jarChanges(
+  setCookies: readonly string[],
+  url: string,
+  now = Date.now(),
+): { add: JarCookie[]; remove: { name: string; domain: string; path: string }[]; accepted: string[] } {
+  const add: JarCookie[] = [];
+  const remove: { name: string; domain: string; path: string }[] = [];
+  const accepted: string[] = [];
+  let at: URL;
+  try {
+    at = new URL(url);
+  } catch {
+    return { add, remove, accepted };
+  }
+  const host = at.hostname.toLowerCase();
+  const address = host.startsWith("[") || /^[\d.]+$/.test(host);
+  const local = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+  const slash = at.pathname.lastIndexOf("/");
+  const defaultPath = slash <= 0 ? "/" : at.pathname.slice(0, slash);
+  for (const line of setCookies) {
+    const [first, ...attrs] = line.split(";");
+    const eq = first.indexOf("=");
+    const name = eq < 0 ? "" : first.slice(0, eq).trim();
+    if (!name) continue;
+    const value = first.slice(eq + 1).trim();
+    let domain = host;
+    let path = defaultPath;
+    let expires = -1;
+    let maxAge: number | null = null;
+    let httpOnly = false;
+    let secure = false;
+    let sameSite: JarCookie["sameSite"];
+    let refused = false;
+    let domainNamed = false;
+    for (const attr of attrs) {
+      const sign = attr.indexOf("=");
+      const key = (sign < 0 ? attr : attr.slice(0, sign)).trim().toLowerCase();
+      const val = sign < 0 ? "" : attr.slice(sign + 1).trim();
+      if (key === "domain" && val !== "") {
+        domainNamed = true;
+        const d = (val.startsWith(".") ? val.slice(1) : val).toLowerCase();
+        // An address is its own host only; a name's Domain covers it and its subdomains.
+        if (d === host) domain = address || !host.includes(".") ? host : `.${d}`;
+        else if (!address && d.includes(".") && host.endsWith(`.${d}`)) domain = `.${d}`;
+        else refused = true;
+      } else if (key === "path" && val.startsWith("/")) path = val;
+      else if (key === "max-age" && /^-?\d{1,15}$/.test(val)) maxAge = Number(val);
+      else if (key === "expires") {
+        const when = Date.parse(val);
+        if (!Number.isNaN(when)) expires = Math.floor(when / 1000);
+      } else if (key === "httponly") httpOnly = true;
+      else if (key === "secure") secure = true;
+      else if (key === "samesite") {
+        const v = val.toLowerCase();
+        sameSite = v === "strict" ? "Strict" : v === "lax" ? "Lax" : v === "none" ? "None" : undefined;
+      }
+    }
+    if (refused || (secure && at.protocol !== "https:" && !local) || (sameSite === "None" && !secure)) continue;
+    // The name prefixes a browser holds a cookie to: __Secure- needs Secure; __Host- also Path=/ and no Domain at all,
+    // not even one naming the host itself.
+    const lower = name.toLowerCase();
+    if ((lower.startsWith("__secure-") || lower.startsWith("__host-")) && !secure) continue;
+    if (lower.startsWith("__host-") && (domainNamed || path !== "/")) continue;
+    accepted.push(line);
+    // Max-Age wins over Expires.
+    if (maxAge !== null ? maxAge <= 0 : expires !== -1 && expires * 1000 <= now) {
+      remove.push({ name, domain, path });
+      continue;
+    }
+    if (maxAge !== null) expires = Math.floor(now / 1000) + maxAge;
+    add.push({ name, value, domain, path, expires, httpOnly, secure, ...(sameSite ? { sameSite } : {}) });
+  }
+  return { add, remove, accepted };
 }
 
 /** The most hops SceneScout follows itself for one request, as a browser would (the Fetch standard's limit). */
