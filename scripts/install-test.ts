@@ -3428,7 +3428,11 @@ test("release plan: publish exactly when npm lacks the version, under the tag ch
 
 test("build: dist is emptied before tsc, so a file deleted from src is not packed", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
-  assert.match(pkg.scripts.build, /rmSync\(['"]dist['"], *\{[^}]*recursive: *true[^}]*\}\).*&& tsc$/, "clear dist, then compile");
+  assert.match(
+    pkg.scripts.build,
+    /rmSync\(['"]dist['"], *\{[^}]*recursive: *true[^}]*\}\).*&& tsc && node scripts\/bin-executable\.mjs$/,
+    "clear dist, then compile",
+  );
 });
 
 test("ci action: the model key is blanked for every step except the one that runs the exploration", () => {
@@ -3469,4 +3473,28 @@ test("example workflows: Dependabot reads their folder, and their third-party pi
     }
   }
   assert.ok(checked >= 2, `the scan found the shared pins: ${checked}`);
+});
+
+test("the build leaves every bin target executable, so a linked scenescout still runs after a rebuild", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
+  const targets = Object.values(pkg.bin ?? {}) as string[];
+  assert.ok(targets.length > 0, "package.json declares a bin");
+  assert.match(pkg.scripts.build, /&& node scripts\/bin-executable\.mjs$/, "build marks the bin targets executable after tsc");
+
+  // Run the step on a copy of the targets made 0644, as tsc writes them.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-bin-"));
+  fs.mkdirSync(path.join(tmp, "scripts"));
+  fs.copyFileSync(path.join(repoRoot, "scripts", "bin-executable.mjs"), path.join(tmp, "scripts", "bin-executable.mjs"));
+  fs.writeFileSync(path.join(tmp, "package.json"), JSON.stringify({ bin: pkg.bin }));
+  for (const target of targets) {
+    fs.mkdirSync(path.dirname(path.join(tmp, target)), { recursive: true });
+    fs.writeFileSync(path.join(tmp, target), "#!/usr/bin/env node\n", { mode: 0o644 });
+  }
+  execFileSync(process.execPath, [path.join(tmp, "scripts", "bin-executable.mjs")]);
+  if (process.platform !== "win32") {
+    for (const target of targets) {
+      assert.equal(fs.statSync(path.join(tmp, target)).mode & 0o111, 0o111, `${target} is executable`);
+    }
+  }
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
