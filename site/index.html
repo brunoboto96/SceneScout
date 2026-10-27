@@ -786,6 +786,79 @@
           grid-template-columns: minmax(0, 1fr);
         }
       }
+      /* The tour: the video beside a list of its parts, one column on narrow screens. */
+      .tour {
+        display: grid;
+        grid-template-columns: minmax(0, 3fr) minmax(220px, 1fr);
+        gap: 28px;
+        align-items: start;
+      }
+      @media (max-width: 940px) {
+        .tour {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .tour video {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: 3px;
+        background: var(--night);
+      }
+      .tour-parts {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 6px;
+      }
+      .tour-parts button {
+        width: 100%;
+        display: grid;
+        grid-template-columns: 1.6em minmax(0, 1fr) auto;
+        gap: 10px;
+        align-items: baseline;
+        text-align: left;
+        font: inherit;
+        color: var(--muted);
+        background: none;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 9px 12px;
+        cursor: pointer;
+      }
+      .tour-parts button:hover,
+      .tour-parts button[aria-current="true"] {
+        color: var(--text);
+        border-color: var(--rule);
+        background: var(--panel);
+      }
+      .tour-parts button[aria-current="true"] .n {
+        color: var(--gold);
+      }
+      .tour-error {
+        grid-column: 1 / -1;
+        margin: 0;
+        color: var(--muted);
+      }
+      .tour-transcript {
+        margin-top: 28px;
+        max-width: 72ch;
+        color: var(--muted);
+      }
+      .tour-transcript summary {
+        cursor: pointer;
+        color: var(--text);
+      }
+      .tour-transcript h3 {
+        margin: 22px 0 6px;
+        font-size: 1rem;
+        color: var(--text);
+      }
+      .tour-parts .len {
+        font-variant-numeric: tabular-nums;
+        font-size: 0.9rem;
+      }
       figure.shot {
         margin: 0;
         display: grid;
@@ -1374,6 +1447,7 @@
           SceneScout
         </a>
         <nav aria-label="Main">
+          <a class="opt" href="#tour">Tour</a>
           <a class="opt" href="#bestiary">What it finds</a>
           <a class="opt" href="#quests">QA evidence</a>
           <a class="opt2" href="#start">Get started</a>
@@ -1468,6 +1542,179 @@
               <li>any MCP client</li>
             </ul>
           </div>
+        </div>
+      </section>
+
+      <section id="tour">
+        <div class="wrap">
+          <div class="section-head">
+            <span class="tag">The tour</span>
+            <h2>Every feature, in nine minutes.</h2>
+            <p class="lede">
+              A narrated walk through SceneScout on the demo app: a first look, an agent's run, saved journeys and their evidence, CI, and the safety model.
+            </p>
+          </div>
+          <div class="tour">
+            <figure class="shot">
+              <div class="frame gilded">
+                <video
+                  id="tour-video"
+                  aria-label="SceneScout tour, narrated, with captions in the picture"
+                  data-testid="tour-video"
+                  controls
+                  playsinline
+                  preload="none"
+                  width="1600"
+                  height="1100"
+                  poster="tour-poster.jpg"
+                  src="https://pub-eda00eb13114427b89956121687d9e56.r2.dev/video/scenescout-explainer.mp4"
+                ></video>
+              </div>
+              <figcaption>The captions are part of the picture, so it reads without sound.</figcaption>
+            </figure>
+            <ol class="tour-parts" aria-label="Watch one part" data-base="https://pub-eda00eb13114427b89956121687d9e56.r2.dev/video/">
+              <li>
+                <button aria-label="The whole tour, 9:17" type="button" data-src="scenescout-explainer.mp4" data-testid="tour-part-all" aria-current="true">
+                  <span class="n" aria-hidden="true">▶</span>The whole tour<span class="len">9:17</span>
+                </button>
+              </li>
+              <li>
+                <button aria-label="Meet SceneScout, 0:57" type="button" data-src="chapters/01-meet-scenescout.mp4" data-testid="tour-part-1">
+                  <span class="n" aria-hidden="true">1</span>Meet SceneScout<span class="len">0:57</span>
+                </button>
+              </li>
+              <li>
+                <button
+                  aria-label="A first look in one command, 0:34"
+                  type="button"
+                  data-src="chapters/02-a-first-look-in-one-command.mp4"
+                  data-testid="tour-part-2"
+                >
+                  <span class="n" aria-hidden="true">2</span>A first look in one command<span class="len">0:34</span>
+                </button>
+              </li>
+              <li>
+                <button aria-label="What it catches, 1:16" type="button" data-src="chapters/03-what-it-catches.mp4" data-testid="tour-part-3">
+                  <span class="n" aria-hidden="true">3</span>What it catches<span class="len">1:16</span>
+                </button>
+              </li>
+              <li>
+                <button aria-label="An exploratory run, 1:59" type="button" data-src="chapters/04-an-exploratory-run.mp4" data-testid="tour-part-4">
+                  <span class="n" aria-hidden="true">4</span>An exploratory run<span class="len">1:59</span>
+                </button>
+              </li>
+              <li>
+                <button
+                  aria-label="Automated QA with evidence, 1:17"
+                  type="button"
+                  data-src="chapters/05-automated-qa-with-evidence.mp4"
+                  data-testid="tour-part-5"
+                >
+                  <span class="n" aria-hidden="true">5</span>Automated QA with evidence<span class="len">1:17</span>
+                </button>
+              </li>
+              <li>
+                <button
+                  aria-label="In CI and on pull requests, 1:08"
+                  type="button"
+                  data-src="chapters/06-in-ci-and-on-pull-requests.mp4"
+                  data-testid="tour-part-6"
+                >
+                  <span class="n" aria-hidden="true">6</span>In CI and on pull requests<span class="len">1:08</span>
+                </button>
+              </li>
+              <li>
+                <button aria-label="Safe by default, 0:53" type="button" data-src="chapters/07-safe-by-default.mp4" data-testid="tour-part-7">
+                  <span class="n" aria-hidden="true">7</span>Safe by default<span class="len">0:53</span>
+                </button>
+              </li>
+              <li>
+                <button aria-label="Smarter every run, 1:10" type="button" data-src="chapters/08-smarter-every-run.mp4" data-testid="tour-part-8">
+                  <span class="n" aria-hidden="true">8</span>Smarter every run<span class="len">1:10</span>
+                </button>
+              </li>
+            </ol>
+            <p class="tour-error" role="status" data-testid="tour-error" hidden>
+              This part did not load here. <a href="" data-testid="tour-error-link">Open the video on its own</a>.
+            </p>
+          </div>
+          <details class="tour-transcript" data-testid="tour-transcript">
+            <summary>Read the transcript</summary>
+            <h3>1. Meet SceneScout</h3>
+            <p>
+              This is SceneScout. It turns the coding agent you already use into an exploratory tester, for any web app. Scripted end-to-end tests answer one
+              question. Does this exact flow still work? They say nothing about the rest of the app. SceneScout explores the whole app, like a curious, thorough
+              tester. It clicks, fills forms, switches roles, and reports what's broken, and what could be better. Your coding agent is the brain. SceneScout
+              gives it a real browser, deterministic checks and a memory, over MCP. No extra model, and no extra API key. It works with Claude Code, Cursor, VS
+              Code, Codex, Gemini, Copilot, Windsurf, and any other MCP client. Next, a first look, in one command.
+            </p>
+            <h3>2. A first look in one command</h3>
+            <p>
+              Let's try it. Harbor is a small demo order desk, with bugs planted on purpose. One command takes a first look at any app you're allowed to test.
+              No account, no API key, and no setup. A first look runs in observe mode. Only reads leave the page, so nothing on the site can change. Thirteen
+              seconds later, it has measured twelve pages, and it leads with the three problems to look at first. So what does it look for?
+            </p>
+            <h3>3. What it catches</h3>
+            <p>
+              Here's what it caught on Harbor. On the dashboard, a badge covers the All orders button. SceneScout measures that from the layout boxes. No
+              screenshot guessing. And the weekly chart never loads. Its request answered 404. Filter the orders by archived, and the server fails with a 500.
+              The page just shows an empty table. It tells the user there's nothing there. A hidden button proves nothing. SceneScout calls the app's own API,
+              as each role. Here, a clerk approved an order the page hid from them, and the server said yes. Like an impatient user, it double-clicks. Create
+              order sent the same request twice, and made two orders. On every page, after every action, it checks for broken layout, real breakage, permission
+              leaks, and pages that lie, saying saved, after the server refused. It scores accessibility and craft from 0 to 100, counts the steps a task takes,
+              and sniffs out security smells, like typed markup that comes back as an element. Now let's give it to your agent.
+            </p>
+            <h3>4. An exploratory run</h3>
+            <p>
+              For a deeper run, hand it to your coding agent. Just ask. Use SceneScout to test your local address. In Claude Code, there's a slash command too.
+              With no flags, a guided form asks in plain words. The address, what to check, how you sign in, how careful to be, and how thorough. Look only is
+              the default. A care level that writes on a remote site, or creates test data, needs your yes, in a second form. The agent can't answer that one
+              for you. While it runs, a live view on your machine shows every agent. What it's doing, the page it's on, and a feed of every action. Bigger apps
+              split into lanes. Here, three agents test the demo in parallel, each with its own role, and their findings merge into one report. The report opens
+              with a plain summary. What was checked, what was found, and each problem, with its steps, what was expected, and what happened. Developers get the
+              technical details, folded underneath. The evidence, the repro trace, and a Playwright regression test, ready to fill in. At the end, problems come
+              back as plain cards, worst first. Mark one not a bug, and it's remembered, so it never comes back as new. To share it, make a team report. A
+              cover, every problem with its picture, what wasn't checked, and blank sign-off lines. File problems as GitHub or Jira tickets. You see a preview
+              first, nothing is filed until you say yes, and filed tickets are read back later. After a fix, re-check tests the same problems again, and never
+              less carefully than before. And a check you like can be saved by name, and run again. Next, evidence you can hand to anyone.
+            </p>
+            <h3>5. Automated QA with evidence</h3>
+            <p>
+              Now, the journeys that must never break. Save the journeys that matter as a few lines of JSON. The happy paths, and the ones that must fail
+              politely. Write them by hand, or keep one your agent just walked. scenescout check replays them with no model involved. It measures every page,
+              and fails only on what it can prove. Recorded, every run leaves proof. The replay page shows each journey, with a pass or fail badge, and the page
+              after every step. A broken journey opens at the step that broke. Step three expected a 200, and the server answered 500. Each journey is filmed
+              too, so a pass is something you can watch. Here, placing an order. And a test report, laid out by your own template. Test IDs, the requirements
+              each covers, expected and actual results, and a screenshot per step. Every deviation is listed again for the reviewer, and every piece of evidence
+              has its fingerprint. SceneScout signs nothing. The sign-off rows are for your people. Next, the same gate in CI.
+            </p>
+            <h3>6. In CI and on pull requests</h3>
+            <p>
+              All of this works in CI, as well. There are five commands for CI. A gate, an unattended run, QA from a pull request comment, filing issues, and a
+              preflight. As a GitHub Action, the gate is a few lines. It runs on every pull request, keeps its evidence, and writes SARIF for code scanning.
+              scenescout ci runs an unattended exploratory session, with the Anthropic or OpenAI API, split into lanes. It reports, and never fails the build.
+              Or comment on a pull request. /scenescout qa tests the preview, and replies in the thread. Ask it to compare the save button, and it highlights
+              the pixels that changed. scenescout preflight checks in seconds, with no browser, that the runner can reach the app, the saved sign-in, and the
+              model's API. And scenescout export files the findings as GitHub or Jira issues, each one only once. And all of it is safe by default.
+            </p>
+            <h3>7. Safe by default</h3>
+            <p>
+              Now, safety. Every request the page sends is judged against the session's write mode. Observe, read-only, safe-write, or destructive. The agent is
+              told never to choose destructive itself. A refused request never reaches your server. The page gets a refusal instead, and if it still says saved,
+              that's a finding too. Not sure? scenescout policy explain shows how any one request would be judged, in every mode, and which rule decides it. A
+              team can commit a config file that caps what any agent may choose, refuses every outbound path, or masks emails and card numbers. And there's no
+              telemetry. Last, it gets better every run.
+            </p>
+            <h3>8. Smarter every run</h3>
+            <p>
+              Finally, what makes it get better. SceneScout remembers. Each run starts from what the last one learned, and re-tests the bugs that earlier runs
+              left open. Done is a contract. The report lists everything not tested, and at the extensive level, it won't finish while any known page is
+              unvisited. And it's measured, not asserted. Every change is scored against an app with 13 planted bugs, and a held-out app it's never tuned on.
+              Behind a sign-in? Sign in once yourself, SSO and MFA included, and every session reuses it. In Chromium, Firefox, or WebKit. Rather press buttons
+              than write prompts? The Claude Code mod adds a guided panel, and the Claude Desktop extension needs no terminal at all. SceneScout is free and
+              open source. Install it with one command, and let your agent find the bugs, before your users do. Thanks for watching.
+            </p>
+          </details>
         </div>
       </section>
 
@@ -1941,6 +2188,38 @@ npx -y scenescout install --client cursor    <span class="c"># or vscode, codex,
           setTimeout(() => (btn.textContent = "Copy"), 1800);
         });
       }
+      // The tour's parts: each button plays its own file in the one player, and a part that ends goes on to the next.
+      const tour = document.getElementById("tour-video");
+      const list = document.querySelector(".tour-parts");
+      const parts = [...list.querySelectorAll("button")];
+      const failed = document.querySelector(".tour-error");
+      let stall;
+      tour.addEventListener("error", () => {
+        clearTimeout(stall);
+        failed.querySelector("a").href = tour.src;
+        failed.hidden = false;
+      });
+      tour.addEventListener("playing", () => clearTimeout(stall));
+      const start = (btn) => {
+        const src = new URL(btn.dataset.src, list.dataset.base).href;
+        for (const b of parts) b === btn ? b.setAttribute("aria-current", "true") : b.removeAttribute("aria-current");
+        failed.hidden = true;
+        // A part that failed is loaded again, so a click once the network is back retries it.
+        if (tour.currentSrc !== src || tour.error) tour.src = src;
+        clearTimeout(stall);
+        // A load that hangs fires no error, so a part not playing within 15 s offers the direct link.
+        stall = setTimeout(() => tour.readyState < 3 && tour.dispatchEvent(new Event("error")), 15000);
+        tour.play().catch((e) => {
+          // A play cut short by the next click, or an autoplay the browser refused, is not a failed part.
+          if (e.name === "AbortError" || e.name === "NotAllowedError") return clearTimeout(stall);
+          tour.dispatchEvent(new Event("error"));
+        });
+      };
+      tour.addEventListener("ended", () => {
+        const i = parts.findIndex((b) => b.hasAttribute("aria-current"));
+        if (i > 0 && i < parts.length - 1) start(parts[i + 1]);
+      });
+      for (const btn of parts) btn.addEventListener("click", () => start(btn));
       // Recall per benchmark run (demo app, 13 planted), from docs/benchmark.md.
       const runs = [11, 12, 9, 10, 11, 11, 10, 10, 11, 13, 11, 11, 12];
       const ns = "http://www.w3.org/2000/svg",

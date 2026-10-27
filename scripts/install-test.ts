@@ -903,6 +903,46 @@ test("the desktop extension's description claims no more than the write policy e
   assert.match(text, /unsubscribe link/, "says a link that acts when opened is followed");
 });
 
+test("the website's tour names each part's file once, under one address, with a transcript per part", () => {
+  const html = fs.readFileSync(path.join(repoRoot, "site/index.html"), "utf8");
+  const list = /<ol class="tour-parts"[^>]*data-base="([^"]+)"[^>]*>([\s\S]*?)<\/ol>/.exec(html);
+  assert.ok(list, "the tour's part list carries its base address");
+  const base = list[1];
+  assert.match(base, /^https:\/\/[^/]+\/.+\/$/, "the base is an https address ending in a folder");
+  const buttons = [...list[2].matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/g)].map((m) => ({ attrs: m[1], body: m[2] }));
+  assert.equal(buttons.length, 9, "the whole tour and its eight parts");
+  const attr = (b: { attrs: string }, name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(b.attrs)?.[1] ?? "";
+  const srcs = buttons.map((b) => attr(b, "data-src"));
+  for (const [i, src] of srcs.entries()) {
+    assert.ok(new URL(src, base).href.startsWith(base), `part ${i} resolves inside the base: ${src}`);
+  }
+  assert.equal(new Set(srcs).size, srcs.length, "no two parts play the same file");
+  const ids = buttons.map((b) => attr(b, "data-testid"));
+  assert.ok(
+    ids.every((id) => /^tour-part-[\w-]+$/.test(id)),
+    "every part has a test id",
+  );
+  assert.equal(new Set(ids).size, ids.length, "and no two share one");
+  assert.equal(attr(buttons[0], "aria-current"), "true", "the whole tour is the part shown first");
+  const video = /<video\b[^>]*>/.exec(html)?.[0] ?? "";
+  assert.equal(/\ssrc="([^"]+)"/.exec(video)?.[1], new URL(srcs[0], base).href, "the player starts on the whole tour");
+  assert.match(video, /\sid="tour-video"/, "the player has the id the script finds it by");
+  assert.match(html, /class="tour-error"/, "and the line the script shows when a part will not load is there");
+  assert.equal(html.split(new URL(base).host).length - 1, 2, "the bucket's host is written in the base and the player's first file only");
+  const poster = /\sposter="([^"]+)"/.exec(video)?.[1] ?? "";
+  assert.ok(poster && fs.statSync(path.join(repoRoot, "site", poster)).size > 0, "the player's poster is a file in the site");
+  // Each part's number, title and file agree with its heading in the transcript, so a reorder or rename in one place fails.
+  const transcript = /<details class="tour-transcript"[\s\S]*?<\/details>/.exec(html)?.[0] ?? "";
+  const headings = [...transcript.matchAll(/<h3>([^<]+)<\/h3>/g)].map((m) => m[1]);
+  assert.equal(headings.length, buttons.length - 1, "the transcript has a heading per part");
+  for (const [k, b] of buttons.slice(1).entries()) {
+    const n = k + 1;
+    const title = /<\/span>([^<]+)<span class="len">/.exec(b.body)?.[1].trim();
+    assert.equal(headings[k], `${n}. ${title}`, `part ${n}'s transcript heading`);
+    assert.ok(srcs[n].startsWith(`chapters/${String(n).padStart(2, "0")}-`), `part ${n} plays its own chapter file`);
+  }
+});
+
 /**
  * Wording that claims more than the write policy enforces (Safety model, "What is a guarantee and what is best effort").
  * Each phrase is tied to a mode or a page, so an ordinary "changes nothing" or "reads only" elsewhere is not caught.
