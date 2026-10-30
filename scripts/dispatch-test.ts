@@ -19,7 +19,7 @@ import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
 import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
-import { bestEffort, readWithin, settleWithin } from "../src/engine/best-effort.ts";
+import { bestEffort, heldRead, readWithin, settleWithin } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles, socketsLeft } from "./smoke/leaks.ts";
 import { busiestOwners, parseTasklist, parseTcpTable, readMachineSockets, socketLine, tcpStateCounts, type CommandRunner } from "../src/engine/tcp-table.ts";
@@ -874,6 +874,142 @@ test("settleWithin waits for the work, at most the bound, and never rejects", as
   await settleWithin(new Promise<void>(() => {}), 20);
   assert.ok(Date.now() - started < 1000, "work that never finishes is given up on at the bound");
   await settleWithin(Promise.reject(new Error("gone")), 1000);
+});
+
+// heldRead: a read the page holds while its own navigation is on its way
+
+test("heldRead answers the value of a read that settles within the limit, without releasing", async () => {
+  let released = 0;
+  const got = await heldRead(Promise.resolve(7), 200, async () => void released++);
+  assert.deepEqual(got, { stalled: false, value: 7 });
+  assert.equal(released, 0);
+});
+
+test("heldRead releases a read that never settles and ends within twice the limit as stalled", { timeout: 5000 }, async () => {
+  let released = 0;
+  const started = Date.now();
+  const got = await heldRead(new Promise<number>(() => {}), 100, async () => void released++);
+  assert.deepEqual(got, { stalled: true, navigating: true });
+  assert.equal(released, 1);
+  assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
+});
+
+test("heldRead stalls a read that the release lets fail, and a release that throws does not escape", { timeout: 5000 }, async () => {
+  let fail: (e: Error) => void = () => {};
+  const work = new Promise<number>((_, reject) => (fail = reject));
+  const got = await heldRead(work, 100, async () => {
+    fail(new Error("Execution context was destroyed"));
+    throw new Error("page closed");
+  });
+  assert.deepEqual(got, { stalled: true, navigating: true });
+});
+
+test("heldRead passes on a read that fails before the limit", async () => {
+  await assert.rejects(
+    heldRead(Promise.reject(new Error("boom")), 200, async () => {}),
+    /boom/,
+  );
+});
+
+test("heldRead waits on for a read slower than the limit with no navigation on its way, and releases nothing", { timeout: 5000 }, async () => {
+  let released = 0;
+  const slow = new Promise<number>((resolve) => setTimeout(() => resolve(3), 150));
+  const got = await heldRead(
+    slow,
+    50,
+    async () => void released++,
+    () => false,
+    1000,
+  );
+  assert.deepEqual(got, { stalled: false, value: 3 });
+  assert.equal(released, 0);
+});
+
+test("...while the same read with a navigation on its way is released at the limit (the contrast)", { timeout: 5000 }, async () => {
+  let released = 0;
+  const slow = new Promise<number>((resolve) => setTimeout(() => resolve(3), 150));
+  const got = await heldRead(
+    slow,
+    50,
+    async () => void released++,
+    () => true,
+    1000,
+  );
+  assert.deepEqual(got, { stalled: true, navigating: true });
+  assert.equal(released, 1);
+});
+
+test(
+  "heldRead leaves, without releasing, a read with no navigation on its way that never settles, once the slow grace is spent",
+  { timeout: 5000 },
+  async () => {
+    let released = 0;
+    const started = Date.now();
+    const got = await heldRead(
+      new Promise<number>(() => {}),
+      50,
+      async () => void released++,
+      () => false,
+      200,
+    );
+    const took = Date.now() - started;
+    assert.deepEqual(got, { stalled: true, navigating: false });
+    assert.equal(released, 0);
+    assert.ok(took >= 240 && took < 1500, `took ${took} ms`);
+  },
+);
+
+test("heldRead releases a slow read as soon as a navigation starts during its grace, not at the grace's end", { timeout: 5000 }, async () => {
+  let released = 0;
+  let on = false;
+  setTimeout(() => (on = true), 150);
+  const started = Date.now();
+  const got = await heldRead(
+    new Promise<number>(() => {}),
+    50,
+    async () => void released++,
+    () => on,
+    3000,
+    20,
+  );
+  const took = Date.now() - started;
+  assert.deepEqual(got, { stalled: true, navigating: true });
+  assert.equal(released, 1);
+  assert.ok(took < 1000, `took ${took} ms`);
+});
+
+test("heldRead with no release leaves a read held by a navigation and answers stalled at the limit, without a second wait", { timeout: 5000 }, async () => {
+  let settled = false;
+  const work = new Promise<number>(() => {}).finally(() => (settled = true));
+  const started = Date.now();
+  const got = await heldRead(work, 100, null, () => true, 1000);
+  const took = Date.now() - started;
+  assert.deepEqual(got, { stalled: true, navigating: true });
+  assert.equal(settled, false);
+  assert.ok(took >= 90 && took < 180, `took ${took} ms`);
+});
+
+test("...while with no release and nothing on its way the slow read is still waited for and answered (the contrast)", { timeout: 5000 }, async () => {
+  const slow = new Promise<number>((resolve) => setTimeout(() => resolve(5), 200));
+  const got = await heldRead(slow, 50, null, () => false, 1000);
+  assert.deepEqual(got, { stalled: false, value: 5 });
+});
+
+test("heldRead with no release does not leave a read that fails after it was left unhandled", { timeout: 5000 }, async () => {
+  let fail: (e: Error) => void = () => {};
+  const work = new Promise<number>((_, reject) => (fail = reject));
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => void unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const got = await heldRead(work, 50, null, () => true, 1000);
+    assert.deepEqual(got, { stalled: true, navigating: true });
+    fail(new Error("context destroyed"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
 });
 
 test("readWithin gives the value, or undefined when the read rejects or has not settled by the bound", async () => {
