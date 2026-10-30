@@ -2298,10 +2298,11 @@ test("a beacon is a ping in Chromium and a beacon elsewhere; only Chromium needs
 
 // ── The command line: help and unknown flags are settled before a command runs ──
 
-/** A dispatch whose handlers only record what reached them; usage and refusal end the run as the real ones do. */
+/** A dispatch whose handlers only record what reached them; usage returns as the real one does, and refusal ends the run. */
 async function dispatched(argv: string[]): Promise<{ ran: string[]; exit: number | null; said: string[] }> {
   const ran: string[] = [];
   const said: string[] = [];
+  let exit: number | null = null;
   class Exit {
     constructor(readonly code: number) {}
   }
@@ -2311,9 +2312,10 @@ async function dispatched(argv: string[]): Promise<{ ran: string[]; exit: number
   const commands = Object.fromEntries(SUBCOMMANDS.map((c) => [c, record(c)])) as CliHandlers["commands"];
   try {
     await dispatch(argv[0], argv.slice(1), {
+      // It returns rather than throws, so a caller that does not return after it is seen running on.
       usage: (code) => {
         said.push("usage");
-        throw new Exit(code);
+        exit = code;
       },
       version: () => {
         said.push("version");
@@ -2331,7 +2333,7 @@ async function dispatched(argv: string[]): Promise<{ ran: string[]; exit: number
     if (err instanceof Exit) return { ran, exit: err.code, said };
     throw err;
   }
-  return { ran, exit: null, said };
+  return { ran, exit, said };
 }
 
 test("`scenescout --help` read through a pipe arrives whole, as it does into a file", () => {
@@ -2350,6 +2352,11 @@ test("`scenescout --help` read through a pipe arrives whole, as it does into a f
     assert.equal(piped.status, 0);
     assert.equal(piped.stdout.length, whole.length);
     assert.equal(piped.stdout.slice(-200), whole.slice(-200));
+    // `scan` with no path prints the same usage and exits 1, and never goes on to scan.
+    const scan = spawnSync(process.execPath, ["--import", "tsx", cli, "scan"], { encoding: "utf8", cwd: repo, maxBuffer: 1 << 24 });
+    assert.equal(scan.status, 1);
+    assert.equal(scan.stderr, "");
+    assert.equal(scan.stdout, whole);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
