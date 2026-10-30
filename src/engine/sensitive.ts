@@ -67,7 +67,7 @@ const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; p
       ...["passwort", "kennwort", "passwortbestatigung", "passwortbestaetigung", "kennwortbestatigung", "kennwortbestaetigung"],
       ...["passwortwiederholung", "contrasena", "wachtwoord", "losenord", "passord", "adgangskode", "salasana"],
     ],
-    phrases: ["mot de passe", "palavra passe", "memorable word"],
+    phrases: ["mot de passe", "palavra passe", "memorable word", "pass phrase"],
   },
   {
     kind: "one-time code",
@@ -184,7 +184,9 @@ export function secretWordKind(text: string): SecretKind | null {
   let tail = words.length;
   while (tail > 0 && ABOUT_THE_SECRET.has(words[tail - 1])) tail -= 1;
   const last = words[tail - 1];
-  if (tail > 0 && tail < words.length && (wordKind(last) || last === "code" || last in ALONE_KINDS)) return null;
+  const head = ` ${words.slice(0, tail).join(" ")}`;
+  const endsInPhrase = WORD_KINDS.some(({ phrases }) => phrases.some((p) => head.endsWith(` ${p}`)));
+  if (tail > 0 && tail < words.length && (wordKind(last) || last === "code" || last in ALONE_KINDS || endsInPhrase)) return null;
   const joined = ` ${words.join(" ")} `;
   // A phrase is read before a single word, as it says more: "pass code" is a code, though "pass" alone is a password.
   for (const { kind, phrases } of WORD_KINDS) if (phrases.some((p) => joined.includes(` ${p} `))) return kind;
