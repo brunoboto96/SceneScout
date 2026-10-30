@@ -248,7 +248,7 @@ import {
   type TimeLimits,
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
-import { bestEffort, readWithin, settleWithin } from "./best-effort.js";
+import { bestEffort, heldRead, readWithin, settleWithin, SLOW_READ_MS } from "./best-effort.js";
 import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
@@ -845,6 +845,11 @@ const RECORD_SHOT_TIMEOUT_MS = 2500;
 
 /** How long a repeat step waits for its condition after each round of its actions, before running them again. */
 const REPEAT_CHECK_MS = 1000;
+
+/** What a snapshot answers when the page is on its way to `url` and cannot be read. */
+function navigationPendingSnapshot(url: string, navMs: number): string {
+  return `NAVIGATION PENDING: ${stillNavigating(url, "nav", navMs)}. Nothing on the page can be read until that navigation lands; navigate elsewhere, or take scout_snapshot again later.`;
+}
 
 export class BrowserEngine {
   private browser: Browser | null = null;
@@ -2403,8 +2408,70 @@ export class BrowserEngine {
    */
   private async crawlLandedUrl(page: Page): Promise<string> {
     if (!this.watchesForBounce) return page.url();
-    const doc = Number(await bestEffort(page.evaluate(PAGE_AGE_SCRIPT), 0));
+    const age = await this.readHeld(page, bestEffort(page.evaluate(PAGE_AGE_SCRIPT), 0), this.limits.crawlNavMs, false);
+    const doc = age.stalled ? 0 : Number(age.value);
     return this.stableUrl(CRAWL_URL_HELD_MS, Math.min(Number.isFinite(doc) ? doc : 0, Date.now() - this.actionStartedAt));
+  }
+
+  /**
+   * Reads of the page after the check for its own navigation (ownNavigationPending): the page can start one after that
+   * check, and Chromium then holds every read until it lands, with no limit. Released at `limitMs` by ending that
+   * navigation (best-effort.ts heldRead; a read with none on its way is only slow and is given longer), and answered as
+   * stalled with where the page was going, named before it is ended. With `release` false the navigation is left on
+   * its way and the read is skipped instead, for a read the page can do without (the oracles' scans). A read held with
+   * no navigation on its way is skipped, or with `release` an error, rather than leaving the page.
+   */
+  private async readHeld<T>(
+    page: Page,
+    work: Promise<T>,
+    limitMs: number,
+    release = true,
+  ): Promise<{ stalled: false; value: T } | { stalled: true; leavingFor: string }> {
+    let leavingFor = "";
+    const goingTo = (): string => redactSecrets(this.requests.navigationOf(page.mainFrame())?.request.url() ?? page.url());
+    const read = await heldRead(
+      work,
+      limitMs,
+      release
+        ? () => {
+            leavingFor = goingTo();
+            this.traceStep(page.url(), `read held past ${limitMs} ms: released (the page was going to ${leavingFor})`);
+            return page.goto("about:blank", { timeout: this.limits.backNavMs });
+          }
+        : null,
+      () => !page.isClosed() && this.requests.navigating(page.mainFrame()),
+    );
+    if (!read.stalled) return read;
+    if (!read.navigating) {
+      this.traceStep(page.url(), `read held past ${limitMs + SLOW_READ_MS} ms with no navigation on its way`);
+      if (release) throw new Error(`The page did not answer a read within ${limitMs + SLOW_READ_MS} ms, with no navigation of its own on its way.`);
+      return { stalled: true, leavingFor: "" };
+    }
+    if (!release) {
+      leavingFor = goingTo();
+      this.traceStep(page.url(), `read held past ${limitMs} ms: skipped (the page is going to ${leavingFor})`);
+    }
+    return { stalled: true, leavingFor };
+  }
+
+  /**
+   * The oracles' scans of the page after an action, and `also` with them: skipped rather than waited on when a
+   * navigation of the page's own, started after their check for one, holds them past the page-load limit (readHeld).
+   */
+  private async scanPage(also?: () => Promise<void>): Promise<void> {
+    const page = this.page;
+    if (!page || page.isClosed()) return;
+    this.traceStep(page.url(), "scans");
+    await this.readHeld(
+      page,
+      (async () => {
+        await this.scanForInjections();
+        await this.scanForContradictions();
+        if (also) await also();
+      })(),
+      this.limits.navMs,
+      false,
+    );
   }
 
   /**
@@ -2786,15 +2853,26 @@ export class BrowserEngine {
   private async snapshotUnwatched(full = false): Promise<string> {
     const page = this.requirePage();
     const memory = this.memory!;
+    this.traceStep(page.url(), "snapshot: settle");
     await this.settle(true);
+    this.traceStep(page.url(), "snapshot: own navigation");
     // A page moving itself on cannot be read until that navigation lands (crawlStep says why): waited for within the
     // page-load limit since the last action, and reported rather than read when it has not landed by then.
     const pending = await this.ownNavigationPending(page, this.limits.navMs, this.actionStartedAt);
     if (pending !== null) {
-      return `NAVIGATION PENDING: ${stillNavigating(pending, "nav", this.limits.navMs)}. Nothing on the page can be read until that navigation lands; navigate elsewhere, or take scout_snapshot again later.`;
+      return navigationPendingSnapshot(pending, this.limits.navMs);
     }
 
-    const { elements, truncated, forms, cut, prev: prevSnap, matched, aliases } = await this.snapshots.collect();
+    this.traceStep(page.url(), "snapshot: collect");
+    // A read released: the page the refs and the last snapshot's address name is gone (a state already read is kept).
+    const movedOn = (leavingFor: string): string => {
+      this.snapshots.dropRefs(`the page moved itself on to ${leavingFor}`);
+      this.snapshotUrl = "";
+      return navigationPendingSnapshot(leavingFor, this.limits.navMs);
+    };
+    const collected = await this.readHeld(page, this.snapshots.collect(), this.limits.navMs);
+    if (collected.stalled) return movedOn(collected.leavingFor);
+    const { elements, truncated, forms, cut, prev: prevSnap, matched, aliases } = collected.value;
     const url = page.url();
     this.snapshotUrl = url;
     this.snapshotAt = Date.now();
@@ -2816,9 +2894,18 @@ export class BrowserEngine {
     // it is the frame a reader most wants beside the step. Recording only the
     // actions that go through afterAction kept 9 frames out of 67 in a real
     // run, and none of them from the routes a crawl had just swept.
+    this.traceStep(url, "snapshot: frame");
     this.logAction({ action: "snapshot", url, result: fp, ...(await this.frameFor("snapshot")) });
-    await this.scanForInjections();
-    await this.scanForContradictions();
+    this.traceStep(url, "snapshot: scans");
+    const scanned = await this.readHeld(
+      page,
+      (async () => {
+        await this.scanForInjections();
+        await this.scanForContradictions();
+      })(),
+      this.limits.navMs,
+    );
+    if (scanned.stalled) return movedOn(scanned.leavingFor);
 
     // An alert or live region that appeared after the write policy refused one of
     // the current input's requests may be the page answering the engine's
@@ -2933,13 +3020,29 @@ export class BrowserEngine {
 
     // Per document: the page's own controls together, and each frame's apart —
     // an embed's controls are not laid out against the page's.
-    const { geometry, brokenImages } = await this.measureLayout(page, elements, url);
-    const hiddenFileInputs = await this.hiddenFileInputs(page);
-    const { frames, nested: nestedFrames } = await this.frameInventory(page);
+    this.traceStep(url, "snapshot: layout, frames, title and main area");
+    const read = await this.readHeld(
+      page,
+      (async () => ({
+        layout: await this.measureLayout(page, elements, url),
+        hiddenFileInputs: await this.hiddenFileInputs(page),
+        inventory: await this.frameInventory(page),
+        title: await page.title(),
+        main: await this.readMainRegion(page),
+      }))(),
+      this.limits.navMs,
+    );
+    if (read.stalled) return movedOn(read.leavingFor);
+    this.traceStep(url, "snapshot: done");
+    const {
+      layout: { geometry, brokenImages },
+      hiddenFileInputs,
+      inventory: { frames, nested: nestedFrames },
+      title,
+      main,
+    } = read.value;
     const cov = memory.coverage();
     const unvisited = this.unvisitedKnownRoutes();
-    const title = await page.title();
-    const main = await this.readMainRegion(page);
     return (
       `URL: ${url}\nTitle: ${title}\nState: ${fp} ${isNew ? "(NEW state)" : "(revisited)"}\n` +
       `Coverage: ${cov.states} states known · ${cov.elementsExercised}/${cov.elementsTotal} elements exercised` +
@@ -3237,7 +3340,9 @@ export class BrowserEngine {
 
   private async afterAction(action: string, target: string, click?: ClickContext): Promise<string> {
     const page = this.requirePage();
+    this.traceStep(target, `${action}: settle`);
     await this.settle();
+    this.traceStep(page.url(), `${action}: dropped navigation`);
     // The policy dropped a navigation and the browser showed its error page. That is the tester's own doing and must say
     // so: reported as an off-origin bounce, it hid the block, and the caller then read the unchanged URL as "the app
     // silently discarded the data".
@@ -3278,9 +3383,8 @@ export class BrowserEngine {
     }
     const frame = await this.recordFrame(action);
     this.logAction({ action, target, url, ...(frame ? { frame } : await this.holdFrame()) });
-    await this.scanForInjections();
-    await this.scanForContradictions();
-    if (click) await this.rankRouteCancellations(click, url);
+    await this.scanPage(click ? () => this.rankRouteCancellations(click, url) : undefined);
+    this.traceStep(url, `${action}: done`);
     const violations = this.oracles.drain();
     const mutations = this.drainMutations() + this.drainBlocked() + this.drainRefresh() + this.drainCreated();
     const moved = this.snapshotUrl !== "" && url !== this.snapshotUrl;
@@ -4571,6 +4675,7 @@ export class BrowserEngine {
     const stayed = new Promise<"stayed">((resolve) => {
       this.onLeaveRefused = () => resolve("stayed");
     });
+    this.traceStep(url, "navigate: load");
     const going = this.withinLimit("nav", () => this.gotoSettlingFailure(page, url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs }));
     let outcome: "went" | "stayed" | "refused";
     try {
@@ -5622,6 +5727,25 @@ export class BrowserEngine {
     );
   }
 
+  /**
+   * The engine's last steps on the page (a crawl's per route, a navigation's and a snapshot's), each with where it was
+   * and the time since the first, so a stall names its step (settle smoke).
+   */
+  private stepTrace: string[] = [];
+  private stepTraceStart = 0;
+
+  private traceStep(where: string, step: string): void {
+    const now = Date.now();
+    if (this.stepTrace.length === 0) this.stepTraceStart = now;
+    this.stepTrace.push(`+${now - this.stepTraceStart} ms ${redactSecrets(where)}: ${step}`);
+    if (this.stepTrace.length > 60) this.stepTrace.shift();
+  }
+
+  /** The steps the engine has taken, newest last. */
+  stepTraceLines(): string[] {
+    return [...this.stepTrace];
+  }
+
   /** A crawled route that could not be read: it failed to load, or its page was still moving on at the limit. */
   private crawlRouteUnloaded(run: CrawlRun, path: string, url: string, reason: string, verdict: "LOAD FAILED" | "NAVIGATION PENDING"): CrawlStepOutcome {
     // Not retried by later crawls in this process (a check would otherwise try it
@@ -5659,6 +5783,7 @@ export class BrowserEngine {
     }
     const url = resolved.url;
     this.actionStartedAt = Date.now();
+    this.traceStep(path, "crawl: load");
     this.oracles.drain(false); // discard pre-route leftovers WITHOUT marking their signatures as reported
     let status: number | string = "ERR";
     // The main document's response, as the browser received it. Kept apart from goto's own result: a browser that
@@ -5727,7 +5852,9 @@ export class BrowserEngine {
       });
       return "resource";
     }
+    this.traceStep(path, "crawl: settle");
     await this.settle();
+    this.traceStep(path, "crawl: own navigation");
     // A route whose page moved itself on is read once that navigation lands: read while it is on its way, Chromium held
     // the read until it did, however long that took. One still on its way at the page-load limit is not read.
     const pending = await this.ownNavigationPending(page, this.limits.crawlNavMs, this.actionStartedAt);
@@ -5739,9 +5866,21 @@ export class BrowserEngine {
     // With a saved sign-in, the address is watched until it has held still since the route's document arrived before
     // the route is read: a guard that sends a signed-out visitor to sign-in from its scripts a moment after load would
     // otherwise pass as a healthy route. Without one, there is no sign-in to lose and nothing is waited for.
+    this.traceStep(path, "crawl: landed address");
     await this.crawlLandedUrl(page);
+    this.traceStep(path, "crawl: collect");
     this.harvestPaused = opts.measureOnly === true;
-    const { elements, forms, aliases } = await this.snapshots.collect().finally(() => (this.harvestPaused = false));
+    const collected = await this.readHeld(
+      page,
+      // The main area is read with the controls: "41 el" alone cannot tell a page of text from one that drew nothing.
+      this.snapshots.collect().then(async (c) => ({ ...c, main: await this.readMainRegion(page) })),
+      this.limits.crawlNavMs,
+    ).finally(() => (this.harvestPaused = false));
+    if (collected.stalled) {
+      return this.crawlRouteUnloaded(run, path, url, stillNavigating(collected.leavingFor, "nav", this.limits.crawlNavMs), "NAVIGATION PENDING");
+    }
+    this.traceStep(path, "crawl: record");
+    const { elements, forms, aliases, main } = collected.value;
     const finalUrl = page.url();
     // A route that sent the page to another site (a single sign-on provider's sign-in, or any other page there) is
     // judged by where it went, as a navigation is when the origin fence takes it back (navigationLanding), but that
@@ -5784,12 +5923,24 @@ export class BrowserEngine {
     // Error-status routes render but would otherwise be re-crawled forever —
     // an attempt with the status satisfies the contract.
     if (typeof status === "number" && status >= 400 && !opts.measureOnly) memory.markAttempted(requestedRoute, `status:${status}`, this.role);
+    this.traceStep(path, "crawl: checks");
     this.logAction({ action: "crawl", target: path, url: finalUrl, ...(await this.frameFor("crawl")) });
 
-    await this.scanForInjections();
-    await this.scanForContradictions();
-    // Measured before the drain: the audit's Tab presses can load things too.
-    const inspected = opts.inspect ? await this.inspectRoute(page, elements, finalUrl) : null;
+    this.traceStep(path, "crawl: scans");
+    const scanned = await this.readHeld(
+      page,
+      (async () => {
+        await this.scanForInjections();
+        await this.scanForContradictions();
+        // Measured before the drain: the audit's Tab presses can load things too.
+        return opts.inspect ? await this.inspectRoute(page, elements, finalUrl) : null;
+      })(),
+      this.limits.crawlNavMs,
+    );
+    if (scanned.stalled) {
+      return this.crawlRouteUnloaded(run, path, url, stillNavigating(scanned.leavingFor, "nav", this.limits.crawlNavMs), "NAVIGATION PENDING");
+    }
+    const inspected = scanned.value;
     const violations = this.oracles.drain();
     const own = elements.filter((el) => !el.frame?.foreign);
     this.crawlHealth.push({
@@ -5812,9 +5963,6 @@ export class BrowserEngine {
     // Counted over the page's own controls, as the check's lists are: another site's frame is not this app's to fix.
     const unnamed = own.filter((el) => missingName(el) || placeholderOnly(el)).length;
     const missingTestid = trackedElements(elements).filter((el) => !el.testid && !el.disabled).length;
-    // What the page's main area holds besides controls: "41 el" alone cannot tell a page
-    // of text from a main area that rendered nothing.
-    const main = await this.readMainRegion(page);
     // A main area holding only an alert or a loading placeholder is the usual look of a broken route that answered 200.
     const shows = main && !deadEnd ? mainState(main) : null;
     const stateFlag = mainStateFlag(shows);
@@ -6094,8 +6242,7 @@ export class BrowserEngine {
       // scout_coverage before it was ever clicked.
       if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "upload")
         await this.recordPlanCoverage(run, step, { preState, preTestid, preLabel, chose });
-      await this.scanForInjections();
-      await this.scanForContradictions();
+      await this.scanPage();
       const violations = this.oracles.drain();
       const mutations = this.drainDialogs() + this.drainMutations() + this.drainBlocked() + this.drainRefresh() + this.drainCreated();
       const forcedNote = !forcedClick
@@ -6157,7 +6304,10 @@ export class BrowserEngine {
     try {
       // Record the state the action LANDED on (it may be a new screen
       // this plan just reached, and it deserves coverage of its own)…
-      const { elements, forms, aliases } = await this.snapshots.collect();
+      // A page the step sent on its way elsewhere holds the read: its coverage is left unrecorded rather than waited on.
+      const landed = await this.readHeld(page, this.snapshots.collect(), this.limits.navMs, false);
+      if (landed.stalled) return;
+      const { elements, forms, aliases } = landed.value;
       const url = page.url();
       const fp = fingerprintState(url, trackedElements(elements));
       this.memory!.visitState(
@@ -6533,8 +6683,7 @@ export class BrowserEngine {
     } catch (err) {
       failure = firstLineOf(explainTimeout(err, "action", actionMs));
     }
-    await bestEffort(this.scanForInjections());
-    await bestEffort(this.scanForContradictions());
+    await bestEffort(this.scanPage());
     // What the write policy refused of the app's own requests while this step ran is the step's, whatever caused it.
     const blocked = ownRefusals();
     if (!refusal && blocked.length > 0) refusal = `the ${this.writeRule.at()} write policy refused ${blocked.join(", ")}`;

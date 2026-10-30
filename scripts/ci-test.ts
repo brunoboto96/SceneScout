@@ -21,6 +21,16 @@ import { z } from "zod";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
+import {
+  groupChecks as groupFlakeChecks,
+  jobCell as flakeJobCell,
+  parseJobLog as parseFlakeLog,
+  recordKey as flakeRecordKey,
+  recordsOf as flakeRecordsOf,
+  renderReport as renderFlakeReport,
+  type FlakeRecord,
+  type JobInput as FlakeJobInput,
+} from "./flaky/flakes.ts";
 import { retentionDaysOf } from "../action/check-action.mjs";
 import { expectedJobs, FULL_CI_LABEL, FULL_CI_PATHS, FULL_PLATFORMS, isDocsPath, plan, PULL_REQUEST_PLATFORMS, verdict } from "./test-plan.mjs";
 import {
@@ -4984,4 +4994,151 @@ test("cloud providers: their credentials are secrets — redacted from output an
   // A Google access token that reached a message from somewhere else is removed by its shape.
   assert.equal(redactKeys("denied ya29.a0AfH6SMBxxxxxxxxxxxxxxxxxxxx now", []), `denied ${REDACTED_KEY} now`);
   assert.equal(redactKeys("the ya29 label", []), "the ya29 label");
+});
+
+// ── recurring CI failures (scripts/flaky/flakes.ts) ────────────────────────
+const STALL_SUITE = "settle after an action and before a bounce verdict";
+const STALL_CHECK = "a crawled page that moves itself on to an address that never answers ends at the page-load limit";
+const flakeJob = (over: Partial<FlakeJobInput> = {}): FlakeJobInput => ({
+  runId: 1,
+  attempt: 1,
+  commit: "7c49bd1f00000000000000000000000000000000",
+  name: "macos-latest · node 24 · shard 3/3",
+  conclusion: "failure",
+  startedAt: "2026-10-29T10:00:00Z",
+  completedAt: "2026-10-29T10:12:00Z",
+  ...over,
+});
+const stamp = (lines: string[]) => lines.map((l, i) => `2026-10-29T10:0${i % 10}:00.1234567Z ${l}`).join("\n");
+
+test("flaky checks: a log names the failed check under its suite; the same log with every check passing names none", () => {
+  const failing = stamp([
+    "Shard 3/3: 4 suites",
+    "",
+    "━━ settle ━━",
+    "  ✓ first",
+    "  ✗ second \u001b[31mred\u001b[0m",
+    "    expected 1",
+    "  ✓ third",
+    "━━ other ━━",
+    "  ✗ other CRASHED — the rest of this suite did not run",
+  ]);
+  const honest = failing.replace("  ✗ second", "  ✓ second").replace("✗ other CRASHED", "✓ other fine");
+  assert.deepEqual(parseFlakeLog(failing).failures, [
+    { suite: "settle", check: "second red" },
+    { suite: "other", check: "crashed" },
+  ]);
+  assert.deepEqual(parseFlakeLog(honest).failures, []);
+});
+
+test("flaky checks: a job that ran to its limit is a stall in the last suite, naming the last check that passed; one cancelled early is not a failure", () => {
+  const log = stamp([`━━ ${STALL_SUITE} ━━`, "  ✓ an earlier check", `  ✓ ${STALL_CHECK.replace("ends at", "starts and ends at")}`]);
+  const hung = flakeJob({ conclusion: "cancelled", completedAt: "2026-10-29T10:35:00Z" });
+  const [rec, ...rest] = flakeRecordsOf(hung, log, [hung]);
+  assert.equal(rest.length, 0);
+  assert.equal(rec.kind, "stalled");
+  assert.equal(rec.suite, STALL_SUITE);
+  assert.match(rec.check, /^a crawled page that moves itself on/);
+  assert.equal(flakeRecordKey(rec), `stalled in ${STALL_SUITE}`);
+  // The same conclusion after 3 minutes is a newer push superseding the run, not a failure of any check.
+  const superseded = flakeJob({ conclusion: "cancelled", completedAt: "2026-10-29T10:03:00Z" });
+  assert.deepEqual(flakeRecordsOf(superseded, log, [superseded]), []);
+  assert.deepEqual(flakeRecordsOf(flakeJob({ conclusion: "success" }), log, []), []);
+});
+
+test("flaky checks: a job cancelled at its limit with no log kept is a stall at its step, and the required check's own failure adds no record", () => {
+  const lost = flakeJob({ conclusion: "cancelled", completedAt: "2026-10-29T10:39:00Z", failedStep: "Browser suite, shard 3 of 3" });
+  const [rec] = flakeRecordsOf(lost, undefined, [lost]);
+  assert.equal(flakeRecordKey(rec), "stalled in Browser suite, shard 3 of 3");
+  assert.deepEqual(flakeRecordsOf(flakeJob({ name: "test" }), undefined, []), []);
+});
+
+test("flaky checks: a failed job whose log is unavailable is recorded by its failed step", () => {
+  const [rec] = flakeRecordsOf(flakeJob({ failedStep: "Install the browser's system libraries" }), undefined, []);
+  assert.equal(rec.kind, "step");
+  assert.equal(flakeRecordKey(rec), "step Install the browser's system libraries");
+});
+
+test("flaky checks: a check failing in two runs is recurring with both platforms; two attempts of one run count once, and a later pass is noted", () => {
+  const failLog = (check: string) => stamp(["━━ visual baselines ━━", `  ✗ ${check}`]);
+  const a1 = flakeJob({ runId: 10, name: "windows-latest · node 24 · shard 3/3" });
+  const a2 = flakeJob({ runId: 10, attempt: 2, name: "windows-latest · node 24 · shard 3/3" });
+  const a3 = flakeJob({ runId: 10, attempt: 3, name: "windows-latest · node 24 · shard 3/3", conclusion: "success" });
+  const other = flakeJob({ runId: 11, name: "ubuntu-latest · webkit · shard 3/3", commit: "abcdef0123456789" });
+  const all = [a1, a2, a3, other];
+  const records = [
+    ...flakeRecordsOf(a1, failLog("within the threshold at 127.0.0.1:41233"), all),
+    ...flakeRecordsOf(a2, failLog("within the threshold at 127.0.0.1:50999"), all),
+    ...flakeRecordsOf(other, failLog("within the threshold at 127.0.0.1:1234"), all),
+  ];
+  const [g, ...none] = groupFlakeChecks(records, 12);
+  assert.equal(none.length, 0, "the port in the name does not make three checks");
+  assert.equal(g.runs, 2, "attempts 1 and 2 of run 10 are one run");
+  assert.equal(g.window, 12);
+  assert.deepEqual(
+    g.cells.map((c) => [c.cell, c.count]),
+    [
+      ["windows-latest · node 24 · shard 3/3", 2],
+      ["ubuntu-latest · webkit · shard 3/3", 1],
+    ],
+  );
+  assert.equal(g.rerunsPassed, 2, "attempt 3 of run 10 passed the job both earlier attempts failed");
+  assert.deepEqual(g.commits, ["7c49bd1f", "abcdef01"]);
+});
+
+test("flaky checks: the report leads with checks failing in more than one run and lists single failures apart", () => {
+  const rec = (runId: number, check: string): FlakeRecord => flakeRecordsOf(flakeJob({ runId }), stamp(["━━ s ━━", `  ✗ ${check}`]), [])[0];
+  const text = renderFlakeReport([rec(1, "twice"), rec(2, "twice"), rec(2, "once")], 5);
+  assert.ok(text.indexOf("## s › twice") > 0 && text.includes("Failed in 2 of 5 runs"), text);
+  assert.ok(text.indexOf("## Failed once in this window") > text.indexOf("## s › twice"));
+  assert.ok(text.includes("- s › once — macos-latest"), text);
+  assert.ok(!text.includes("## s › once"));
+  assert.match(renderFlakeReport([rec(1, "only")], 5), /No check failed in more than one run/);
+});
+
+test("flaky checks: a job name gives its platform, node, browser and shard", () => {
+  assert.deepEqual(flakeJobCell("macos-latest · node 24 · shard 3/3"), { os: "macos-latest", node: "24", shard: "3/3" });
+  assert.deepEqual(flakeJobCell("ubuntu-latest · webkit · shard 1/3"), { os: "ubuntu-latest", browser: "webkit", shard: "1/3" });
+  assert.deepEqual(flakeJobCell("ubuntu-latest · check action"), { os: "ubuntu-latest" });
+});
+
+test("flaky-checks.yml: reads the Actions history with read-only permissions and writes the report to the job summary", () => {
+  const workflow = readWorkflow("flaky-checks.yml");
+  assert.deepEqual(workflow.permissions, { actions: "read", contents: "read" });
+  assert.ok("schedule" in workflow.on && "workflow_dispatch" in workflow.on);
+  const steps = (Object.values(workflow.jobs)[0] as { steps: { run?: string }[] }).steps;
+  assert.ok(
+    steps.some((s) => s.run?.includes("scripts/flaky/ci-flakes.ts")),
+    "no step runs the report",
+  );
+});
+
+test("flaky checks: Node 20's TAP failure names the same check as the spec reporter's ✖; a TODO and a pass name none", () => {
+  const name = "the reference lists exactly the environment variables the code reads";
+  const tap = stamp([
+    "TAP version 13",
+    `not ok 19 - ${name}`,
+    "  ---",
+    "  duration_ms: 1.2",
+    "  ...",
+    "ok 20 - another",
+    "not ok 21 - pending \\# later # TODO not yet",
+    "# fail 1",
+  ]);
+  const spec = stamp([`✖ ${name} (1.25ms)`, "✖ failing tests:", `✖ ${name} (1.25ms)`]);
+  assert.deepEqual(parseFlakeLog(tap).failures, [{ suite: "unit suites", check: name }]);
+  assert.deepEqual(parseFlakeLog(spec).failures, parseFlakeLog(tap).failures);
+  assert.deepEqual(parseFlakeLog(tap.replace("not ok 19", "ok 19")).failures, []);
+});
+
+test("flaky checks: a failure after an earlier attempt passed is not a later pass, and the report carries no log text beyond check names", () => {
+  const passed = flakeJob({ runId: 20, attempt: 1, conclusion: "success" });
+  const failed = flakeJob({ runId: 20, attempt: 2 });
+  const secret = ["ghp", "x".repeat(36)].join("_");
+  const log = stamp(["━━ s ━━", "  ✗ a check", `    expected token ${secret}`, `Error: at ${secret}`]);
+  const [rec] = flakeRecordsOf(failed, log, [passed, failed]);
+  assert.equal(rec.rerunPassed, false);
+  const report = renderFlakeReport([rec, { ...rec, runId: 21 }], 3);
+  assert.ok(report.includes("## s › a check"), report);
+  assert.ok(!report.includes(secret) && !report.includes("expected token"), report);
 });

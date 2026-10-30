@@ -1,0 +1,43 @@
+# Recurring CI failures: lists the checks of test.yml that failed in more than
+# one of the last runs on main, with the platforms, browsers, shards and commits
+# they failed on, and a job that ran to its limit as a stall in the suite it
+# stopped in. The Actions history is the record, so nothing is stored; the
+# report goes to this run's summary. How to read it: CONTRIBUTING.md ("A check
+# that keeps failing"). The rules are in scripts/flaky/flakes.ts, held by ci-test.
+name: flaky-checks
+
+on:
+  schedule:
+    # Daily, 05:41 UTC: off the hour, when scheduled runs queue longest.
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: How many of the latest completed runs to read (1 to 100).
+        default: "30"
+      branch:
+        description: The branch whose runs are read.
+        default: main
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: Recurring failures of the latest runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNS: ${{ inputs.runs || '30' }}
+          BRANCH: ${{ inputs.branch || 'main' }}
+        run: npx tsx scripts/flaky/ci-flakes.ts --runs "$RUNS" --branch "$BRANCH"
