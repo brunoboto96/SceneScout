@@ -46,21 +46,17 @@ permissions:
   contents: read
 
 jobs:
-  # What this run needs (scripts/test-plan.mjs; ADR 26). A push to main and a
-  # dispatched run (the release's Version Packages branch) test every cell. A
-  # pull request runs Linux and Windows on Node 24; the macOS, Node 20, Firefox
-  # and WebKit cells join it when it carries the `full-ci` label or changes the
-  # browser code or the dependency tree. A pull request that changes only
-  # documentation runs the `docs` job instead of the matrix.
+  # What this run needs (scripts/test-plan.mjs; ADR 33). Every run that
+  # changes code tests every cell: a push to main, a dispatched run (the
+  # release's Version Packages branch) and a pull request. A pull request that
+  # changes only documentation runs the `docs` job instead of the matrix.
   plan:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: read
     outputs:
       kind: ${{ steps.plan.outputs.kind }}
-      full: ${{ steps.plan.outputs.full }}
       platforms: ${{ steps.plan.outputs.platforms }}
     steps:
       # The merge commit and its first parent, the base it was merged onto: the
@@ -70,13 +66,9 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
-      - name: Changed files and labels
+      - name: Changed files
         id: diff
         if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
         run: |
           # The file names come from the pull request, so the delimiter is one no file name can match.
           delimiter="EOF_$(openssl rand -hex 16)"
@@ -85,17 +77,12 @@ jobs:
             echo "files<<$delimiter"
             git diff --name-only --no-renames HEAD^1 HEAD
             echo "$delimiter"
-            # Read now rather than from the event, so adding the label and re-running the workflow is enough.
-            echo "labels<<$delimiter"
-            gh api --paginate "repos/$REPO/issues/$PR/labels" --jq '.[].name'
-            echo "$delimiter"
           } >> "$GITHUB_OUTPUT"
       - name: Plan
         id: plan
         env:
           EVENT: ${{ github.event_name }}
           FILES: ${{ steps.diff.outputs.files }}
-          LABELS: ${{ steps.diff.outputs.labels }}
         run: node scripts/test-plan.mjs plan
 
   # A pull request that changes only documentation: every pure-logic suite and
@@ -212,8 +199,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every platform on main and on a dispatched run; Linux and Windows on
-        # Node 24 for a pull request. scripts/test-plan.mjs lists both.
+        # Every platform on every run that changes code. scripts/test-plan.mjs lists them.
         platform: ${{ fromJSON(needs.plan.outputs.platforms) }}
         shard: [1, 2, 3]
     steps:
@@ -318,11 +304,11 @@ jobs:
   # The write policy is a promise about every browser the engine can drive, and
   # the browsers differ exactly where it matters: what the driver can intercept.
   # The browser suite therefore runs against the other two as well: on main,
-  # on a dispatched run, and on a pull request the plan gives the full matrix.
+  # on a dispatched run and on a pull request that changes code.
   cross-browser:
     name: ubuntu-latest · ${{ matrix.browser }} · shard ${{ matrix.shard }}/3
     needs: plan
-    if: needs.plan.outputs.full == 'true'
+    if: needs.plan.outputs.kind == 'code'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
