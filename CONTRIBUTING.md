@@ -98,8 +98,9 @@ approval, and only the maintainer can merge or publish a release. Review may
 take a while; a pull request that is small, tested and in scope is reviewed
 first.
 
-A pull request's CI runs the same cells as `main`: Chromium, Firefox and
-WebKit on Linux, Windows and macOS, and Node 20 and 24. A pull request that
+A pull request's CI runs the same cells as `main`: the suite on Linux,
+Windows and macOS with Chromium (Linux on Node 20 and 24), and the browser
+suite on Firefox and WebKit on Linux. A pull request that
 changes only documentation runs the unit suites and `mcp-check` only.
 [ADR 33](docs/adr/0033-every-pull-request-runs-every-cell.md) has what runs
 where.

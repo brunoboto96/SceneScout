@@ -39,8 +39,8 @@ what changed, it runs everything) and the concurrency groups.
 
 ## Consequences
 
-A pull request that changes code runs 21 jobs again, about 174 runner-minutes
-per run, where it ran 10. That is the cost accepted: longer waits for a runner
+A pull request that changes code runs 22 jobs, as `main` does (a recent `main`
+run took about 190 runner-minutes), where it ran 10. That is the cost accepted: longer waits for a runner
 when several pull requests push at once, and more minutes per push. The
 mitigations in place are the per-pull-request cancelling concurrency group and
 the single docs job for prose.
