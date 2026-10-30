@@ -672,4 +672,17 @@ async function crawlJudgesAnotherOriginsSignIn(baseUrl: string, foreignBaseUrl: 
     late.kept.includes("origin-fence:bounced") && late.kept.includes(`${foreignBaseUrl}/sso-provider/authorize`),
     late.kept.slice(0, 4000),
   );
+
+  const later = await inProject(async (engine, project) => {
+    const nav = await engine.navigate(`${baseUrl}${route("/sso-provider/authorize?client_id=smoke-app&return=x", 3)}`);
+    const at = engine.currentUrl;
+    await engine.close();
+    return { nav, at, kept: keptText(project) };
+  });
+  check("a provider reached only while the verdict's watch runs is a bounce too", later.nav.includes("NOT counted as covered"), later.nav);
+  check(
+    "...and the fence takes that page back too, with its origin-fence entry",
+    later.kept.includes("origin-fence:bounced") && later.kept.includes(`${foreignBaseUrl}/sso-provider/authorize`) && later.at.startsWith(baseUrl),
+    `${later.at}\n${later.nav}\n${later.kept.slice(0, 4000)}`,
+  );
 }
