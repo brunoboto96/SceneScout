@@ -104,7 +104,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 
 | Option | Default | |
 |---|---|---|
-| `--provider` | the one whose key is set | `anthropic` or `openai`. Required when both keys are set |
+| `--provider` | the one whose key is set | `anthropic`, `openai`, `bedrock`, `vertex` or `azure`. Required when both of the first two keys are set. A cloud is chosen only by naming it, and needs `--model` ([the clouds](../ci.md#the-model)) |
 | `--model` | `claude-sonnet-5` or `gpt-6-luna` | The model id |
 | `--effort` | `low` | `none` (OpenAI only), `low`, `medium`, `high`, `xhigh` or `max` |
 | `--base-url` | the provider's own API | Another endpoint implementing the same API. Must be https, or plain http to `127.0.0.1` or `localhost`, with no credentials, query or fragment |
@@ -133,7 +133,7 @@ The address must be written in full, with `http://` or `https://`; one without i
 | `--out` | `<project>/.scenescout/ci` | Where the files go |
 | `--sarif-file-anchor` | as for `check` | The repository file each `ci.sarif` result points at |
 
-The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` only.
+The API key has no option: it is read from `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, or from the variable of the cloud `--provider` names (`AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_OAUTH_ACCESS_TOKEN`, `AZURE_OPENAI_API_KEY`), only.
 
 ### `scenescout login`
 
@@ -380,6 +380,13 @@ The presets:
 | `SCENESCOUT_FROM_RUN_TURNS_PER_PAGE` | the server, `ci` | A whole number from 1 to 200 (default 7): turns a continued `ci` run budgets per page, which caps how many pages it takes on. `--from-run-turns-per-page` wins over it |
 | `ANTHROPIC_API_KEY` | `ci`; the server with the dedup judge on | The Anthropic key. The only way to give one |
 | `OPENAI_API_KEY` | `ci`; the server with the dedup judge on | The OpenAI key. The only way to give one |
+| `AWS_BEARER_TOKEN_BEDROCK` | `ci --provider bedrock` | An Amazon Bedrock API key, sent as a bearer token to Bedrock only |
+| `AWS_REGION` | `ci --provider bedrock` | The region in Bedrock's address, e.g. `us-east-1`; `AWS_DEFAULT_REGION` is read when this is unset. Not needed with `--base-url` |
+| `GOOGLE_OAUTH_ACCESS_TOKEN` | `ci --provider vertex` | A Google OAuth access token, sent as a bearer token to Vertex AI only |
+| `GOOGLE_CLOUD_PROJECT` | `ci --provider vertex` | The project in Vertex AI's address. Not needed with `--base-url` |
+| `GOOGLE_CLOUD_LOCATION` | `ci --provider vertex` | Where Vertex AI serves the model: `global`, the multi-region `us` or `eu`, or a region such as `us-east5`. Not needed with `--base-url` |
+| `AZURE_OPENAI_API_KEY` | `ci --provider azure` | The Azure OpenAI resource's key, sent in the `api-key` header to that resource only |
+| `AZURE_OPENAI_ENDPOINT` | `ci --provider azure` | The resource's https address, e.g. `https://my-resource.openai.azure.com`. Not needed with `--base-url` |
 | `SCENESCOUT_LOGIN_USERNAME` | `login --script` | Required: the test user's username or email |
 | `SCENESCOUT_LOGIN_PASSWORD` | `login --script` | The password. Required unless the sign-in is passwordless: then leave it unset and set a code below. Set but empty is refused |
 | `SCENESCOUT_LOGIN_TOTP_SECRET` | `login --script` | The base32 TOTP secret or `otpauth://` URI, when the form asks for a code |

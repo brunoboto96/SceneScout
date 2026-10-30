@@ -27,7 +27,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { CHECK_OPTION_NAMES, CHECK_RULES, parseCheckArgs, WORTH_A_LOOK_RULES } from "../src/engine/check.ts";
-import { CI_OPTION_NAMES, DEDUP_MODES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
+import { CI_OPTION_NAMES, CLOUD_ADDRESS_ENV, DEDUP_MODES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
 import { CONFIG_KEYS, PRESET_POLICY, PRESETS, UPLOAD_MODES } from "../src/engine/project-config.ts";
 import { WRITE_MODES } from "../src/engine/policy.ts";
 import { EVIDENCE_MODES } from "../src/engine/capture.ts";
@@ -553,7 +553,7 @@ const ENV_IN_CODE = sorted(
 test("the reference lists exactly the environment variables the code reads", () => {
   assert.ok(ENV_IN_CODE.includes("SCENESCOUT_LIVE") && ENV_IN_CODE.includes("CLAUDE_CONFIG_DIR"), "the scan of src/ found the variables it should");
   const listed = sorted(tableIn(REFERENCE, "## Environment variables").map((r) => nameIn(r[0])));
-  assert.deepEqual(listed, sorted([...ENV_IN_CODE, ...Object.values(KEY_ENV)]));
+  assert.deepEqual(listed, sorted([...ENV_IN_CODE, ...Object.values(KEY_ENV), ...CLOUD_ADDRESS_ENV]));
 });
 
 test("the config file's tables are its keys, each key's values and every preset's settings", () => {

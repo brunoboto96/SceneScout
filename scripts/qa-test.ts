@@ -19,6 +19,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { EGRESS_MODES } from "../src/engine/project-config.ts";
+import { KEY_ENV } from "../src/engine/ci.ts";
 import {
   ALLOWED_ROLES,
   allowlist,
@@ -1167,6 +1168,13 @@ test("shots stage: refuses to run beside a key; otherwise pushes the pictures to
     runShots({ env: { ...env, OPENAI_API_KEY: "fake-key-value-000000" }, inputs: { "github-token": "test-token" }, log: quiet }),
     /never runs beside a model's key/,
   );
+  // Every variable a CI run reads a key from, the clouds' included, stops the stage.
+  for (const name of Object.values(KEY_ENV))
+    await assert.rejects(
+      runShots({ env: { ...env, [name]: "fake-key-value-000000" }, inputs: { "github-token": "test-token" }, log: quiet }),
+      new RegExp(`never runs beside a model's key, and ${name} is set`),
+      name,
+    );
 
   let branch: string | null = null;
   await withGitHub(
