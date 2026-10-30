@@ -12,13 +12,17 @@
       <div id="out"></div>
     </main>
     <script>
-      // Renders the note as markup. The first time the injection scan finds it there, the page has its service worker
-      // move it on to an address the fixture server holds back (held=1), and answers the scan only once a request of
-      // its own, also held, is let through: a scan read that completes after the action gave it up, with the page on
-      // its way elsewhere.
+      // Shows the typed payload as an element. The first time the injection scan finds it there, the page has its
+      // service worker move it on to an address the fixture server holds back (held=1), and answers the scan only once
+      // a request of its own, also held, is let through: a scan read that completes after the action gave it up, with
+      // the page on its way elsewhere.
       if (navigator.serviceWorker) navigator.serviceWorker.register("/navigate-sw.js");
+      // Built with DOM calls rather than from the field's text, so the fixture itself carries no injection.
       document.getElementById("show").onclick = () => {
-        document.getElementById("out").innerHTML = document.querySelector("input").value;
+        const shown = document.createElement("marquee");
+        shown.setAttribute("data-probe", "1");
+        shown.textContent = "x";
+        document.getElementById("out").replaceChildren(shown);
       };
       const all = Document.prototype.querySelectorAll;
       let left = false;
