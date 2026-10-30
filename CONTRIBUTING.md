@@ -105,6 +105,10 @@ for the `full-ci` label when your change may behave differently in another
 browser or on another platform. [ADR 26](docs/adr/0026-a-pull-request-runs-the-cells-it-can-break-and-main-runs-them-all.md)
 has what runs where.
 
+### A check that keeps failing
+
+A failing check is fixed or its cause is named; it is not re-run until green. To see which checks keep coming back, the `flaky-checks` workflow (daily, or run it by hand from the Actions tab) reads the last completed runs of `test.yml` on `main` and writes a report to its job summary. It lists each check that failed in more than one run, with the platforms, browsers, shards and commits it failed on, how many runs it failed in out of the runs read, and whether a later attempt passed. A job that ran to its 35-minute limit is listed as a stall in the suite where its log stops, with the last check that passed. The same report prints locally with `npx tsx scripts/flaky/ci-flakes.ts --runs 30` (needs `gh` signed in); `--json <file>` keeps the records. The runs are the history, so nothing is stored and GitHub's log retention is the limit. A job cancelled well before its limit is a newer push replacing the run, and is not listed.
+
 ## Local setup
 
 ```bash
