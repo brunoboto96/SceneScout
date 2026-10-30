@@ -87,7 +87,8 @@ import { GUIDED_PROMPTS, guidedPromptText, livePrompt, loginPrompt, LOGIN_PROMPT
 
 import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
 import { EXIT_CONFIG, runConfigCommand } from "../src/engine/config-explain.ts";
-import { EXIT_POLICY, runPolicyCommand } from "../src/engine/policy-explain.ts";
+import { CONFIG_KEYS } from "../src/engine/project-config.ts";
+import { EXIT_POLICY, policySettingsFrom, runPolicyCommand } from "../src/engine/policy-explain.ts";
 import {
   downloadLine,
   FIRST_RUN_DEFAULTS,
@@ -2515,12 +2516,38 @@ test("`scenescout policy explain` prints no credential from the URL or a malform
 test("the CLI runs `scenescout policy explain` and exits with its code (one process: the codes themselves are tested above)", () => {
   const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const env: Record<string, string | undefined> = { ...process.env };
-  for (const name of ["SCENESCOUT_STRICT_WRITES", "SCENESCOUT_REFUSE_DESTRUCTIVE_GETS", "SCENESCOUT_READ_POSTS", "SCENESCOUT_AUTH_POSTS"]) delete env[name];
+  for (const name of Object.keys(POLICY_EXPLAIN_ENV)) delete env[name];
   const cli = (...args: string[]) =>
     spawnSync(process.execPath, ["--import", "tsx", path.join(repo, "src", "cli.ts"), "policy", ...args], { cwd: repo, env, encoding: "utf8" });
   const ok = cli("explain", "DELETE", "https://app.example.com/api/things/3", "--mode", "read-only");
   assert.equal(ok.status, EXIT_POLICY.explained, ok.stderr);
   assert.match(ok.stdout, /^  read-only +refused /m);
+});
+
+/** The variables `scenescout policy explain` reads, as the server does, each with a value that turns its setting on. */
+const POLICY_EXPLAIN_ENV = {
+  SCENESCOUT_STRICT_WRITES: "1",
+  SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1",
+  SCENESCOUT_READ_POSTS: "POST /api/search",
+  SCENESCOUT_AUTH_POSTS: "POST /api/login",
+  SCENESCOUT_ALLOWED_WRITES: "POST /api/things",
+} as const;
+
+test("`scenescout policy explain`'s help names exactly the variables and config keys it reads", () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  // Read from the source: a piped --help can be cut short on macOS, where usage() exits before stdout drains.
+  const help = fs.readFileSync(path.join(repo, "src", "cli.ts"), "utf8");
+  const start = help.indexOf("scenescout policy explain <METHOD> <URL>");
+  assert.ok(start >= 0, "the usage has a policy explain entry");
+  const entry = help.slice(start, help.indexOf("Sends nothing.", start));
+  assert.deepEqual([...new Set(entry.match(/SCENESCOUT_[A-Z_]+/g))].sort(), Object.keys(POLICY_EXPLAIN_ENV).sort());
+  for (const [name, value] of Object.entries(POLICY_EXPLAIN_ENV))
+    assert.notDeepEqual(policySettingsFrom({ [name]: value }), policySettingsFrom({}), `${name} changes what policy explain judges by`);
+  const keys = ["readPosts", "writeClassifier", "refuseDestructiveGets", "authPosts", "allowedWrites"];
+  for (const key of keys) {
+    assert.ok((CONFIG_KEYS as readonly string[]).includes(key), `${key} is a config key`);
+    assert.match(entry, new RegExp(`\\b${key}\\b`), `the help names the config's ${key}`);
+  }
 });
 
 test("`scenescout config explain`: exit 0 with a line per key, exit 2 with one line on a bad argument, an invalid file or a folder outside projectsRoot", () => {

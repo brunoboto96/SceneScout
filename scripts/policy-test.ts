@@ -5535,6 +5535,18 @@ test("RouteGuard: a request naming two write methods is listed only when the lis
     "fallback",
     "PUT and DELETE both listed",
   );
+  const deleteOnly = guardRig("read-only", { allowedWrites: ["DELETE /api/things/*"] });
+  assert.equal(await deleteOnly.send("DELETE", "/api/things/7").done, "fallback", "a listed DELETE");
+  assert.equal(
+    await deleteOnly.send("DELETE", "/api/things/7", { headers: { "x-http-method-override": "PUT" } }).done,
+    "fulfill 403",
+    "a DELETE naming an unlisted PUT",
+  );
+  assert.equal(
+    await both.send("DELETE", "/api/things/7", { headers: { "x-http-method-override": "PUT" } }).done,
+    "fallback",
+    "a DELETE naming PUT, both listed",
+  );
 });
 
 test("RouteGuard: an entry's * does not stand for a segment holding an encoded slash or a dot segment", async () => {
@@ -5544,6 +5556,7 @@ test("RouteGuard: an entry's * does not stand for a segment holding an encoded s
   assert.equal(await send("PUT", "/api/things/a%5Cb", { body: "{}" }).done, "fulfill 403", "an encoded backslash");
   assert.equal(await send("PUT", "/api/things/%2e%2e%2fadmin", { body: "{}" }).done, "fulfill 403", "encoded dots and slash");
   assert.equal(await send("PUT", "/api/things/a%20b", { body: "{}" }).done, "fallback", "an encoded space is one segment");
+  assert.equal(await send("PUT", "/api/things/a%zz", { body: "{}" }).done, "fulfill 403", "an escape that cannot be decoded");
 });
 
 test("RouteGuard: with a list, a POST counts as a sign-in only by observe's narrow rule, in every mode", async () => {
