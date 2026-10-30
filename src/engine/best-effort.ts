@@ -39,3 +39,23 @@ export async function settleWithin(p: Promise<unknown>, ms: number): Promise<voi
     }),
   ]);
 }
+
+/**
+ * `work`'s value, or undefined when it rejects or has not settled within `ms`. Never rejects, and clears its timer.
+ * For a read of a page that may never answer (a document read held until a navigation lands).
+ */
+export async function readWithin<T>(work: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+      }),
+    ]);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
