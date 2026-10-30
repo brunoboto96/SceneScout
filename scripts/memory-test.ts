@@ -5073,6 +5073,7 @@ test("a name a person would call secret is a secret field though no word list na
     ...["security_question", "memorable_moment", "maiden voyage", "recovery_email", "master_list", "encryption_method", "account_name"],
     ...["Account type", "order_number", "tracking number", "phone_number", "routing slip", "sort_order", "Sort by", "social_media"],
     ...["national_park", "insurance company", "account number length", "security question answer hint", "ssn_enabled"],
+    ...["Your most memorable date", "Most memorable place you visited", "most_memorable_information"],
   ];
   for (const name of secret) {
     assert.notEqual(secretFieldKind({ type: "text", name }), null, `${name} in the name`);
@@ -5118,14 +5119,15 @@ test("sensitive corpus: the rates are bounded, so a detector that regresses fail
     assert.equal(sensitiveRates(cases, detector).missed, 0, `${detector} left a secret readable`);
   for (const detector of ["email address", "phone number"] as const)
     assert.equal(sensitiveRates(cases, detector).falseAlarms, 0, `${detector} altered text with no secret`);
-  // A 19-digit number with a wrong check digit whose first 16 digits pass the check is read as a card: masking errs towards hiding.
-  assert.ok(sensitiveRates(cases, "card number").falseAlarmRate < 0.01, "card number altered text with no secret");
+  // A 16-digit card in whole groups followed by a short group (a card and its CVV) is masked though the 19 digits fail the check.
+  const card = sensitiveRates(cases, "card number");
+  assert.deepEqual(Object.keys(card.wrongShapes), ["right layout, check digit wrong"], "card number altered text with no secret");
+  assert.ok(card.falseAlarmRate < 0.01, `card number false-alarm rate ${card.falseAlarmRate}`);
+  // A secret named only by the question it answers is left unread on purpose (#718); every other secret shape is caught.
+  const question = "secret written as the question it answers";
+  assert.deepEqual(Object.keys(sensitiveRates(cases.filter((c) => c.secret)).wrongShapes), [question], "a secret shape left readable");
+  const asked = sensitiveRates(cases.filter((c) => c.shape === question));
+  assert.ok(asked.secret > 0 && asked.missed === asked.secret, `question-worded secrets read: ${asked.secret - asked.missed} of ${asked.secret}`);
   const all = sensitiveRates(cases);
-  // The remaining misses are a secret named only by the question it answers; nothing else may be missed.
-  assert.deepEqual(
-    Object.keys(sensitiveRates(cases).wrongShapes).filter((k) => k.startsWith("secret ")),
-    ["secret written as the question it answers"],
-  );
-  assert.ok(all.missRate < 0.02, `miss rate ${all.missRate}`);
   assert.ok(all.falseAlarmRate < 0.05, `false-alarm rate ${all.falseAlarmRate}`);
 });

@@ -121,6 +121,7 @@ const NEAR_THE_LISTS = [
   ...["security question", "memorable moment", "memorable quote", "maiden voyage", "recovery email", "recovery options", "master list"],
   ...["encryption method", "account name", "account type", "account balance", "order number", "tracking number", "phone number"],
   ...["routing slip", "sort order", "sort by", "social media", "social handle", "national park", "insurance company", "answer count"],
+  ...["most memorable date", "most memorable place", "least memorable information"],
 ];
 /** A secret that is written as the question it answers: no word of it says secret, so it stays unread. */
 const QUESTION_LABELS = [

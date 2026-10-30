@@ -178,6 +178,16 @@ function wordKind(word: string): SecretKind | null {
 
 const TWO_FA = new LinearRegex(String.raw`(?:^|[^\p{L}\p{N}])2fa(?:$|[^\p{L}\p{N}])`, { ignoreCase: true, needs: ["2fa"] });
 
+/** Words before a phrase that make it a question about an experience: "Your most memorable date" is not the bank's "Memorable date". */
+const ASKING_QUALIFIERS = new Set(["most", "least"]);
+
+/** Whether the spaced words hold the phrase, not straight after an asking qualifier. */
+function namesPhrase(joined: string, phrase: string): boolean {
+  for (let at = joined.indexOf(` ${phrase} `); at !== -1; at = joined.indexOf(` ${phrase} `, at + 1))
+    if (!ASKING_QUALIFIERS.has(joined.slice(0, at).split(" ").pop() ?? "")) return true;
+  return false;
+}
+
 /** Which kind of secret a field's name, label or placeholder names, if any. */
 export function secretWordKind(text: string): SecretKind | null {
   // "2FA" splits into "2" and "fa" below, so it is read before the split.
@@ -193,7 +203,7 @@ export function secretWordKind(text: string): SecretKind | null {
   if (tail > 0 && tail < words.length && (wordKind(last) || last === "code" || last in ALONE_KINDS || endsInPhrase)) return null;
   const joined = ` ${words.join(" ")} `;
   // A phrase is read before a single word, as it says more: "pass code" is a code, though "pass" alone is a password.
-  for (const { kind, phrases } of WORD_KINDS) if (phrases.some((p) => joined.includes(` ${p} `))) return kind;
+  for (const { kind, phrases } of WORD_KINDS) if (phrases.some((p) => namesPhrase(joined, p))) return kind;
   for (const { kind, whole, suffix } of WORD_KINDS) if (words.some((w) => whole.includes(w) || suffix.some((s) => w.endsWith(s)))) return kind;
   if (words.includes("code") && words.every((w) => CODE_COMPANIONS.has(w))) return "one-time code";
   const named = words.filter((w) => !ALONE_FILLERS.has(w));
