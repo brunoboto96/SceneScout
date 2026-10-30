@@ -1572,6 +1572,8 @@ export class BrowserEngine {
       return;
     if (page.isClosed()) return;
     const url = page.url();
+    // The page the wait landed on may be another site's, which is not judged for a claim (the origin fence takes it back).
+    if (!this.isSameOrigin(url)) return;
     // Bounded: Chromium holds this read while a navigation is on its way, which an address that never answers never ends.
     const state = (await readWithin(page.evaluate(CLAIM_SCAN_SCRIPT), this.limits.navMs)) as PageState | undefined;
     if (state === undefined) return;
@@ -3399,6 +3401,9 @@ export class BrowserEngine {
     const frame = await this.recordFrame(action);
     this.logAction({ action, target, url, ...(frame ? { frame } : await this.holdFrame()) });
     await this.scanPage(click ? () => this.rankRouteCancellations(click, url) : undefined);
+    // The claim scan can wait for a page that lands late (#713): one that landed on another origin is taken back too.
+    const late = await this.originFence(page, action, target, true);
+    if (late !== null) return late;
     this.traceStep(url, `${action}: done`);
     const violations = this.oracles.drain();
     const mutations = this.drainMutations() + this.drainBlocked() + this.drainRefresh() + this.drainCreated();
