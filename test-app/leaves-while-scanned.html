@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving while it is scanned</title>
+  </head>
+  <body>
+    <main>
+      <h1>Leaving while scanned</h1>
+      <label>Note <input type="text" name="note" /></label>
+      <button type="button" onclick="throw new Error('route change cancelled')">Check</button>
+    </main>
+    <script>
+      // Moves itself on, to a page the fixture server holds back (held=1), the third time it is asked for the element a
+      // typed payload would make (the count before typing, the scan after it, then the scan after a click): a page that
+      // starts a navigation of its own while the scans after an action are reading it. The click's error makes the
+      // scans read the page again after that.
+      const all = Document.prototype.querySelectorAll;
+      let asked = 0;
+      document.querySelectorAll = function (selector) {
+        if (selector === 'marquee[data-probe="1"]' && ++asked === 3) location.href = "/page2.html?held=1";
+        return all.call(document, selector);
+      };
+    </script>
+  </body>
+</html>

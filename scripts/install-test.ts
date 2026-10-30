@@ -87,7 +87,8 @@ import { GUIDED_PROMPTS, guidedPromptText, livePrompt, loginPrompt, LOGIN_PROMPT
 
 import { dispatch, HAND_PARSED, looksLikeUrl, SUBCOMMANDS, type CliHandlers, type Subcommand } from "../src/commands.ts";
 import { EXIT_CONFIG, runConfigCommand } from "../src/engine/config-explain.ts";
-import { EXIT_POLICY, runPolicyCommand } from "../src/engine/policy-explain.ts";
+import { CONFIG_KEYS } from "../src/engine/project-config.ts";
+import { EXIT_POLICY, policySettingsFrom, runPolicyCommand } from "../src/engine/policy-explain.ts";
 import {
   downloadLine,
   FIRST_RUN_DEFAULTS,
@@ -2515,12 +2516,38 @@ test("`scenescout policy explain` prints no credential from the URL or a malform
 test("the CLI runs `scenescout policy explain` and exits with its code (one process: the codes themselves are tested above)", () => {
   const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const env: Record<string, string | undefined> = { ...process.env };
-  for (const name of ["SCENESCOUT_STRICT_WRITES", "SCENESCOUT_REFUSE_DESTRUCTIVE_GETS", "SCENESCOUT_READ_POSTS", "SCENESCOUT_AUTH_POSTS"]) delete env[name];
+  for (const name of Object.keys(POLICY_EXPLAIN_ENV)) delete env[name];
   const cli = (...args: string[]) =>
     spawnSync(process.execPath, ["--import", "tsx", path.join(repo, "src", "cli.ts"), "policy", ...args], { cwd: repo, env, encoding: "utf8" });
   const ok = cli("explain", "DELETE", "https://app.example.com/api/things/3", "--mode", "read-only");
   assert.equal(ok.status, EXIT_POLICY.explained, ok.stderr);
   assert.match(ok.stdout, /^  read-only +refused /m);
+});
+
+/** The variables `scenescout policy explain` reads, as the server does, each with a value that turns its setting on. */
+const POLICY_EXPLAIN_ENV = {
+  SCENESCOUT_STRICT_WRITES: "1",
+  SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1",
+  SCENESCOUT_READ_POSTS: "POST /api/search",
+  SCENESCOUT_AUTH_POSTS: "POST /api/login",
+  SCENESCOUT_ALLOWED_WRITES: "POST /api/things",
+} as const;
+
+test("`scenescout policy explain`'s help names exactly the variables and config keys it reads", () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  // Read from the source: a piped --help can be cut short on macOS, where usage() exits before stdout drains.
+  const help = fs.readFileSync(path.join(repo, "src", "cli.ts"), "utf8");
+  const start = help.indexOf("scenescout policy explain <METHOD> <URL>");
+  assert.ok(start >= 0, "the usage has a policy explain entry");
+  const entry = help.slice(start, help.indexOf("Sends nothing.", start));
+  assert.deepEqual([...new Set(entry.match(/SCENESCOUT_[A-Z_]+/g))].sort(), Object.keys(POLICY_EXPLAIN_ENV).sort());
+  for (const [name, value] of Object.entries(POLICY_EXPLAIN_ENV))
+    assert.notDeepEqual(policySettingsFrom({ [name]: value }), policySettingsFrom({}), `${name} changes what policy explain judges by`);
+  const keys = ["readPosts", "writeClassifier", "refuseDestructiveGets", "authPosts", "allowedWrites"];
+  for (const key of keys) {
+    assert.ok((CONFIG_KEYS as readonly string[]).includes(key), `${key} is a config key`);
+    assert.match(entry, new RegExp(`\\b${key}\\b`), `the help names the config's ${key}`);
+  }
 });
 
 test("`scenescout config explain`: exit 0 with a line per key, exit 2 with one line on a bad argument, an invalid file or a folder outside projectsRoot", () => {
@@ -3168,6 +3195,27 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
     const startsLater =
       floor !== null && (Number(floor[1]) > Number(next.split(".")[0]) || (floor[1] === next.split(".")[0] && Number(floor[2]) >= Number(next.split(".")[1])));
     assert.ok(rangeAdmits(range, next) || startsLater, `AGENTS.md no longer records the Playwright hold, so widen the range ${range} (or restore the line)`);
+  }
+});
+
+test("while engines admit a Node older than 22.19, undici stays on 7.x: Dependabot ignores its majors and AGENTS.md records the hold", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { engines: { node: string }; dependencies: Record<string, string> };
+  const cfg = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "dependabot.yml"), "utf8")) as {
+    updates: Array<{ "package-ecosystem": string; ignore?: Array<{ "dependency-name": string; "update-types"?: string[] }> }>;
+  };
+  const ignores = cfg.updates.find((u) => u["package-ecosystem"] === "npm")?.ignore ?? [];
+  const agents = fs.readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8");
+  const hold = agents.split("\n").some((line) => line.startsWith("- **undici stays on 7.x"));
+  const floor = /^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(pkg.engines.node.trim());
+  assert.ok(floor, `engines.node is read as a lower bound, not ${pkg.engines.node}`);
+  const oldest = `${floor[1]}.${floor[2] ?? 0}.${floor[3] ?? 0}`;
+  if (!atLeastVersion(oldest, "22.19.0")) {
+    assert.ok(
+      ignores.some((i) => i["dependency-name"] === "undici" && i["update-types"]?.includes("version-update:semver-major")),
+      `undici 8 needs Node >= 22.19, so Dependabot must ignore its major while engines admit Node ${oldest}`,
+    );
+    assert.ok(hold, `AGENTS.md records the undici hold while engines admit Node ${oldest}`);
+    assert.ok(/^[~^]7\./.test(pkg.dependencies.undici), `undici is published as a 7.x range, not ${pkg.dependencies.undici}`);
   }
 });
 

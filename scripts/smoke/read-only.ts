@@ -11,6 +11,7 @@ import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
 import type { StyleRecord } from "../../dist/engine/design.js";
 import { droppedNavigationErrorPage, focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
 import { DEFAULT_ACTION_TIMEOUT_MS } from "../../dist/engine/limits.js";
+import { writeRulesSettings } from "../../dist/engine/project-config.js";
 import { BROWSER, check, eventually, settle, WAIT_MS, type SmokeContext } from "./harness.ts";
 
 export const title = "read-only exploration";
@@ -1138,6 +1139,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
   await failuresAtTheActionLimit({ baseUrl, projectDir, stats } as SmokeContext);
   await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
   await readPosts({ baseUrl, projectDir, stats } as SmokeContext);
+  await allowedWrites({ baseUrl, projectDir, stats } as SmokeContext);
   await methodOverrides({ baseUrl, projectDir, stats } as SmokeContext);
 }
 
@@ -1196,6 +1198,73 @@ async function failuresAtTheActionLimit({ baseUrl, projectDir }: SmokeContext): 
     check("a missing scroll target is refused, not silently ignored", missing.includes("Scroll target not found"), missing);
   } finally {
     await engine.close().catch(() => {});
+  }
+}
+
+/**
+ * The operator's list of allowed writes, on the page that sends four POSTs
+ * (read-posts.html). In read-only, which lets a plain POST out, a list naming
+ * one endpoint lets that endpoint out whatever its body says and refuses the
+ * plain POST to the other: the list, not the pattern, decides.
+ */
+async function allowedWrites({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
+  const writesTo = (key: string): number => stats.writes[key] ?? 0;
+  const lineOf = (snap: string, testid: string): string => snap.match(new RegExp(`[^\\n]*\\[testid=${testid}[,\\]][^\\n]*`))?.[0] ?? "";
+  const run = async (list: string[] | undefined): Promise<{ snap: string; out: string; engine: InstanceType<typeof BrowserEngine> }> => {
+    const engine = new BrowserEngine();
+    const out = await engine.attach({
+      url: baseUrl,
+      projectDir,
+      mode: "read-only",
+      ...(list ? { writeRules: writeRulesSettings({ allowedWrites: list }, {}, false) } : {}),
+    });
+    await engine.navigate("/read-posts.html");
+    let snap = "";
+    const done = await eventually(
+      async () => {
+        snap = await engine.snapshot(true);
+        return !/Loading…|Pending/.test(snap);
+      },
+      WAIT_MS,
+      200,
+    );
+    if (!done) throw new Error(`read-posts fixture: the page's requests never settled:\n${snap}`);
+    return { snap, out, engine };
+  };
+
+  console.log("read-only with a list of allowed writes: only the listed endpoint goes out");
+  const before = { search: writesTo("POST /api/search"), searchDelete: writesTo("POST /api/search (delete)"), notes: writesTo("POST /api/notes") };
+  const listed = await run(["POST /api/search"]);
+  try {
+    check("the attach names the list", listed.out.includes("Allowed writes: only POST /api/search"), listed.out);
+    check(
+      "the listed endpoint goes out, its destructive-looking body included",
+      lineOf(listed.snap, "search-results").includes("Results: Widget A, Widget B") &&
+        lineOf(listed.snap, "search-delete").includes("sent") &&
+        writesTo("POST /api/search") > before.search &&
+        writesTo("POST /api/search (delete)") > before.searchDelete,
+      `${listed.snap}\n${JSON.stringify(stats.writes)}`,
+    );
+    check(
+      "a plain POST to an endpoint nobody listed is refused, though read-only alone lets it out",
+      lineOf(listed.snap, "notes-save").includes("refused: status 403") && writesTo("POST /api/notes") === before.notes,
+      `${listed.snap}\n${JSON.stringify(stats.writes)}`,
+    );
+    check(
+      "each write let out by the list is logged",
+      listed.engine.memory!.actionLog.some((e) => e.action === "write-policy:allowed-write" && (e.target ?? "").includes("POST /api/search")),
+      JSON.stringify(listed.engine.memory!.actionLog.filter((e) => e.action.startsWith("write-policy"))),
+    );
+  } finally {
+    await listed.engine.close().catch(() => {});
+  }
+
+  console.log("read-only with no list: the same page's plain POSTs go out");
+  const free = await run(undefined);
+  try {
+    check("without a list the unlisted POST is judged by the mode, which lets it out", lineOf(free.snap, "notes-save").includes("sent"), free.snap);
+  } finally {
+    await free.engine.close().catch(() => {});
   }
 }
 

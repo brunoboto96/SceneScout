@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving while its controls are read</title>
+  </head>
+  <body>
+    <main>
+      <h1>Leaving while read</h1>
+      <button type="button">Stay</button>
+    </main>
+    <script>
+      // Moves itself on, to a page the fixture server holds back (held=1), the first time its age is read: a page
+      // that starts a navigation of its own after it was checked for one, while its controls are being read.
+      const byType = performance.getEntriesByType.bind(performance);
+      let left = false;
+      performance.getEntriesByType = function (type) {
+        if (!left && type === "navigation") {
+          left = true;
+          location.href = "/page2.html?held=1";
+        }
+        return byType(type);
+      };
+    </script>
+  </body>
+</html>

@@ -46,6 +46,14 @@ import {
   type WriteMode,
   WRITE_MODES,
 } from "./policy.js";
+import {
+  ALLOWED_WRITES_ENV,
+  allowedWriteEntries,
+  allowedWriteKey,
+  allowedWritesFromEnv,
+  MAX_ALLOWED_WRITES,
+  type AllowedWritesSetting,
+} from "./write-allowlist.js";
 import { EVIDENCE_MODES, type EvidenceMode } from "./capture.js";
 import { REFUSE_DESTRUCTIVE_GETS_ENV, refuseDestructiveGetsSetting, STRICT_WRITES_ENV, writeClassifierSetting, type WriteClassifier } from "./strict-writes.js";
 import { DEDUP_ENV, DEDUP_MODES, type DedupMode } from "./ci.js";
@@ -80,6 +88,7 @@ export const CONFIG_KEYS = [
   "writeClassifier",
   "refuseDestructiveGets",
   "authPosts",
+  "allowedWrites",
   "redactPageText",
 ] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
@@ -245,9 +254,14 @@ export const NO_POLICY: LoadedPolicy = { policy: {}, sources: [] };
  * export or a `ci` run that worked before; and writeClassifier and authPosts,
  * which no preset sets because the strict classifier refuses writes the
  * standard one lets out and a sign-in list names one app's endpoints; and
- * redactPageText, which changes what the agent reads rather than what it may do.
+ * redactPageText, which changes what the agent reads rather than what it may do; and allowedWrites, which names one app's endpoints.
  */
-export type PresetPolicy = Required<Omit<Policy, "projectsRoot" | "egress" | "writeClassifier" | "authPosts" | "authPostsNarrowOnly" | "redactPageText">>;
+export type PresetPolicy = Required<
+  Omit<
+    Policy,
+    "projectsRoot" | "egress" | "writeClassifier" | "authPosts" | "authPostsNarrowOnly" | "allowedWrites" | "allowedWritesNarrowOnly" | "redactPageText"
+  >
+>;
 
 /** What each preset sets. A key the file sets beside the preset replaces the preset's value for that key. */
 export const PRESET_POLICY: Record<Preset, PresetPolicy> = {
@@ -369,6 +383,8 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
   if (!writeClassifier.ok) return writeClassifier;
   const authPosts = list("authPosts", MAX_READ_POSTS, (entries) => readPostEntries(entries).rejected);
   if (!authPosts.ok) return authPosts;
+  const allowedWrites = list("allowedWrites", MAX_ALLOWED_WRITES, (entries) => allowedWriteEntries(entries).rejected);
+  if (!allowedWrites.ok) return allowedWrites;
   const readPosts = list("readPosts", MAX_READ_POSTS, (entries) => readPostEntries(entries).rejected);
   if (!readPosts.ok) return readPosts;
   const trustedEmbeds = list("trustedEmbeds", MAX_TRUSTED_EMBEDS, (entries) => trustedEmbedOrigins(entries).rejected);
@@ -388,6 +404,7 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
     writeClassifier: writeClassifier.value,
     refuseDestructiveGets: obj.refuseDestructiveGets as boolean | undefined,
     authPosts: authPosts.value,
+    allowedWrites: allowedWrites.value,
     redactPageText: redactPageText.value,
   };
   for (const [k, v] of Object.entries(set)) if (v !== undefined) (base as Record<string, unknown>)[k] = v;
@@ -440,6 +457,10 @@ export function tightenPolicy(a: Policy, b: Policy): Policy {
     out.refuseDestructiveGets = a.refuseDestructiveGets === true || b.refuseDestructiveGets === true;
   if (a.authPosts || b.authPosts) out.authPosts = a.authPosts && b.authPosts ? intersect(b.authPosts, a.authPosts, readPostKey) : (a.authPosts ?? b.authPosts);
   if (a.authPosts ? a.authPostsNarrowOnly === true : b.authPosts !== undefined) out.authPostsNarrowOnly = true;
+  if (a.allowedWrites || b.allowedWrites)
+    out.allowedWrites =
+      a.allowedWrites && b.allowedWrites ? intersect(b.allowedWrites, a.allowedWrites, allowedWriteKey) : (a.allowedWrites ?? b.allowedWrites);
+  if (a.allowedWrites ? a.allowedWritesNarrowOnly === true : b.allowedWrites !== undefined) out.allowedWritesNarrowOnly = true;
   // The operator's only: withProjectPolicy refuses a project's file that sets it.
   if (a.projectsRoot) out.projectsRoot = a.projectsRoot;
   return out;
@@ -627,6 +648,14 @@ export interface WriteRulesPolicy {
    * unless SCENESCOUT_AUTH_POSTS, the operator's, also lists the entry.
    */
   authPostsNarrowOnly?: boolean;
+  /**
+   * The only writes that may leave the page: each entry is a write method and a path (write-allowlist.ts).
+   * Every other write is refused, and a listed one goes out whatever its path or body looks like.
+   * SCENESCOUT_ALLOWED_WRITES may narrow it. [] allows none. Unset: writes are judged by the mode alone.
+   */
+  allowedWrites?: string[];
+  /** Not a key, so no file sets it: true when `allowedWrites` came from a project's own file alone (tightenPolicy), so the list only narrows the mode's rules. */
+  allowedWritesNarrowOnly?: boolean;
 }
 
 /** The sign-in allowlist a session judges by: its entries, and whether a POST must also look like a sign-in (policy.ts isAuthExempt). */
@@ -640,6 +669,7 @@ export interface WriteRulesSources {
   writeClassifier?: string;
   refuseDestructiveGets?: string;
   authPosts?: string;
+  allowedWrites?: string;
 }
 
 /** The write-judgement settings a session runs with (writeRulesSettings), as the browser engine takes them from the attach. */
@@ -647,6 +677,8 @@ export interface SessionWriteRules {
   writeClassifier: WriteClassifier;
   refuseDestructiveGets: boolean;
   authPosts: AuthPostsSetting | null;
+  /** The list of writes that may leave the page, or null when none is set (the mode alone judges writes). */
+  allowedWrites: AllowedWritesSetting | null;
   notes: string[];
   from: WriteRulesSources;
 }
@@ -697,7 +729,50 @@ export function writeRulesSettings(file: WriteRulesPolicy, env: Record<string, s
   if (refuseDestructiveGets) from.refuseDestructiveGets = file.refuseDestructiveGets === true ? BY_CONFIG : REFUSE_DESTRUCTIVE_GETS_ENV;
   if (entries !== null) from.authPosts = file.authPosts ? (fromEnv.length > 0 ? `${BY_CONFIG}, narrowed by ${AUTH_POSTS_ENV}` : BY_CONFIG) : AUTH_POSTS_ENV;
   const andSignInPath = guided || (file.authPostsNarrowOnly === true && fromEnv.length === 0);
-  return { writeClassifier, refuseDestructiveGets, authPosts: entries === null ? null : { entries, andSignInPath }, notes, from };
+  const writes = allowedWritesSetting(file, env, guided, notes);
+  if (writes) from.allowedWrites = writes.from;
+  return {
+    writeClassifier,
+    refuseDestructiveGets,
+    authPosts: entries === null ? null : { entries, andSignInPath },
+    allowedWrites: writes ? writes.setting : null,
+    notes,
+    from,
+  };
+}
+
+/**
+ * The allowed-writes list a session runs with: the file's, narrowed to the
+ * entries SCENESCOUT_ALLOWED_WRITES also names when it is set; with no file
+ * list, the environment's; null when neither sets one. A guided check, and a
+ * list only a project's own file set (unless the environment lists the entries
+ * too), ask the mode's rules as well, so the list cannot let out a write the
+ * mode would refuse.
+ */
+function allowedWritesSetting(
+  file: WriteRulesPolicy,
+  env: Record<string, string | undefined>,
+  guided: boolean,
+  notes: string[],
+): { setting: AllowedWritesSetting; from: string } | null {
+  const fromEnv = allowedWritesFromEnv(env[ALLOWED_WRITES_ENV]);
+  let entries: string[];
+  let from: string;
+  if (file.allowedWrites) {
+    entries = [...file.allowedWrites];
+    from = BY_CONFIG;
+    if (fromEnv.length > 0) {
+      entries = intersect(fromEnv, file.allowedWrites, allowedWriteKey);
+      const dropped = fromEnv.filter((e) => !entries.includes(e));
+      if (dropped.length > 0) notes.push(`${ALLOWED_WRITES_ENV} entries the config does not list were left out: ${quoted(dropped)}`);
+      from = `${BY_CONFIG}, narrowed by ${ALLOWED_WRITES_ENV}`;
+    }
+  } else if (fromEnv.length > 0) {
+    entries = fromEnv;
+    from = ALLOWED_WRITES_ENV;
+  } else return null;
+  const andModeRules = guided || (file.allowedWritesNarrowOnly === true && fromEnv.length === 0);
+  return { setting: { entries, andModeRules }, from };
 }
 
 /**
@@ -716,6 +791,13 @@ export function writeRulesNote(policy: WriteRulesPolicy, rules: SessionWriteRule
     const which = entries.length === 0 ? "no POST counts" : `only ${quoted(entries)} ${entries.length === 1 ? "counts" : "count"}`;
     out.push(
       `authPosts: ${which} as signing in${andSignInPath && entries.length > 0 ? `, and only when it also looks like a sign-in by its path (${policy.authPostsNarrowOnly === true ? "the list is the project's own" : "a guided check"})` : ""}`,
+    );
+  }
+  if (policy.allowedWrites && rules.allowedWrites) {
+    const { entries, andModeRules } = rules.allowedWrites;
+    const which = entries.length === 0 ? "no write may leave the page" : `only ${quoted(entries)} may be written`;
+    out.push(
+      `allowedWrites: ${which}${andModeRules && entries.length > 0 ? `, and a listed write must also pass the mode's own rules (${policy.allowedWritesNarrowOnly === true ? "the list is the project's own" : "a guided check"})` : ""}`,
     );
   }
   return [...out, ...rules.notes];

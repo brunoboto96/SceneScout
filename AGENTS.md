@@ -101,6 +101,7 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
   - `fingerprint.ts`: route/element identity
   - `policy.ts`
   - `project-config.ts`: the operator's config file and what it lets an argument loosen
+  - `write-allowlist.ts`: the operator's list of allowed writes: its entries, which request a list names, and the sign-in rule while a list is set (policy-test)
   - `route-guard.ts`: the write policy on the wire: the order the route handler applies its rules in, and when a write marks its page exercised
   - `policy-explain.ts`: `scenescout policy explain`, one request's verdict in each mode, from the route handler's own functions
   - `config-explain.ts`: `scenescout config explain`, each config key's resolved value and where it came from, through the functions an attach resolves them with
@@ -125,6 +126,7 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
   - `ticket-status.ts`: reading filed tickets back: which places a record names, a project's tickets newest first, and the kept read that limits each project to one tracker read every five minutes
   - `recap.ts`: the end-of-check card: its figures from an ended guided check, the SVG drawn from them with every figure and the address escaped, and its save, only into a real `.scenescout/` folder and replacing a link at `recap.svg` rather than writing through it (report-test, against `scripts/golden/recap.svg`)
   - `mods/scenescout-mod/hooks/game.js`: the mod's optional game layer: off unless set to `on`, the bestiary from the cards, and drawn beside the cards without changing their words (live-test)
+  - `scripts/flaky/flakes.ts`: recurring CI failures: a job's log read into check records, a stall in the suite a job ran to its limit in, and the report of checks failing in more than one run (ci-test; `ci-flakes.ts` is the command, `flaky-checks.yml` the daily run)
   - `ci-lanes.ts`: splitting an unattended run into lanes
   - `capture.ts` and `png.ts`: an element's picture and the pixel diff of two
   - `baseline.ts`: visual baselines: what is pictured, where it is kept and when it is met
@@ -181,6 +183,7 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
 - **typescript stays on 5.x.** TypeScript 7 was tried and reverted: it breaks this project's module resolution (`Cannot find name 'node:fs'` and cascading implicit-any errors). The caret range `^5.9.3` prevents an accidental jump, but `npm install typescript@latest` would still do it — re-test the build before changing that line.
 - **zod stays on 4.x, at 4.6.6 or later.** Every 3.x and every 4.x before 4.6.6 builds one issue per bad element before it checks an array's `.max()`, so an oversized array can exhaust memory ([GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5)); 4.6.6 checks the bound first. `@modelcontextprotocol/sdk` 1.x accepts zod `^3.25 || ^4.0` and turns a v4 schema into the tool's JSON Schema with zod's own `toJSONSchema`, which leaves `additionalProperties` off an object that strips unknown keys (3.x printed `false` there; what a call may carry is unchanged).
 - **playwright stays on 1.63.** On 1.64 a click on a link whose navigation is answered with `204 No Content` never returns, so the engine's own click would hang ([#487](https://github.com/brunoboto96/SceneScout/issues/487)). The published range is therefore `~1.63.0`, which no install resolves to 1.64, and `.github/dependabot.yml` ignores 1.64.x; a bump to it is declined until a release fixes that. Then widen the range, drop this line and the ignore together (`install-test` holds the range to this line, so changing one alone fails; a later hold changes its `HELD_PLAYWRIGHT_MINOR`), and re-run the smoke suite on all three browsers.
+- **undici stays on 7.x while `engines` allow a Node older than 22.19 (today Node 20).** undici 8 needs Node >= 22.19 and crashes on Node 20 when a proxy is set, because `proxy.ts` loads it then (`zlib.createZstdDecompress` is missing). `.github/dependabot.yml` ignores undici's semver-major updates; drop the ignore and this line together in the separate change that raises `engines` to `>=22.19` or later (a floor of plain `>=22` still admits Node versions undici 8 does not run on; `install-test` holds the ignore, this line and the 7.x range to the engines floor). That change must also handle undici 8's behaviour change: `EnvHttpProxyAgent` forwards plain-http targets as absolute-URI requests instead of CONNECT tunnels, so an unreachable http target comes back as the proxy's 502 rather than a thrown network error.
 
 ## More than one browser
 
