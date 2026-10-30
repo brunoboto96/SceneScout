@@ -17,6 +17,7 @@ import { shellQuote, writeProfile } from "../dist/engine/profiles.js";
 import { siteFolderName } from "../dist/engine/project-folder.js";
 import { MCP_APP_MIME, STATUS_PANE_URI, STATUS_POLL_TOOL, STATUS_TOOL } from "../dist/engine/status-pane.js";
 import { asLf } from "./checkout.ts";
+import { OWN_TABLE_TOOLS, toolParamsMarkdown, toolParamsSection } from "./tool-params.ts";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -2231,7 +2232,7 @@ async function main(): Promise<void> {
   if (!toolSection) guideGaps.push("Configuration-reference.md has no MCP tool parameters section");
   const listedTools = new Map<string, string>();
   for (const row of toolSection.matchAll(/^\| `(scout_[a-z_]+)` \| ([^|\n]+) \|/gm)) listedTools.set(row[1], row[2].trim());
-  const tableTools = tools.filter((t) => t.name !== "scout_attach" && t.name !== "scout_login");
+  const tableTools = tools.filter((t) => !OWN_TABLE_TOOLS.has(t.name));
   const listedToolNames = [...listedTools.keys()].sort().join(",");
   const servedToolNames = tableTools
     .map((t) => t.name)
@@ -2251,6 +2252,9 @@ async function main(): Promise<void> {
         `Configuration-reference.md lists ${tool.name} parameters [${listedParams.join(", ")}], the server has [${served.join(", ")}] (name:required)`,
       );
   }
+  // The same table word for word, so it stays what `npm run tool-params` writes rather than a hand edit of it.
+  if (toolParamsSection(reference) !== toolParamsMarkdown(tools))
+    guideGaps.push("Configuration-reference.md's MCP tool parameters table is not what `npm run tool-params` generates from the schemas: run it");
   // Prompt names and arguments, held to prompts/list the same way tool options are held to their schemas.
   const promptSection = (reference.split("\n## MCP prompts\n")[1] ?? "").split("\n## ")[0];
   const promptRows = [...promptSection.matchAll(/^\| `([a-z][a-z-]*)` \| ([^|\n]+) \|/gm)];
