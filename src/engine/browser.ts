@@ -4594,6 +4594,9 @@ export class BrowserEngine {
     // is how the whole failure mode stayed invisible in the first place.
     let settled = "";
     try {
+      // With a sign-in held, a guard's redirect to another origin may land after the load settled; the origin fence
+      // (afterAction) must see the page where it ended up, or it stays off the app until the next call.
+      if (this.watchesForBounce) await this.stableUrl();
       settled = await this.afterAction("navigate", url);
     } catch (err) {
       this.recordNavigationOutcome(url, await this.navigationLanding(page));

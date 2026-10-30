@@ -607,7 +607,8 @@ function keptStateUrls(project: string): string[] {
  */
 async function crawlJudgesAnotherOriginsSignIn(baseUrl: string, foreignBaseUrl: string, deadState: string): Promise<void> {
   console.log("auth loss: a crawl judges a route that goes to a sign-in provider on another origin, and nothing keeps the provider's query");
-  const route = (to: string): string => `/sso-gated.html?soon=1&secret=1&idp=${encodeURIComponent(foreignBaseUrl)}&to=${encodeURIComponent(to)}`;
+  const route = (to: string, soon = 1): string =>
+    `/sso-gated.html?soon=${soon}&secret=1&idp=${encodeURIComponent(foreignBaseUrl)}&to=${encodeURIComponent(to)}`;
   const inProject = async <T>(run: (engine: BrowserEngine, project: string) => Promise<T>): Promise<T> => {
     // A project of its own each time, so one visit's coverage is not another's.
     const project = fs.mkdtempSync(path.join(os.tmpdir(), "ft-authcrawl-"));
@@ -659,4 +660,16 @@ async function crawlJudgesAnotherOriginsSignIn(baseUrl: string, foreignBaseUrl: 
     fenced.kept.slice(0, 4000),
   );
   check("...without the provider's query anywhere the session kept", !fenced.kept.includes(PROVIDER_STATE), fenced.kept.slice(0, 4000));
+
+  const late = await inProject(async (engine, project) => {
+    const nav = await engine.navigate(`${baseUrl}${route("/sso-provider/authorize?client_id=smoke-app&return=x", 2)}`);
+    await engine.close();
+    return { nav, kept: keptText(project) };
+  });
+  check("a provider reached after the load settled is a bounce too", late.nav.includes("NOT counted as covered"), late.nav);
+  check(
+    "...and the action log has the origin-fence entry for the page taken back",
+    late.kept.includes("origin-fence:bounced") && late.kept.includes(`${foreignBaseUrl}/sso-provider/authorize`),
+    late.kept.slice(0, 4000),
+  );
 }

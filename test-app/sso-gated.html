@@ -16,6 +16,7 @@
       //   ?idp=<origin>  the provider's origin (the harness's second origin)
       //   ?to=<path>     where on it: the provider's authorize endpoint, or (the contrast) an ordinary page of that site
       //   ?soon=1        the token check answers at once (40 ms after load), inside what a navigation watches
+      //   ?soon=2        the same at 300 ms: after the load has settled on a busy machine, still inside what a navigation watches
       //   ?secret=1      the page adds a sign-in state of its own to the address it goes to, so the state is in no
       //                  address the engine was asked for, only in the provider's (what is kept must not hold it)
       addEventListener("load", function () {
@@ -29,7 +30,7 @@
           var to = params.get("to");
           if (params.get("secret") === "1") to += (to.indexOf("?") === -1 ? "?" : "&") + "state=" + ["idp", "only", "state", "4c1e"].join("-");
           location.replace(params.get("idp") + to);
-        }, new URLSearchParams(location.search).get("soon") === "1" ? 40 : 1500);
+        }, { 1: 40, 2: 300 }[new URLSearchParams(location.search).get("soon")] || 1500);
       });
     </script>
   </body>
