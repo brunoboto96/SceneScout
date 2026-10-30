@@ -78,6 +78,18 @@ export function isRefused(req: WatchedRequest): boolean {
 }
 
 /**
+ * Whether the action's requests are to be kept until the page that answers them has landed: a write the action sent was
+ * refused (or failed) and the page is on its way to another document. Judged now, that page is not the answer to the
+ * write, and Chromium holds a read of it until it lands (#674); judged once it landed, a success page that arrived after
+ * the settle wait is still compared with the refused write (#707). Only a write the action sent counts: a navigation
+ * that was cut short, or a refused read, is nothing a page on its way elsewhere is the answer to, and holding for it
+ * would wait on a page that may never land.
+ */
+export function holdForLandedPage(requests: readonly WatchedRequest[], navigating: boolean): boolean {
+  return navigating && requests.some((r) => WRITING_METHODS.has(r.method.toUpperCase()) && !r.background && isRefused(r));
+}
+
+/**
  * Phrases that assert there is nothing to show.
  *
  * Deliberately narrow: these are the stock empty-state sentences, not any

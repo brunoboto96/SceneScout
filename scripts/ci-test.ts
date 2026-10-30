@@ -21,6 +21,16 @@ import { z } from "zod";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CI_ACTION_ONLY_INPUTS, ciArgs, ciOutDirFor, ciSummaryOutputs, ciVerdict, hasCiCommand } from "../action/ci-action.mjs";
+import {
+  groupChecks as groupFlakeChecks,
+  jobCell as flakeJobCell,
+  parseJobLog as parseFlakeLog,
+  recordKey as flakeRecordKey,
+  recordsOf as flakeRecordsOf,
+  renderReport as renderFlakeReport,
+  type FlakeRecord,
+  type JobInput as FlakeJobInput,
+} from "./flaky/flakes.ts";
 import { retentionDaysOf } from "../action/check-action.mjs";
 import { expectedJobs, FULL_CI_LABEL, FULL_CI_PATHS, FULL_PLATFORMS, isDocsPath, plan, PULL_REQUEST_PLATFORMS, verdict } from "./test-plan.mjs";
 import {
@@ -53,6 +63,9 @@ import {
   plannedRoutes,
   PLANNER_SESSION,
 } from "../src/engine/ci-lanes.ts";
+import { AzureOpenAIConversation, BedrockConversation, VertexConversation } from "../src/engine/provider.ts";
+import type { ProviderName } from "../src/engine/ci.ts";
+import { createServer, type IncomingMessage, type Server } from "node:http";
 import { buildRunRecord, continueLines, continuePlan, FROM_RUN_ENV, FROM_RUN_MODE_ENV, type RunRecord } from "../src/engine/from-run.ts";
 import { runRecordOf } from "../src/engine/report.ts";
 import {
@@ -120,6 +133,7 @@ import {
   readFindings,
   REDACTED_KEY,
   resolvePrice,
+  KEY_ENV,
   redactKeys,
   secretValues,
   settleTurn,
@@ -251,7 +265,10 @@ test("options: what is refused, and why", () => {
   assert.match(bad([u, "--mode=destructive", "--allow-destructive=false"]), /needs --allow-destructive/);
   assert.match(bad([u, "--allow-destructive=yes"]), /--allow-destructive takes no value, or true or false/);
   assert.match(bad([u, "--mode=write"]), /--mode must be one of observe, read-only, safe-write, destructive/);
-  assert.match(bad([u, "--api-key=abc"]), /there is no --api-key: the key is read from ANTHROPIC_API_KEY or OPENAI_API_KEY only/);
+  assert.match(
+    bad([u, "--api-key=abc"]),
+    /there is no --api-key: the key is read from the environment only \(ANTHROPIC_API_KEY, OPENAI_API_KEY, or the variable of --provider bedrock\|vertex\|azure\)/,
+  );
   assert.match(bad([u, "--max-turns=0"]), /--max-turns must be a whole number from 1 to 500/);
   assert.match(bad([u, "--max-tokens=1.5"]), /--max-tokens must be a whole number/);
   assert.match(bad([u, "--max-minutes=999"]), /--max-minutes must be a whole number from 1 to 360/);
@@ -1874,7 +1891,7 @@ test("action: every input that is not the action's own is a `scenescout ci` opti
   for (const secret of ["api-key", "key", "anthropic-api-key", "openai-api-key"]) assert.ok(!actionInputs.includes(secret), `${secret} must never be an input`);
 });
 
-test("action: the model key reaches only the run step; every other step blanks both key names", () => {
+test("action: the model key reaches only the run step; every other step blanks every key name", () => {
   const steps = action.runs.steps as Array<{ id?: string; name?: string; env?: Record<string, string> }>;
   assert.ok(steps.length > 3);
   assert.ok(
@@ -1883,12 +1900,9 @@ test("action: the model key reaches only the run step; every other step blanks b
   );
   for (const step of steps) {
     const label = step.name ?? step.id ?? "(unnamed step)";
-    if (step.id === "run") {
-      assert.equal(step.env?.ANTHROPIC_API_KEY, undefined, `${label} keeps the inherited key`);
-      assert.equal(step.env?.OPENAI_API_KEY, undefined, `${label} keeps the inherited key`);
-    } else {
-      assert.equal(step.env?.ANTHROPIC_API_KEY, "", `${label} blanks ANTHROPIC_API_KEY`);
-      assert.equal(step.env?.OPENAI_API_KEY, "", `${label} blanks OPENAI_API_KEY`);
+    for (const name of Object.values(KEY_ENV)) {
+      if (step.id === "run") assert.equal(step.env?.[name], undefined, `${label} keeps the inherited ${name}`);
+      else assert.equal(step.env?.[name], "", `${label} blanks ${name}`);
     }
   }
 });
@@ -4733,4 +4747,398 @@ test("egress: under the config's egress none, ci stops with exit 2 and its model
     api.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── native cloud providers (issue #537) ─────────────────────────────────────
+
+const BEDROCK_KEY = "fake-bedrock-token-0123456789abcdef";
+const VERTEX_KEY = "ya29.fake-vertex-token-0123456789abcdef";
+const AZURE_KEY = "fake-azure-key-0123456789abcdef";
+const BEDROCK_MODEL = "us.anthropic.stand-in-model-v1:0";
+
+const CLAUDE_OK = {
+  content: [{ type: "tool_use", id: "tu_1", name: "scout_crawl", input: {} }],
+  stop_reason: "tool_use",
+  usage: { input_tokens: 7, output_tokens: 3 },
+};
+
+test("cloud providers: named with --provider, never chosen from a key that happens to be in the environment", () => {
+  const u = "http://127.0.0.1:3000";
+  for (const name of ["bedrock", "vertex", "azure"]) {
+    const r = parseCiArgs([u, "--provider", name], "/work");
+    assert.ok(r.ok && r.options.provider === name, name);
+  }
+  const bad = parseCiArgs([u, "--provider", "gemini"], "/work");
+  assert.ok(!bad.ok && /--provider must be one of anthropic, openai, bedrock, vertex, azure/.test(bad.error));
+
+  // A cloud credential alone does not select a cloud provider, and beside a direct key it does not make the choice ambiguous.
+  const alone = detectProvider({ AWS_BEARER_TOKEN_BEDROCK: BEDROCK_KEY, AWS_REGION: "us-east-1" }, {});
+  assert.ok(!alone.ok && /set ANTHROPIC_API_KEY or OPENAI_API_KEY/.test(alone.error) && /--provider bedrock/.test(alone.error));
+  const beside = detectProvider({ ANTHROPIC_API_KEY: ANTHROPIC_KEY, AWS_BEARER_TOKEN_BEDROCK: BEDROCK_KEY, GOOGLE_OAUTH_ACCESS_TOKEN: VERTEX_KEY }, {});
+  assert.ok(beside.ok && beside.resolved.provider === "anthropic");
+});
+
+test("cloud providers: each needs its credential, its place and a model id, and says which variable is missing", () => {
+  const model = "m-1";
+  const noKey = detectProvider({ AWS_REGION: "us-east-1" }, { provider: "bedrock", model });
+  assert.ok(!noKey.ok && /--provider bedrock needs AWS_BEARER_TOKEN_BEDROCK/.test(noKey.error));
+  const noRegion = detectProvider({ AWS_BEARER_TOKEN_BEDROCK: BEDROCK_KEY }, { provider: "bedrock", model });
+  assert.ok(!noRegion.ok && /AWS_REGION/.test(noRegion.error) && !noRegion.error.includes(BEDROCK_KEY));
+  const noModel = detectProvider({ AWS_BEARER_TOKEN_BEDROCK: BEDROCK_KEY, AWS_REGION: "us-east-1" }, { provider: "bedrock" });
+  assert.ok(!noModel.ok && /--model is required for bedrock/.test(noModel.error));
+  const badRegion = detectProvider({ AWS_BEARER_TOKEN_BEDROCK: BEDROCK_KEY, AWS_REGION: "x.evil.example/" }, { provider: "bedrock", model });
+  assert.ok(!badRegion.ok && /AWS_REGION/.test(badRegion.error));
+
+  const noProject = detectProvider({ GOOGLE_OAUTH_ACCESS_TOKEN: VERTEX_KEY, GOOGLE_CLOUD_LOCATION: "us-east5" }, { provider: "vertex", model });
+  assert.ok(!noProject.ok && /GOOGLE_CLOUD_PROJECT/.test(noProject.error));
+  const noLocation = detectProvider({ GOOGLE_OAUTH_ACCESS_TOKEN: VERTEX_KEY, GOOGLE_CLOUD_PROJECT: "demo-project" }, { provider: "vertex", model });
+  assert.ok(!noLocation.ok && /GOOGLE_CLOUD_LOCATION/.test(noLocation.error));
+
+  const noEndpoint = detectProvider({ AZURE_OPENAI_API_KEY: AZURE_KEY }, { provider: "azure", model });
+  assert.ok(!noEndpoint.ok && /AZURE_OPENAI_ENDPOINT/.test(noEndpoint.error));
+  const plainHttp = detectProvider({ AZURE_OPENAI_API_KEY: AZURE_KEY, AZURE_OPENAI_ENDPOINT: "http://resource.example.com" }, { provider: "azure", model });
+  assert.ok(!plainHttp.ok && /AZURE_OPENAI_ENDPOINT/.test(plainHttp.error));
+
+  // --base-url stands in for the place, so the place's variables are not needed then.
+  const based = detectProvider({ AWS_BEARER_TOKEN_BEDROCK: BEDROCK_KEY }, { provider: "bedrock", model, baseUrl: "https://gateway.example.com" });
+  assert.ok(based.ok && based.resolved.baseUrl === "https://gateway.example.com");
+});
+
+test("cloud providers: the address each one calls comes from the environment", () => {
+  const bedrock = detectProvider({ AWS_BEARER_TOKEN_BEDROCK: BEDROCK_KEY, AWS_REGION: "eu-west-1" }, { provider: "bedrock", model: BEDROCK_MODEL });
+  assert.ok(bedrock.ok);
+  assert.deepEqual(bedrock.resolved, { provider: "bedrock", model: BEDROCK_MODEL, effort: "low", baseUrl: "https://bedrock-runtime.eu-west-1.amazonaws.com" });
+  const vertex = detectProvider(
+    { GOOGLE_OAUTH_ACCESS_TOKEN: VERTEX_KEY, GOOGLE_CLOUD_PROJECT: "demo-project", GOOGLE_CLOUD_LOCATION: "us-east5" },
+    { provider: "vertex", model: "claude-x@20250101" },
+  );
+  assert.ok(vertex.ok);
+  assert.equal(vertex.resolved.baseUrl, "https://us-east5-aiplatform.googleapis.com/v1/projects/demo-project/locations/us-east5/publishers/anthropic/models");
+  const global = detectProvider(
+    { GOOGLE_OAUTH_ACCESS_TOKEN: VERTEX_KEY, GOOGLE_CLOUD_PROJECT: "demo-project", GOOGLE_CLOUD_LOCATION: "global" },
+    { provider: "vertex", model: "claude-x" },
+  );
+  assert.ok(global.ok && global.resolved.baseUrl.startsWith("https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/"));
+  // The multi-regions have their own host, not "<location>-aiplatform" (platform.claude.com, Claude Models on Google Cloud: endpoint types).
+  for (const multi of ["us", "eu"]) {
+    const r = detectProvider(
+      { GOOGLE_OAUTH_ACCESS_TOKEN: VERTEX_KEY, GOOGLE_CLOUD_PROJECT: "demo-project", GOOGLE_CLOUD_LOCATION: multi },
+      { provider: "vertex", model: "claude-x" },
+    );
+    assert.ok(r.ok);
+    assert.equal(r.resolved.baseUrl, `https://aiplatform.${multi}.rep.googleapis.com/v1/projects/demo-project/locations/${multi}/publishers/anthropic/models`);
+  }
+  const azure = detectProvider(
+    { AZURE_OPENAI_API_KEY: AZURE_KEY, AZURE_OPENAI_ENDPOINT: "https://resource.openai.azure.com/" },
+    { provider: "azure", model: "my-deployment" },
+  );
+  assert.ok(azure.ok);
+  assert.deepEqual(azure.resolved, { provider: "azure", model: "my-deployment", effort: "low", baseUrl: "https://resource.openai.azure.com/openai/v1" });
+  // Effort: Azure takes the Responses API's list, the two Claude hosts the Messages API's.
+  assert.ok(
+    detectProvider({ AZURE_OPENAI_API_KEY: AZURE_KEY, AZURE_OPENAI_ENDPOINT: "https://r.openai.azure.com" }, { provider: "azure", model: "d", effort: "none" })
+      .ok,
+  );
+  const noNone = detectProvider({ AWS_BEARER_TOKEN_BEDROCK: BEDROCK_KEY, AWS_REGION: "us-east-1" }, { provider: "bedrock", model: "m", effort: "none" });
+  assert.ok(!noNone.ok && /for bedrock/.test(noNone.error));
+});
+
+test("cloud providers: the request shapes are each cloud's own", () => {
+  const bedrock = new BedrockConversation({ ...O, baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", model: BEDROCK_MODEL }, "KICKOFF").request(
+    BEDROCK_KEY,
+  );
+  assert.equal(bedrock.url, "https://bedrock-runtime.us-east-1.amazonaws.com/model/us.anthropic.stand-in-model-v1%3A0/invoke");
+  assert.equal(bedrock.headers.authorization, `Bearer ${BEDROCK_KEY}`);
+  assert.equal(bedrock.headers["x-api-key"], undefined);
+  assert.equal((bedrock.body as any).anthropic_version, "bedrock-2023-05-31");
+  assert.equal((bedrock.body as any).model, undefined, "the model is in the path");
+  // InvokeModel refuses a top-level cache_control with a 400, so the breakpoint is an explicit one on the last user block.
+  assert.equal("cache_control" in (bedrock.body as any), false, "no top-level cache_control on Bedrock");
+  assert.deepEqual((bedrock.body as any).messages, [{ role: "user", content: [{ type: "text", text: "KICKOFF", cache_control: { type: "ephemeral" } }] }]);
+  assert.deepEqual((bedrock.body as any).system[0].cache_control, { type: "ephemeral" });
+  const later = new BedrockConversation({ ...O, baseUrl: "https://b.example.com", model: "m" }, "KICKOFF");
+  later.accept(CLAUDE_OK);
+  later.addResults([{ id: "tu_1", text: "R1", isError: false }]);
+  const laterBody = later.request(BEDROCK_KEY).body as any;
+  assert.deepEqual(laterBody.messages.at(-1).content, [{ type: "tool_result", tool_use_id: "tu_1", content: "R1", cache_control: { type: "ephemeral" } }]);
+  assert.equal(laterBody.messages[0].content, "KICKOFF", "only the last block is marked");
+  assert.equal(JSON.stringify(later.messages).includes("cache_control"), false, "the kept conversation is not changed");
+
+  const vertex = new VertexConversation(
+    { ...O, baseUrl: "https://v.example.com/v1/projects/p/locations/l/publishers/anthropic/models", model: "claude-x@20250101" },
+    "K",
+  ).request(VERTEX_KEY);
+  assert.equal(vertex.url, "https://v.example.com/v1/projects/p/locations/l/publishers/anthropic/models/claude-x@20250101:rawPredict");
+  assert.equal(vertex.headers.authorization, `Bearer ${VERTEX_KEY}`);
+  assert.equal((vertex.body as any).anthropic_version, "vertex-2023-10-16");
+  assert.equal((vertex.body as any).model, undefined);
+  assert.deepEqual((vertex.body as any).cache_control, { type: "ephemeral" }, "Vertex takes automatic caching");
+
+  const azure = new AzureOpenAIConversation({ ...O, baseUrl: "https://r.openai.azure.com/openai/v1", model: "my-deployment" }, "K").request(AZURE_KEY);
+  assert.equal(azure.url, "https://r.openai.azure.com/openai/v1/responses");
+  assert.equal(azure.headers["api-key"], AZURE_KEY);
+  assert.equal(azure.headers.authorization, undefined);
+  assert.equal((azure.body as any).model, "my-deployment");
+  assert.equal((azure.body as any).store, false, "stateless on Azure too");
+});
+
+interface StandIn {
+  base: string;
+  seen: Array<{ url: string; headers: IncomingMessage["headers"]; body: any }>;
+  close(): Promise<void>;
+}
+
+/** A stand-in cloud endpoint over real HTTP: answers `statuses` in order (then the last), each 200 with `ok`. */
+async function cloudStandIn(statuses: number[], ok: unknown, quoteKey?: string): Promise<StandIn> {
+  const seen: StandIn["seen"] = [];
+  const server: Server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      seen.push({ url: req.url ?? "", headers: req.headers, body: JSON.parse(raw) });
+      const status = statuses[Math.min(seen.length - 1, statuses.length - 1)];
+      res.writeHead(status, { "content-type": "application/json", ...(status === 429 ? { "retry-after": "0" } : {}) });
+      res.end(JSON.stringify(status === 200 ? ok : { message: `refused${quoteKey ? ` for ${quoteKey}` : ""}` }));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as { port: number };
+  return { base: `http://127.0.0.1:${port}`, seen, close: () => new Promise((r) => server.close(() => r())) };
+}
+
+test("cloud providers: Bedrock and Vertex over HTTP carry the token, a Claude body and no model, and read a tool call back", async () => {
+  const cases: Array<[ProviderName, string, string, RegExp, string]> = [
+    ["bedrock", BEDROCK_KEY, BEDROCK_MODEL, /^\/model\/us\.anthropic\.stand-in-model-v1%3A0\/invoke$/, "bedrock-2023-05-31"],
+    ["vertex", VERTEX_KEY, "claude-x@20250101", /^\/claude-x@20250101:rawPredict$/, "vertex-2023-10-16"],
+  ];
+  for (const [provider, key, model, path, version] of cases) {
+    const api = await cloudStandIn([200], CLAUDE_OK);
+    try {
+      const client = httpClient({ provider, model, effort: "low", baseUrl: api.base }, key, "SYSTEM", TOOLS, "KICKOFF");
+      const turn = await client.next(60_000);
+      assert.deepEqual(turn.calls, [{ id: "tu_1", name: "scout_crawl", input: {} }], provider);
+      assert.equal(api.seen.length, 1);
+      assert.match(api.seen[0].url, path, provider);
+      assert.equal(api.seen[0].headers.authorization, `Bearer ${key}`);
+      assert.equal(api.seen[0].headers["x-api-key"], undefined);
+      assert.equal(api.seen[0].body.anthropic_version, version);
+      assert.equal(api.seen[0].body.model, undefined);
+      assert.equal("cache_control" in api.seen[0].body, provider === "vertex", provider);
+      assert.ok(!JSON.stringify(api.seen[0].body).includes(key), "the key is in a header, never the body");
+    } finally {
+      await api.close();
+    }
+  }
+});
+
+test("cloud providers: Azure over HTTP sends api-key and no bearer, to the deployment's own Responses path", async () => {
+  const api = await cloudStandIn([200], OK_REPLY);
+  try {
+    const client = httpClient(
+      { provider: "azure", model: "my-deployment", effort: "low", baseUrl: `${api.base}/openai/v1` },
+      AZURE_KEY,
+      "SYSTEM",
+      TOOLS,
+      "KICKOFF",
+    );
+    assert.equal((await client.next(60_000)).text, "done");
+    assert.equal(api.seen[0].url, "/openai/v1/responses");
+    assert.equal(api.seen[0].headers["api-key"], AZURE_KEY);
+    assert.equal(api.seen[0].headers.authorization, undefined);
+    assert.equal(api.seen[0].body.model, "my-deployment");
+    assert.equal(api.seen[0].body.store, false);
+  } finally {
+    await api.close();
+  }
+});
+
+test("cloud providers: a throttled or failing call is retried, a refused token fails at once with the key removed", async () => {
+  const throttled = await cloudStandIn([429, 503, 200], CLAUDE_OK);
+  try {
+    const client = new HttpModelClient(new BedrockConversation({ ...O, baseUrl: throttled.base, model: "m" }, "K"), BEDROCK_KEY, {
+      sleep: async () => {},
+      random: () => 0,
+    });
+    assert.equal((await client.next(60_000)).calls.length, 1);
+    assert.equal(throttled.seen.length, 3);
+  } finally {
+    await throttled.close();
+  }
+  const refused = await cloudStandIn([403], null, VERTEX_KEY);
+  try {
+    const client = new HttpModelClient(new VertexConversation({ ...O, baseUrl: refused.base, model: "m" }, "K"), VERTEX_KEY, { sleep: async () => {} });
+    await assert.rejects(client.next(60_000), (e: unknown) => {
+      if (!(e instanceof ProviderError)) return false;
+      // The error quotes the token, as some APIs do; what the run prints is redacted.
+      const printed = redactKeys(e.message, secretValues({ GOOGLE_OAUTH_ACCESS_TOKEN: VERTEX_KEY }));
+      return /HTTP 403/.test(e.message) && !printed.includes(VERTEX_KEY) && printed.includes(REDACTED_KEY);
+    });
+    assert.equal(refused.seen.length, 1, "a refusal is not retried");
+  } finally {
+    await refused.close();
+  }
+});
+
+test("cloud providers: their credentials are secrets — redacted from output and kept out of the server's environment", () => {
+  const env = {
+    AWS_BEARER_TOKEN_BEDROCK: BEDROCK_KEY,
+    GOOGLE_OAUTH_ACCESS_TOKEN: VERTEX_KEY,
+    AZURE_OPENAI_API_KEY: AZURE_KEY,
+    AWS_REGION: "us-east-1",
+    PATH: "/bin",
+  };
+  assert.deepEqual(secretValues(env).sort(), [AZURE_KEY, BEDROCK_KEY, VERTEX_KEY].sort());
+  const child = childEnv(env);
+  for (const k of ["AWS_BEARER_TOKEN_BEDROCK", "GOOGLE_OAUTH_ACCESS_TOKEN", "AZURE_OPENAI_API_KEY"]) assert.equal(child[k], undefined, k);
+  assert.equal(child.AWS_REGION, "us-east-1");
+  // A Google access token that reached a message from somewhere else is removed by its shape.
+  assert.equal(redactKeys("denied ya29.a0AfH6SMBxxxxxxxxxxxxxxxxxxxx now", []), `denied ${REDACTED_KEY} now`);
+  assert.equal(redactKeys("the ya29 label", []), "the ya29 label");
+});
+
+// ── recurring CI failures (scripts/flaky/flakes.ts) ────────────────────────
+const STALL_SUITE = "settle after an action and before a bounce verdict";
+const STALL_CHECK = "a crawled page that moves itself on to an address that never answers ends at the page-load limit";
+const flakeJob = (over: Partial<FlakeJobInput> = {}): FlakeJobInput => ({
+  runId: 1,
+  attempt: 1,
+  commit: "7c49bd1f00000000000000000000000000000000",
+  name: "macos-latest · node 24 · shard 3/3",
+  conclusion: "failure",
+  startedAt: "2026-10-29T10:00:00Z",
+  completedAt: "2026-10-29T10:12:00Z",
+  ...over,
+});
+const stamp = (lines: string[]) => lines.map((l, i) => `2026-10-29T10:0${i % 10}:00.1234567Z ${l}`).join("\n");
+
+test("flaky checks: a log names the failed check under its suite; the same log with every check passing names none", () => {
+  const failing = stamp([
+    "Shard 3/3: 4 suites",
+    "",
+    "━━ settle ━━",
+    "  ✓ first",
+    "  ✗ second \u001b[31mred\u001b[0m",
+    "    expected 1",
+    "  ✓ third",
+    "━━ other ━━",
+    "  ✗ other CRASHED — the rest of this suite did not run",
+  ]);
+  const honest = failing.replace("  ✗ second", "  ✓ second").replace("✗ other CRASHED", "✓ other fine");
+  assert.deepEqual(parseFlakeLog(failing).failures, [
+    { suite: "settle", check: "second red" },
+    { suite: "other", check: "crashed" },
+  ]);
+  assert.deepEqual(parseFlakeLog(honest).failures, []);
+});
+
+test("flaky checks: a job that ran to its limit is a stall in the last suite, naming the last check that passed; one cancelled early is not a failure", () => {
+  const log = stamp([`━━ ${STALL_SUITE} ━━`, "  ✓ an earlier check", `  ✓ ${STALL_CHECK.replace("ends at", "starts and ends at")}`]);
+  const hung = flakeJob({ conclusion: "cancelled", completedAt: "2026-10-29T10:35:00Z" });
+  const [rec, ...rest] = flakeRecordsOf(hung, log, [hung]);
+  assert.equal(rest.length, 0);
+  assert.equal(rec.kind, "stalled");
+  assert.equal(rec.suite, STALL_SUITE);
+  assert.match(rec.check, /^a crawled page that moves itself on/);
+  assert.equal(flakeRecordKey(rec), `stalled in ${STALL_SUITE}`);
+  // The same conclusion after 3 minutes is a newer push superseding the run, not a failure of any check.
+  const superseded = flakeJob({ conclusion: "cancelled", completedAt: "2026-10-29T10:03:00Z" });
+  assert.deepEqual(flakeRecordsOf(superseded, log, [superseded]), []);
+  assert.deepEqual(flakeRecordsOf(flakeJob({ conclusion: "success" }), log, []), []);
+});
+
+test("flaky checks: a job cancelled at its limit with no log kept is a stall at its step, and the required check's own failure adds no record", () => {
+  const lost = flakeJob({ conclusion: "cancelled", completedAt: "2026-10-29T10:39:00Z", failedStep: "Browser suite, shard 3 of 3" });
+  const [rec] = flakeRecordsOf(lost, undefined, [lost]);
+  assert.equal(flakeRecordKey(rec), "stalled in Browser suite, shard 3 of 3");
+  assert.deepEqual(flakeRecordsOf(flakeJob({ name: "test" }), undefined, []), []);
+});
+
+test("flaky checks: a failed job whose log is unavailable is recorded by its failed step", () => {
+  const [rec] = flakeRecordsOf(flakeJob({ failedStep: "Install the browser's system libraries" }), undefined, []);
+  assert.equal(rec.kind, "step");
+  assert.equal(flakeRecordKey(rec), "step Install the browser's system libraries");
+});
+
+test("flaky checks: a check failing in two runs is recurring with both platforms; two attempts of one run count once, and a later pass is noted", () => {
+  const failLog = (check: string) => stamp(["━━ visual baselines ━━", `  ✗ ${check}`]);
+  const a1 = flakeJob({ runId: 10, name: "windows-latest · node 24 · shard 3/3" });
+  const a2 = flakeJob({ runId: 10, attempt: 2, name: "windows-latest · node 24 · shard 3/3" });
+  const a3 = flakeJob({ runId: 10, attempt: 3, name: "windows-latest · node 24 · shard 3/3", conclusion: "success" });
+  const other = flakeJob({ runId: 11, name: "ubuntu-latest · webkit · shard 3/3", commit: "abcdef0123456789" });
+  const all = [a1, a2, a3, other];
+  const records = [
+    ...flakeRecordsOf(a1, failLog("within the threshold at 127.0.0.1:41233"), all),
+    ...flakeRecordsOf(a2, failLog("within the threshold at 127.0.0.1:50999"), all),
+    ...flakeRecordsOf(other, failLog("within the threshold at 127.0.0.1:1234"), all),
+  ];
+  const [g, ...none] = groupFlakeChecks(records, 12);
+  assert.equal(none.length, 0, "the port in the name does not make three checks");
+  assert.equal(g.runs, 2, "attempts 1 and 2 of run 10 are one run");
+  assert.equal(g.window, 12);
+  assert.deepEqual(
+    g.cells.map((c) => [c.cell, c.count]),
+    [
+      ["windows-latest · node 24 · shard 3/3", 2],
+      ["ubuntu-latest · webkit · shard 3/3", 1],
+    ],
+  );
+  assert.equal(g.rerunsPassed, 2, "attempt 3 of run 10 passed the job both earlier attempts failed");
+  assert.deepEqual(g.commits, ["7c49bd1f", "abcdef01"]);
+});
+
+test("flaky checks: the report leads with checks failing in more than one run and lists single failures apart", () => {
+  const rec = (runId: number, check: string): FlakeRecord => flakeRecordsOf(flakeJob({ runId }), stamp(["━━ s ━━", `  ✗ ${check}`]), [])[0];
+  const text = renderFlakeReport([rec(1, "twice"), rec(2, "twice"), rec(2, "once")], 5);
+  assert.ok(text.indexOf("## s › twice") > 0 && text.includes("Failed in 2 of 5 runs"), text);
+  assert.ok(text.indexOf("## Failed once in this window") > text.indexOf("## s › twice"));
+  assert.ok(text.includes("- s › once — macos-latest"), text);
+  assert.ok(!text.includes("## s › once"));
+  assert.match(renderFlakeReport([rec(1, "only")], 5), /No check failed in more than one run/);
+});
+
+test("flaky checks: a job name gives its platform, node, browser and shard", () => {
+  assert.deepEqual(flakeJobCell("macos-latest · node 24 · shard 3/3"), { os: "macos-latest", node: "24", shard: "3/3" });
+  assert.deepEqual(flakeJobCell("ubuntu-latest · webkit · shard 1/3"), { os: "ubuntu-latest", browser: "webkit", shard: "1/3" });
+  assert.deepEqual(flakeJobCell("ubuntu-latest · check action"), { os: "ubuntu-latest" });
+});
+
+test("flaky-checks.yml: reads the Actions history with read-only permissions and writes the report to the job summary", () => {
+  const workflow = readWorkflow("flaky-checks.yml");
+  assert.deepEqual(workflow.permissions, { actions: "read", contents: "read" });
+  assert.ok("schedule" in workflow.on && "workflow_dispatch" in workflow.on);
+  const steps = (Object.values(workflow.jobs)[0] as { steps: { run?: string }[] }).steps;
+  assert.ok(
+    steps.some((s) => s.run?.includes("scripts/flaky/ci-flakes.ts")),
+    "no step runs the report",
+  );
+});
+
+test("flaky checks: Node 20's TAP failure names the same check as the spec reporter's ✖; a TODO and a pass name none", () => {
+  const name = "the reference lists exactly the environment variables the code reads";
+  const tap = stamp([
+    "TAP version 13",
+    `not ok 19 - ${name}`,
+    "  ---",
+    "  duration_ms: 1.2",
+    "  ...",
+    "ok 20 - another",
+    "not ok 21 - pending \\# later # TODO not yet",
+    "# fail 1",
+  ]);
+  const spec = stamp([`✖ ${name} (1.25ms)`, "✖ failing tests:", `✖ ${name} (1.25ms)`]);
+  assert.deepEqual(parseFlakeLog(tap).failures, [{ suite: "unit suites", check: name }]);
+  assert.deepEqual(parseFlakeLog(spec).failures, parseFlakeLog(tap).failures);
+  assert.deepEqual(parseFlakeLog(tap.replace("not ok 19", "ok 19")).failures, []);
+});
+
+test("flaky checks: a failure after an earlier attempt passed is not a later pass, and the report carries no log text beyond check names", () => {
+  const passed = flakeJob({ runId: 20, attempt: 1, conclusion: "success" });
+  const failed = flakeJob({ runId: 20, attempt: 2 });
+  const secret = ["ghp", "x".repeat(36)].join("_");
+  const log = stamp(["━━ s ━━", "  ✗ a check", `    expected token ${secret}`, `Error: at ${secret}`]);
+  const [rec] = flakeRecordsOf(failed, log, [passed, failed]);
+  assert.equal(rec.rerunPassed, false);
+  const report = renderFlakeReport([rec, { ...rec, runId: 21 }], 3);
+  assert.ok(report.includes("## s › a check"), report);
+  assert.ok(!report.includes(secret) && !report.includes("expected token"), report);
 });

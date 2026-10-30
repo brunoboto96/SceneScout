@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving once its controls are read</title>
+  </head>
+  <body>
+    <main>
+      <h1>Leaving after read</h1>
+      <form action="/echo"><button type="submit">Send</button></form>
+    </main>
+    <script>
+      // Moves itself on, to a page the fixture server holds back (held=1), the first time its forms are listed: a
+      // page that starts a navigation of its own once its controls have been read, before the rest of it is.
+      const forms = Object.getOwnPropertyDescriptor(Document.prototype, "forms").get;
+      let left = false;
+      Object.defineProperty(document, "forms", {
+        get() {
+          if (!left) {
+            left = true;
+            location.href = "/page2.html?held=1";
+          }
+          return forms.call(document);
+        },
+      });
+    </script>
+  </body>
+</html>

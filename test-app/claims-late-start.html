@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Entries</title>
+  </head>
+  <body>
+    <!--
+      A save the server refuses, after which the page moves on to a page the
+      server holds back for longer than the engine waits for an action to
+      settle. "Save and go" lands on claims-late-done.html, which says "Saved";
+      "Save and go (honest)" lands on claims-late-error.html, which says the
+      save failed. The two differ only in what the late page says.
+    -->
+    <h1>Entry 4</h1>
+    <button data-testid="entry-save-late-button" onclick="saveAndGo('claims-late-done')">Save and go late</button>
+    <button data-testid="entry-save-late-honest-button" onclick="saveAndGo('claims-late-error')">Save and go late honest</button>
+    <script>
+      async function saveAndGo(page) {
+        await fetch("/api/refuse/500?late=" + page, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {});
+        location.href = "/late/" + page + ".html";
+      }
+    </script>
+  </body>
+</html>

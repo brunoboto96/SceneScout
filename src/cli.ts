@@ -198,8 +198,10 @@ Usage:
   scenescout ci <url>               An exploratory run with no person present: a model reached through its API
                                     drives the tools by the SceneScout method and the run ends in the report.
                                     It reports and never gates. The key is read from ANTHROPIC_API_KEY or
-                                    OPENAI_API_KEY only. Writes report.md, summary.md, ci.json and ci.sarif.
+                                    OPENAI_API_KEY (or a cloud's own variable) only. Writes report.md, summary.md,
+                                    ci.json and ci.sarif.
                                     (--provider anthropic|openai: needed only when both keys are set;
+                                      bedrock|vertex|azure: a cloud's own endpoint, only when named, with --model;
                                      --model id (default claude-sonnet-5 / gpt-6-luna); --effort none|low|medium|
                                       high|xhigh|max (default low; none is OpenAI only); --base-url https://…/v1 for
                                       another endpoint that implements the same API;
