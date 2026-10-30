@@ -123,7 +123,8 @@ function packageVersion(): string {
   return (JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version: string }).version;
 }
 
-function usage(exitCode = 1): never {
+/** Print the usage and set the exit code; the process ends once stdout has drained, since exiting here cuts a piped read short. */
+function usage(exitCode = 1): void {
   // The version beside the name: an old global install is otherwise easy to mistake for this one.
   console.log(`SceneScout ${packageVersion()} — AI exploratory UI testing engine (MCP)
 
@@ -313,7 +314,7 @@ Usage:
                                     of its page, and a live stream you can switch on per session
                                     (--no-open to print the address only)
 `);
-  process.exit(exitCode);
+  process.exitCode = exitCode;
 }
 
 /**
@@ -1053,7 +1054,7 @@ try {
     },
     commands: {
       scan: (a) => {
-        if (!a[0]) usage();
+        if (!a[0]) return usage();
         console.log(formatScan(scanProject(a[0])));
       },
       serve: async () => {
