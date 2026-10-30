@@ -105,11 +105,15 @@ const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; p
   },
   {
     kind: "secret",
-    whole: ["token", "bearer", "sessionid", "accesskey", "sshkey", "signingkey", "licensekey", "licencekey"],
-    suffix: ["secret", "apikey"],
+    whole: ["token", "bearer", "sessionid", "accesskey", "sshkey", "signingkey", "licensekey", "licencekey", "iban", "ssn"],
+    suffix: ["secret", "apikey", "accountnumber", "routingnumber"],
     phrases: [
       ...["api key", "recovery code", "backup code", "private key", "seed phrase", "recovery phrase", "security answer"],
       ...["access key", "ssh key", "signing key", "license key", "licence key", "session id"],
+      // Answers a person gives to prove who they are, and the numbers that identify their money or their state record.
+      ...["security question answer", "answer to security question", "secret answer", "memorable information", "memorable date"],
+      ...["memorable place", "maiden name", "recovery key", "master key", "encryption key"],
+      ...["account number", "routing number", "sort code", "social security number", "national insurance number"],
     ],
   },
 ];

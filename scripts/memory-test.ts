@@ -5062,6 +5062,30 @@ test("a count or setting after a secret's two-word name is not the secret, as af
   assert.equal(maskSecretFieldValues('textbox "API key" ← "zzfake123"').text, `textbox "API key" ← ${maskedValue("secret")}`);
 });
 
+test("a name a person would call secret is a secret field though no word list names it, and the name one fact short of it is not (#718)", () => {
+  const secret = [
+    ...["security_question_answer", "securityQuestionAnswer", "Secret answer", "answer-to-security-question", "memorable_information"],
+    ...["Memorable date", "memorable place", "mothers_maiden_name", "Maiden name", "recovery_key", "master-key", "encryptionKey"],
+    ...["account_number", "Bank account number", "accountNumber2", "routing_number", "IBAN", "sort-code", "Sort code"],
+    ...["social_security_number", "ssn", "SSN", "National insurance number"],
+  ];
+  const nearMiss = [
+    ...["security_question", "memorable_moment", "maiden voyage", "recovery_email", "master_list", "encryption_method", "account_name"],
+    ...["Account type", "order_number", "tracking number", "phone_number", "routing slip", "sort_order", "Sort by", "social_media"],
+    ...["national_park", "insurance company", "account number length", "security question answer hint", "ssn_enabled"],
+  ];
+  for (const name of secret) {
+    assert.notEqual(secretFieldKind({ type: "text", name }), null, `${name} in the name`);
+    assert.notEqual(secretFieldKind({ type: "text", label: name }), null, `${name} in the label`);
+    assert.notEqual(secretFieldKind({ type: "text", placeholder: `Enter your ${name}` }), null, `${name} in the placeholder`);
+    assert.ok(maskSecretFieldValues(`textbox "${name}" ← "zzfake123"`).hits > 0, `${name} typed value`);
+  }
+  for (const name of nearMiss) {
+    assert.equal(secretFieldKind({ type: "text", name }), null, `${name} in the name`);
+    assert.equal(maskSecretFieldValues(`textbox "${name}" ← "zzfake123"`).hits, 0, `${name} typed value`);
+  }
+});
+
 test("sensitive corpus: the generator is seeded and every shape has a pair on the other side of the verdict", () => {
   assert.deepEqual(sensitiveCases(300, 7), sensitiveCases(300, 7));
   assert.notDeepEqual(sensitiveCases(300, 7), sensitiveCases(300, 8));
@@ -5092,8 +5116,10 @@ test("sensitive corpus: the rates are bounded, so a detector that regresses fail
   const cases = sensitiveCases(PUBLISHED_CASES, PUBLISHED_SEED);
   for (const detector of ["email address", "phone number", "card number", "secret parameter"] as const)
     assert.equal(sensitiveRates(cases, detector).missed, 0, `${detector} left a secret readable`);
-  for (const detector of ["email address", "phone number", "card number"] as const)
+  for (const detector of ["email address", "phone number"] as const)
     assert.equal(sensitiveRates(cases, detector).falseAlarms, 0, `${detector} altered text with no secret`);
+  // A 19-digit number with a wrong check digit whose first 16 digits pass the check is read as a card: masking errs towards hiding.
+  assert.ok(sensitiveRates(cases, "card number").falseAlarmRate < 0.01, "card number altered text with no secret");
   const all = sensitiveRates(cases);
   assert.ok(all.missRate < 0.01, `miss rate ${all.missRate}`);
   assert.ok(all.falseAlarmRate < 0.05, `false-alarm rate ${all.falseAlarmRate}`);

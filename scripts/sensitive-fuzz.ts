@@ -92,6 +92,45 @@ const SECRET_NAMES: ReadonlyArray<readonly string[]> = [
   ["recovery", "code"],
   ["private", "key"],
 ];
+// Names a person would call secret that the detector's lists do not carry: answers to account questions, memorable
+// words, bank identifiers. Written from the requirement, as above; where the detector reads them as secret, it is
+// because it was widened to (#718), not because a case was drawn from its lists.
+const OUTSIDE_THE_LISTS: ReadonlyArray<readonly string[]> = [
+  ["security", "question", "answer"],
+  ["secret", "answer"],
+  ["answer", "to", "security", "question"],
+  ["memorable", "information"],
+  ["memorable", "date"],
+  ["memorable", "place"],
+  ["mothers", "maiden", "name"],
+  ["maiden", "name"],
+  ["recovery", "key"],
+  ["master", "key"],
+  ["encryption", "key"],
+  ["account", "number"],
+  ["bank", "account", "number"],
+  ["routing", "number"],
+  ["iban"],
+  ["sort", "code"],
+  ["social", "security", "number"],
+  ["ssn"],
+  ["national", "insurance", "number"],
+];
+// The same words with the one fact that makes them a secret taken away or changed.
+const NEAR_THE_LISTS = [
+  ...["security question", "memorable moment", "memorable quote", "maiden voyage", "recovery email", "recovery options", "master list"],
+  ...["encryption method", "account name", "account type", "account balance", "order number", "tracking number", "phone number"],
+  ...["routing slip", "sort order", "sort by", "social media", "social handle", "national park", "insurance company", "answer count"],
+];
+/** A secret that is written as the question it answers: no word of it says secret, so it stays unread. */
+const QUESTION_LABELS = [
+  "What was the name of your first pet?",
+  "Name of your first school",
+  "Your favourite teacher",
+  "City where you were born",
+  "Your childhood nickname",
+];
+const ORDINARY_QUESTIONS = ["How did you hear about us?", "What can we help with?", "Name of your company", "Your favourite colour", "City where you work"];
 /** Names in other languages, written plain and accented. */
 const SECRET_LABELS_OTHER_LANGUAGES = [
   "Passwort",
@@ -244,6 +283,7 @@ export function sensitiveCases(n = 3000, seed = 538): SensitiveCase[] {
     hidden,
   });
 
+  const outsideField = (value: string, where: "name" | "id" | "label" | "placeholder"): SecretFieldFacts => ({ type: "text", [where]: value });
   const fieldCases: Array<() => SensitiveCase> = [
     () => field("type=password", true, { type: "password", name: ordinaryName() }),
     () => field("password shown by a toggle", true, { type: "text", name: ordinaryName(), wasPassword: true }),
@@ -264,6 +304,20 @@ export function sensitiveCases(n = 3000, seed = 538): SensitiveCase[] {
     () => field("autocomplete for another field", false, { type: "text", autocomplete: pick(AUTOCOMPLETE_ORDINARY), name: ordinaryName() }),
     () => field("field name that starts like a secret", false, { type: "text", name: styled(pick(LOOKALIKE_NAMES).split(" "), style()) }),
     () => field("setting about a secret", false, { type: "text", name: styled(pick(ABOUT_A_SECRET).split(" "), style()) }),
+    () =>
+      field(
+        "secret named outside the detector's lists",
+        true,
+        outsideField(styled(pick(OUTSIDE_THE_LISTS), style()), pick(["name", "id", "label", "placeholder"])),
+      ),
+    () => field("secret written as the question it answers", true, { type: "text", label: pick(QUESTION_LABELS) }),
+    () =>
+      field(
+        "name one fact short of a secret",
+        false,
+        outsideField(styled(pick(NEAR_THE_LISTS).split(" "), style()), pick(["name", "id", "label", "placeholder"])),
+      ),
+    () => field("ordinary question", false, { type: "text", label: pick(ORDINARY_QUESTIONS) }),
     () => field("code that is not a sign-in code", false, { type: "text", label: pick(OTHER_CODES) }),
     () => field("single-character box that is not a code", false, { type: pick(["checkbox", "radio", "email"]), maxLength: 1, name: ordinaryName() }),
   ];
@@ -342,6 +396,18 @@ export function sensitiveCases(n = 3000, seed = 538): SensitiveCase[] {
       const value = fakeValue(r);
       return text("typed value", "value with an escaped quote", true, `textbox "${cap(pick(["password", "pin", "token"]))}" ← "${value}\\"${value}"`, value);
     },
+    () => {
+      const value = fakeValue(r);
+      const label = styled(pick(OUTSIDE_THE_LISTS), pick(["title", "spaced"]));
+      return text("typed value", "typed value of a secret named outside the lists", true, `textbox "${label}" ← "${value}"`, value);
+    },
+    () =>
+      text(
+        "typed value",
+        "typed value of a name one fact short of a secret",
+        false,
+        `textbox "${styled(pick(NEAR_THE_LISTS).split(" "), "title")}" ← "${fakeValue(r)}"`,
+      ),
     () => text("typed value", "ordinary field's typed value", false, `textbox "${cap(pick(ORDINARY_NAMES))}" ← "${fakeValue(r)}"`),
     () => text("typed value", "field about a secret", false, `textbox "${cap(pick(ABOUT_A_SECRET))}" ← "${fakeValue(r)}"`),
     () => text("typed value", "field that starts like a secret", false, `textbox "${cap(pick(LOOKALIKE_NAMES))}" ← "${fakeValue(r)}"`),
@@ -563,6 +629,12 @@ const SHAPE_NOTES: Record<string, string> = {
   "secret in the label": 'a label reading "Verification code"',
   "secret in the placeholder": 'placeholder "Enter your PIN"',
   "label in another language": '"Passwort", "Contraseña", "Mot de passe", "Пароль"',
+  "secret named outside the detector's lists": '`security_question_answer`, "Memorable information", `account-number`, `iban`',
+  "secret written as the question it answers": '"What was the name of your first pet?"',
+  "name one fact short of a secret": '`security_question`, "Account name", "Order number", "Sort order"',
+  "ordinary question": '"How did you hear about us?"',
+  "typed value of a secret named outside the lists": '`textbox "Memorable information" ← "…"`',
+  "typed value of a name one fact short of a secret": '`textbox "Account name" ← "…"`',
   "plain text field": '`name="username"`, "Search", "City"',
   "autocomplete for another field": '`autocomplete="email"`, `given-name`, `off`',
   "field name that starts like a secret": '`passwordless`, `secretary`, `spinner`, `tokenizer`, "Boarding pass"',
