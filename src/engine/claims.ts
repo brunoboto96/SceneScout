@@ -78,6 +78,16 @@ export function isRefused(req: WatchedRequest): boolean {
 }
 
 /**
+ * Whether the action's requests are to be kept until the page that answers them has landed: one of them was refused
+ * (or failed) and the page is on its way to another document. Judged now, that page is not the answer to the write, and
+ * Chromium holds a read of it until it lands (#674); judged once it landed, a success page that arrived after the
+ * settle wait is still compared with the refused write (#707).
+ */
+export function holdForLandedPage(requests: readonly WatchedRequest[], navigating: boolean): boolean {
+  return navigating && requests.some((r) => r.status === null || r.status >= 400);
+}
+
+/**
  * Phrases that assert there is nothing to show.
  *
  * Deliberately narrow: these are the stock empty-state sentences, not any

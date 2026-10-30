@@ -35,6 +35,7 @@ import {
   quietAnswer,
   saidSince,
   type WatchedRequest,
+  holdForLandedPage,
 } from "./claims.js";
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
@@ -1536,8 +1537,13 @@ export class BrowserEngine {
     const page = this.page;
     if (!page || page.isClosed() || requests.length === 0) return;
     if (!requests.some((r) => r.status === null || r.status >= 400)) return;
-    // A page on its way elsewhere has no DOM worth asking, and Chromium holds the question until it lands (#674).
-    if (this.requests.navigating(page.mainFrame())) return;
+    // A page on its way elsewhere is not asked until it lands (#674); the writes are kept for it, within the page-load limit (#707).
+    if (
+      holdForLandedPage(requests, this.requests.navigating(page.mainFrame())) &&
+      (await this.ownNavigationPending(page, this.limits.navMs, this.actionStartedAt)) !== null
+    )
+      return;
+    if (page.isClosed()) return;
     const url = page.url();
     let state: PageState;
     try {

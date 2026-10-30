@@ -216,6 +216,27 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
       check(`..."${label}": the page's own beacon is never the one paired`, !lie.some((v) => v.detail.includes("nav=beacon")), JSON.stringify(lie));
     }
 
+    // ── a success page that arrives after the settle wait ──────────────────
+    // The same refused save and the same late move; the page that lands says
+    // "Saved" or admits the failure.
+    for (const [label, lies, name] of [
+      ["Save and go late", true, 'a refused save that moves to a page saying "Saved" after the settle wait is a false_success'],
+      ["Save and go late honest", false, "the same late page admitting the failure is not"],
+    ] as const) {
+      await engine.navigate("/claims-late-start.html");
+      const lateSnap = await engine.snapshot(true);
+      const ref = new RegExp(`(e\\d+) button "${label}"`).exec(lateSnap)?.[1];
+      if (!ref) throw new Error(`"${label}" not in /claims-late-start.html: ${lateSnap.slice(0, 400)}`);
+      const lateBefore = engine.oracleLog.all.length;
+      const out = await engine.click(ref);
+      const lateFound = engine.oracleLog.all.slice(lateBefore).filter((v) => v.kind === "false_success");
+      check(
+        name,
+        lies ? lateFound.some((v) => /Saved successfully/.test(v.detail)) : lateFound.length === 0,
+        `${JSON.stringify(lateFound)} ${out.slice(0, 500)}`,
+      );
+    }
+
     // ── a control that shows a refused change as kept ──────────────────────
     // The same radio and the same refused save; one page puts the old choice back.
     for (const [route, lies, name] of [
