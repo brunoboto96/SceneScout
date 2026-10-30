@@ -3368,6 +3368,9 @@ export class BrowserEngine {
     const frame = await this.recordFrame(action);
     this.logAction({ action, target, url, ...(frame ? { frame } : await this.holdFrame()) });
     await this.scanPage(click ? () => this.rankRouteCancellations(click, url) : undefined);
+    // The claim scan can wait for a page that lands late (#713): one that landed on another origin is taken back too.
+    const late = await this.originFence(page, action, target, true);
+    if (late !== null) return late;
     this.traceStep(url, `${action}: done`);
     const violations = this.oracles.drain();
     const mutations = this.drainMutations() + this.drainBlocked() + this.drainRefresh() + this.drainCreated();

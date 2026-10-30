@@ -12,13 +12,18 @@
       "Save and go (honest)" lands on claims-late-error.html, which says the
       save failed. The two differ only in what the late page says. "Save and
       go elsewhere" lands on the same success page served by the origin named
-      in ?elsewhere=, another site than this one.
+      by the port in ?elsewhere=, another site than this one.
     -->
     <h1>Entry 4</h1>
     <button data-testid="entry-save-late-button" onclick="saveAndGo('claims-late-done')">Save and go late</button>
     <button data-testid="entry-save-late-honest-button" onclick="saveAndGo('claims-late-error')">Save and go late honest</button>
-    <button data-testid="entry-save-late-elsewhere-button" onclick="saveAndGo('claims-late-done', new URLSearchParams(location.search).get('elsewhere') || '')">Save and go late elsewhere</button>
+    <button data-testid="entry-save-late-elsewhere-button" onclick="saveAndGo('claims-late-done', elsewhere())">Save and go late elsewhere</button>
     <script>
+      // Only a port: the other origin is this loopback host's, so the query cannot send the page anywhere else.
+      function elsewhere() {
+        const port = Number.parseInt(new URLSearchParams(location.search).get("elsewhere") ?? "", 10);
+        return port > 0 && port < 65536 ? "http://127.0.0.1:" + port : "";
+      }
       async function saveAndGo(page, origin = "") {
         await fetch("/api/refuse/500?late=" + (origin ? "elsewhere" : page), { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {});
         location.href = origin + "/late/" + page + ".html";

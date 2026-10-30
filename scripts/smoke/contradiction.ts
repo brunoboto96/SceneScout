@@ -294,17 +294,30 @@ export async function run({ baseUrl, foreignBaseUrl, stats }: SmokeContext): Pro
     }
 
     // The same late success page, served by another origin: not the app's page, so not judged for a claim.
-    await engine.navigate(`/claims-late-start.html?elsewhere=${encodeURIComponent(foreignBaseUrl)}`);
+    await engine.navigate(`/claims-late-start.html?elsewhere=${new URL(foreignBaseUrl).port}`);
     const elsewhereSnap = await engine.snapshot(true);
     const elsewhereRef = /(e\d+) button "Save and go late elsewhere"/.exec(elsewhereSnap)?.[1];
     if (!elsewhereRef) throw new Error(`"Save and go late elsewhere" not in /claims-late-start.html: ${elsewhereSnap.slice(0, 400)}`);
     const elsewhereBefore = engine.oracleLog.all.length;
     const elsewhereOut = await engine.click(elsewhereRef);
     const elsewhereFound = engine.oracleLog.all.slice(elsewhereBefore).filter((v) => v.kind === "false_success");
+    // A refused request already reported is not reported again (once per request a session), so a fixture reusing the
+    // earlier late page's request would pass the check below with no origin rule at all.
+    const earlierRefusals = new Set(engine.oracleLog.all.slice(0, elsewhereBefore).map((v) => v.detail));
+    check(
+      "the save that goes elsewhere is refused on a request no earlier check reported",
+      engine.oracleLog.all.slice(elsewhereBefore).some((v) => v.kind === "http_error" && /\/api\/refuse\/500/.test(v.detail) && !earlierRefusals.has(v.detail)),
+      JSON.stringify(engine.oracleLog.all.slice(elsewhereBefore).map((v) => v.detail)),
+    );
     check(
       'a refused save that moves to a page on another origin saying "Saved" after the settle wait is not a false_success',
       elsewhereFound.length === 0,
       `${JSON.stringify(elsewhereFound)} ${elsewhereOut.slice(0, 500)}`,
+    );
+    check(
+      "...and the origin fence takes that late page back to the app, and the click says so",
+      new URL(engine.currentUrl).origin === new URL(baseUrl).origin && /Navigated off-origin and was bounced back/.test(elsewhereOut),
+      `${engine.currentUrl} ${elsewhereOut.slice(0, 500)}`,
     );
 
     // ── a page too busy to be read ──────────────────────────────────────────
