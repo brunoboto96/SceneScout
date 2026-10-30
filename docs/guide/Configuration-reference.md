@@ -384,7 +384,7 @@ The presets:
 | `AWS_REGION` | `ci --provider bedrock` | The region in Bedrock's address, e.g. `us-east-1`; `AWS_DEFAULT_REGION` is read when this is unset. Not needed with `--base-url` |
 | `GOOGLE_OAUTH_ACCESS_TOKEN` | `ci --provider vertex` | A Google OAuth access token, sent as a bearer token to Vertex AI only |
 | `GOOGLE_CLOUD_PROJECT` | `ci --provider vertex` | The project in Vertex AI's address. Not needed with `--base-url` |
-| `GOOGLE_CLOUD_LOCATION` | `ci --provider vertex` | The region in Vertex AI's address, e.g. `us-east5`, or `global`. Not needed with `--base-url` |
+| `GOOGLE_CLOUD_LOCATION` | `ci --provider vertex` | Where Vertex AI serves the model: `global`, the multi-region `us` or `eu`, or a region such as `us-east5`. Not needed with `--base-url` |
 | `AZURE_OPENAI_API_KEY` | `ci --provider azure` | The Azure OpenAI resource's key, sent in the `api-key` header to that resource only |
 | `AZURE_OPENAI_ENDPOINT` | `ci --provider azure` | The resource's https address, e.g. `https://my-resource.openai.azure.com`. Not needed with `--base-url` |
 | `SCENESCOUT_LOGIN_USERNAME` | `login --script` | Required: the test user's username or email |

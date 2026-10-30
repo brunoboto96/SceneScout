@@ -78,8 +78,14 @@ function cloudBaseUrl(
     const location = read("GOOGLE_CLOUD_LOCATION");
     if (!CLOUD_PROJECT.test(project)) return { ok: false, error: "--provider vertex needs GOOGLE_CLOUD_PROJECT set to a project id, or --base-url" };
     if (!CLOUD_REGION.test(location))
-      return { ok: false, error: "--provider vertex needs GOOGLE_CLOUD_LOCATION set to a region such as us-east5, or global, or --base-url" };
-    const host = location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`;
+      return { ok: false, error: "--provider vertex needs GOOGLE_CLOUD_LOCATION set to global, us, eu or a region such as us-east5, or --base-url" };
+    // Global, the two multi-regions, and a single region each have their own host.
+    const host =
+      location === "global"
+        ? "aiplatform.googleapis.com"
+        : location === "us" || location === "eu"
+          ? `aiplatform.${location}.rep.googleapis.com`
+          : `${location}-aiplatform.googleapis.com`;
     return { ok: true, url: `https://${host}/v1/projects/${project}/locations/${location}/publishers/anthropic/models` };
   }
   const endpoint = read("AZURE_OPENAI_ENDPOINT");

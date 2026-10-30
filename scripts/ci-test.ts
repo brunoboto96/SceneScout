@@ -4748,6 +4748,12 @@ const VERTEX_KEY = "ya29.fake-vertex-token-0123456789abcdef";
 const AZURE_KEY = "fake-azure-key-0123456789abcdef";
 const BEDROCK_MODEL = "us.anthropic.stand-in-model-v1:0";
 
+const CLAUDE_OK = {
+  content: [{ type: "tool_use", id: "tu_1", name: "scout_crawl", input: {} }],
+  stop_reason: "tool_use",
+  usage: { input_tokens: 7, output_tokens: 3 },
+};
+
 test("cloud providers: named with --provider, never chosen from a key that happens to be in the environment", () => {
   const u = "http://127.0.0.1:3000";
   for (const name of ["bedrock", "vertex", "azure"]) {
@@ -4805,6 +4811,15 @@ test("cloud providers: the address each one calls comes from the environment", (
     { provider: "vertex", model: "claude-x" },
   );
   assert.ok(global.ok && global.resolved.baseUrl.startsWith("https://aiplatform.googleapis.com/v1/projects/demo-project/locations/global/"));
+  // The multi-regions have their own host, not "<location>-aiplatform" (platform.claude.com, Claude Models on Google Cloud: endpoint types).
+  for (const multi of ["us", "eu"]) {
+    const r = detectProvider(
+      { GOOGLE_OAUTH_ACCESS_TOKEN: VERTEX_KEY, GOOGLE_CLOUD_PROJECT: "demo-project", GOOGLE_CLOUD_LOCATION: multi },
+      { provider: "vertex", model: "claude-x" },
+    );
+    assert.ok(r.ok);
+    assert.equal(r.resolved.baseUrl, `https://aiplatform.${multi}.rep.googleapis.com/v1/projects/demo-project/locations/${multi}/publishers/anthropic/models`);
+  }
   const azure = detectProvider(
     { AZURE_OPENAI_API_KEY: AZURE_KEY, AZURE_OPENAI_ENDPOINT: "https://resource.openai.azure.com/" },
     { provider: "azure", model: "my-deployment" },
@@ -4829,7 +4844,17 @@ test("cloud providers: the request shapes are each cloud's own", () => {
   assert.equal(bedrock.headers["x-api-key"], undefined);
   assert.equal((bedrock.body as any).anthropic_version, "bedrock-2023-05-31");
   assert.equal((bedrock.body as any).model, undefined, "the model is in the path");
-  assert.deepEqual((bedrock.body as any).messages, [{ role: "user", content: "KICKOFF" }]);
+  // InvokeModel refuses a top-level cache_control with a 400, so the breakpoint is an explicit one on the last user block.
+  assert.equal("cache_control" in (bedrock.body as any), false, "no top-level cache_control on Bedrock");
+  assert.deepEqual((bedrock.body as any).messages, [{ role: "user", content: [{ type: "text", text: "KICKOFF", cache_control: { type: "ephemeral" } }] }]);
+  assert.deepEqual((bedrock.body as any).system[0].cache_control, { type: "ephemeral" });
+  const later = new BedrockConversation({ ...O, baseUrl: "https://b.example.com", model: "m" }, "KICKOFF");
+  later.accept(CLAUDE_OK);
+  later.addResults([{ id: "tu_1", text: "R1", isError: false }]);
+  const laterBody = later.request(BEDROCK_KEY).body as any;
+  assert.deepEqual(laterBody.messages.at(-1).content, [{ type: "tool_result", tool_use_id: "tu_1", content: "R1", cache_control: { type: "ephemeral" } }]);
+  assert.equal(laterBody.messages[0].content, "KICKOFF", "only the last block is marked");
+  assert.equal(JSON.stringify(later.messages).includes("cache_control"), false, "the kept conversation is not changed");
 
   const vertex = new VertexConversation(
     { ...O, baseUrl: "https://v.example.com/v1/projects/p/locations/l/publishers/anthropic/models", model: "claude-x@20250101" },
@@ -4839,6 +4864,7 @@ test("cloud providers: the request shapes are each cloud's own", () => {
   assert.equal(vertex.headers.authorization, `Bearer ${VERTEX_KEY}`);
   assert.equal((vertex.body as any).anthropic_version, "vertex-2023-10-16");
   assert.equal((vertex.body as any).model, undefined);
+  assert.deepEqual((vertex.body as any).cache_control, { type: "ephemeral" }, "Vertex takes automatic caching");
 
   const azure = new AzureOpenAIConversation({ ...O, baseUrl: "https://r.openai.azure.com/openai/v1", model: "my-deployment" }, "K").request(AZURE_KEY);
   assert.equal(azure.url, "https://r.openai.azure.com/openai/v1/responses");
@@ -4872,12 +4898,6 @@ async function cloudStandIn(statuses: number[], ok: unknown, quoteKey?: string):
   return { base: `http://127.0.0.1:${port}`, seen, close: () => new Promise((r) => server.close(() => r())) };
 }
 
-const CLAUDE_OK = {
-  content: [{ type: "tool_use", id: "tu_1", name: "scout_crawl", input: {} }],
-  stop_reason: "tool_use",
-  usage: { input_tokens: 7, output_tokens: 3 },
-};
-
 test("cloud providers: Bedrock and Vertex over HTTP carry the token, a Claude body and no model, and read a tool call back", async () => {
   const cases: Array<[ProviderName, string, string, RegExp, string]> = [
     ["bedrock", BEDROCK_KEY, BEDROCK_MODEL, /^\/model\/us\.anthropic\.stand-in-model-v1%3A0\/invoke$/, "bedrock-2023-05-31"],
@@ -4895,6 +4915,7 @@ test("cloud providers: Bedrock and Vertex over HTTP carry the token, a Claude bo
       assert.equal(api.seen[0].headers["x-api-key"], undefined);
       assert.equal(api.seen[0].body.anthropic_version, version);
       assert.equal(api.seen[0].body.model, undefined);
+      assert.equal("cache_control" in api.seen[0].body, provider === "vertex", provider);
       assert.ok(!JSON.stringify(api.seen[0].body).includes(key), "the key is in a header, never the body");
     } finally {
       await api.close();

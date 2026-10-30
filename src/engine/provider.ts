@@ -166,14 +166,28 @@ function cloudClaudeBody(req: HttpRequest, anthropicVersion: string): Record<str
   return { anthropic_version: anthropicVersion, ...rest };
 }
 
-/** Claude on Amazon Bedrock: the Messages body, InvokeModel, an API key as a bearer token (AWS_BEARER_TOKEN_BEDROCK). */
+/** The conversation with its last user block marked as a cache breakpoint, for a host that refuses the top-level `cache_control`. */
+function withLastBreakpoint(messages: AnthropicConversation["messages"]): AnthropicConversation["messages"] {
+  const last = messages.at(-1);
+  if (!last || last.role !== "user") return messages;
+  const blocks = typeof last.content === "string" ? [{ type: "text", text: last.content }] : Array.isArray(last.content) ? [...last.content] : [];
+  const tail = obj(blocks.at(-1));
+  if (!tail) return messages;
+  blocks[blocks.length - 1] = { ...tail, cache_control: { type: "ephemeral" } };
+  return [...messages.slice(0, -1), { role: "user", content: blocks }];
+}
+
+/**
+ * Claude on Amazon Bedrock: the Messages body, InvokeModel, an API key as a bearer token (AWS_BEARER_TOKEN_BEDROCK).
+ * InvokeModel answers a top-level `cache_control` with a 400, so the conversation's breakpoint is set on its last block instead.
+ */
 export class BedrockConversation extends AnthropicConversation {
   override request(key: string): HttpRequest {
-    const base = super.request(key);
+    const { cache_control: _automatic, ...body } = cloudClaudeBody(super.request(key), "bedrock-2023-05-31");
     return {
       url: `${this.o.baseUrl}/model/${encodeURIComponent(this.o.model)}/invoke`,
       headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${key}` },
-      body: cloudClaudeBody(base, "bedrock-2023-05-31"),
+      body: { ...body, messages: withLastBreakpoint(this.messages) },
     };
   }
 }
