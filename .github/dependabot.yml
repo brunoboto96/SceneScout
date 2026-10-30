@@ -23,7 +23,7 @@ updates:
         update-types: [minor, patch]
     ignore:
       # Pinned on purpose — see "Pinned dependencies" in AGENTS.md.
-      # TypeScript 7 breaks this project's module resolution.
+      # TypeScript 7 has no stable JavaScript compiler API, which two test suites use.
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
       # Types must describe the OLDEST supported Node (engines: >=22.19.0), or
