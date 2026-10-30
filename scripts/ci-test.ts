@@ -5134,7 +5134,7 @@ test("flaky checks: Node 20's TAP failure names the same check as the spec repor
 test("flaky checks: a failure after an earlier attempt passed is not a later pass, and the report carries no log text beyond check names", () => {
   const passed = flakeJob({ runId: 20, attempt: 1, conclusion: "success" });
   const failed = flakeJob({ runId: 20, attempt: 2 });
-  const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+  const secret = ["ghp", "x".repeat(36)].join("_");
   const log = stamp(["━━ s ━━", "  ✗ a check", `    expected token ${secret}`, `Error: at ${secret}`]);
   const [rec] = flakeRecordsOf(failed, log, [passed, failed]);
   assert.equal(rec.rerunPassed, false);
