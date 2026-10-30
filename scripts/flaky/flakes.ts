@@ -114,12 +114,14 @@ export function parseJobLog(text: string): ParsedLog {
       }
       continue;
     }
-    // node:test's spec reporter marks a failed test with ✖ and a duration.
+    // node:test's spec reporter marks a failed test with ✖ and a duration; Node 20 prints TAP when not on a terminal.
     const failed = /^\s*✖ (.+?)(?: \(\d+(?:\.\d+)?ms\))?$/.exec(line);
     if (failed && !suite) {
       const name = normalizeCheck(failed[1]);
       if (!/^failing tests:?$/i.test(name)) add("unit suites", name);
     }
+    const notOk = /^\s*not ok \d+ - (.+?)(?: # (TODO|SKIP)\b.*)?$/.exec(line);
+    if (notOk && !notOk[2] && !suite) add("unit suites", normalizeCheck(notOk[1].replace(/\\#/g, "#")));
   }
   return { failures, lastSuite, lastCheck };
 }

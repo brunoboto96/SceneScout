@@ -5112,3 +5112,33 @@ test("flaky-checks.yml: reads the Actions history with read-only permissions and
     "no step runs the report",
   );
 });
+
+test("flaky checks: Node 20's TAP failure names the same check as the spec reporter's ✖; a TODO and a pass name none", () => {
+  const name = "the reference lists exactly the environment variables the code reads";
+  const tap = stamp([
+    "TAP version 13",
+    `not ok 19 - ${name}`,
+    "  ---",
+    "  duration_ms: 1.2",
+    "  ...",
+    "ok 20 - another",
+    "not ok 21 - pending \\# later # TODO not yet",
+    "# fail 1",
+  ]);
+  const spec = stamp([`✖ ${name} (1.25ms)`, "✖ failing tests:", `✖ ${name} (1.25ms)`]);
+  assert.deepEqual(parseFlakeLog(tap).failures, [{ suite: "unit suites", check: name }]);
+  assert.deepEqual(parseFlakeLog(spec).failures, parseFlakeLog(tap).failures);
+  assert.deepEqual(parseFlakeLog(tap.replace("not ok 19", "ok 19")).failures, []);
+});
+
+test("flaky checks: a failure after an earlier attempt passed is not a later pass, and the report carries no log text beyond check names", () => {
+  const passed = flakeJob({ runId: 20, attempt: 1, conclusion: "success" });
+  const failed = flakeJob({ runId: 20, attempt: 2 });
+  const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+  const log = stamp(["━━ s ━━", "  ✗ a check", `    expected token ${secret}`, `Error: at ${secret}`]);
+  const [rec] = flakeRecordsOf(failed, log, [passed, failed]);
+  assert.equal(rec.rerunPassed, false);
+  const report = renderFlakeReport([rec, { ...rec, runId: 21 }], 3);
+  assert.ok(report.includes("## s › a check"), report);
+  assert.ok(!report.includes(secret) && !report.includes("expected token"), report);
+});

@@ -2,8 +2,8 @@
 # one of the last runs on main, with the platforms, browsers, shards and commits
 # they failed on, and a job that ran to its limit as a stall in the suite it
 # stopped in. The Actions history is the record, so nothing is stored; the
-# report goes to this run's summary. How to read it: docs/ci.md ("Recurring CI
-# failures"). The rules are in scripts/flaky/flakes.ts, held by ci-test.
+# report goes to this run's summary. How to read it: CONTRIBUTING.md ("A check
+# that keeps failing"). The rules are in scripts/flaky/flakes.ts, held by ci-test.
 name: flaky-checks
 
 on:

@@ -25,10 +25,11 @@ function boundedInt(text: string, name: string, min: number, max: number): numbe
   return n;
 }
 
-/** `gh api`, tried three times: the API answers 502 now and then. */
+/** `gh api`, tried four times with a growing pause: the API answers 502 in bursts, not once. */
 function gh(args: string[]): string {
   let last: unknown;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    if (attempt > 1) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000 * 2 ** (attempt - 2) + Math.floor(Math.random() * 1000));
     try {
       return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] });
     } catch (err) {
@@ -59,9 +60,14 @@ function main(): void {
   const records: FlakeRecord[] = [];
   let unreadable = 0;
   for (const run of runs) {
-    let listed: Record<string, any>[];
+    const listed: Record<string, any>[] = [];
     try {
-      listed = JSON.parse(gh(["api", `repos/${repo}/actions/runs/${run.id}/jobs?filter=all&per_page=100`])).jobs;
+      // Every attempt's jobs are listed, so a run re-tried a few times can pass one page.
+      for (let page = 1; page <= 10; page++) {
+        const body = JSON.parse(gh(["api", `repos/${repo}/actions/runs/${run.id}/jobs?filter=all&per_page=100&page=${page}`]));
+        listed.push(...body.jobs);
+        if (body.jobs.length < 100 || listed.length >= body.total_count) break;
+      }
     } catch (err) {
       unreadable += 1;
       console.error(`run ${run.id} left out, its jobs could not be read: ${err instanceof Error ? err.message : String(err)}`);
