@@ -19,7 +19,7 @@ import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
 import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
-import { bestEffort, heldRead, readWithin, settleWithin } from "../src/engine/best-effort.ts";
+import { bestEffort, heldRead, readWithin, ScanGate, settleWithin } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles, socketsLeft } from "./smoke/leaks.ts";
 import { busiestOwners, parseTasklist, parseTcpTable, readMachineSockets, socketLine, tcpStateCounts, type CommandRunner } from "../src/engine/tcp-table.ts";
@@ -1018,4 +1018,27 @@ test("readWithin gives the value, or undefined when the read rejects or has not 
   const started = Date.now();
   assert.equal(await readWithin(new Promise<number>(() => {}), 20), undefined);
   assert.ok(Date.now() - started < 1000, "a read that never answers is given up on at the bound");
+});
+
+// ScanGate: what a scan given up on may still add
+
+test("ScanGate keeps what a read returns while the scan is still wanted", async () => {
+  const gate = new ScanGate();
+  assert.deepEqual(await gate.keep(Promise.resolve(["hit"])), ["hit"]);
+  assert.equal(gate.closed, false);
+});
+
+test("ScanGate drops what a read returns after the scan was given up on, whether the read was slow or already settled", async () => {
+  const gate = new ScanGate();
+  let land: (hits: string[]) => void = () => {};
+  const late = gate.keep(new Promise<string[]>((resolve) => (land = resolve)));
+  gate.close();
+  land(["finding"]);
+  assert.equal(await late, undefined);
+  assert.equal(gate.closed, true);
+  assert.equal(await gate.keep(Promise.resolve(["finding"])), undefined);
+});
+
+test("ScanGate passes a failing read through to the caller", async () => {
+  await assert.rejects(new ScanGate().keep(Promise.reject(new Error("Execution context was destroyed"))), /Execution context/);
 });
