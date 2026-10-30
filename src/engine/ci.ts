@@ -25,21 +25,91 @@ import { fromRunLine, resolveFromRun, type FromRun, type FromRunMode, type RunRe
 
 // ── options ─────────────────────────────────────────────────────────────────
 
-export const PROVIDERS = ["anthropic", "openai"] as const;
+/** The providers whose key alone selects them: a run with one of these keys set needs no --provider. */
+export const DIRECT_PROVIDERS = ["anthropic", "openai"] as const;
+/**
+ * The three clouds' own endpoints. Chosen only with --provider: a cloud
+ * credential is often in a CI job's environment for other reasons, and it must
+ * not redirect a run. Each needs a model id (`--model`), since model ids and
+ * deployment names are the account's own.
+ */
+export const CLOUD_PROVIDERS = ["bedrock", "vertex", "azure"] as const;
+export const PROVIDERS = [...DIRECT_PROVIDERS, ...CLOUD_PROVIDERS] as const;
 export type ProviderName = (typeof PROVIDERS)[number];
+export type DirectProviderName = (typeof DIRECT_PROVIDERS)[number];
 
 /** Where each provider's key is read from. Nothing else is: no flag, no file, no input. */
-export const KEY_ENV: Record<ProviderName, string> = { anthropic: "ANTHROPIC_API_KEY", openai: "OPENAI_API_KEY" };
+export const KEY_ENV: Record<ProviderName, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  bedrock: "AWS_BEARER_TOKEN_BEDROCK",
+  vertex: "GOOGLE_OAUTH_ACCESS_TOKEN",
+  azure: "AZURE_OPENAI_API_KEY",
+};
 
-const DEFAULT_MODEL: Record<ProviderName, string> = { anthropic: "claude-sonnet-5", openai: "gpt-6-luna" };
+const DEFAULT_MODEL: Record<DirectProviderName, string> = { anthropic: "claude-sonnet-5", openai: "gpt-6-luna" };
 
 /** The API root each request path is joined to. `--base-url` replaces it, for a compatible endpoint. */
-const DEFAULT_BASE_URL: Record<ProviderName, string> = { anthropic: "https://api.anthropic.com/v1", openai: "https://api.openai.com/v1" };
+const DEFAULT_BASE_URL: Record<DirectProviderName, string> = { anthropic: "https://api.anthropic.com/v1", openai: "https://api.openai.com/v1" };
+
+/** The variables, besides the credentials in KEY_ENV, that build a cloud's address; the configuration reference lists each. */
+export const CLOUD_ADDRESS_ENV = ["AWS_REGION", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "AZURE_OPENAI_ENDPOINT"] as const;
+
+const isDirect = (p: ProviderName): p is DirectProviderName => (DIRECT_PROVIDERS as readonly string[]).includes(p);
+
+/** A cloud provider's address, read from the environment. Region and project names are held to DNS-label shapes: they become part of a host. */
+const CLOUD_REGION = /^[a-z0-9]+(?:-[a-z0-9]+){0,4}$/;
+const CLOUD_PROJECT = /^[a-z0-9][a-z0-9:._-]{2,99}$/;
+
+function cloudBaseUrl(
+  provider: (typeof CLOUD_PROVIDERS)[number],
+  env: Record<string, string | undefined>,
+): { ok: true; url: string } | { ok: false; error: string } {
+  const read = (name: string): string => (env[name] ?? "").trim();
+  if (provider === "bedrock") {
+    const name = read("AWS_REGION") !== "" ? "AWS_REGION" : "AWS_DEFAULT_REGION";
+    const region = read(name);
+    if (!CLOUD_REGION.test(region))
+      return { ok: false, error: `--provider bedrock needs AWS_REGION (or AWS_DEFAULT_REGION) set to a region such as us-east-1, or --base-url` };
+    return { ok: true, url: `https://bedrock-runtime.${region}.amazonaws.com` };
+  }
+  if (provider === "vertex") {
+    const project = read("GOOGLE_CLOUD_PROJECT");
+    const location = read("GOOGLE_CLOUD_LOCATION");
+    if (!CLOUD_PROJECT.test(project)) return { ok: false, error: "--provider vertex needs GOOGLE_CLOUD_PROJECT set to a project id, or --base-url" };
+    if (!CLOUD_REGION.test(location))
+      return { ok: false, error: "--provider vertex needs GOOGLE_CLOUD_LOCATION set to global, us, eu or a region such as us-east5, or --base-url" };
+    // Global, the two multi-regions, and a single region each have their own host.
+    const host =
+      location === "global"
+        ? "aiplatform.googleapis.com"
+        : location === "us" || location === "eu"
+          ? `aiplatform.${location}.rep.googleapis.com`
+          : `${location}-aiplatform.googleapis.com`;
+    return { ok: true, url: `https://${host}/v1/projects/${project}/locations/${location}/publishers/anthropic/models` };
+  }
+  const endpoint = read("AZURE_OPENAI_ENDPOINT");
+  let parsed: URL | undefined;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    parsed = undefined;
+  }
+  if (!parsed || parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash)
+    return {
+      ok: false,
+      error: "--provider azure needs AZURE_OPENAI_ENDPOINT set to the resource's https address, e.g. https://my-resource.openai.azure.com, or --base-url",
+    };
+  return { ok: true, url: `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}/openai/v1` };
+}
 
 /** Reasoning effort each API accepts. The Messages API has no "none": thinking is lowered, not switched off. */
 const EFFORTS: Record<ProviderName, readonly string[]> = {
   anthropic: ["low", "medium", "high", "xhigh", "max"],
   openai: ["none", "low", "medium", "high", "xhigh", "max"],
+  bedrock: ["low", "medium", "high", "xhigh", "max"],
+  vertex: ["low", "medium", "high", "xhigh", "max"],
+  azure: ["none", "low", "medium", "high", "xhigh", "max"],
 };
 const DEFAULT_EFFORT = "low";
 
@@ -220,7 +290,10 @@ export function parseCiArgs(
   const known = new Set<string>(CI_OPTION_NAMES);
   for (const name of flags.keys()) {
     if (name === "api-key" || name === "key")
-      return { ok: false, error: `there is no --${name}: the key is read from ANTHROPIC_API_KEY or OPENAI_API_KEY only` };
+      return {
+        ok: false,
+        error: `there is no --${name}: the key is read from the environment only (ANTHROPIC_API_KEY, OPENAI_API_KEY, or the variable of --provider ${CLOUD_PROVIDERS.join("|")})`,
+      };
     if (!known.has(name)) return { ok: false, error: `unknown option --${name}` };
   }
   if (positional.length !== 1) return { ok: false, error: "give exactly one URL to explore, e.g. scenescout ci http://127.0.0.1:3000" };
@@ -400,14 +473,17 @@ export function detectProvider(
   env: Record<string, string | undefined>,
   options: Pick<CiOptions, "provider" | "model" | "effort" | "baseUrl">,
 ): { ok: true; resolved: ResolvedProvider } | { ok: false; error: string } {
-  const withKey = PROVIDERS.filter((p) => present(env, KEY_ENV[p]));
+  const withKey = DIRECT_PROVIDERS.filter((p) => present(env, KEY_ENV[p]));
   let provider: ProviderName;
   if (options.provider) {
-    if (!withKey.includes(options.provider))
+    if (!present(env, KEY_ENV[options.provider]))
       return { ok: false, error: `--provider ${options.provider} needs ${KEY_ENV[options.provider]} set in the environment` };
     provider = options.provider;
   } else if (withKey.length === 0) {
-    return { ok: false, error: `set ${KEY_ENV.anthropic} or ${KEY_ENV.openai} in the environment: a CI run needs a model to drive it` };
+    return {
+      ok: false,
+      error: `set ${KEY_ENV.anthropic} or ${KEY_ENV.openai} in the environment (or name a cloud with --provider ${CLOUD_PROVIDERS.join("|")}): a CI run needs a model to drive it`,
+    };
   } else if (withKey.length > 1) {
     return { ok: false, error: `both ${KEY_ENV.anthropic} and ${KEY_ENV.openai} are set: pass --provider anthropic or --provider openai to choose` };
   } else {
@@ -415,7 +491,23 @@ export function detectProvider(
   }
   const effort = options.effort ?? DEFAULT_EFFORT;
   if (!EFFORTS[provider].includes(effort)) return { ok: false, error: `--effort must be one of ${EFFORTS[provider].join(", ")} for ${provider}` };
-  return { ok: true, resolved: { provider, model: options.model ?? DEFAULT_MODEL[provider], effort, baseUrl: options.baseUrl ?? DEFAULT_BASE_URL[provider] } };
+  if (isDirect(provider))
+    return {
+      ok: true,
+      resolved: { provider, model: options.model ?? DEFAULT_MODEL[provider], effort, baseUrl: options.baseUrl ?? DEFAULT_BASE_URL[provider] },
+    };
+  if (!options.model)
+    return {
+      ok: false,
+      error: `--model is required for ${provider}: ${provider === "azure" ? "the name of your deployment" : "the model id your account uses"}`,
+    };
+  let baseUrl = options.baseUrl;
+  if (!baseUrl) {
+    const cloud = cloudBaseUrl(provider, env);
+    if (!cloud.ok) return cloud;
+    baseUrl = cloud.url;
+  }
+  return { ok: true, resolved: { provider, model: options.model, effort, baseUrl } };
 }
 
 // ── the dedup judge's model ─────────────────────────────────────────────────
@@ -446,12 +538,12 @@ export function dedupModeFromEnv(env: Record<string, string | undefined>): Dedup
  */
 export function judgeKeyConfig(env: Record<string, string | undefined>): { ok: true; resolved: ResolvedProvider; key: string } | { ok: false; error: string } {
   const named = (env[DEDUP_PROVIDER_ENV] ?? "").trim();
-  if (named !== "" && !(PROVIDERS as readonly string[]).includes(named))
-    throw new Error(`${DEDUP_PROVIDER_ENV} must be one of ${PROVIDERS.join(", ")}, not ${JSON.stringify(named)}`);
-  const withKey = PROVIDERS.filter((p) => present(env, KEY_ENV[p]));
-  let provider: ProviderName;
+  if (named !== "" && !(DIRECT_PROVIDERS as readonly string[]).includes(named))
+    throw new Error(`${DEDUP_PROVIDER_ENV} must be one of ${DIRECT_PROVIDERS.join(", ")}, not ${JSON.stringify(named)}`);
+  const withKey = DIRECT_PROVIDERS.filter((p) => present(env, KEY_ENV[p]));
+  let provider: DirectProviderName;
   if (named !== "") {
-    provider = named as ProviderName;
+    provider = named as DirectProviderName;
     if (!withKey.includes(provider)) return { ok: false, error: `${DEDUP_PROVIDER_ENV}=${provider} needs ${KEY_ENV[provider]} in the server's environment` };
   } else if (withKey.length === 0) {
     return { ok: false, error: `the judge needs ${KEY_ENV.anthropic} or ${KEY_ENV.openai} in the server's environment` };
@@ -510,7 +602,7 @@ export function secretValues(env: Record<string, string | undefined>): string[] 
 }
 
 /** Key-shaped strings, for a key that reached a message from somewhere other than this environment (an echo of another). */
-const KEY_SHAPES = /\bsk-[A-Za-z0-9_-]{16,}/g;
+const KEY_SHAPES = /\bsk-[A-Za-z0-9_-]{16,}|\bya29\.[A-Za-z0-9_-]{16,}/g;
 
 /**
  * Remove every key value, and anything shaped like a provider key, from a

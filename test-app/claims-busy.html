@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Entries</title>
+  </head>
+  <body>
+    <!--
+      A save the server refuses, after which the page's script keeps its main
+      thread busy for longer than the page-load limit, so nothing can read the
+      page until it is done.
+    -->
+    <h1>Entry 5</h1>
+    <button data-testid="entry-save-busy-button" onclick="saveThenBusy()">Save then busy</button>
+    <script>
+      async function saveThenBusy() {
+        await fetch("/api/refuse/500?busy=1", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {});
+        setTimeout(function () {
+          var end = Date.now() + 15000;
+          while (Date.now() < end) {}
+        }, 0);
+      }
+    </script>
+  </body>
+</html>

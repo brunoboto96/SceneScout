@@ -115,6 +115,9 @@ import { sarifFilesFor } from "./engine/sarif.js";
 import { decodePng, diffImages, encodePng } from "./engine/png.js";
 import {
   AnthropicConversation,
+  AzureOpenAIConversation,
+  BedrockConversation,
+  VertexConversation,
   backoffMs,
   errorMessage,
   MalformedReply,
@@ -242,7 +245,18 @@ export class HttpModelClient implements ModelClient {
 
 /** One conversation with the provider `resolved` names. */
 function conversationFor(resolved: ResolvedProvider, o: ConversationOptions, kickoff: string): Conversation {
-  return resolved.provider === "anthropic" ? new AnthropicConversation(o, kickoff) : new OpenAIConversation(o, kickoff);
+  switch (resolved.provider) {
+    case "anthropic":
+      return new AnthropicConversation(o, kickoff);
+    case "openai":
+      return new OpenAIConversation(o, kickoff);
+    case "bedrock":
+      return new BedrockConversation(o, kickoff);
+    case "vertex":
+      return new VertexConversation(o, kickoff);
+    case "azure":
+      return new AzureOpenAIConversation(o, kickoff);
+  }
 }
 
 export function httpClient(resolved: ResolvedProvider, key: string, system: string, tools: readonly ToolSpec[], kickoff: string): ModelClient {

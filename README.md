@@ -134,7 +134,7 @@ Everything is one self-contained HTML page per report, with no scripts, nothing 
 
 ## 📺 Watch it work
 
-A narrated nine-minute tour of every feature, on the demo app, is on [the website](https://brunoboto96.github.io/SceneScout/#tour).
+A narrated eight-minute tour of every feature, on the demo app, is on [the website](https://brunoboto96.github.io/SceneScout/#tour).
 
 Each exploratory run opens a live view on your machine, with one card per agent: what it is doing, the page it is on, and a feed of every action. Three agents are testing the demo app in parallel here:
 

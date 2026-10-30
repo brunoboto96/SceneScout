@@ -19,7 +19,7 @@ import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
 import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
-import { bestEffort, heldRead, settleWithin } from "../src/engine/best-effort.ts";
+import { bestEffort, heldRead, readWithin, settleWithin } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles, socketsLeft } from "./smoke/leaks.ts";
 import { busiestOwners, parseTasklist, parseTcpTable, readMachineSockets, socketLine, tcpStateCounts, type CommandRunner } from "../src/engine/tcp-table.ts";
@@ -1010,4 +1010,12 @@ test("heldRead with no release does not leave a read that fails after it was lef
   } finally {
     process.off("unhandledRejection", onUnhandled);
   }
+});
+
+test("readWithin gives the value, or undefined when the read rejects or has not settled by the bound", async () => {
+  assert.equal(await readWithin(Promise.resolve(7), 1000), 7);
+  assert.equal(await readWithin(Promise.reject(new Error("gone")), 1000), undefined);
+  const started = Date.now();
+  assert.equal(await readWithin(new Promise<number>(() => {}), 20), undefined);
+  assert.ok(Date.now() - started < 1000, "a read that never answers is given up on at the bound");
 });

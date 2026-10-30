@@ -49,6 +49,9 @@ export const SLOW_FILE_MS = 15_000;
 /** How long the fixture server holds /slow-page back. */
 export const SLOW_PAGE_MS = 2500;
 
+/** How long /late/ pages are held: past an action's settle wait and the default action limit, well inside the page-load limit. */
+const LATE_PAGE_MS = 6000;
+
 /** Everything a suite needs. `projectDir` is shared on purpose: later suites assert on memory earlier ones wrote. */
 export interface SmokeContext {
   baseUrl: string;
@@ -387,6 +390,15 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
           timers.push(setTimeout(() => res.end('"signedIn":false}'), 500));
         }, 250),
       );
+      return;
+    }
+    // A claims fixture held back for longer than an action's settle wait (settle.ts SETTLE_CAP_MS), shorter than the page-load limit.
+    const late = /^\/late\/(claims-late-[a-z]+)\.html$/.exec(urlPath);
+    if (late) {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end(fs.readFileSync(path.join(appDir, `${late[1]}.html`)));
+      }, LATE_PAGE_MS);
       return;
     }
     // A page the server holds back before answering: slower than a lowered page-load limit, faster than the default.
