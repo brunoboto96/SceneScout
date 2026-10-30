@@ -18,6 +18,7 @@
  * wiring to the browser lives in `browser.ts`.
  */
 import { createHash } from "node:crypto";
+import { NOT_ALLOWED_WRITE_REFUSAL, type WriteAllowList } from "./write-allowlist.js";
 import {
   allowsForeignWriteOnSignIn,
   allowsWrite,
@@ -102,13 +103,20 @@ export function judgeUnseenWrite(input: {
   readPost?: boolean;
   /** The operator's sign-in allowlist for this request, when one is set (policy.ts isAuthExempt). */
   authList?: AuthPostList | null;
+  /** The operator's list of allowed writes as this request meets it, when one is set (write-allowlist.ts). */
+  allowList?: WriteAllowList | null;
 }): UnseenWriteVerdict {
   const { mode, method, pathname, destructiveWire } = input;
   if (mode === "destructive" || isReadMethod(method)) return { allow: true };
   if (input.foreign) return { allow: false, why: `sent from a frame of ${input.foreign}` };
   const authExempt = isAuthExempt(mode, method, pathname, destructiveWire, input.authList);
   if (input.offApp && !authExempt) return { allow: false, why: `sent from a page of ${input.offApp}, outside the app` };
-  if (authExempt || input.readPost) return { allow: true };
+  if (authExempt) return { allow: true };
+  if (input.allowList) {
+    if (!input.allowList.listed) return { allow: false, why: NOT_ALLOWED_WRITE_REFUSAL };
+    if (!input.allowList.andModeRules) return { allow: true };
+  }
+  if (input.readPost) return { allow: true };
   return allowsWrite(mode, method, destructiveWire, input.owned) ? { allow: true } : { allow: false };
 }
 

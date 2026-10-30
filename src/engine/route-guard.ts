@@ -33,6 +33,7 @@ import {
   type ReadPost,
   type WriteMode,
 } from "./policy.js";
+import { NOT_ALLOWED_WRITE_REFUSAL, writeAllowListFor, type AllowedWrite, type WriteAllowList } from "./write-allowlist.js";
 import {
   bodyDigest,
   headerOf,
@@ -138,6 +139,8 @@ export interface RouteGuardHost {
   authPosts(): readonly ReadPost[] | null;
   /** True: a listed POST must also look like a sign-in to the path rule, so the list only narrows it (a guided check). Absent: false. */
   authPostsNarrowOnly?(): boolean;
+  /** The writes the operator listed (the config's allowedWrites or SCENESCOUT_ALLOWED_WRITES), or null when no list is set (write-allowlist.ts). */
+  allowedWrites?(): { entries: readonly AllowedWrite[]; andModeRules: boolean } | null;
 }
 
 /** What the route handler does with a write it sees, short of the ownership rule. */
@@ -147,6 +150,8 @@ export type RoutedWriteVerdict =
   | { kind: "auth" }
   /** A POST the user named as a read: out, and logged. */
   | { kind: "read-post" }
+  /** A write the operator's list names: out, and logged. */
+  | { kind: "listed-write" }
   /** Judged by allowsWrite on whether this run owns the resource. */
   | { kind: "by-ownership" };
 
@@ -155,8 +160,9 @@ export type RoutedWriteVerdict =
  * mode other than destructive, in the order the handler applies the rules: a
  * foreign frame's write is refused before any other rule, sign-in included; a
  * write from a page an embed moved off the app is refused unless it is a
- * sign-in; a sign-in goes out; a read POST goes out; the rest is judged by
- * ownership. unload.ts judgeUnseenWrite applies the same rules to the writes
+ * sign-in; a sign-in goes out; with a list of allowed writes, an unlisted
+ * write is refused and a listed one goes out; a read POST goes out; the rest
+ * is judged by ownership. unload.ts judgeUnseenWrite applies the same rules to the writes
  * the handler never sees.
  */
 export function routedWriteVerdict(input: {
@@ -169,12 +175,18 @@ export function routedWriteVerdict(input: {
   readPost: boolean;
   /** The operator's sign-in allowlist for this request, when one is set. */
   authList?: AuthPostList | null;
+  /** The operator's list of allowed writes as this request meets it, when one is set. */
+  allowList?: WriteAllowList | null;
 }): RoutedWriteVerdict {
   const { rule, method, pathname, destructiveWire } = input;
   if (input.foreign) return { kind: "refuse", why: `sent from a frame of ${input.foreign}` };
   const authExempt = isAuthExempt(rule, method, pathname, destructiveWire, input.authList);
   if (input.offApp && !authExempt) return { kind: "refuse", why: `sent from a page of ${input.offApp}, outside the app` };
   if (authExempt) return { kind: "auth" };
+  if (input.allowList) {
+    if (!input.allowList.listed) return { kind: "refuse", why: NOT_ALLOWED_WRITE_REFUSAL };
+    if (!input.allowList.andModeRules) return { kind: "listed-write" };
+  }
   if (input.readPost) return { kind: "read-post" };
   return { kind: "by-ownership" };
 }
@@ -194,11 +206,16 @@ export function marksRouteExercised(input: {
   foreign: () => string | null;
   offApp: () => string | null;
   authList?: AuthPostList | null;
+  allowList?: WriteAllowList | null;
 }): boolean {
   const { rule, method, pathname, destructiveWire } = input;
+  const authExempt = isAuthExempt(rule, method, pathname, destructiveWire, input.authList);
+  // A list of allowed writes: only a listed write (or a sign-in) goes out, and a listed one needs nothing else unless the list only narrows.
+  if (rule !== "destructive" && input.allowList && !authExempt && !input.allowList.listed) return false;
+  const listedOut = rule !== "destructive" && !authExempt && input.allowList?.listed === true && !input.allowList.andModeRules;
   // Same test the route handler uses: in observe only an exempt auth request goes out.
-  if (rule === "observe" && !isAuthExempt(rule, method, pathname, destructiveWire, input.authList)) return false;
-  if ((rule === "read-only" || rule === "observe") && destructiveWire) return false;
+  if (rule === "observe" && !authExempt && !listedOut) return false;
+  if ((rule === "read-only" || rule === "observe") && destructiveWire && !listedOut) return false;
   // A foreign frame's write is refused in every mode the route handler runs in.
   if (rule !== "destructive" && input.foreign()) return false;
   if (rule !== "destructive" && input.offApp() && !isAuthExempt(rule, method, pathname, destructiveWire, input.authList)) return false;
@@ -290,6 +307,11 @@ export class RouteGuard {
   authListFor(url: string): AuthPostList | null {
     const entries = this.host.authPosts();
     return entries ? { entries, appUrl: this.host.appUrl(), url, andSignInPath: this.host.authPostsNarrowOnly?.() === true } : null;
+  }
+
+  /** The operator's list of allowed writes as a write of `method` to `url` meets it, or null when no list is set. */
+  allowListFor(method: string, url: string): WriteAllowList | null {
+    return writeAllowListFor(this.host.allowedWrites?.() ?? null, this.host.appUrl(), method, url);
   }
 
   /** Whether the write policy stopped this request, at the route handler or at the browser level. */
@@ -543,12 +565,23 @@ export class RouteGuard {
       offApp: offAppPageWrite(this.host.appUrl(), this.host.pageUrl(), url, this.host.movedByEmbed()),
       readPost: readPost !== null,
       authList: this.authListFor(url),
+      allowList: this.allowListFor(method, url),
     });
     if (verdict.kind === "refuse") return refuse(verdict.why);
     // Auth/session flows must work in every mode — but never a destructive
     // one, and in observe only the requests a login itself needs.
     if (verdict.kind === "auth") {
       this.routedWrites.note(rule, sent, url, bodyDigest(req.postDataBuffer()));
+      return route.fallback();
+    }
+    if (verdict.kind === "listed-write") {
+      this.host.logAction({
+        action: "write-policy:allowed-write",
+        target: `${method} ${pathname} (allowed by the list: ${this.allowListFor(method, url)?.entry?.entry ?? "listed"})`,
+        url: this.host.pageUrl() ?? "",
+      });
+      this.routedWrites.note(rule, sent, url, bodyDigest(req.postDataBuffer()));
+      if (method === "POST") this.host.clearRefusedPost(url);
       return route.fallback();
     }
     if (verdict.kind === "read-post" && readPost) {
@@ -703,6 +736,7 @@ export class RouteGuard {
           owned: this.host.isOwnedResource(pathname),
           readPost: readPost !== null,
           authList: this.authListFor(url),
+          allowList: this.allowListFor(method, url),
         });
         if (readPost && verdict.allow)
           this.host.logAction({

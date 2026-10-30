@@ -97,6 +97,7 @@ import {
   writeMethodLabel,
 } from "../src/engine/policy.ts";
 import type { WriteMode } from "../src/engine/policy.ts";
+import { allowedWriteEntries, allowedWriteKey, matchAllowedWrite, MAX_ALLOWED_WRITES, NOT_ALLOWED_WRITE_REFUSAL } from "../src/engine/write-allowlist.ts";
 import { scriptLiteral } from "../src/engine/script-literal.ts";
 import {
   deriveCollection,
@@ -2440,6 +2441,8 @@ function guardRig(
     refuseGets?: boolean;
     authPosts?: string[];
     narrowOnly?: boolean;
+    allowedWrites?: string[];
+    allowedAndModeRules?: boolean;
     /** The session's rule read afresh on every request, where a test changes it as it goes; else `rule`. */
     ruleNow?: () => (typeof WRITE_MODES)[number];
     leftPageRuleCapMs?: number;
@@ -2483,6 +2486,8 @@ function guardRig(
     refuseDestructiveGets: () => opts.refuseGets ?? false,
     authPosts: () => (opts.authPosts ? readPostEntries(opts.authPosts).entries : null),
     authPostsNarrowOnly: () => opts.narrowOnly === true,
+    allowedWrites: () =>
+      opts.allowedWrites ? { entries: allowedWriteEntries(opts.allowedWrites).entries, andModeRules: opts.allowedAndModeRules === true } : null,
   };
   const guard = new RouteGuard(host, opts.leftPageRuleCapMs);
   const send = (
@@ -4023,7 +4028,7 @@ test("write rules: the file and the environment each turn the strict classifier 
   const on = { SCENESCOUT_STRICT_WRITES: "1", SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1" };
   // Nothing set: today's defaults.
   const none = writeRulesSettings({}, {}, false);
-  assert.deepEqual(none, { writeClassifier: "standard", refuseDestructiveGets: false, authPosts: null, notes: [], from: {} });
+  assert.deepEqual(none, { writeClassifier: "standard", refuseDestructiveGets: false, authPosts: null, allowedWrites: null, notes: [], from: {} });
   // The file stricter than the environment: on, with the environment unset or off.
   for (const env of [{}, { SCENESCOUT_STRICT_WRITES: "0", SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "off" }]) {
     const r = writeRulesSettings({ writeClassifier: "strict", refuseDestructiveGets: true }, env, false);
@@ -4041,6 +4046,7 @@ test("write rules: the file and the environment each turn the strict classifier 
     writeClassifier: "strict",
     refuseDestructiveGets: true,
     authPosts: null,
+    allowedWrites: null,
     notes: [],
     from: { writeClassifier: "SCENESCOUT_STRICT_WRITES", refuseDestructiveGets: "SCENESCOUT_REFUSE_DESTRUCTIVE_GETS" },
   });
@@ -4846,7 +4852,8 @@ test("config explain: a value is a default, a preset's, the operator's file's or
   // No file at all: every row is a default.
   const none = explainConfig({ loaded: NO_POLICY, env: {} });
   assert.ok(none.rows.every((r) => r.source === "default"));
-  assert.equal(none.rows.length, 14);
+  assert.equal(none.rows.length, CONFIG_KEYS.length, "one row per key");
+  assert.equal(rowOf(none, "allowedWrites").value, "no list (writes are judged by the mode)");
   assert.match(formatConfigExplanation(none)[0], /^Config files: none/);
 });
 
@@ -5327,4 +5334,373 @@ test("allowlist header: the single send of a page load carries the request's hea
     accept: "text/html",
     "x-ci-allow": "t",
   });
+});
+
+// ── the endpoint allowlist for writes (#538 item 2, #546): only the writes the operator names go out ──────
+
+const ALLOWED_APP = "https://app.example.com";
+
+test("allowed writes: an entry is a write method and a path, read as a read POST's path is, and anything else is rejected", () => {
+  const r = allowedWriteEntries([
+    "post /api/things/",
+    "PUT /api/things/*",
+    "DELETE https://api.example.com/v1/things/*",
+    "PATCH /api/things/*/note",
+    "POST /api/things",
+  ]);
+  assert.deepEqual(
+    r.entries.map((e) => e.entry),
+    ["POST /api/things", "PUT /api/things/*", "DELETE https://api.example.com/v1/things/*", "PATCH /api/things/*/note"],
+    "upper-cased method, no trailing slash, a repeat dropped",
+  );
+  assert.deepEqual(r.rejected, []);
+  const bad = allowedWriteEntries([
+    "GET /api/things",
+    "HEAD /api/things",
+    "/api/things",
+    "POST",
+    "POST api/things",
+    "POST /api/things?x=1",
+    "PUT /api/th*ngs",
+    "POST /a b",
+    "FETCH /api",
+  ]);
+  assert.equal(bad.entries.length, 0);
+  assert.equal(bad.rejected.length, 9, "a read, a missing method or path, a query, a partial wildcard: none is an entry");
+  assert.equal(allowedWriteEntries(Array.from({ length: MAX_ALLOWED_WRITES + 1 }, (_, i) => `POST /api/t${i}`)).overflow.length, 1);
+  assert.equal(allowedWriteKey("  put   /api/x/ "), "PUT /api/x");
+});
+
+test("allowed writes: a listed method and path match; the same path with another method, or a near path, does not (the contrastive pair)", () => {
+  const { entries } = allowedWriteEntries(["POST /api/things", "PUT /api/things/*", "DELETE https://api.example.com/v1/things/*"]);
+  const hit = (method: string, url: string): string | null => matchAllowedWrite(entries, ALLOWED_APP, method, url)?.entry ?? null;
+  assert.equal(hit("POST", `${ALLOWED_APP}/api/things`), "POST /api/things");
+  assert.equal(hit("POST", `${ALLOWED_APP}/api/things?page=2`), "POST /api/things", "a query is not part of the path");
+  assert.equal(hit("PUT", `${ALLOWED_APP}/api/things/7`), "PUT /api/things/*");
+  assert.equal(hit("DELETE", "https://api.example.com/v1/things/7"), "DELETE https://api.example.com/v1/things/*");
+  // The same path, another method.
+  assert.equal(hit("DELETE", `${ALLOWED_APP}/api/things`), null);
+  assert.equal(hit("PUT", `${ALLOWED_APP}/api/things`), null);
+  assert.equal(hit("PATCH", `${ALLOWED_APP}/api/things/7`), null);
+  // The same method, a near path.
+  assert.equal(hit("POST", `${ALLOWED_APP}/api/things/7`), null, "a longer path");
+  assert.equal(hit("POST", `${ALLOWED_APP}/api/thing`), null, "a shorter name");
+  assert.equal(hit("PUT", `${ALLOWED_APP}/api/things/7/archive`), null, "* is one segment");
+  assert.equal(hit("PUT", `${ALLOWED_APP}/api/things`), null, "* is a segment, not nothing");
+  // The same method and path on another origin: an entry without one is the app's own.
+  assert.equal(hit("POST", "https://other.example.net/api/things"), null);
+  assert.equal(hit("DELETE", `${ALLOWED_APP}/v1/things/7`), null);
+  assert.equal(hit("post", `${ALLOWED_APP}/api/things`), "POST /api/things", "the method is compared in upper case");
+});
+
+test("allowed writes: the verdict lets a listed write out and refuses the rest, whatever the classifier says", () => {
+  const base = { method: "POST", pathname: "/api/things", destructiveWire: false, foreign: null, offApp: null, readPost: false };
+  const listed = { listed: true, andModeRules: false };
+  const unlisted = { listed: false, andModeRules: false };
+  for (const rule of ["observe", "read-only", "safe-write"] as const) {
+    assert.deepEqual(routedWriteVerdict({ ...base, rule, allowList: listed }), { kind: "listed-write" }, `${rule}: listed`);
+    assert.deepEqual(
+      routedWriteVerdict({ ...base, rule, destructiveWire: true, allowList: listed }),
+      { kind: "listed-write" },
+      `${rule}: listed, though it looks destructive`,
+    );
+    const no = routedWriteVerdict({ ...base, rule, allowList: unlisted });
+    assert.equal(no.kind, "refuse", `${rule}: unlisted`);
+    if (no.kind === "refuse") assert.equal(no.why, NOT_ALLOWED_WRITE_REFUSAL);
+    // No list: as before.
+    assert.notEqual(routedWriteVerdict({ ...base, rule, allowList: null }).kind, "refuse", `${rule}: no list set`);
+  }
+  // Unlisted, though the mode, a read POST or ownership would let it out.
+  assert.equal(routedWriteVerdict({ ...base, rule: "observe", readPost: true, allowList: unlisted }).kind, "refuse", "a read POST needs listing too");
+  assert.equal(routedWriteVerdict({ ...base, rule: "safe-write", method: "PUT", allowList: unlisted }).kind, "refuse");
+  // The sign-in exemption stays, as in observe; a foreign frame's write is refused before the list is asked.
+  assert.deepEqual(routedWriteVerdict({ ...base, rule: "observe", pathname: "/api/auth/login", allowList: unlisted }), { kind: "auth" });
+  const foreign = routedWriteVerdict({ ...base, rule: "observe", foreign: "https://chat.example.com", allowList: listed });
+  assert.equal(foreign.kind, "refuse");
+  if (foreign.kind === "refuse") assert.match(foreign.why, /sent from a frame of https:\/\/chat\.example\.com/);
+  assert.equal(
+    routedWriteVerdict({ ...base, rule: "read-only", offApp: "https://idp.example.com", allowList: listed }).kind,
+    "refuse",
+    "a page an embed moved off the app",
+  );
+  // andModeRules: listed is not enough, the mode's own rules also apply (a guided check, a project's own list).
+  const narrow = { listed: true, andModeRules: true };
+  assert.deepEqual(routedWriteVerdict({ ...base, rule: "read-only", allowList: narrow }), { kind: "by-ownership" });
+  assert.equal(routedWriteVerdict({ ...base, rule: "read-only", allowList: { listed: false, andModeRules: true } }).kind, "refuse");
+});
+
+test("allowed writes: unseen writes (a page left as it sent them) are judged by the same list", () => {
+  const base = { method: "POST", pathname: "/api/things", destructiveWire: true, foreign: null, offApp: null, owned: false };
+  assert.deepEqual(judgeUnseenWrite({ ...base, mode: "observe", allowList: { listed: true, andModeRules: false } }), { allow: true });
+  assert.deepEqual(judgeUnseenWrite({ ...base, mode: "read-only", allowList: { listed: false, andModeRules: false } }), {
+    allow: false,
+    why: NOT_ALLOWED_WRITE_REFUSAL,
+  });
+  assert.deepEqual(
+    judgeUnseenWrite({ ...base, mode: "read-only", allowList: { listed: true, andModeRules: true } }),
+    { allow: false },
+    "listed, but destructive for read-only",
+  );
+  assert.deepEqual(judgeUnseenWrite({ ...base, mode: "read-only", destructiveWire: false, allowList: { listed: true, andModeRules: true } }), { allow: true });
+  assert.deepEqual(
+    judgeUnseenWrite({ ...base, mode: "destructive", allowList: { listed: false, andModeRules: false } }),
+    { allow: true },
+    "destructive judges no write",
+  );
+});
+
+test("allowed writes: a write marks its page exercised only when the list lets it out", () => {
+  const marks = (rule: (typeof WRITE_MODES)[number], listed: boolean, destructiveWire = false, andModeRules = false) =>
+    marksRouteExercised({
+      rule,
+      method: "POST",
+      pathname: "/api/things",
+      destructiveWire,
+      foreign: () => null,
+      offApp: () => null,
+      allowList: { listed, andModeRules },
+    });
+  assert.equal(marks("observe", true), true, "a listed write goes out of observe");
+  assert.equal(marks("observe", true, true), true, "and whatever it looks like");
+  assert.equal(marks("observe", false), false);
+  assert.equal(marks("read-only", false), false, "read-only would have let a plain POST out; the list does not");
+  assert.equal(marks("read-only", true, true, true), false, "listed, but destructive for read-only");
+  assert.equal(marks("read-only", true, false, true), true);
+});
+
+const ALLOW_RIG = ["POST /api/things", "PUT /api/things/*"];
+
+test("RouteGuard: with a list, a listed write goes out and the same path by another method, or a near path, is refused, in every mode", async () => {
+  for (const rule of ["observe", "read-only", "safe-write"] as const) {
+    const { send, logged } = guardRig(rule, { allowedWrites: ALLOW_RIG });
+    assert.equal(await send("POST", "/api/things", { body: '{"note":"draft"}' }).done, "fallback", `${rule}: listed`);
+    assert.equal(await send("PUT", "/api/things/7", { body: "{}" }).done, "fallback", `${rule}: listed with a wildcard`);
+    assert.equal(await send("POST", "/api/things", { body: '{"action":"delete"}' }).done, "fallback", `${rule}: listed, whatever the body says`);
+    assert.ok(
+      logged.some((l) => l.includes("allowed by the list: POST /api/things")),
+      `${rule}: each is logged`,
+    );
+    assert.equal(await send("DELETE", "/api/things/7").done, "fulfill 403", `${rule}: another method on a listed path`);
+    assert.equal(await send("PUT", "/api/things", { body: "{}" }).done, "fulfill 403", `${rule}: the collection by a member's method`);
+    assert.equal(await send("POST", "/api/things/7", { body: "{}" }).done, "fulfill 403", `${rule}: a near path`);
+    assert.equal(await send("POST", "/api/other", { body: "{}" }).done, "fulfill 403", `${rule}: an unlisted path`);
+    assert.equal(await send("POST", "https://other.example.net/api/things", { body: "{}" }).done, "fulfill 403", `${rule}: another origin`);
+  }
+  // Without a list the same requests are judged by the mode as before (the contrast).
+  assert.equal(await guardRig("read-only").send("POST", "/api/other", { body: "{}" }).done, "fallback");
+  assert.equal(await guardRig("observe").send("POST", "/api/things", { body: "{}" }).done, "fulfill 403");
+  // The sign-in exemption and reads are unchanged.
+  const { send } = guardRig("observe", { allowedWrites: ALLOW_RIG });
+  assert.equal(await send("POST", "/api/auth/login", { body: "{}" }).done, "fallback");
+  assert.equal(await send("GET", "/api/things", { type: "xhr" }).done, "fallback");
+  // A refusal says why.
+  const refused = guardRig("observe", { allowedWrites: ALLOW_RIG });
+  await refused.send("DELETE", "/api/things/7").done;
+  assert.ok(
+    refused.calls.some((c) => c.includes(`why=${NOT_ALLOWED_WRITE_REFUSAL}`)),
+    refused.calls.join("\n"),
+  );
+});
+
+test("RouteGuard: a method override is judged as the method it names against the list", async () => {
+  const { send } = guardRig("read-only", { allowedWrites: ALLOW_RIG });
+  assert.equal(await send("POST", "/api/things", { body: "{}" }).done, "fallback");
+  assert.equal(await send("POST", "/api/things", { body: "{}", headers: { "x-http-method-override": "DELETE" } }).done, "fulfill 403");
+  assert.equal(await send("POST", "/api/things?_method=PUT", { body: "{}" }).done, "fulfill 403", "PUT is listed for members only");
+  assert.equal(
+    await send("POST", "/api/things/7", { body: "{}", headers: { "x-http-method-override": "PUT" } }).done,
+    "fallback",
+    "a POST naming a listed PUT is that PUT",
+  );
+});
+
+test("RouteGuard: a list that only narrows (a guided check, a project's own list) still asks the mode", async () => {
+  const narrow = { allowedWrites: ALLOW_RIG, allowedAndModeRules: true };
+  assert.equal(await guardRig("read-only", narrow).send("POST", "/api/things", { body: "{}" }).done, "fallback", "listed and plain");
+  assert.equal(await guardRig("read-only", narrow).send("POST", "/api/things", { body: '{"action":"delete"}' }).done, "fulfill 403", "listed, destructive");
+  assert.equal(await guardRig("observe", narrow).send("POST", "/api/things", { body: "{}" }).done, "fulfill 403", "listed, but observe lets no POST out");
+  assert.equal(await guardRig("read-only", narrow).send("POST", "/api/other", { body: "{}" }).done, "fulfill 403", "unlisted");
+});
+
+test("RouteGuard: the browser-level interception applies the list to a write the handler never saw", async () => {
+  const unseen = async (rule: (typeof WRITE_MODES)[number], method: string, path: string, allowedWrites: string[] | undefined) => {
+    const { guard } = guardRig(rule, { allowedWrites });
+    const sent: string[] = [];
+    await (guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+      { send: async (cmd: string) => void sent.push(cmd) },
+      {
+        requestId: "1",
+        resourceType: "Ping",
+        request: { url: `${ALLOWED_APP}${path}`, method, headers: { Origin: ALLOWED_APP }, postData: "{}" },
+      },
+    );
+    return sent[0];
+  };
+  assert.equal(await unseen("read-only", "POST", "/api/things", ALLOW_RIG), "Fetch.continueRequest");
+  assert.equal(await unseen("read-only", "POST", "/api/other", ALLOW_RIG), "Fetch.failRequest");
+  assert.equal(await unseen("read-only", "DELETE", "/api/things", ALLOW_RIG), "Fetch.failRequest");
+  assert.equal(await unseen("read-only", "POST", "/api/other", undefined), "Fetch.continueRequest", "no list: read-only lets a plain POST out");
+});
+
+test("policy explain: with a list, each verdict equals the route handler's, in every mode and for every kind of request", async () => {
+  const requests: Array<{ method: string; path: string; body?: string; headers?: Record<string, string> }> = [
+    { method: "POST", path: "/api/things", body: "{}" },
+    { method: "POST", path: "/api/things", body: '{"action":"delete"}' },
+    { method: "POST", path: "/api/things/7", body: "{}" },
+    { method: "PUT", path: "/api/things/7", body: "{}" },
+    { method: "PUT", path: "/api/things", body: "{}" },
+    { method: "PATCH", path: "/api/things/7", body: "{}" },
+    { method: "DELETE", path: "/api/things/7" },
+    { method: "POST", path: "/api/other", body: "{}" },
+    { method: "POST", path: "/api/auth/login", body: "{}" },
+    { method: "POST", path: "/api/things", body: "{}", headers: { "x-http-method-override": "DELETE" } },
+    { method: "POST", path: "/api/things/7?_method=PUT", body: "{}" },
+    { method: "POST", path: "/api/things?_method=PUT", body: "{}" },
+    { method: "GET", path: "/api/things" },
+  ];
+  for (const classifier of ["standard", "strict"] as const)
+    for (const andModeRules of [false, true])
+      for (const list of [undefined, ALLOW_RIG, []] as const)
+        for (const rule of ["observe", "read-only", "safe-write"] as const)
+          for (const owned of [false, true])
+            for (const r of requests) {
+              const handler = await guardRig(rule, {
+                classifier,
+                owned: () => owned,
+                allowedWrites: list ? [...list] : undefined,
+                allowedAndModeRules: andModeRules,
+              }).send(r.method, r.path, { type: "xhr", body: r.body ?? null, headers: r.headers ?? {} }).done;
+              const [v] = explainRequest({
+                method: r.method,
+                url: `${EXPLAIN_APP}${r.path}`,
+                body: r.body,
+                headers: r.headers,
+                mode: rule,
+                settings: {
+                  ...DEFAULT_POLICY_SETTINGS,
+                  classifier,
+                  allowedWrites: list ? { entries: allowedWriteEntries([...list]).entries, andModeRules } : null,
+                },
+              }).verdicts;
+              const explained = v.outcome === "depends" ? (owned ? "allowed" : "refused") : v.outcome;
+              const label = `${classifier} narrow=${andModeRules} list=${JSON.stringify(list)} ${rule} owned=${owned} ${r.method} ${r.path} ${JSON.stringify(r.headers ?? {})}`;
+              assert.equal(explained, handler === "fallback" ? "allowed" : "refused", `${label}: handler ${handler}, explain ${v.outcome} (${v.rule})`);
+            }
+  // The rule it prints names the list.
+  const settings = { ...DEFAULT_POLICY_SETTINGS, allowedWrites: { entries: allowedWriteEntries(ALLOW_RIG).entries, andModeRules: false } };
+  const yes = explainRequest({ method: "POST", url: `${EXPLAIN_APP}/api/things`, body: "{}", mode: "observe", settings }).verdicts[0];
+  assert.match(yes.rule, /allowed writes.*POST \/api\/things/);
+  const no = explainRequest({ method: "DELETE", url: `${EXPLAIN_APP}/api/things/7`, mode: "read-only", settings }).verdicts[0];
+  assert.equal(no.outcome, "refused");
+  assert.match(no.rule, /not on the list of allowed writes/);
+});
+
+test("config: allowedWrites is a key whose entries are checked, and a preset sets none", () => {
+  assert.ok((CONFIG_KEYS as readonly string[]).includes("allowedWrites"));
+  assert.deepEqual(parsed('{"allowedWrites": ["post /api/things/", "PUT /api/things/*"]}'), { allowedWrites: ["post /api/things/", "PUT /api/things/*"] });
+  assert.deepEqual(parsed('{"allowedWrites": []}'), { allowedWrites: [] }, "[] allows no write");
+  for (const [text, why] of [
+    ['{"allowedWrites": "POST /api/things"}', /"allowedWrites" must be a list of strings/],
+    ['{"allowedWrites": ["GET /api/things"]}', /"allowedWrites" has entries that are not valid: "GET \/api\/things"/],
+    ['{"allowedWrites": ["/api/things"]}', /"allowedWrites" has entries that are not valid/],
+    ['{"allowedWrites": ["POST /api/things?x=1"]}', /"allowedWrites" has entries that are not valid/],
+  ] as const) {
+    const r = parsePolicy(text, "config.json");
+    assert.ok(!r.ok && why.test(r.error), r.ok ? text : r.error);
+  }
+  assert.ok(!parsePolicy(JSON.stringify({ allowedWrites: Array.from({ length: MAX_ALLOWED_WRITES + 1 }, (_, i) => `POST /api/t${i}`) }), "c.json").ok);
+  assert.equal(parsed('{"preset": "strict"}').allowedWrites, undefined, "a list names one app's endpoints");
+});
+
+test("config: the project's file can only narrow the operator's allowedWrites, and a list only it sets narrows the mode's rules", () => {
+  const op: Policy = { allowedWrites: ["POST /api/things", "PUT /api/things/*"] };
+  assert.deepEqual(
+    tightenPolicy(op, { allowedWrites: ["PUT /api/things/*", "DELETE /api/things/*"] }).allowedWrites,
+    ["PUT /api/things/*"],
+    "never an entry the operator did not list",
+  );
+  assert.deepEqual(tightenPolicy(op, { allowedWrites: [] }).allowedWrites, []);
+  assert.deepEqual(tightenPolicy(op, {}).allowedWrites, op.allowedWrites);
+  assert.equal(tightenPolicy(op, { allowedWrites: ["post /api/things/"] }).allowedWritesNarrowOnly, undefined);
+  assert.deepEqual(tightenPolicy({}, { allowedWrites: ["POST /api/things"] }), { allowedWrites: ["POST /api/things"], allowedWritesNarrowOnly: true });
+  assert.deepEqual(
+    tightenPolicy({ allowedWrites: [] }, { allowedWrites: ["POST /api/things"] }).allowedWrites,
+    [],
+    "[] allows none, whatever the project lists",
+  );
+});
+
+test("write rules: the environment's allowed writes only narrow the file's, and a guided check or a project-only list asks the mode too", () => {
+  const file = { allowedWrites: ["POST /api/things", "PUT /api/things/*"] };
+  assert.equal(writeRulesSettings({}, {}, false).allowedWrites, null, "no list: the mode alone");
+  assert.deepEqual(writeRulesSettings(file, {}, false).allowedWrites, { entries: file.allowedWrites, andModeRules: false });
+  assert.equal(writeRulesSettings(file, {}, false).from.allowedWrites, "the SceneScout config");
+  const narrower = writeRulesSettings(file, { SCENESCOUT_ALLOWED_WRITES: "post /api/things/" }, false);
+  assert.deepEqual(narrower.allowedWrites?.entries, ["post /api/things/"]);
+  assert.equal(narrower.from.allowedWrites, "the SceneScout config, narrowed by SCENESCOUT_ALLOWED_WRITES");
+  const wider = writeRulesSettings(file, { SCENESCOUT_ALLOWED_WRITES: "POST /api/things, DELETE /api/things/*" }, false);
+  assert.deepEqual(wider.allowedWrites?.entries, ["POST /api/things"], "an entry the file does not list is dropped");
+  assert.match(wider.notes.join("; "), /SCENESCOUT_ALLOWED_WRITES entries the config does not list were left out: "DELETE \/api\/things\/\*"/);
+  assert.deepEqual(
+    writeRulesSettings({ allowedWrites: [] }, { SCENESCOUT_ALLOWED_WRITES: "POST /api/things" }, false).allowedWrites?.entries,
+    [],
+    "[] allows none",
+  );
+  // The environment alone names the list.
+  const envOnly = writeRulesSettings({}, { SCENESCOUT_ALLOWED_WRITES: "POST /api/things\nPUT /api/things/*" }, false);
+  assert.deepEqual(envOnly.allowedWrites, { entries: ["POST /api/things", "PUT /api/things/*"], andModeRules: false });
+  assert.equal(envOnly.from.allowedWrites, "SCENESCOUT_ALLOWED_WRITES");
+  // A guided check keeps the list as a narrowing only.
+  assert.equal(writeRulesSettings(file, {}, true).allowedWrites?.andModeRules, true);
+  assert.equal(writeRulesSettings({}, { SCENESCOUT_ALLOWED_WRITES: "POST /api/things" }, true).allowedWrites?.andModeRules, true);
+  // A list only the project's file set narrows, unless the operator's environment lists the entry as well.
+  assert.equal(writeRulesSettings({ ...file, allowedWritesNarrowOnly: true }, {}, false).allowedWrites?.andModeRules, true);
+  assert.equal(
+    writeRulesSettings({ ...file, allowedWritesNarrowOnly: true }, { SCENESCOUT_ALLOWED_WRITES: "POST /api/things" }, false).allowedWrites?.andModeRules,
+    false,
+  );
+  // What the Config line says.
+  const note = writeRulesNote(file, writeRulesSettings(file, {}, false)).join("; ");
+  assert.match(note, /allowedWrites: only "POST \/api\/things", "PUT \/api\/things\/\*" may be written/);
+  assert.match(
+    writeRulesNote({ allowedWrites: [] }, writeRulesSettings({ allowedWrites: [] }, {}, false)).join("; "),
+    /allowedWrites: no write may leave the page/,
+  );
+});
+
+test("policy explain: the settings line names the list and where it came from; an argument cannot name one", () => {
+  const rules = writeRulesSettings({ allowedWrites: ALLOW_RIG }, {}, false);
+  const settings = policySettingsFrom({}, rules);
+  assert.deepEqual(
+    settings.allowedWrites?.entries.map((e) => e.entry),
+    ALLOW_RIG,
+  );
+  const e = explainRequest({ method: "POST", url: `${EXPLAIN_APP}/api/things`, body: "{}", settings });
+  assert.match(formatExplanation(`${EXPLAIN_APP}/api/things`, e, settings).join("\n"), /allowedWrites \(2, the SceneScout config\)/);
+  const envOnly = policySettingsFrom({ SCENESCOUT_ALLOWED_WRITES: "POST /api/things" });
+  assert.deepEqual(
+    envOnly.allowedWrites?.entries.map((x) => x.entry),
+    ["POST /api/things"],
+  );
+  assert.equal(policySettingsFrom({}).allowedWrites, null);
+  assert.ok(!parsePolicyArgs(["explain", "POST", `${EXPLAIN_APP}/x`, "--allowed-writes", "POST /x"]).ok, "no flag names an entry");
+});
+
+test("config explain: allowedWrites shows the list, whether the config or the environment set it, and a narrowing list's condition", () => {
+  const op = loadedOf({ allowedWrites: ["POST /api/things", "PUT /api/things/*"] });
+  const fromFile = explainConfig({ loaded: op, env: {} });
+  assert.equal(rowOf(fromFile, "allowedWrites").value, "POST /api/things, PUT /api/things/*");
+  assert.equal(rowOf(fromFile, "allowedWrites").source, "default", "no layer given: the row cannot name a file");
+  const narrowed = explainConfig({ loaded: op, env: { SCENESCOUT_ALLOWED_WRITES: "POST /api/things" } });
+  assert.equal(rowOf(narrowed, "allowedWrites").value, "POST /api/things");
+  assert.match(rowOf(narrowed, "allowedWrites").source, /narrowed by SCENESCOUT_ALLOWED_WRITES/);
+  const envOnly = explainConfig({ loaded: NO_POLICY, env: { SCENESCOUT_ALLOWED_WRITES: "DELETE https://api.example.com/v1/things/*" } });
+  assert.equal(rowOf(envOnly, "allowedWrites").value, "DELETE https://api.example.com/v1/things/*");
+  assert.equal(rowOf(envOnly, "allowedWrites").source, "environment SCENESCOUT_ALLOWED_WRITES");
+  const projectOnly = explainConfig({ loaded: loadedOf({ allowedWrites: ["POST /api/things"], allowedWritesNarrowOnly: true }), env: {} });
+  assert.match(rowOf(projectOnly, "allowedWrites").value, /each only when the mode would also let it out/);
+  assert.equal(rowOf(explainConfig({ loaded: loadedOf({ allowedWrites: [] }), env: {} }), "allowedWrites").value, "[] (none)");
+  // An address in an entry loses its user name and password.
+  const cred = explainConfig({ loaded: loadedOf({ allowedWrites: ["POST https://user:pw@api.example.com/v1/x"] }), env: {} });
+  assert.ok(!rowOf(cred, "allowedWrites").value.includes("pw"), rowOf(cred, "allowedWrites").value);
 });
