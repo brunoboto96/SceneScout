@@ -67,7 +67,7 @@ const WORD_KINDS: Array<{ kind: SecretKind; whole: string[]; suffix: string[]; p
       ...["passwort", "kennwort", "passwortbestatigung", "passwortbestaetigung", "kennwortbestatigung", "kennwortbestaetigung"],
       ...["passwortwiederholung", "contrasena", "wachtwoord", "losenord", "passord", "adgangskode", "salasana"],
     ],
-    phrases: ["mot de passe", "palavra passe", "memorable word"],
+    phrases: ["mot de passe", "palavra passe", "memorable word", "pass phrase"],
   },
   {
     kind: "one-time code",

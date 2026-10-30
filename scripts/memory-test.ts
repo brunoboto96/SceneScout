@@ -108,7 +108,16 @@ import {
   type FormProbe,
 } from "../src/engine/forms.ts";
 import { coverageView, generateReport, runRecordOf } from "../src/engine/report.ts";
-import { maskedValue, maskFillCalls, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
+import { maskedValue, maskFillCalls, maskSecretFieldValues, redactPersonal, secretFieldKind, type SecretFieldFacts } from "../src/engine/sensitive.ts";
+import {
+  PUBLISHED_CASES,
+  PUBLISHED_SEED,
+  RATES_BEGIN as SENSITIVE_RATES_BEGIN,
+  RATES_END as SENSITIVE_RATES_END,
+  ratesMarkdown as sensitiveRatesMarkdown,
+  sensitiveCases,
+  sensitiveRates,
+} from "./sensitive-fuzz.ts";
 import { maskingHandler, maskPageText, maskToolResult } from "../src/engine/redact.ts";
 import { MASK_COLOR, MAX_FIELD_MASKS, masksToPaint, SECRET_BY_ATTRIBUTE } from "../src/engine/secret-pixels.ts";
 import { REDACTION_VERSION } from "../src/engine/memory-scrub.ts";
@@ -5029,4 +5038,54 @@ test("maskingHandler: whether a result is masked is asked before and after the c
     ).isError,
     true,
   );
+});
+
+// ---------------------------------------------------------------------------
+// A generated corpus for the detectors in sensitive.ts (#538)
+// ---------------------------------------------------------------------------
+
+test("a passphrase written as two words is a secret field, and a phrase that is not one stays ordinary (found by the sensitive corpus)", () => {
+  for (const name of ["pass phrase", "pass_phrase", "passPhrase", "pass-phrase", "Pass Phrase", "PASS_PHRASE", "pass_phrase3"]) {
+    assert.equal(secretFieldKind({ type: "text", name }), "password", name);
+    assert.equal(secretFieldKind({ type: "text", label: name }), "password", name);
+  }
+  for (const name of ["catch phrase", "phrase", "pass rate", "phrase book"]) assert.equal(secretFieldKind({ type: "text", name }), null, name);
+  assert.equal(maskSecretFieldValues('textbox "Pass phrase" ← "zzfake123"').text, `textbox "Pass phrase" ← ${maskedValue("password")}`);
+});
+
+test("sensitive corpus: the generator is seeded and every shape has a pair on the other side of the verdict", () => {
+  assert.deepEqual(sensitiveCases(300, 7), sensitiveCases(300, 7));
+  assert.notDeepEqual(sensitiveCases(300, 7), sensitiveCases(300, 8));
+  const cases = sensitiveCases(PUBLISHED_CASES, PUBLISHED_SEED);
+  for (const detector of ["secret field", "typed value", "secret parameter", "email address", "phone number", "card number"] as const) {
+    const mine = cases.filter((c) => c.detector === detector);
+    assert.ok(mine.some((c) => c.secret) && mine.some((c) => !c.secret), `${detector} needs secret and near-miss shapes`);
+  }
+});
+
+test("sensitive corpus: every secret case holds its secret in the input it is scored on", () => {
+  for (const c of sensitiveCases(600, 538)) if (c.secret && c.text !== undefined) assert.ok(c.text.includes(c.hidden!), `${c.shape}: ${c.text}`);
+});
+
+test("sensitive corpus: the redaction rates in the Safety model guide are the corpus script's output", () => {
+  const guide = fs.readFileSync(new URL("../docs/guide/Safety-model.md", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const a = guide.indexOf(SENSITIVE_RATES_BEGIN);
+  const b = guide.indexOf(SENSITIVE_RATES_END);
+  assert.ok(a >= 0 && b > a, "docs/guide/Safety-model.md lost its sensitive-rates markers");
+  assert.equal(
+    guide.slice(a, b + SENSITIVE_RATES_END.length),
+    sensitiveRatesMarkdown(),
+    "the published redaction rates differ from a fresh seeded run: a detector or the corpus changed. Regenerate them with `npm run sensitive-rates` and commit the guide.",
+  );
+});
+
+test("sensitive corpus: the rates are bounded, so a detector that regresses fails here", () => {
+  const cases = sensitiveCases(PUBLISHED_CASES, PUBLISHED_SEED);
+  for (const detector of ["email address", "phone number", "card number", "secret parameter"] as const)
+    assert.equal(sensitiveRates(cases, detector).missed, 0, `${detector} left a secret readable`);
+  for (const detector of ["email address", "phone number", "card number"] as const)
+    assert.equal(sensitiveRates(cases, detector).falseAlarms, 0, `${detector} altered text with no secret`);
+  const all = sensitiveRates(cases);
+  assert.ok(all.missRate < 0.01, `miss rate ${all.missRate}`);
+  assert.ok(all.falseAlarmRate < 0.05, `false-alarm rate ${all.falseAlarmRate}`);
 });
