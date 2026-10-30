@@ -12,9 +12,9 @@
 | [GitHub Action inputs](#github-action-inputs) | The inputs and outputs of the check, ci and qa actions |
 | [Repository variables and secrets](#repository-variables-and-secrets-for-scenescout-qa) | What the `/scenescout qa` workflows read |
 | [`scout_login`](#scout_login-options) and [`scout_attach`](#scout_attach-options) options | What an agent can pass when it signs in or attaches |
-| [MCP prompts](#mcp-prompts) and [mod settings](#claude-code-mod-settings) | The prompts a client lists, and the optional Claude Code mod's settings |
+| [MCP tool parameters](#mcp-tool-parameters), [MCP prompts](#mcp-prompts) and [mod settings](#claude-code-mod-settings) | The parameters of every other tool, the prompts a client lists, and the optional Claude Code mod's settings |
 
-Every config key, command-line option, environment variable, GitHub Action input, `/scenescout qa` repository setting, `scout_attach` option and MCP prompt, with its default. A test (`guide-test`, and `mcp-check` for `scout_attach`, `scout_login` and the MCP prompts) compares these tables with the code, so an option added or removed in one place and not the other fails the build. `scenescout --help` prints the same options in short.
+Every config key, command-line option, environment variable, GitHub Action input, `/scenescout qa` repository setting, `scout_attach` option, MCP tool parameter and MCP prompt, with its default. A test (`guide-test`, and `mcp-check` for every tool's parameters and the MCP prompts) compares these tables with the code, so an option added or removed in one place and not the other fails the build. `scenescout --help` prints the same options in short.
 
 An option takes its value after a space or an equals sign: `--fail-on high` or `--fail-on=high`. Relative paths are resolved from the directory the command runs in.
 
@@ -599,6 +599,59 @@ What an agent can pass when it attaches a session. You rarely set these by hand;
 | `dedup` | `SCENESCOUT_DEDUP`, else `rule` | `judge` asks a model, only when `SCENESCOUT_DEDUP=judge` is in the server's environment (the argument alone is refused with a note); it asks whether a filing the rule keeps apart from everything recorded is one of the open findings on its page; it needs a key in the server's environment and sends the findings' titles, categories and evidence, and the page's path, to the provider. For the whole run |
 | `planId` | none | The guided plan this attach carries out (`gp-…`). Once any guided plan is built in the server, an attach above `observe` needs an accepted plan's id, in no mode above the plan's and on the plan's site. While a plan is open, an attach passing `readPosts` or `trustedEmbeds` is refused, and a plan no session carries any more must be confirmed again ([Safety model](Safety-model.md#care-levels-in-a-guided-check)) |
 | `open` | `SCENESCOUT_OPEN`, else by context | `live`, `report`, `both` or `none`: ask to open the live view on this attach and `report.html` when `scout_report` writes it. It may ask for less than `SCENESCOUT_OPEN` allows, never more, and with that unset CI, SSH and no display refuse it; the attach result names what was not opened and why. Unset, both open on a local desktop session, headed or headless, and nothing opens in CI, over SSH, or on Linux with no display |
+
+## MCP tool parameters
+
+Every tool other than `scout_attach` and `scout_login` (whose options have their own tables above), with each parameter it takes and whether the call must carry it. `mcp-check` holds this table to the schemas the server lists, so a parameter renamed, added, removed or made required in one place and not the other fails the build.
+
+| Tool | Parameters |
+|---|---|
+| `scout_playbook` | none |
+| `scout_intake` | `url` (optional) |
+| `scout_guided_plan` | `choices` (optional), `planId` (optional) |
+| `scout_guided_confirm` | `planId` (required) |
+| `scout_recheck_plan` | `ids` (optional), `signIn` (optional), `address` (optional) |
+| `scout_saved_checks` | `action` (required), `name` (optional), `planId` (optional), `address` (optional) |
+| `scout_lane_brief` | `lanes` (required), `goal` (optional), `routes` (optional), `runMinutes` (optional), `expiryMarginMinutes` (optional), `fromRun` (optional), `fromRunMode` (optional), `session` (optional) |
+| `scout_lane_report` | `lane` (required), `reply` (optional) |
+| `scout_scan` | `projectPath` (required) |
+| `scout_session` | `name` (optional), `session` (optional), `paceMs` (optional), `area` (optional) |
+| `scout_snapshot` | `full` (optional), `session` (optional) |
+| `scout_crawl` | `paths` (optional), `session` (optional) |
+| `scout_run_plan` | `steps` (required), `onViolation` (optional), `task` (optional), `objective` (optional), `session` (optional) |
+| `scout_click` | `ref` (required), `clicks` (optional), `leave` (optional), `task` (optional), `objective` (optional), `session` (optional) |
+| `scout_type` | `ref` (required), `textValue` (optional), `value` (optional), `pressEnter` (optional), `replace` (optional), `task` (optional), `objective` (optional), `session` (optional) |
+| `scout_upload` | `ref` (optional), `filePath` (optional), `fixture` (optional), `name` (optional), `task` (optional), `objective` (optional), `session` (optional) |
+| `scout_hover` | `ref` (required), `session` (optional) |
+| `scout_select` | `ref` (required), `value` (required), `task` (optional), `objective` (optional), `session` (optional) |
+| `scout_navigate` | `target` (required), `leave` (optional), `task` (optional), `objective` (optional), `session` (optional) |
+| `scout_request` | `path` (required), `method` (optional), `body` (optional), `headers` (optional), `select` (optional), `offset` (optional), `limit` (optional), `task` (optional), `objective` (optional), `session` (optional) |
+| `scout_network` | `contains` (optional), `limit` (optional), `session` (optional) |
+| `scout_back` | `leave` (optional), `task` (optional), `objective` (optional), `session` (optional) |
+| `scout_scroll` | `to` (optional), `by` (optional), `target` (optional), `session` (optional) |
+| `scout_press` | `key` (required), `task` (optional), `objective` (optional), `session` (optional) |
+| `scout_design_audit` | `session` (optional) |
+| `scout_journey` | `action` (required), `goal` (optional), `completed` (optional), `note` (optional), `session` (optional) |
+| `scout_note` | `action` (required), `section` (optional), `note` (optional), `session` (optional) |
+| `scout_screenshot` | `session` (optional) |
+| `scout_capture` | `ref` (optional), `key` (optional), `name` (optional), `margin` (optional), `session` (optional) |
+| `scout_finding` | `severity` (required), `category` (required), `title` (required), `detail` (required), `evidence` (optional), `convention` (optional), `ref` (optional), `session` (optional) |
+| `scout_status` | none |
+| `scout_status_poll` | none |
+| `scout_recap` | `save` (optional) |
+| `scout_coverage` | `scope` (optional), `session` (optional) |
+| `scout_report` | `force` (optional), `level` (optional), `history` (optional), `report` (optional), `session` (optional) |
+| `scout_resolve` | `findingId` (optional), `id` (optional), `session` (optional) |
+| `scout_verify` | `id` (optional), `verdict` (optional), `note` (optional), `ids` (optional), `session` (optional) |
+| `scout_tickets` | `text` (optional), `path` (optional), `session` (optional) |
+| `scout_criterion` | `ticket` (required), `criterion` (required), `verdict` (required), `findings` (optional), `confidence` (required), `reason` (required), `untestedBecause` (optional), `session` (optional) |
+| `scout_cards` | `filter` (optional), `ids` (optional), `limit` (optional), `pictures` (optional) |
+| `scout_feedback` | `id` (optional), `verdict` (optional), `reason` (optional), `export` (optional) |
+| `scout_team_report` | none |
+| `scout_ticket_preview` | `ids` (required), `to` (required), `target` (required) |
+| `scout_ticket_file` | `previewId` (required) |
+| `scout_ticket_status` | `address` (optional) |
+| `scout_close` | `session` (optional), `all` (optional), `force` (optional) |
 
 ## MCP prompts
 

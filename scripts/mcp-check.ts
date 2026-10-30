@@ -2178,6 +2178,20 @@ async function main(): Promise<void> {
   }
   console.log(`✓ skill documents every non-exempt tool parameter`);
 
+  // A parameter the skill shows in a call, such as `scout_scroll {target: "…"}`, must be one the tool takes: the word elsewhere in the skill does not count.
+  const skillCallGaps: string[] = [];
+  for (const m of skill.matchAll(/\b(scout_[a-z_]+)\s*\{([^}]*)\}/g)) {
+    const tool = tools.find((t) => t.name === m[1]);
+    if (!tool) continue;
+    const params = Object.keys((tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
+    for (const item of m[2].split(",")) {
+      const key = item.match(/^\s*([A-Za-z]+)\s*(?::|$)/)?.[1];
+      if (key && !params.includes(key)) skillCallGaps.push(`${m[1]} has no parameter ${key}`);
+    }
+  }
+  if (skillCallGaps.length > 0) fail(`the skill shows calls with parameters the tool does not take:\n  ${skillCallGaps.join("\n  ")}`);
+  console.log(`✓ every parameter the skill shows in a call is one the tool takes`);
+
   // The guide (docs/guide/) names tools and their parameters for people, and
   // its configuration reference lists scout_attach's options. Both are held
   // to the schemas the server actually serves; guide-test covers the rest.
@@ -2211,6 +2225,31 @@ async function main(): Promise<void> {
     if (!section) guideGaps.push(`Configuration-reference.md has no ${tool} options table`);
     else if (JSON.stringify(listedRequired) !== JSON.stringify(required))
       guideGaps.push(`Configuration-reference.md marks ${tool} options [${listedRequired.join(", ")}] required, the server requires [${required.join(", ")}]`);
+  }
+  // Every other tool's parameters and which of them a call must carry, held to the schemas the same way.
+  const toolSection = (reference.split("\n## MCP tool parameters\n")[1] ?? "").split("\n## ")[0];
+  if (!toolSection) guideGaps.push("Configuration-reference.md has no MCP tool parameters section");
+  const listedTools = new Map<string, string>();
+  for (const row of toolSection.matchAll(/^\| `(scout_[a-z_]+)` \| ([^|\n]+) \|/gm)) listedTools.set(row[1], row[2].trim());
+  const tableTools = tools.filter((t) => t.name !== "scout_attach" && t.name !== "scout_login");
+  const listedToolNames = [...listedTools.keys()].sort().join(",");
+  const servedToolNames = tableTools
+    .map((t) => t.name)
+    .sort()
+    .join(",");
+  if (toolSection && listedToolNames !== servedToolNames)
+    guideGaps.push(`Configuration-reference.md tool parameters table lists tools [${listedToolNames}], the server has [${servedToolNames}]`);
+  for (const tool of tableTools) {
+    const cell = listedTools.get(tool.name);
+    if (cell === undefined) continue;
+    const schema = tool.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
+    const served = Object.keys(schema.properties ?? {}).map((name) => `${name}:${(schema.required ?? []).includes(name)}`);
+    const listedParams =
+      cell === "none" ? [] : [...cell.matchAll(/`([A-Za-z][A-Za-z0-9]*)`\s*\((required|optional)\)/g)].map((m) => `${m[1]}:${m[2] === "required"}`);
+    if (JSON.stringify([...listedParams].sort()) !== JSON.stringify([...served].sort()))
+      guideGaps.push(
+        `Configuration-reference.md lists ${tool.name} parameters [${listedParams.join(", ")}], the server has [${served.join(", ")}] (name:required)`,
+      );
   }
   // Prompt names and arguments, held to prompts/list the same way tool options are held to their schemas.
   const promptSection = (reference.split("\n## MCP prompts\n")[1] ?? "").split("\n## ")[0];
@@ -2246,7 +2285,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log(
-    "✓ the guide names only tools and parameters the server has, lists every scout_attach option, which scout_attach and scout_login options are required, and the same prompts the server lists",
+    "✓ the guide names only tools and parameters the server has, lists every scout_attach option, which options of every tool are required, and the same prompts the server lists",
   );
 
   const result = await client.callTool({ name: "scout_scan", arguments: { projectPath: packageRoot } });
