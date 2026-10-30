@@ -2334,6 +2334,27 @@ async function dispatched(argv: string[]): Promise<{ ran: string[]; exit: number
   return { ran, exit: null, said };
 }
 
+test("`scenescout --help` read through a pipe arrives whole, as it does into a file", () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const cli = path.join(repo, "src", "cli.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-help-"));
+  try {
+    const target = path.join(dir, "help.txt");
+    const fd = fs.openSync(target, "w");
+    const toFile = spawnSync(process.execPath, ["--import", "tsx", cli, "--help"], { stdio: ["ignore", fd, "pipe"], cwd: repo });
+    fs.closeSync(fd);
+    assert.equal(toFile.status, 0);
+    const whole = fs.readFileSync(target, "utf8");
+    assert.ok(whole.length > 16 * 1024, "the usage is longer than a pipe's first write");
+    const piped = spawnSync(process.execPath, ["--import", "tsx", cli, "--help"], { encoding: "utf8", cwd: repo, maxBuffer: 1 << 24 });
+    assert.equal(piped.status, 0);
+    assert.equal(piped.stdout.length, whole.length);
+    assert.equal(piped.stdout.slice(-200), whole.slice(-200));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("`--help` and `-h` print the usage and exit 0 for EVERY subcommand, and the command itself never runs", async () => {
   for (const command of SUBCOMMANDS) {
     for (const help of ["--help", "-h"]) {
