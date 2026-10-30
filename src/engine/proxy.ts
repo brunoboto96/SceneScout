@@ -154,12 +154,18 @@ export function proxyLine(settings: ProxySettings): string {
   return `Proxy (${settings.source === "SCENESCOUT_PROXY" ? PROXY_ENV : "HTTPS_PROXY / HTTP_PROXY / NO_PROXY"}): ${parts.join("; ")}.`;
 }
 
-/** The options undici's EnvHttpProxyAgent takes for these settings. */
-export function fetchProxyOptions(settings: ProxySettings): { httpProxy?: string; httpsProxy?: string; noProxy: string } {
+/**
+ * The options undici's EnvHttpProxyAgent takes for these settings. `proxyTunnel`
+ * sends a plain-http target through CONNECT as well, as undici 7 did: undici 8
+ * forwards it in absolute form instead, and then a target the proxy cannot
+ * reach answers with the proxy's 502 rather than failing as a network error.
+ */
+export function fetchProxyOptions(settings: ProxySettings): { httpProxy?: string; httpsProxy?: string; noProxy: string; proxyTunnel: true } {
   return {
     ...(settings.httpProxy ? { httpProxy: settings.httpProxy } : {}),
     ...(settings.httpsProxy ? { httpsProxy: settings.httpsProxy } : {}),
     noProxy: settings.noProxy.join(","),
+    proxyTunnel: true,
   };
 }
 

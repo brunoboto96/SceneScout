@@ -48,7 +48,8 @@ import {
   type Runner,
   type RunResult,
 } from "../src/installer.ts";
-import { atLeastVersion, downloadEnv, installerFailure } from "../src/installer.ts";
+import { atLeastVersion, downloadEnv, installerFailure, NODE_FLOOR } from "../src/installer.ts";
+import { FULL_PLATFORMS } from "./test-plan.mjs";
 import { parse as parseYaml } from "yaml";
 import { distTagFor, parseVersions, releasePlan } from "./release-plan.mjs";
 import {
@@ -362,11 +363,33 @@ test("diagnose names each broken piece and its fix", () => {
     run: scripted([absent]).run,
   });
   const failing = checks.filter((c) => !c.ok).map((c) => c.name);
-  assert.deepEqual(failing, ["node >= 20", "engine built", "browser downloaded (chromium-headless-shell)", "skill installed", "claude CLI on PATH"]);
+  assert.deepEqual(failing, ["node >= 22.19", "engine built", "browser downloaded (chromium-headless-shell)", "skill installed", "claude CLI on PATH"]);
   assert.ok(
     checks.every((c) => c.ok || c.fix),
     "every failure says how to fix it",
   );
+});
+
+test("diagnose holds Node to the engines floor by minor, not by major: 22.18 fails where 22.19 and every later line pass", () => {
+  const packageRoot = tmp("sc-bare-");
+  const nodeCheck = (nodeVersion: string) =>
+    diagnose({
+      packageRoot,
+      claudeDir: tmp("sc-claude-"),
+      nodeVersion,
+      defaultBrowser: { target: "chromium-headless-shell", path: null },
+      run: scripted([absent]).run,
+    }).find((c) => c.name === "node >= 22.19");
+  for (const [version, ok] of [
+    ["v20.19.6", false],
+    ["v22.18.0", false],
+    ["v22.19.0", true],
+    ["v22.23.4", true],
+    ["v24.11.1", true],
+    ["v26.13.0", true],
+  ] as const)
+    assert.equal(nodeCheck(version)?.ok, ok, version);
+  assert.equal(nodeCheck("v22.18.0")?.fix, "install Node 22.19 or newer");
 });
 
 test("diagnose passes a complete setup and flags a registration pointing elsewhere", () => {
@@ -380,7 +403,7 @@ test("diagnose passes a complete setup and flags a registration pointing elsewhe
   const healthy = diagnose({
     packageRoot,
     claudeDir,
-    nodeVersion: "v22.1.0",
+    nodeVersion: "v22.19.0",
     defaultBrowser: { target: "chromium-headless-shell", path: chromiumPath },
     run: scripted([ok(`scenescout:\n  Command: ${process.execPath}\n  Args: ${server}`)]).run,
   });
@@ -392,7 +415,7 @@ test("diagnose passes a complete setup and flags a registration pointing elsewhe
   const moved = diagnose({
     packageRoot,
     claudeDir,
-    nodeVersion: "v22.1.0",
+    nodeVersion: "v22.19.0",
     defaultBrowser: { target: "chromium-headless-shell", path: chromiumPath },
     run: scripted([ok(`scenescout:\n  Command: ${process.execPath}\n  Args: /old/place/dist/mcp-server.js`)]).run,
   });
@@ -411,7 +434,7 @@ test("diagnose fails a registration that names a bare `node`, which Claude Code 
   const checks = diagnose({
     packageRoot,
     claudeDir,
-    nodeVersion: "v22.1.0",
+    nodeVersion: "v22.19.0",
     defaultBrowser: { target: "chromium-headless-shell", path: chromiumPath },
     run: scripted([ok(`scenescout:\n  Command: node\n  Args: ${server}\n`)]).run,
   });
@@ -426,7 +449,7 @@ test("diagnose separates 'not registered' from 'registered but unreadable'", () 
   installSkill({ packageRoot, claudeDir });
   const chromiumPath = path.join(packageRoot, "chromium");
   fs.writeFileSync(chromiumPath, "");
-  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
+  const base = { packageRoot, claudeDir, nodeVersion: "v22.19.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
 
   const unregistered = diagnose({ ...base, run: scripted([fail('No MCP server named "scenescout".')]).run }).filter((c) => !c.ok);
   assert.equal(unregistered.length, 1);
@@ -463,7 +486,7 @@ test("diagnose compares the registration by real path, not by spelling", () => {
   const checks = diagnose({
     packageRoot,
     claudeDir,
-    nodeVersion: "v22.1.0",
+    nodeVersion: "v22.19.0",
     defaultBrowser: { target: "chromium-headless-shell", path: chromiumPath },
     run: scripted([ok(listing)]).run,
   });
@@ -829,7 +852,7 @@ test("the desktop extension's manifest has every required field, the package's v
     ["${__dirname}/dist/mcp-server.js"],
     "an absolute path inside the bundle, whatever folder the app starts it from",
   );
-  assert.equal(manifest.compatibility?.runtimes?.node, `${pkg.engines.node}.0.0`, "the Node it needs is the package's");
+  assert.equal(manifest.compatibility?.runtimes?.node, pkg.engines.node, "the Node it needs is the package's");
   // The only settings are the trackers' sign-ins for filing tickets, each optional: with none the engine starts as it is.
   assert.deepEqual(Object.keys(manifest.user_config ?? {}), ["github_token", "jira_base_url", "jira_email", "jira_api_token"]);
 });
@@ -1135,7 +1158,7 @@ test("doctor passes a Claude Desktop-only install, and still checks Claude Code 
   assert.ok(desktopExtension);
   const base = {
     packageRoot,
-    nodeVersion: "v22.1.0",
+    nodeVersion: "v22.19.0",
     defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath },
     desktopExtension,
     // The same revision as this copy's: the browser check above is the extension's too.
@@ -1150,7 +1173,7 @@ test("doctor passes a Claude Desktop-only install, and still checks Claude Code 
   );
   assert.deepEqual(
     desktopOnly.map((c) => c.name),
-    ["node >= 20", "engine built", "browser downloaded (chromium-headless-shell)", "desktop extension installed", CLAUDE_CODE_NOT_NEEDED],
+    ["node >= 22.19", "engine built", "browser downloaded (chromium-headless-shell)", "desktop extension installed", CLAUDE_CODE_NOT_NEEDED],
   );
   assert.match(desktopOnly[3].detail, /SceneScout 3\.15\.0 in Claude Desktop/);
   assert.equal(
@@ -1193,7 +1216,7 @@ test("doctor flags an extension missing its server, and one whose browser build 
   const base = {
     packageRoot,
     claudeDir: tmp("sc-claude-"),
-    nodeVersion: "v22.1.0",
+    nodeVersion: "v22.19.0",
     defaultBrowser: { target: "chromium-headless-shell" as const, path: ownShell },
     scope: "engine" as const,
     headlessShellDir: ownShell,
@@ -1245,7 +1268,7 @@ test("doctor does not fail an extension that downloads its browser on first use,
     return diagnose({
       packageRoot,
       claudeDir: tmp("sc-claude-"),
-      nodeVersion: "v22.1.0",
+      nodeVersion: "v22.19.0",
       defaultBrowser: { target: "chromium-headless-shell", path: ownShell },
       scope: "engine",
       headlessShellDir: ownShell,
@@ -1340,7 +1363,7 @@ test("diagnose accepts an npx registration and vets its launcher", () => {
   installSkill({ packageRoot, claudeDir });
   const chromiumPath = path.join(packageRoot, "chromium");
   fs.writeFileSync(chromiumPath, "");
-  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
+  const base = { packageRoot, claudeDir, nodeVersion: "v22.19.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
   const good = diagnose({ ...base, run: scripted([ok("scenescout:\n  Command: /opt/node/bin/npx\n  Args: -y scenescout serve\n")]).run });
   assert.deepEqual(
     good.filter((c) => !c.ok),
@@ -1357,7 +1380,7 @@ test("diagnose fails a registration that pins a version npm does not have, and o
   installSkill({ packageRoot, claudeDir });
   const chromiumPath = path.join(packageRoot, "chromium");
   fs.writeFileSync(chromiumPath, "");
-  const base = { packageRoot, claudeDir, nodeVersion: "v22.1.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
+  const base = { packageRoot, claudeDir, nodeVersion: "v22.19.0", defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath } };
   const listing = ok("scenescout:\n  Command: /opt/node/bin/npx\n  Args: -y scenescout@9.9.9 serve\n");
   const names = (checks: ReturnType<typeof diagnose>) => checks.filter((c) => !c.ok).map((c) => c.name);
 
@@ -1396,13 +1419,13 @@ test("the engine-only doctor does not fail a plugin install for lacking a skill 
   const base = {
     packageRoot,
     claudeDir: tmp("sc-claude-"),
-    nodeVersion: "v22.1.0",
+    nodeVersion: "v22.19.0",
     defaultBrowser: { target: "chromium-headless-shell" as const, path: chromiumPath },
   };
   const engine = diagnose({ ...base, scope: "engine", run: scripted([]).run });
   assert.deepEqual(
     engine.map((c) => c.name),
-    ["node >= 20", "engine built", "browser downloaded (chromium-headless-shell)"],
+    ["node >= 22.19", "engine built", "browser downloaded (chromium-headless-shell)"],
   );
   assert.deepEqual(
     engine.filter((c) => !c.ok),
@@ -1467,7 +1490,7 @@ test("doctor names a repair command that exists for the way the tool was install
   const fixes = diagnose({
     packageRoot: fromNpm,
     claudeDir: tmp("sc-claude-"),
-    nodeVersion: "v22.1.0",
+    nodeVersion: "v22.19.0",
     defaultBrowser: { target: "chromium-headless-shell", path: null },
     run: scripted([fail('No MCP server named "scenescout".')]).run,
   })
@@ -1555,7 +1578,7 @@ test("a build counts as installed only when its files are there", () => {
 
 test("doctor names the download command for the browser that is actually missing", () => {
   const packageRoot = tmp("sc-pkg-");
-  const base = { scope: "engine" as const, packageRoot, claudeDir: tmp("sc-claude-"), nodeVersion: "v22.1.0", run: scripted([]).run };
+  const base = { scope: "engine" as const, packageRoot, claudeDir: tmp("sc-claude-"), nodeVersion: "v22.19.0", run: scripted([]).run };
   const fixFor = (target: "chromium-headless-shell" | "firefox") =>
     diagnose({ ...base, defaultBrowser: { target, path: null } }).find((c) => c.name.startsWith("browser downloaded"))?.fix ?? "";
   // The plain install already brings the headless shell.
@@ -3226,24 +3249,96 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
   }
 });
 
-test("while engines admit a Node older than 22.19, undici stays on 7.x: Dependabot ignores its majors and AGENTS.md records the hold", () => {
-  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { engines: { node: string }; dependencies: Record<string, string> };
-  const cfg = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "dependabot.yml"), "utf8")) as {
-    updates: Array<{ "package-ecosystem": string; ignore?: Array<{ "dependency-name": string; "update-types"?: string[] }> }>;
+// Node's release schedule (github.com/nodejs/Release, schedule.json): each LTS line's end of life.
+// Add a line when it becomes LTS; ADR 34 says when the default moves to it.
+const NODE_LTS_END_OF_LIFE: Record<number, string> = { 20: "2026-04-30", 22: "2027-04-30", 24: "2028-04-30", 26: "2029-04-30" };
+
+/** engines.node read as a lower bound `>=x[.y[.z]]`, or null when it is written another way. */
+function nodeFloor(range: string): string | null {
+  const m = /^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(range.trim());
+  return m ? `${m[1]}.${m[2] ?? 0}.${m[3] ?? 0}` : null;
+}
+
+test("engines start on the oldest Node LTS line still maintained today, and every place that states the floor agrees", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+    engines: { node: string };
+    devDependencies: Record<string, string>;
   };
-  const ignores = cfg.updates.find((u) => u["package-ecosystem"] === "npm")?.ignore ?? [];
-  const agents = fs.readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8");
-  const hold = agents.split("\n").some((line) => line.startsWith("- **undici stays on 7.x"));
-  const floor = /^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(pkg.engines.node.trim());
+  const floor = nodeFloor(pkg.engines.node);
   assert.ok(floor, `engines.node is read as a lower bound, not ${pkg.engines.node}`);
-  const oldest = `${floor[1]}.${floor[2] ?? 0}.${floor[3] ?? 0}`;
-  if (!atLeastVersion(oldest, "22.19.0")) {
-    assert.ok(
-      ignores.some((i) => i["dependency-name"] === "undici" && i["update-types"]?.includes("version-update:semver-major")),
-      `undici 8 needs Node >= 22.19, so Dependabot must ignore its major while engines admit Node ${oldest}`,
-    );
-    assert.ok(hold, `AGENTS.md records the undici hold while engines admit Node ${oldest}`);
-    assert.ok(/^[~^]7\./.test(pkg.dependencies.undici), `undici is published as a 7.x range, not ${pkg.dependencies.undici}`);
+  const floorMajor = Number(floor.split(".")[0]);
+  const today = new Date().toISOString().slice(0, 10);
+  const maintained = Object.entries(NODE_LTS_END_OF_LIFE)
+    .filter(([, end]) => end > today)
+    .map(([major]) => Number(major));
+  assert.ok(floorMajor in NODE_LTS_END_OF_LIFE, `engines start on Node ${floorMajor}, which is not an LTS line`);
+  assert.equal(
+    floorMajor,
+    Math.min(...maintained),
+    `engines start on Node ${floorMajor}; the oldest LTS line maintained on ${today} is ${Math.min(...maintained)}: raise or lower the floor with its docs, test cell and @types/node (ADR 34)`,
+  );
+  assert.equal(NODE_FLOOR, floor, "the doctor checks the engines floor");
+  assert.ok(
+    FULL_PLATFORMS.some((p) => p.node === floorMajor),
+    `CI runs a cell on Node ${floorMajor}, the oldest supported line`,
+  );
+  for (const p of FULL_PLATFORMS) assert.ok(maintained.includes(p.node), `CI's ${p.os} cell runs Node ${p.node}, which is not a maintained LTS line`);
+  assert.match(pkg.devDependencies["@types/node"], new RegExp(`^\\^${floorMajor}\\.`), "the types describe the oldest supported Node");
+});
+
+test("engines admit no Node that a runtime dependency refuses", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { engines: { node: string } };
+  const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8")) as {
+    packages: Record<string, { dev?: boolean; engines?: Record<string, string> | string[] }>;
+  };
+  const ours = nodeFloor(pkg.engines.node)!;
+  const refused: string[] = [];
+  for (const [where, entry] of Object.entries(lock.packages)) {
+    if (!where || entry.dev || Array.isArray(entry.engines) || !entry.engines?.node) continue;
+    const theirs = nodeFloor(entry.engines.node);
+    assert.ok(theirs, `${where} declares node ${entry.engines.node}, a range this test does not read yet`);
+    if (!atLeastVersion(ours, theirs)) refused.push(`${where} needs ${entry.engines.node}`);
+  }
+  assert.deepEqual(refused, [], `engines (${pkg.engines.node}) admit Node versions these dependencies refuse`);
+});
+
+test("Dependabot waits out a cooldown on both ecosystems: a week, and a month for an npm major", () => {
+  const cfg = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "dependabot.yml"), "utf8")) as {
+    updates: Array<{
+      "package-ecosystem": string;
+      cooldown?: Record<string, number>;
+      ignore?: Array<{ "dependency-name": string; "update-types"?: string[] }>;
+    }>;
+  };
+  for (const ecosystem of ["npm", "github-actions"]) {
+    const cooldown = cfg.updates.find((u) => u["package-ecosystem"] === ecosystem)?.cooldown;
+    assert.ok((cooldown?.["default-days"] ?? 0) >= 7, `${ecosystem} waits at least 7 days for a release`);
+  }
+  const npm = cfg.updates.find((u) => u["package-ecosystem"] === "npm")!;
+  assert.ok((npm.cooldown?.["semver-major-days"] ?? 0) >= 30, "an npm major waits at least 30 days");
+  assert.ok(
+    npm.ignore?.some((i) => i["dependency-name"] === "@types/node" && i["update-types"]?.includes("version-update:semver-major")),
+    "@types/node moves its major with the engines floor, not with Dependabot",
+  );
+});
+
+test("each action looks for the engines floor before it installs Node, comparing by minor", () => {
+  const floor = NODE_FLOOR;
+  const short = floor.replace(/\.0$/, "");
+  for (const file of ["action.yml", "ci/action.yml", "qa/action.yml"]) {
+    const action = parseYaml(fs.readFileSync(path.join(repoRoot, file), "utf8")) as { runs: { steps: ReleaseStep[] } };
+    const step = action.runs.steps.find((s) => s.id === "node");
+    assert.ok(step?.run, `${file} has a step that looks for Node`);
+    assert.equal(step.name, `Look for Node.js ${short} or newer`, file);
+    const script = /node -e '([^']+)'/.exec(step.run)?.[1] ?? "";
+    assert.ok(script.includes(`"${floor}"`), `${file} compares against the engines floor ${floor}`);
+    const passes = (wanted: string) => spawnSync(process.execPath, ["-e", script.replace(`"${floor}"`, `"${wanted}"`)]).status === 0;
+    // This suite runs on a supported Node, so the floor itself passes; one minor or one major later does not.
+    const [ownMajor, ownMinor] = process.versions.node.split(".").map(Number);
+    assert.equal(passes(floor), true, `${file}: Node ${process.versions.node} meets ${floor}`);
+    assert.equal(passes(`${ownMajor}.${ownMinor}.0`), true, `${file}: an equal minor passes`);
+    assert.equal(passes(`${ownMajor}.${ownMinor + 1}.0`), false, `${file}: a later minor of the same line fails`);
+    assert.equal(passes(`${ownMajor + 1}.0.0`), false, `${file}: a later line fails`);
   }
 });
 

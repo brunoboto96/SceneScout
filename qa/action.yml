@@ -150,11 +150,11 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Look for Node.js 20 or newer
+    - name: Look for Node.js 22.19 or newer
       id: node
       shell: bash
       run: |
-        if command -v node >/dev/null && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 20 ]; then
+        if command -v node >/dev/null && node -e 'const f = "22.19.0".split(".").map(Number), v = process.versions.node.split(".").map(Number); process.exit(v[0] > f[0] || (v[0] === f[0] && v[1] >= f[1]) ? 0 : 1)'; then
           echo "present=true" >> "$GITHUB_OUTPUT"
         else
           echo "present=false" >> "$GITHUB_OUTPUT"

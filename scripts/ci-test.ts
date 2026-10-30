@@ -2098,7 +2098,7 @@ test("the suite runs on Windows for every pull request that changes code", () =>
 const cell = (os: string, node: number) => ({ os, node });
 
 test("test plan: main and dispatched runs get every cell, a pull request Linux and Windows on Node 24", () => {
-  assert.deepEqual(FULL_PLATFORMS, [cell("ubuntu-latest", 20), cell("ubuntu-latest", 24), cell("macos-latest", 24), cell("windows-latest", 24)]);
+  assert.deepEqual(FULL_PLATFORMS, [cell("ubuntu-latest", 22), cell("ubuntu-latest", 24), cell("macos-latest", 24), cell("windows-latest", 24)]);
   assert.deepEqual(PULL_REQUEST_PLATFORMS, [cell("ubuntu-latest", 24), cell("windows-latest", 24)]);
   const src = ["src/engine/policy.ts"];
   for (const event of ["push", "workflow_dispatch"]) {

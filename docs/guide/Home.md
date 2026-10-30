@@ -8,7 +8,7 @@
 
 ## Try it in one command
 
-All it takes is Node 20 or newer and an app you are allowed to test. No account, no API key, no setup:
+All it takes is Node 22.19 or newer and an app you are allowed to test. No account, no API key, no setup:
 
 ```bash
 npx -y scenescout http://localhost:3000

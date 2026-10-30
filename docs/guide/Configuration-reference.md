@@ -458,7 +458,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `working-directory` | `.` | Where the check runs; other relative paths are resolved from here |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref, installed with `npm ci` from that release's lockfile. A version other than that release installs with its dependencies resolved at run time, with a warning |
 | `cli` | empty | A built `dist/cli.js` to run instead of the npm package, for testing the action itself |
-| `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
+| `node-version` | `24` | Installed only when the runner has no Node 22.19 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
 | `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and `replay.html` with its frames and videos on a recorded check |
 | `artifact-name` | empty | Empty means `scenescout-check-<job id>`; give each matrix cell its own |
@@ -504,7 +504,7 @@ A default of "empty" means the input is passed on only when set, so the CLI's ow
 | `working-directory` | `.` | Where the run happens |
 | `version` | empty | The scenescout npm version to run; empty means the version of the action's ref, installed with `npm ci` from that release's lockfile. A version other than that release installs with its dependencies resolved at run time, with a warning |
 | `cli` | empty | A built `dist/cli.js` to run instead, for testing the action itself |
-| `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
+| `node-version` | `24` | Installed only when the runner has no Node 22.19 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo` |
 | `upload-artifact` | `true` | Keep `report.md`, `report.html`, `summary.md`, `ci.json`, `ci.sarif` and the pictures in `shots/` as an artifact; nothing else in the output folder is uploaded |
 | `artifact-name` | empty | Empty means `scenescout-ci-<job id>` |

@@ -108,7 +108,7 @@ And the action's own:
 |---|---|---|
 | `working-directory` | `.` | Where the check runs; relative paths above are resolved from here |
 | `version` | the ref's release | The scenescout npm version to run. Empty, or the ref's own release, installs that release's locked dependency tree; a version other than that release installs as npm would, with a warning |
-| `node-version` | `24` | Installed only when the runner has no Node 20 or newer |
+| `node-version` | `24` | Installed only when the runner has no Node 22.19 or newer |
 | `install-deps` | `true` | On Linux, install the browser's system libraries with `sudo`. Set `false` on a runner or container that has them |
 | `upload-artifact` | `true` | Keep the three files as an artifact, with the pictures of any visual baseline not met, and on a recorded check `replay.html` with its `replay-frames/` and `replay-videos/` folders |
 | `artifact-retention-days` | empty | Days to keep the artifact, 1 to 90. Empty keeps the repository's artifact retention setting (the `scenescout-shots` branch has its own pruning, described with the `/scenescout qa` comment) |
@@ -499,7 +499,7 @@ Why flows and re-tests work this way: [ADR 12](adr/0012-a-check-replays-saved-fl
 
 ## Other CI systems
 
-Anywhere Node 20 or newer runs, the check is one command. Install the browser first; on Linux add its system libraries unless the image already has them (the official Playwright images do).
+Anywhere Node 22.19 or newer runs, the check is one command. Install the browser first; on Linux add its system libraries unless the image already has them (the official Playwright images do).
 
 ### Plain shell
 

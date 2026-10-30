@@ -19,8 +19,8 @@ import { fileURLToPath } from "node:url";
 
 /** Every cell of the suite's matrix, as a push to main and a dispatched run test it. */
 export const FULL_PLATFORMS = [
-  // The supported floor and the current LTS, on the platform CI is cheapest on.
-  { os: "ubuntu-latest", node: 20 },
+  // The oldest maintained LTS line (the engines floor, ADR 34) and the default, on the platform CI is cheapest on.
+  { os: "ubuntu-latest", node: 22 },
   { os: "ubuntu-latest", node: 24 },
   // Where most contributors actually run it.
   { os: "macos-latest", node: 24 },

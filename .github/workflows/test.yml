@@ -48,7 +48,7 @@ permissions:
 jobs:
   # What this run needs (scripts/test-plan.mjs; ADR 26). A push to main and a
   # dispatched run (the release's Version Packages branch) test every cell. A
-  # pull request runs Linux and Windows on Node 24; the macOS, Node 20, Firefox
+  # pull request runs Linux and Windows on Node 24; the macOS, Node 22, Firefox
   # and WebKit cells join it when it carries the `full-ci` label or changes the
   # browser code or the dependency tree. A pull request that changes only
   # documentation runs the `docs` job instead of the matrix.
