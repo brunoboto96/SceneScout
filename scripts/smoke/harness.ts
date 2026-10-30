@@ -22,6 +22,8 @@ export const BROWSER = defaultEngine(process.env);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appDir = path.join(here, "..", "..", "test-app");
+/** The worker scripts the fixtures register, served by name so a request path never becomes a file path. */
+const WORKER_SCRIPTS = ["sw.js", "navigate-sw.js"] as const;
 
 /** What the fixture server saw, so a suite can assert on what actually reached it. */
 export interface ServerStats {
@@ -755,10 +757,11 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end(JSON.stringify({ id: "7", name: "existing item" }));
       return;
     }
-    if (urlPath === "/sw.js" || urlPath === "/navigate-sw.js") {
+    const workerScript = WORKER_SCRIPTS.find((name) => urlPath === `/${name}`);
+    if (workerScript) {
       // A worker script must be served as JavaScript or registration is refused.
       res.writeHead(200, { "content-type": "text/javascript" });
-      res.end(fs.readFileSync(path.join(appDir, urlPath.slice(1))));
+      res.end(fs.readFileSync(path.join(appDir, workerScript)));
       return;
     }
     if (urlPath === "/api/items/999" && req.method === "DELETE") stats.workerDeletes += 1;
