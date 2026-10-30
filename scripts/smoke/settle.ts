@@ -156,7 +156,17 @@ async function crawlOfAPageThatMovesOnToNowhere(baseUrl: string): Promise<void> 
   try {
     await engine.attach({ url: `${baseUrl}/covered.html`, projectDir, mode: "read-only", navTimeoutMs: limitMs });
     const t0 = Date.now();
-    const out = await engine.crawl(["/leaves-for-held.html", "/leaves-for-page.html", "/leaves-twice.html"]);
+    // A stall names its route and step: the trace is printed once the crawl has run well past its limits.
+    const stalled = setTimeout(
+      () => console.log(`  (crawl still running after ${Date.now() - t0} ms; steps:\n    ${engine.crawlTraceLines().slice(-12).join("\n    ")})`),
+      60_000,
+    );
+    let out: string;
+    try {
+      out = await engine.crawl(["/leaves-for-held.html", "/leaves-for-page.html", "/leaves-twice.html"]);
+    } finally {
+      clearTimeout(stalled);
+    }
     const ms = Date.now() - t0;
     console.log(`  (crawl of both routes: ${ms} ms, page-load limit ${limitMs} ms)`);
     check(

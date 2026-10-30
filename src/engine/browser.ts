@@ -247,7 +247,7 @@ import {
   type TimeLimits,
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
-import { bestEffort, settleWithin } from "./best-effort.js";
+import { bestEffort, heldRead, settleWithin } from "./best-effort.js";
 import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { readMachineSockets } from "./tcp-table.js";
@@ -5553,6 +5553,7 @@ export class BrowserEngine {
     const page = this.requirePage();
     const memory = this.memory!;
     this.crawlHealth = [];
+    this.crawlTrace = [];
     const explicit = !!paths && paths.length > 0;
     const targets = (explicit ? paths : this.crawlableRoutes().map((r) => this.navigablePath(r))).slice(0, Math.min(150, opts.limit ?? 150));
     if (targets.length === 0) {
@@ -5606,6 +5607,22 @@ export class BrowserEngine {
     );
   }
 
+  /** The last steps of a crawl, each with the route and the time since the crawl's first, for a stall to name itself (settle smoke). */
+  private crawlTrace: string[] = [];
+  private crawlTraceStart = 0;
+
+  private traceCrawl(path: string, step: string): void {
+    const now = Date.now();
+    if (this.crawlTrace.length === 0) this.crawlTraceStart = now;
+    this.crawlTrace.push(`+${now - this.crawlTraceStart} ms ${path}: ${step}`);
+    if (this.crawlTrace.length > 60) this.crawlTrace.shift();
+  }
+
+  /** Where the crawl is, as the steps it has taken (newest last). */
+  crawlTraceLines(): string[] {
+    return [...this.crawlTrace];
+  }
+
   /** A crawled route that could not be read: it failed to load, or its page was still moving on at the limit. */
   private crawlRouteUnloaded(run: CrawlRun, path: string, url: string, reason: string, verdict: "LOAD FAILED" | "NAVIGATION PENDING"): CrawlStepOutcome {
     // Not retried by later crawls in this process (a check would otherwise try it
@@ -5643,6 +5660,7 @@ export class BrowserEngine {
     }
     const url = resolved.url;
     this.actionStartedAt = Date.now();
+    this.traceCrawl(path, "load");
     this.oracles.drain(false); // discard pre-route leftovers WITHOUT marking their signatures as reported
     let status: number | string = "ERR";
     // The main document's response, as the browser received it. Kept apart from goto's own result: a browser that
@@ -5711,7 +5729,9 @@ export class BrowserEngine {
       });
       return "resource";
     }
+    this.traceCrawl(path, "settle");
     await this.settle();
+    this.traceCrawl(path, "own navigation");
     // A route whose page moved itself on is read once that navigation lands: read while it is on its way, Chromium held
     // the read until it did, however long that took. One still on its way at the page-load limit is not read.
     const pending = await this.ownNavigationPending(page, this.limits.crawlNavMs, this.actionStartedAt);
@@ -5723,9 +5743,20 @@ export class BrowserEngine {
     // With a saved sign-in, the address is watched until it has held still since the route's document arrived before
     // the route is read: a guard that sends a signed-out visitor to sign-in from its scripts a moment after load would
     // otherwise pass as a healthy route. Without one, there is no sign-in to lose and nothing is waited for.
+    this.traceCrawl(path, "landed address");
     await this.crawlLandedUrl(page);
+    this.traceCrawl(path, "collect");
     this.harvestPaused = opts.measureOnly === true;
-    const { elements, forms, aliases } = await this.snapshots.collect().finally(() => (this.harvestPaused = false));
+    // A page can start a navigation of its own after the check above; Chromium holds the read until it lands, with no
+    // limit, so the read is released at the page-load limit by ending that navigation.
+    const collected = await heldRead(this.snapshots.collect(), this.limits.crawlNavMs, () =>
+      page.goto("about:blank", { timeout: this.limits.backNavMs }),
+    ).finally(() => (this.harvestPaused = false));
+    if (collected.stalled) {
+      return this.crawlRouteUnloaded(run, path, url, stillNavigating(redactSecrets(page.url()), "nav", this.limits.crawlNavMs), "NAVIGATION PENDING");
+    }
+    this.traceCrawl(path, "record");
+    const { elements, forms, aliases } = collected.value;
     const finalUrl = page.url();
     // A route that sent the page to another site (a single sign-on provider's sign-in, or any other page there) is
     // judged by where it went, as a navigation is when the origin fence takes it back (navigationLanding), but that

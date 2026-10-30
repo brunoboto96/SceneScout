@@ -19,7 +19,7 @@ import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
 import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
-import { bestEffort, settleWithin } from "../src/engine/best-effort.ts";
+import { bestEffort, heldRead, settleWithin } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles, socketsLeft } from "./smoke/leaks.ts";
 import { busiestOwners, parseTasklist, parseTcpTable, readMachineSockets, socketLine, tcpStateCounts, type CommandRunner } from "../src/engine/tcp-table.ts";
@@ -874,4 +874,39 @@ test("settleWithin waits for the work, at most the bound, and never rejects", as
   await settleWithin(new Promise<void>(() => {}), 20);
   assert.ok(Date.now() - started < 1000, "work that never finishes is given up on at the bound");
   await settleWithin(Promise.reject(new Error("gone")), 1000);
+});
+
+// heldRead: a read the page holds while its own navigation is on its way
+
+test("heldRead answers the value of a read that settles within the limit, without releasing", async () => {
+  let released = 0;
+  const got = await heldRead(Promise.resolve(7), 200, async () => void released++);
+  assert.deepEqual(got, { stalled: false, value: 7 });
+  assert.equal(released, 0);
+});
+
+test("heldRead releases a read that never settles and ends within twice the limit as stalled", async () => {
+  let released = 0;
+  const started = Date.now();
+  const got = await heldRead(new Promise<number>(() => {}), 100, async () => void released++);
+  assert.deepEqual(got, { stalled: true });
+  assert.equal(released, 1);
+  assert.ok(Date.now() - started < 1500, `took ${Date.now() - started} ms`);
+});
+
+test("heldRead stalls a read that the release lets fail, and a release that throws does not escape", async () => {
+  let fail: (e: Error) => void = () => {};
+  const work = new Promise<number>((_, reject) => (fail = reject));
+  const got = await heldRead(work, 100, async () => {
+    fail(new Error("Execution context was destroyed"));
+    throw new Error("page closed");
+  });
+  assert.deepEqual(got, { stalled: true });
+});
+
+test("heldRead passes on a read that fails before the limit", async () => {
+  await assert.rejects(
+    heldRead(Promise.reject(new Error("boom")), 200, async () => {}),
+    /boom/,
+  );
 });
