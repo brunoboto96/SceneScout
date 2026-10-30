@@ -3344,27 +3344,9 @@ export class BrowserEngine {
         formatViolations(this.oracles.drain())
       );
     }
-    let url = page.url();
-    if (url !== "about:blank" && !this.isSameOrigin(url)) {
-      // A click carried us off the app's origin.
-      this.fencedLanding = url;
-      this.logAction({ action, target, url });
-      this.logAction({ action: "origin-fence:bounced", target: logAddress(url, this.baseUrl).slice(0, 200), url });
-      const reload = await this.returnToAppPage(page);
-      url = page.url();
-      this.snapshots.dropRefs("the page left the app's origin");
-      return (
-        (reload?.destructive
-          ? `OK: ${action} ${target}\nNavigated off-origin and was taken to about:blank ${BrowserEngine.blankWords(reload)}. Exploration is fenced to ${this.baseUrl}.`
-          : `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${url}${reload ? ` (loaded again with GET, ${BrowserEngine.reloadWords(reload)})` : ""}. Exploration is fenced to ${this.baseUrl}.`) +
-        this.drainLoadRetries() +
-        this.drainMutations() +
-        this.drainBlocked() +
-        this.drainRefresh() +
-        this.drainDialogs() +
-        formatViolations(this.oracles.drain())
-      );
-    }
+    const fenced = await this.originFence(page, action, target);
+    if (fenced !== null) return fenced;
+    const url = page.url();
     const frame = await this.recordFrame(action);
     this.logAction({ action, target, url, ...(frame ? { frame } : await this.holdFrame()) });
     await this.scanPage(click ? () => this.rankRouteCancellations(click, url) : undefined);
@@ -3389,6 +3371,32 @@ export class BrowserEngine {
       this.drainDialogs() +
       mutations +
       formatViolations(violations)
+    );
+  }
+
+  /**
+   * The origin fence: a page off the app's origin is logged and taken back (returnToAppPage). Null while it is on the app.
+   * `logged`: the action itself is already in the action log, so only the fence's entry is added.
+   */
+  private async originFence(page: Page, action: string, target: string, logged = false): Promise<string | null> {
+    const url = page.url();
+    if (url === "about:blank" || this.isSameOrigin(url)) return null;
+    this.fencedLanding = url;
+    if (!logged) this.logAction({ action, target, url });
+    this.logAction({ action: "origin-fence:bounced", target: logAddress(url, this.baseUrl).slice(0, 200), url });
+    const reload = await this.returnToAppPage(page);
+    const back = page.url();
+    this.snapshots.dropRefs("the page left the app's origin");
+    return (
+      (reload?.destructive
+        ? `OK: ${action} ${target}\nNavigated off-origin and was taken to about:blank ${BrowserEngine.blankWords(reload)}. Exploration is fenced to ${this.baseUrl}.`
+        : `OK: ${action} ${target}\nNavigated off-origin and was bounced back to ${back}${reload ? ` (loaded again with GET, ${BrowserEngine.reloadWords(reload)})` : ""}. Exploration is fenced to ${this.baseUrl}.`) +
+      this.drainLoadRetries() +
+      this.drainMutations() +
+      this.drainBlocked() +
+      this.drainRefresh() +
+      this.drainDialogs() +
+      formatViolations(this.oracles.drain())
     );
   }
 
@@ -4699,6 +4707,9 @@ export class BrowserEngine {
     // is how the whole failure mode stayed invisible in the first place.
     let settled = "";
     try {
+      // With a sign-in held, a guard's redirect to another origin may land after the load settled; the origin fence
+      // (afterAction) must see the page where it ended up, or it stays off the app until the next call.
+      if (this.watchesForBounce) await this.stableUrl();
       settled = await this.afterAction("navigate", url);
     } catch (err) {
       this.recordNavigationOutcome(url, await this.navigationLanding(page));
@@ -4707,7 +4718,21 @@ export class BrowserEngine {
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(`${notice}${msg}`);
     }
-    this.recordNavigationOutcome(url, await this.navigationLanding(page));
+    const landing = await this.navigationLanding(page);
+    // The verdict's watch can see a redirect to another origin that landed after the fence read the page: taken back too.
+    let late: string | null;
+    try {
+      late = await this.originFence(page, "navigate", url, true);
+    } catch (err) {
+      this.fencedLanding = null;
+      this.recordNavigationOutcome(url, landing);
+      const notice = this.authLoss.take();
+      if (!notice) throw err;
+      throw new Error(`${notice}${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.fencedLanding = null;
+    if (late !== null) settled += `\n${late.replace(/^OK: navigate [^\n]*\n/, "")}`;
+    this.recordNavigationOutcome(url, landing);
     // Only after a navigation that finished: one that threw leaves its verdict standing.
     return this.answerLoss(page, settled);
   }
