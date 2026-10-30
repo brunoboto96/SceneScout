@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Claiming while it leaves</title>
+  </head>
+  <body>
+    <main>
+      <h1>Claiming while leaving</h1>
+      <button type="button" id="save">Save</button>
+      <p id="status"></p>
+    </main>
+    <script>
+      // A save the server refuses, reported as a success. When the contradiction scan reads the button again after the
+      // save, the page has its service worker move it on to an address the fixture server holds back (held=1), and
+      // answers that read only once a request of its own, also held, is let through: a scan read that completes after
+      // the action gave it up, with the page on its way elsewhere.
+      if (navigator.serviceWorker) navigator.serviceWorker.register("/navigate-sw.js");
+      const save = document.getElementById("save");
+      let saved = false;
+      save.onclick = async () => {
+        await fetch("/api/refuse/500", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).catch(() => {});
+        document.getElementById("status").textContent = "Saved successfully";
+        saved = true;
+      };
+      let left = false;
+      Object.defineProperty(save, "control", {
+        get() {
+          if (saved && !left && navigator.serviceWorker?.controller) {
+            left = true;
+            navigator.serviceWorker.controller.postMessage({ to: "/page2.html?held=1" });
+            const busy = new XMLHttpRequest();
+            busy.open("GET", "/covered.html?held=1", false);
+            busy.send();
+          }
+          return undefined;
+        },
+      });
+    </script>
+  </body>
+</html>

@@ -23,7 +23,8 @@ import path from "node:path";
 import type { Page } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
 import { SETTLE_CAP_MS } from "../../dist/engine/settle.js";
-import { BROWSER, check, eventually, releaseHeldPages, until, type ServerStats, type SmokeContext } from "./harness.ts";
+import { serviceWorkerPolicy } from "../../dist/browsers.js";
+import { BROWSER, check, eventually, heldPageCount, releaseHeldPages, settle, until, type ServerStats, type SmokeContext } from "./harness.ts";
 
 export const title = "settle after leaving";
 
@@ -59,6 +60,8 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
   await crawlOfAPageThatMovesOnToNowhere(baseUrl);
   await crawlOfAPageThatMovesOnWhileRead(baseUrl);
   await actionOnAPageThatMovesOnWhileScanned(baseUrl);
+  await scanGivenUpOnAddsNothingLate(baseUrl, "finds-while-leaving.html", "dom_injection");
+  await scanGivenUpOnAddsNothingLate(baseUrl, "claims-while-leaving.html", "false_success");
 }
 
 async function leftFrames(baseUrl: string, stats: ServerStats): Promise<void> {
@@ -322,6 +325,67 @@ async function actionOnAPageThatMovesOnWhileScanned(baseUrl: string): Promise<vo
       "a click on a page that moves itself on while the scans after it read the page ends within twice the page-load limit",
       ms < limitMs * 2 + 4000 && /^OK: click/.test(clicked),
       `${ms} ms\n${clicked.slice(0, 400)}`,
+    );
+  } finally {
+    releaseHeldPages();
+    await engine.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A scan after an action whose read the page answers only after the action gave the scan up, with a navigation of the
+ * page's own on its way (the fixture's service worker starts it while the page is busy in that read, so it starts after
+ * the scan's check for one by construction). What the read finds then must not be added late, where the next action's
+ * drain would report it as its own on the page the session has moved to (#732). Chromium only: the other browsers run
+ * with service workers blocked, so the fixture cannot start the navigation there.
+ */
+async function scanGivenUpOnAddsNothingLate(baseUrl: string, fixture: string, kind: "dom_injection" | "false_success"): Promise<void> {
+  console.log(`settle: a ${kind} scan given up on while the page moves on adds nothing once it lands`);
+  if (serviceWorkerPolicy(BROWSER) !== "allow") {
+    console.log(`  (skipped on ${BROWSER}: service workers are blocked there)`);
+    return;
+  }
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-settle-late-"));
+  const engine = new BrowserEngine();
+  engine.sessionKey = "settle-late";
+  const limitMs = 3000;
+  const logged = (): number => engine.oracleLog.all.filter((v) => v.kind === kind).length;
+  try {
+    await engine.attach({ url: `${baseUrl}/${fixture}`, projectDir, mode: "read-only", navTimeoutMs: limitMs });
+    const page = (engine as unknown as { page: Page }).page;
+    await until("the fixture's service worker to control the page", async () => (await page.evaluate("!!navigator.serviceWorker.controller")) === true, 8000);
+    const snap = await bounded(engine, "snapshot", engine.snapshot());
+    const ref = (name: string): string | undefined => new RegExp(`(e\\d+)\\s+${name}`).exec(snap)?.[1];
+    if (kind === "dom_injection") {
+      const typed = await bounded(engine, "type", engine.type(ref('textbox "Note"') ?? "e1", '<marquee data-probe="1">x</marquee>'));
+      check("typing the payload ends", /^OK: type/.test(typed), typed.slice(0, 400));
+    }
+    const clicked = await bounded(engine, "click", engine.click(ref(kind === "dom_injection" ? 'button "Show"' : 'button "Save"') ?? "e2"));
+    check(
+      `the click whose ${kind} scan the page holds ends with the page on its way and the scan's read unanswered`,
+      /^OK: click/.test(clicked) && heldPageCount() === 2,
+      `${heldPageCount()} held\n${clicked.slice(0, 400)}`,
+    );
+    releaseHeldPages("/covered.html");
+    // The scan's read now completes; nothing marks that from outside, so the window is a wait (a slow machine can only miss a late finding).
+    await settle(1500);
+    if (kind === "dom_injection") {
+      // Answered after the click had ended: the next action's to judge, which a contradiction scan starting late would take (white-box).
+      const ledger = (engine as unknown as { watchedResponses: Array<{ url: string }> }).watchedResponses;
+      check(
+        "the request the page sent after the click had ended is left for the next action, not taken by the given-up scan",
+        ledger.some((r) => r.url.includes("/covered.html")),
+        JSON.stringify(ledger.map((r) => r.url)),
+      );
+    }
+    releaseHeldPages();
+    await until("the page to land where it was going", () => page.url().includes("/page2.html"), 8000);
+    const next = await bounded(engine, "snapshot", engine.snapshot());
+    check(
+      `what the given-up ${kind} scan read is not reported by the next action, on the page the session moved to`,
+      !next.includes(kind) && logged() === 0,
+      `${logged()} logged\n${next.slice(0, 600)}`,
     );
   } finally {
     releaseHeldPages();

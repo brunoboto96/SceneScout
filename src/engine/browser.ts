@@ -1557,7 +1557,7 @@ export class BrowserEngine {
     const url = page.url();
     // Bounded: Chromium holds this read while a navigation is on its way, which an address that never answers never ends.
     const state = (await readWithin(page.evaluate(CLAIM_SCAN_SCRIPT), this.limits.navMs)) as PageState | undefined;
-    if (state === undefined || gate.closed) return;
+    if (state === undefined) return;
     // A baseline belongs to the input that took it, and to its page.
     const before = this.inputSince !== null && this.inputSince >= this.actionStartedAt ? this.claimBaseline : null;
     // The acted-on control as the click left it, read only when a refusal makes it matter.
@@ -1569,6 +1569,8 @@ export class BrowserEngine {
         // The control's document went away: nothing left to show the change.
       }
     }
+    // Either read above may be held by a navigation of the page's own past the point the scan was given up on.
+    if (gate.closed) return;
     for (const found of findContradictions(requests, state, before, acted && actedNow ? { before: acted.before, after: actedNow } : null)) {
       // Once per refused request a session, except that a high reading of it
       // replaces an earlier medium one (#413).
