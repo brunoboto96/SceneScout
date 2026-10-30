@@ -611,3 +611,8 @@ test("a read that failed, a write the page sent on its own and one the policy dr
   // Contrast: the same ledger with a refused write in it is kept.
   assert.equal(holdForLandedPage([req({ method: "GET", resourceType: "document", status: null }), req({ method: "POST", status: 500 })], true), true);
 });
+
+test("a refused write is kept whatever the case of its method", () => {
+  // fetch sends "patch" as written: only DELETE, GET, HEAD, OPTIONS, POST and PUT are upper-cased.
+  assert.equal(holdForLandedPage([req({ method: "patch", status: 500 })], true), true);
+});

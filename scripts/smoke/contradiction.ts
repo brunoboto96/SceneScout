@@ -292,6 +292,19 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
         `${JSON.stringify(lateFound)} ${out.slice(0, 500)}`,
       );
     }
+
+    // ── a page too busy to be read ──────────────────────────────────────────
+    // A refused save, then a script that holds the page's main thread for 15 s: the scan's read of the page is given up
+    // at the page-load limit, so the action ends rather than waiting for the page.
+    const busyLimitMs = 3000;
+    await engine.attach({ url: `${baseUrl}/claims-busy.html`, projectDir, mode: "safe-write", navTimeoutMs: busyLimitMs });
+    const busySnap = await engine.snapshot(true);
+    const busyRef = /(e\d+) button "Save then busy"/.exec(busySnap)?.[1];
+    if (!busyRef) throw new Error(`"Save then busy" not in /claims-busy.html: ${busySnap.slice(0, 400)}`);
+    const busyStarted = Date.now();
+    await engine.click(busyRef);
+    const busyMs = Date.now() - busyStarted;
+    check("a click whose page is then too busy to read ends at the page-load limit, not when the page is free", busyMs < 11_000, `${busyMs} ms`);
   } finally {
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });

@@ -86,7 +86,7 @@ export function isRefused(req: WatchedRequest): boolean {
  * would wait on a page that may never land.
  */
 export function holdForLandedPage(requests: readonly WatchedRequest[], navigating: boolean): boolean {
-  return navigating && requests.some((r) => WRITING_METHODS.has(r.method) && !r.background && isRefused(r));
+  return navigating && requests.some((r) => WRITING_METHODS.has(r.method.toUpperCase()) && !r.background && isRefused(r));
 }
 
 /**
