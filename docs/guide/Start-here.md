@@ -14,7 +14,7 @@ flowchart LR
 
 ## A first look, with nothing set up
 
-All it takes is Node 20 or newer and the address of an app you are allowed to test, on your machine or deployed:
+All it takes is Node 22.19 or newer and the address of an app you are allowed to test, on your machine or deployed:
 
 ```bash
 npx -y scenescout http://localhost:3000
@@ -64,7 +64,7 @@ It finds defects (crashes, dead ends, permission leaks, double submits) and it a
 
 ## Install
 
-You need Node 20 or newer, an MCP client, and a web app you are allowed to test.
+You need Node 22.19 or newer, an MCP client, and a web app you are allowed to test.
 
 ### With npm (any client)
 

@@ -2098,7 +2098,7 @@ test("the suite runs on Windows for every pull request that changes code", () =>
 const cell = (os: string, node: number) => ({ os, node });
 
 test("test plan: every event that changes code gets every cell, a pull request included", () => {
-  const every = [cell("ubuntu-latest", 20), cell("ubuntu-latest", 24), cell("macos-latest", 24), cell("windows-latest", 24)];
+  const every = [cell("ubuntu-latest", 22), cell("ubuntu-latest", 24), cell("macos-latest", 24), cell("windows-latest", 24)];
   assert.deepEqual(FULL_PLATFORMS, every);
   const src = ["src/engine/policy.ts"];
   for (const event of ["push", "workflow_dispatch", "pull_request"]) {

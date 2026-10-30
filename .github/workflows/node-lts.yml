@@ -1,0 +1,29 @@
+# Node LTS lines (ADR 34): fails when the engines floor is no longer the oldest
+# maintained Node LTS line, or a CI cell runs a line past its end of life. The
+# check depends on the date, so it runs here every week rather than in a pull
+# request's suite. The rule is in scripts/node-lts.ts, held by install-test.
+name: node-lts
+
+on:
+  schedule:
+    # Mondays, 06:17 UTC: off the hour, when scheduled runs queue longest.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - name: The engines floor and CI's cells are on maintained LTS lines
+        run: npx tsx scripts/node-lts.ts

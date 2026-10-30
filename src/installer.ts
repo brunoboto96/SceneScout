@@ -23,6 +23,9 @@ import {
 
 const SKILL_NAME = "scenescout";
 export const MCP_NAME = "scenescout";
+/** The oldest Node this package runs on: package.json's `engines` floor (install-test holds the two equal). */
+export const NODE_FLOOR = "22.19.0";
+const NODE_FLOOR_SHORT = NODE_FLOOR.replace(/\.0$/, "");
 /** Names this tool's skill and MCP server had before renames; cleaned up on install so the old slash command and a duplicate tool set do not linger. */
 const LEGACY_SKILL_NAMES = ["frontend-tester", "scenecraft"];
 const LEGACY_MCP_NAMES = ["scenecraft"];
@@ -562,8 +565,12 @@ export function diagnose(opts: {
 }): Check[] {
   const checks: Check[] = [];
   const repair = repairCommands(opts.packageRoot);
-  const major = Number(opts.nodeVersion.replace(/^v/, "").split(".")[0]);
-  checks.push({ name: "node >= 20", ok: major >= 20, detail: opts.nodeVersion, fix: "install Node 20 or newer" });
+  checks.push({
+    name: `node >= ${NODE_FLOOR_SHORT}`,
+    ok: atLeastVersion(opts.nodeVersion.replace(/^v/, ""), NODE_FLOOR),
+    detail: opts.nodeVersion,
+    fix: `install Node ${NODE_FLOOR_SHORT} or newer`,
+  });
 
   const server = path.join(opts.packageRoot, "dist", "mcp-server.js");
   checks.push({ name: "engine built", ok: fs.existsSync(server), detail: server, fix: repair.build });

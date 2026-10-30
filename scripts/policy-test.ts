@@ -11,6 +11,8 @@
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -5151,7 +5153,53 @@ test("proxy: the browser takes the proxy for the app's scheme, its credentials a
     httpProxy: "http://plain.example.com",
     httpsProxy: "http://ci:s3cret@proxy.example.com:3128",
     noProxy: "localhost,.internal",
+    proxyTunnel: true,
   });
+});
+
+test("proxy: fetch reaches a plain-http target through a CONNECT tunnel, so one the proxy cannot reach throws rather than answering with the proxy's 502", async () => {
+  const target = http.createServer((_req, res) => res.end("from the target"));
+  await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
+  const closed = http.createServer();
+  await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  const closedPort = (closed.address() as net.AddressInfo).port;
+  await new Promise<void>((resolve) => closed.close(() => resolve()));
+  const seen: string[] = [];
+  // A proxy as most are: CONNECT is tunnelled, and an absolute-form request it cannot forward is answered 502.
+  const proxy = http.createServer((_req, res) => {
+    seen.push("forward");
+    res.writeHead(502).end("bad gateway from the proxy");
+  });
+  proxy.on("connect", (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
+    seen.push("connect");
+    const [host, port] = (req.url ?? "").split(":");
+    const upstream = net.connect(Number(port), host, () => {
+      socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      upstream.write(head);
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.on("error", () => socket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"));
+    socket.on("error", () => upstream.destroy());
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const proxyUrl = `http://127.0.0.1:${(proxy.address() as net.AddressInfo).port}`;
+  const { EnvHttpProxyAgent, getGlobalDispatcher, setGlobalDispatcher } = await import("undici");
+  const before = getGlobalDispatcher();
+  const agent = new EnvHttpProxyAgent(fetchProxyOptions(readProxy({ HTTP_PROXY: proxyUrl })!));
+  setGlobalDispatcher(agent);
+  try {
+    const up = await fetch(`http://127.0.0.1:${(target.address() as net.AddressInfo).port}/`);
+    assert.equal(await up.text(), "from the target");
+    assert.deepEqual(seen, ["connect"], "a plain-http target is tunnelled, not forwarded");
+    seen.length = 0;
+    await assert.rejects(fetch(`http://127.0.0.1:${closedPort}/`), "an unreachable target is a network failure, not a response");
+    assert.deepEqual(seen, ["connect"]);
+  } finally {
+    setGlobalDispatcher(before);
+    await agent.close();
+    await Promise.all([target, proxy].map((s) => new Promise<void>((resolve) => s.close(() => resolve()))));
+  }
 });
 
 test("allowlist header: a redirect within the app is followed with it, a page load by a stand-in page; one away from the app, or one that would resend a body, goes to the browser without it", () => {

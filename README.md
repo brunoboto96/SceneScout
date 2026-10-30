@@ -11,7 +11,7 @@ Works with Claude Code · Cursor · VS Code (Copilot) · Codex CLI · Gemini CLI
 [![test](https://github.com/brunoboto96/SceneScout/actions/workflows/test.yml/badge.svg)](https://github.com/brunoboto96/SceneScout/actions/workflows/test.yml)
 [![npm](https://img.shields.io/npm/v/scenescout.svg)](https://www.npmjs.com/package/scenescout)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![node >= 20](https://img.shields.io/badge/node-%E2%89%A5%2020-339933?logo=node.js&logoColor=white)
+![node >= 22.19](https://img.shields.io/badge/node-%E2%89%A5%2022.19-339933?logo=node.js&logoColor=white)
 
 [🌐 Website](https://brunoboto96.github.io/SceneScout/) · [📖 Guide](docs/guide/Home.md) · [🐛 What it catches](#-what-it-catches) · [🎬 QA with evidence](#-automated-qa-with-evidence) · [🚀 Get started](#-get-started) · [🚦 CI](#-in-ci) · [🔒 Safety](#-safe-by-default) · [📚 Docs](#-documentation)
 
@@ -163,7 +163,7 @@ xychart-beta
 
 ## 🚀 Get started
 
-**1. Install** for your agent (Node 20 or newer):
+**1. Install** for your agent (Node 22.19 or newer):
 
 ```bash
 npx -y scenescout install                      # Claude Code: skill, MCP server and the test browser
