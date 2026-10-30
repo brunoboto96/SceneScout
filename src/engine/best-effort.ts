@@ -116,9 +116,10 @@ export async function readWithin<T>(work: Promise<T>, ms: number): Promise<T | u
 
 /**
  * What an action says when the page's own navigation held the lookup of its target past `limitMs`: where the page was
- * going (empty when no navigation was on its way), and what to do next.
+ * going (empty when no navigation was on its way, and the read was then waited on SLOW_READ_MS more), and what to do
+ * next.
  */
 export function heldActionMessage(ref: string, leavingFor: string, limitMs: number): string {
-  if (!leavingFor) return `Could not act on ${ref}: the page did not answer within ${limitMs} ms. Take a new scout_snapshot.`;
+  if (!leavingFor) return `Could not act on ${ref}: the page did not answer within ${limitMs + SLOW_READ_MS} ms. Take a new scout_snapshot.`;
   return `Could not act on ${ref}: a navigation of its own is on its way to ${leavingFor} and the page did not answer within ${limitMs} ms. Wait for it to land, then take a new scout_snapshot.`;
 }
