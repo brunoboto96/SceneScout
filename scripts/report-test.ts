@@ -794,6 +794,18 @@ test("team report: a backslash in a cover cell is escaped, so a backslash then p
   }
 });
 
+test("team report: a carriage return alone in a cover cell does not end the row, as GitHub-flavoured Markdown reads it as a line ending", () => {
+  for (const [address, shown] of [
+    ["https://a.example/x\ry", "https://a.example/x y"],
+    ["https://a.example/x\r\ny", "https://a.example/x y"],
+    ["https://a.example/x\r\r\ny", "https://a.example/x y"],
+  ]) {
+    const md = teamReportMarkdown(teamReportData(teamSource({ address })), new Set());
+    const lines = md.split(/\r\n|\r|\n/);
+    assert.ok(lines.includes(`| Site | ${shown} |`), JSON.stringify(lines.slice(0, 6)));
+  }
+});
+
 /** Every file under `root`, with its bytes' hash, skipping `skip` (a folder name relative to root). */
 function treeOf(root: string, skip: string): Map<string, string> {
   const out = new Map<string, string>();
