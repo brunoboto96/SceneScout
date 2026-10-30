@@ -1553,6 +1553,8 @@ export class BrowserEngine {
       return;
     if (page.isClosed()) return;
     const url = page.url();
+    // The page the wait landed on may be another site's, which is not judged for a claim (the origin fence takes it back).
+    if (!this.isSameOrigin(url)) return;
     // Bounded: Chromium holds this read while a navigation is on its way, which an address that never answers never ends.
     const state = (await readWithin(page.evaluate(CLAIM_SCAN_SCRIPT), this.limits.navMs)) as PageState | undefined;
     if (state === undefined) return;

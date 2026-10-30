@@ -18,7 +18,7 @@ import { check, type SmokeContext } from "./harness.ts";
 
 export const title = "contradiction oracles";
 
-export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
+export async function run({ baseUrl, foreignBaseUrl, stats }: SmokeContext): Promise<void> {
   console.log("contradiction oracles: a refusal the page does not admit to");
   const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-contra-"));
   const engine = new BrowserEngine();
@@ -292,6 +292,20 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
         `${JSON.stringify(lateFound)} ${out.slice(0, 500)}`,
       );
     }
+
+    // The same late success page, served by another origin: not the app's page, so not judged for a claim.
+    await engine.navigate(`/claims-late-start.html?elsewhere=${encodeURIComponent(foreignBaseUrl)}`);
+    const elsewhereSnap = await engine.snapshot(true);
+    const elsewhereRef = /(e\d+) button "Save and go late elsewhere"/.exec(elsewhereSnap)?.[1];
+    if (!elsewhereRef) throw new Error(`"Save and go late elsewhere" not in /claims-late-start.html: ${elsewhereSnap.slice(0, 400)}`);
+    const elsewhereBefore = engine.oracleLog.all.length;
+    const elsewhereOut = await engine.click(elsewhereRef);
+    const elsewhereFound = engine.oracleLog.all.slice(elsewhereBefore).filter((v) => v.kind === "false_success");
+    check(
+      'a refused save that moves to a page on another origin saying "Saved" after the settle wait is not a false_success',
+      elsewhereFound.length === 0,
+      `${JSON.stringify(elsewhereFound)} ${elsewhereOut.slice(0, 500)}`,
+    );
 
     // ── a page too busy to be read ──────────────────────────────────────────
     // A refused save, then a script that holds the page's main thread for 15 s: the scan's read of the page is given up
