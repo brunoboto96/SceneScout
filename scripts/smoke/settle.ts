@@ -59,6 +59,7 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
   await crawlOfAPageThatMovesOnToNowhere(baseUrl);
   await crawlOfAPageThatMovesOnWhileRead(baseUrl);
   await actionOnAPageThatMovesOnWhileScanned(baseUrl);
+  await actionOnAPageThatMovedOnBeforeIt(baseUrl);
 }
 
 async function leftFrames(baseUrl: string, stats: ServerStats): Promise<void> {
@@ -321,6 +322,39 @@ async function actionOnAPageThatMovesOnWhileScanned(baseUrl: string): Promise<vo
     check(
       "a click on a page that moves itself on while the scans after it read the page ends within twice the page-load limit",
       ms < limitMs * 2 + 4000 && /^OK: click/.test(clicked),
+      `${ms} ms\n${clicked.slice(0, 400)}`,
+    );
+  } finally {
+    releaseHeldPages();
+    await engine.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * An action on a page that started a navigation of its own, to an address that never answers, before the action: on
+ * Chromium the lookup of the action's target is held until the navigation lands. It ends at the page-load limit and says
+ * a navigation is on its way. Contrast: a click on the same kind of page before it moves on is done.
+ */
+async function actionOnAPageThatMovedOnBeforeIt(baseUrl: string): Promise<void> {
+  console.log("settle: an action whose page started a navigation of its own before it ends at the page-load limit");
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-settle-before-"));
+  const engine = new BrowserEngine();
+  engine.sessionKey = "settle-before";
+  const limitMs = 3000;
+  try {
+    await engine.attach({ url: `${baseUrl}/leaves-between-actions.html`, projectDir, mode: "read-only", navTimeoutMs: limitMs });
+    const snap = await bounded(engine, "snapshot", engine.snapshot());
+    const ref = /\[(e\d+)\] button "Go on"/.exec(snap)?.[1] ?? /(e\d+)\s+button "Go on"/.exec(snap)?.[1];
+    check("the page's button is listed", ref !== undefined, snap.slice(0, 600));
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const t0 = Date.now();
+    const clicked = await bounded(engine, "click", engine.click(ref ?? "e1"));
+    const ms = Date.now() - t0;
+    console.log(`  (click: ${ms} ms, page-load limit ${limitMs} ms)`);
+    check(
+      "a click on a page whose own navigation is on its way ends within twice the page-load limit, saying so",
+      BROWSER !== "chromium" || (ms < limitMs * 2 + 4000 && /navigation of its own is on its way/.test(clicked) && /page2\.html\?held=1/.test(clicked)),
       `${ms} ms\n${clicked.slice(0, 400)}`,
     );
   } finally {

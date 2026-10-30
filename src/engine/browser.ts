@@ -248,7 +248,7 @@ import {
   type TimeLimits,
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
-import { bestEffort, heldRead, readWithin, settleWithin, SLOW_READ_MS } from "./best-effort.js";
+import { bestEffort, heldActionMessage, heldRead, readWithin, settleWithin, SLOW_READ_MS } from "./best-effort.js";
 import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
@@ -1500,7 +1500,8 @@ export class BrowserEngine {
     const page = this.page;
     if (!page || page.isClosed()) return;
     try {
-      this.claimBaseline = (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
+      const baseline = await this.readHeld(page, page.evaluate(CLAIM_SCAN_SCRIPT), this.limits.navMs, false);
+      if (!baseline.stalled) this.claimBaseline = baseline.value as PageState;
     } catch {
       // A page mid-navigation has nothing on screen to excuse.
     }
@@ -3107,18 +3108,31 @@ export class BrowserEngine {
     // The element and the test id are passed as arguments: no value of the
     // page's is written into the code that runs there.
     const scope = this.snapshots.scopeOf(el);
-    const handle = await bestEffort(scope.$(`xpath=${el.xpath}`), null);
-    let live = handle ? await bestEffort(handle.evaluate(liveFactsOf), null) : null;
-    await bestEffort(handle?.dispose());
-    if (!live && el.testid) {
-      // Found again only by a test id the page gives one element: two would leave it guessing.
-      const found = await bestEffort(scope.evaluate(uniqueByTestid, el.testid), null);
-      if (found && found.live.name === el.name) {
-        el = { ...el, xpath: found.xpath };
-        this.snapshots.refs.set(ref, el);
-        live = found.live;
-        this.rebindNote = `\nℹ ${ref} re-bound after a re-render: found again by its unique testid=${el.testid}.`;
-      }
+    const looked = await this.readHeld(
+      page,
+      (async () => {
+        const handle = await bestEffort(scope.$(`xpath=${el.xpath}`), null);
+        const found = handle ? await bestEffort(handle.evaluate(liveFactsOf), null) : null;
+        await bestEffort(handle?.dispose());
+        if (found) return { live: found, reboundXpath: null };
+        if (el.testid) {
+          // Found again only by a test id the page gives one element: two would leave it guessing.
+          const byTestid = await bestEffort(scope.evaluate(uniqueByTestid, el.testid), null);
+          if (byTestid && byTestid.live.name === el.name) {
+            return { live: byTestid.live, reboundXpath: byTestid.xpath };
+          }
+        }
+        return null;
+      })(),
+      this.limits.navMs,
+      false,
+    );
+    if (looked.stalled) throw new Error(heldActionMessage(ref, looked.leavingFor, this.limits.navMs));
+    const live = looked.value?.live ?? null;
+    if (looked.value?.reboundXpath) {
+      el = { ...el, xpath: looked.value.reboundXpath };
+      this.snapshots.refs.set(ref, el);
+      this.rebindNote = `\nℹ ${ref} re-bound after a re-render: found again by its unique testid=${el.testid}.`;
     }
     if (!live) {
       throw new Error(`Element ${ref} no longer exists in the DOM — take a new scout_snapshot.`);
