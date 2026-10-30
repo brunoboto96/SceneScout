@@ -5053,6 +5053,15 @@ test("a passphrase written as two words is a secret field, and a phrase that is 
   assert.equal(maskSecretFieldValues('textbox "Pass phrase" ← "zzfake123"').text, `textbox "Pass phrase" ← ${maskedValue("password")}`);
 });
 
+test("a count or setting after a secret's two-word name is not the secret, as after its one-word name: api key count is ordinary, api key is not", () => {
+  for (const name of ["apikey_count", "api key count", "api_key_count", "apiKeyCount", "API key expires", "pass phrase hint", "card number length"])
+    assert.equal(secretFieldKind({ type: "text", name }), null, name);
+  for (const name of ["api key", "api_key", "apiKey", "API key 2", "pass phrase", "card number"])
+    assert.notEqual(secretFieldKind({ type: "text", name }), null, name);
+  assert.equal(maskSecretFieldValues('textbox "API key count" ← "12"').hits, 0);
+  assert.equal(maskSecretFieldValues('textbox "API key" ← "zzfake123"').text, `textbox "API key" ← ${maskedValue("secret")}`);
+});
+
 test("sensitive corpus: the generator is seeded and every shape has a pair on the other side of the verdict", () => {
   assert.deepEqual(sensitiveCases(300, 7), sensitiveCases(300, 7));
   assert.notDeepEqual(sensitiveCases(300, 7), sensitiveCases(300, 8));
