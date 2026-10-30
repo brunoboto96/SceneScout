@@ -85,6 +85,7 @@ const UNSET: Record<ConfigKey, string> = {
   writeClassifier: "standard",
   refuseDestructiveGets: "false",
   authPosts: "no list (sign-in is recognised by its path)",
+  allowedWrites: "no list (writes are judged by the mode)",
   redactPageText: "off",
 };
 
@@ -227,6 +228,11 @@ export function explainConfig(input: {
       const via = rules.from.authPosts;
       if (via && via !== "the SceneScout config")
         source = via.includes("narrowed by") ? `${source}, narrowed by ${via.split("narrowed by ")[1]}` : `environment ${via}`;
+    } else if (key === "allowedWrites") {
+      value = rules.allowedWrites?.entries;
+      const via = rules.from.allowedWrites;
+      if (via && via !== "the SceneScout config")
+        source = via.includes("narrowed by") ? `${source}, narrowed by ${via.split("narrowed by ")[1]}` : `environment ${via}`;
     } else if (key === "readPosts") {
       if (resolved.settings.readPosts !== undefined) {
         value = resolved.settings.readPosts;
@@ -245,6 +251,8 @@ export function explainConfig(input: {
     // A list only a project's own file set narrows the path rule rather than replacing it (tightenPolicy, writeRulesSettings).
     if (key === "authPosts" && rules.authPosts?.andSignInPath && rules.authPosts.entries.length > 0)
       shownAs += ", each only when it also looks like a sign-in by its path";
+    if (key === "allowedWrites" && rules.allowedWrites?.andModeRules && rules.allowedWrites.entries.length > 0)
+      shownAs += ", each only when the mode would also let it out";
     rows.push({ key, value: shownAs, source });
   }
   return { files: loaded.sources, rows, notes };

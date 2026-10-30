@@ -251,6 +251,7 @@ import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } f
 import { bestEffort, heldRead, readWithin, settleWithin, SLOW_READ_MS } from "./best-effort.js";
 import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
+import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
 import { readMachineSockets } from "./tcp-table.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
@@ -908,6 +909,9 @@ export class BrowserEngine {
   /** True while a guided plan is open, or for a list only a project's own file set: a listed POST must also look like a sign-in to the path rule (policy.ts isAuthExempt andSignInPath). */
   private authPostsNarrowOnly = false;
   private authPostNotice = "";
+  /** The writes the operator listed; any other write is refused (write-allowlist.ts). Null: the mode alone judges writes. */
+  private allowedWrites: { entries: AllowedWrite[]; andModeRules: boolean } | null = null;
+  private allowedWritesNotice = "";
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
   /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
@@ -1378,6 +1382,7 @@ export class BrowserEngine {
     refuseDestructiveGets: () => this.refuseDestructiveGets,
     authPosts: () => this.authPosts,
     authPostsNarrowOnly: () => this.authPostsNarrowOnly,
+    allowedWrites: () => this.allowedWrites,
   });
   /**
    * Every request answered since the last action, with its status. The HTTP
@@ -1774,6 +1779,16 @@ export class BrowserEngine {
         (authList.rejected.length > 0 ? ` Not a "POST /path" or "POST https://host/path" entry, so not a sign-in: ${authList.rejected.join(", ")}.` : "") +
         (authList.overflow.length > 0 ? ` More than ${MAX_READ_POSTS} sign-in POSTs; not counted: ${authList.overflow.join(", ")}.` : "")
       : "";
+    const writes = rules.allowedWrites ? allowedWriteEntries(rules.allowedWrites.entries) : null;
+    this.allowedWrites = rules.allowedWrites && writes ? { entries: writes.entries, andModeRules: rules.allowedWrites.andModeRules } : null;
+    this.allowedWritesNotice =
+      rules.allowedWrites && writes
+        ? this.mode === "destructive"
+          ? ` Allowed writes (${rules.from.allowedWrites}) do not apply in destructive mode, which lets every write out.`
+          : ` Allowed writes: only ${writes.entries.length > 0 ? writes.entries.map((e) => e.entry).join(", ") : "none"} (${rules.from.allowedWrites}); every other write is refused${rules.allowedWrites.andModeRules ? ", and a listed write must also pass the mode's own rules" : ", and a listed write goes out whatever its path or body looks like"}.` +
+            (writes.rejected.length > 0 ? ` Not a "METHOD /path" entry with a write method, so not listed: ${writes.rejected.join(", ")}.` : "") +
+            (writes.overflow.length > 0 ? ` More than ${MAX_ALLOWED_WRITES} allowed writes; not listed: ${writes.overflow.join(", ")}.` : "")
+        : "";
     const reads = readPostEntries(readPostsSetting(opts.readPosts, process.env[READ_POSTS_ENV]));
     this.readPosts = reads.entries;
     this.readPostNotice =
@@ -2022,6 +2037,7 @@ export class BrowserEngine {
           foreign: () => this.foreignWriteOf(req, rule),
           offApp: () => offAppPageWrite(this.baseUrl, this.page?.url(), req.url(), this.embedMoves.movedTo),
           authList: this.guard.authListFor(req.url()),
+          allowList: this.guard.allowListFor({ method: req.method(), url: req.url(), headers: req.headers(), body: req.postData() }),
         })
       )
         return;
@@ -2194,7 +2210,7 @@ export class BrowserEngine {
       `Memory: ${this.memory!.dir}.${this.memory!.loadWarning ? ` WARNING: ${this.memory!.loadWarning}` : ""}` +
       (this.memory!.prunedStates > 0 ? ` Trimmed ${this.memory!.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory!.legacyDirNote ? ` ${this.memory!.legacyDirNote}` : ""}` +
-      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice}${this.strictNotice}${this.authPostNotice} Call scout_snapshot to see the current state.` +
+      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice}${this.strictNotice}${this.authPostNotice}${this.allowedWritesNotice} Call scout_snapshot to see the current state.` +
       profileNote +
       authWarning
     );

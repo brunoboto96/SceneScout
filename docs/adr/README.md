@@ -40,6 +40,7 @@ and which failure direction was chosen deliberately.
 | [0029](0029-more-readers-of-app-text-run-on-the-linear-time-engine.md) | The route, ticket, calibration and write-policy readers run on the same engine through `fromJs`, which reads a pattern as JavaScript wrote it, so one source is both run and held to JavaScript's own result; patterns that only read SceneScout's own input stay JavaScript, and the rest of the inventory is listed |
 | [0030](0030-the-live-view-holds-recent-step-frames-in-memory.md) | While the live view runs, a frame of each step of a run that does not record is held in memory for the timeline: the last 100 per session, at most 12 MB, never on disk, dropped on close; about 40 ms a step |
 | [0031](0031-the-report-opens-with-a-summary-and-folds-the-technical-details.md) | The report opens with a plain Summary (what was checked and found, the problems as a table, each problem folded with its developer details folded once more), then Evidence only when there are pictures or frames, then the Technical details and, in `report.html`, the Steps, both folded; `qa` writes the Summary and Evidence, `dev` the technical report unfolded |
+| [0032](0032-an-operator-list-names-the-writes-that-may-leave-the-page.md) | With an operator list (`allowedWrites`) set, only the writes it names (a method and a path each) leave the page in `observe`, `read-only` and `safe-write`, whatever they look like; only the operator names an entry, and a project's file or a guided check only narrows |
 
 ## Writing a new one
 

@@ -385,7 +385,35 @@ function multipartMethodOverrides(body: string): string[] {
  * a POST. This is structural, and on in every mode but destructive.
  */
 export function writeMethod(input: { method: string; url: string; headers?: Record<string, string>; body?: string | null }): WriteMethod {
+  let best: WriteMethod = { method: input.method.toUpperCase() };
+  for (const n of overridesNamed(input)) if (methodWeight(n.method) > methodWeight(best.method)) best = { method: n.method, via: n.via };
+  return best;
+}
+
+/**
+ * Every write method a server could act on for this request: each write an
+ * override names, and the sent method when it is a write other than POST or no
+ * override names a write. Several when the overrides disagree (a header naming
+ * PUT, a body naming DELETE) or a PUT carries one, since servers differ in
+ * which they honour. A list of allowed writes must name every one.
+ */
+export function writeMethodsNamed(input: { method: string; url: string; headers?: Record<string, string>; body?: string | null }): string[] {
   const sent = input.method.toUpperCase();
+  const out = new Set(
+    overridesNamed(input)
+      .map((n) => n.method)
+      .filter((m) => methodWeight(m) > 0),
+  );
+  if (methodWeight(sent) > 0 && (sent !== "POST" || out.size === 0)) out.add(sent);
+  return [...out];
+}
+
+function overridesNamed(input: {
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string | null;
+}): Array<{ method: string; via: string }> {
   const named: Array<{ method: string; via: string }> = [];
   for (const [name, value] of Object.entries(input.headers ?? {})) {
     const lower = name.toLowerCase();
@@ -399,9 +427,7 @@ export function writeMethod(input: { method: string; url: string; headers?: Reco
       for (const m of overrideNames(v)) named.push({ method: m, via: `_method=${m} in the query` });
   }
   if (input.body) for (const v of bodyMethodOverrides(input.body)) for (const m of overrideNames(v)) named.push({ method: m, via: `_method=${m} in the body` });
-  let best: WriteMethod = { method: sent };
-  for (const n of named) if (methodWeight(n.method) > methodWeight(best.method)) best = { method: n.method, via: n.via };
-  return best;
+  return named;
 }
 
 /** How a blocked or logged request is named: its method, and the method it was judged as when an override changed it. */

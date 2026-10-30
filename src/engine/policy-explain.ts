@@ -36,6 +36,7 @@ import {
 } from "./policy.js";
 import { applyToCommand, readLaunchPolicy, withProjectPolicy, type PolicyReader, type SessionWriteRules, type WriteRulesSources } from "./project-config.js";
 import { redactRoute } from "./redact.js";
+import { ALLOWED_WRITES_ENV, allowedWriteEntries, allowedWritesFromEnv, writeAllowListFor, type AllowedWrite } from "./write-allowlist.js";
 import { pathnameOf, routedWriteVerdict } from "./route-guard.js";
 import {
   destructiveGet,
@@ -176,6 +177,8 @@ export interface PolicySettings {
   authPosts: readonly ReadPost[] | null;
   /** True: a listed POST must also look like a sign-in by its path (a list only a project's own file set; project-config.ts writeRulesSettings). */
   authPostsNarrowOnly?: boolean;
+  /** The list of writes that may leave the page (the config's allowedWrites or SCENESCOUT_ALLOWED_WRITES), parsed, or null when none is set. */
+  allowedWrites?: { entries: readonly AllowedWrite[]; andModeRules: boolean } | null;
   /** What turned each write-judgement setting on, when the operator's config was read (project-config.ts writeRulesSettings). Absent: the environment. */
   from?: WriteRulesSources;
 }
@@ -191,6 +194,7 @@ export function policySettingsFrom(env: Record<string, string | undefined>, rule
       refuseDestructiveGets: refuseDestructiveGetsSetting(env),
       readPosts: readPostEntries(readPostsSetting(undefined, env[READ_POSTS_ENV])).entries,
       authPosts: authPostsSetting(env[AUTH_POSTS_ENV])?.entries ?? null,
+      allowedWrites: allowedWritesFromEnv(env[ALLOWED_WRITES_ENV]).length > 0 ? listedWrites(allowedWritesFromEnv(env[ALLOWED_WRITES_ENV]), false) : null,
     };
   return {
     classifier: rules.writeClassifier,
@@ -198,8 +202,13 @@ export function policySettingsFrom(env: Record<string, string | undefined>, rule
     readPosts: readPostEntries(readPostsSetting(undefined, env[READ_POSTS_ENV])).entries,
     authPosts: rules.authPosts ? readPostEntries(rules.authPosts.entries).entries : null,
     authPostsNarrowOnly: rules.authPosts?.andSignInPath === true,
+    allowedWrites: rules.allowedWrites ? listedWrites(rules.allowedWrites.entries, rules.allowedWrites.andModeRules) : null,
     from: rules.from,
   };
+}
+
+function listedWrites(entries: readonly string[], andModeRules: boolean): { entries: AllowedWrite[]; andModeRules: boolean } {
+  return { entries: allowedWriteEntries(entries).entries, andModeRules };
 }
 
 /** The settings with nothing turned on: what a server started with no policy variables applies. */
@@ -258,6 +267,7 @@ function verdictFor(
   const destructiveWire = isDestructiveRequest(input.url, input.body, settings.classifier);
   const appUrl = input.appUrl;
   const readPost = readPostAllowed({ mode, method, url: input.url, appUrl, body: input.body, destructiveWire, entries: settings.readPosts });
+  const allowList = writeAllowListFor(settings.allowedWrites ?? null, appUrl, input);
   const verdict = routedWriteVerdict({
     rule: mode,
     method,
@@ -268,6 +278,7 @@ function verdictFor(
     offApp: null,
     readPost: readPost !== null,
     authList: settings.authPosts ? { entries: settings.authPosts, appUrl, url: input.url, andSignInPath: settings.authPostsNarrowOnly === true } : null,
+    allowList,
   });
   if (verdict.kind === "refuse") return { mode, outcome: "refused", rule: verdict.why, source: "route-guard.ts routedWriteVerdict" };
   if (verdict.kind === "auth")
@@ -276,11 +287,20 @@ function verdictFor(
       outcome: "allowed",
       rule: settings.authPosts
         ? `a sign-in POST listed in ${settings.from?.authPosts ?? AUTH_POSTS_ENV}${settings.authPostsNarrowOnly ? " that also looks like a sign-in by its path" : ""}`
-        : mode === "observe"
-          ? "a sign-in, sign-out or token refresh by its path (observe's narrow sign-in rule)"
+        : mode === "observe" || settings.allowedWrites
+          ? `a sign-in, sign-out or token refresh by its path (observe's narrow sign-in rule${mode === "observe" ? "" : ", which a list of allowed writes applies in every mode"})`
           : "an auth or session request by its path",
       source: "policy.ts isAuthExempt",
     };
+  if (verdict.kind === "listed-write") {
+    const entry = allowList?.entry?.entry ?? "listed";
+    return {
+      mode,
+      outcome: "allowed",
+      rule: `named in the list of allowed writes, ${settings.from?.allowedWrites ?? ALLOWED_WRITES_ENV} (${entry}); the list lets it out whatever it looks like`,
+      source: "write-allowlist.ts matchAllowedWrite",
+    };
+  }
   if (verdict.kind === "read-post" && readPost)
     return { mode, outcome: "allowed", rule: `named as a read in ${READ_POSTS_ENV} (${readPost.entry})`, source: "policy.ts readPostAllowed" };
   const notOwned = allowsWrite(mode, method, destructiveWire, false);
@@ -356,8 +376,13 @@ export function formatExplanation(url: string, e: PolicyExplanation, settings: P
         ? `authPosts (${settings.authPosts.length}, ${from.authPosts})`
         : `${AUTH_POSTS_ENV} (${settings.authPosts.length})`
       : "",
+    settings.allowedWrites
+      ? byConfig(from.allowedWrites)
+        ? `allowedWrites (${settings.allowedWrites.entries.length}, ${from.allowedWrites})`
+        : `${ALLOWED_WRITES_ENV} (${settings.allowedWrites.entries.length})`
+      : "",
   ].filter(Boolean);
-  const anyConfig = [from.writeClassifier, from.refuseDestructiveGets, from.authPosts].some(byConfig);
+  const anyConfig = [from.writeClassifier, from.refuseDestructiveGets, from.authPosts, from.allowedWrites].some(byConfig);
   lines.push(`Settings read from this environment${anyConfig ? " and the config" : ""}: ${on.length > 0 ? on.join(", ") : "none (the defaults)"}.`);
   lines.push(
     `Assumed: the app is ${e.appUrl} (--app to change it), and its own top page sent the request. ` +
