@@ -774,6 +774,38 @@ test("team report: every word the app supplied is escaped, and the page runs not
   assert.ok(md.includes("| Site | https://a.example/\\|b |"), md.split("\n").slice(0, 6).join("\n"));
 });
 
+test("team report: a backslash in a cover cell is escaped, so a backslash then pipe stays one cell and the text round-trips", () => {
+  const cells = (row: string): string[] => {
+    const out: string[] = [];
+    let cur = "";
+    for (let i = 1; i < row.length; i++) {
+      const ch = row[i];
+      if (ch === "\\" && i + 1 < row.length) cur += row[++i];
+      else if (ch === "|") (out.push(cur.trim()), (cur = ""));
+      else cur += ch;
+    }
+    return out;
+  };
+  for (const address of ["https://a.example/a\\|b", "https://a.example/ends\\"]) {
+    const md = teamReportMarkdown(teamReportData(teamSource({ address })), new Set());
+    const row = md.split("\n").find((l) => l.startsWith("| Site |"));
+    assert.ok(row, "the cover has a Site row");
+    assert.deepEqual(cells(row), ["Site", address], row);
+  }
+});
+
+test("team report: a carriage return alone in a cover cell does not end the row, as GitHub-flavoured Markdown reads it as a line ending", () => {
+  for (const [address, shown] of [
+    ["https://a.example/x\ry", "https://a.example/x y"],
+    ["https://a.example/x\r\ny", "https://a.example/x y"],
+    ["https://a.example/x\r\r\ny", "https://a.example/x y"],
+  ]) {
+    const md = teamReportMarkdown(teamReportData(teamSource({ address })), new Set());
+    const lines = md.split(/\r\n|\r|\n/);
+    assert.ok(lines.includes(`| Site | ${shown} |`), JSON.stringify(lines.slice(0, 6)));
+  }
+});
+
 /** Every file under `root`, with its bytes' hash, skipping `skip` (a folder name relative to root). */
 function treeOf(root: string, skip: string): Map<string, string> {
   const out = new Map<string, string>();
