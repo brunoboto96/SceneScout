@@ -123,6 +123,7 @@ import {
   readFindings,
   REDACTED_KEY,
   resolvePrice,
+  KEY_ENV,
   redactKeys,
   secretValues,
   settleTurn,
@@ -1880,7 +1881,7 @@ test("action: every input that is not the action's own is a `scenescout ci` opti
   for (const secret of ["api-key", "key", "anthropic-api-key", "openai-api-key"]) assert.ok(!actionInputs.includes(secret), `${secret} must never be an input`);
 });
 
-test("action: the model key reaches only the run step; every other step blanks both key names", () => {
+test("action: the model key reaches only the run step; every other step blanks every key name", () => {
   const steps = action.runs.steps as Array<{ id?: string; name?: string; env?: Record<string, string> }>;
   assert.ok(steps.length > 3);
   assert.ok(
@@ -1889,12 +1890,9 @@ test("action: the model key reaches only the run step; every other step blanks b
   );
   for (const step of steps) {
     const label = step.name ?? step.id ?? "(unnamed step)";
-    if (step.id === "run") {
-      assert.equal(step.env?.ANTHROPIC_API_KEY, undefined, `${label} keeps the inherited key`);
-      assert.equal(step.env?.OPENAI_API_KEY, undefined, `${label} keeps the inherited key`);
-    } else {
-      assert.equal(step.env?.ANTHROPIC_API_KEY, "", `${label} blanks ANTHROPIC_API_KEY`);
-      assert.equal(step.env?.OPENAI_API_KEY, "", `${label} blanks OPENAI_API_KEY`);
+    for (const name of Object.values(KEY_ENV)) {
+      if (step.id === "run") assert.equal(step.env?.[name], undefined, `${label} keeps the inherited ${name}`);
+      else assert.equal(step.env?.[name], "", `${label} blanks ${name}`);
     }
   }
 });
