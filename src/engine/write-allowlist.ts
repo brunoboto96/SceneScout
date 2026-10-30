@@ -9,7 +9,7 @@
  * SCENESCOUT_ALLOWED_WRITES); an attach argument has no way to name an entry.
  * Pure logic, table-tested in policy-test.
  */
-import { matchReadPost, readPostEntries, readPostsSetting, type ReadPost } from "./policy.js";
+import { matchReadPost, readPostEntries, readPostsSetting, writeMethod, writeMethodsNamed, type ReadPost, type WriteMode } from "./policy.js";
 
 /** The environment variable naming the writes that may leave the page. The config file's list is the most it may name. */
 export const ALLOWED_WRITES_ENV = "SCENESCOUT_ALLOWED_WRITES";
@@ -97,6 +97,7 @@ export function allowedWritesFromEnv(env: string | undefined): string[] {
 
 /** The entry that lists a write of `method` to `url`, or null. The method is the one the policy judges it as (policy.ts writeMethod). */
 export function matchAllowedWrite(entries: readonly AllowedWrite[], appUrl: string, method: string, url: string): AllowedWrite | null {
+  if (hasAmbiguousSegment(url)) return null;
   const found = matchReadPost(
     entries.filter((e) => e.method === method.toUpperCase()),
     appUrl,
@@ -105,14 +106,48 @@ export function matchAllowedWrite(entries: readonly AllowedWrite[], appUrl: stri
   return (found as AllowedWrite | null) ?? null;
 }
 
-/** The list as one write is judged against it, or null when no list is set (every write is judged by the mode alone). */
+/** A segment a server may read as more than one (an encoded `/` or `\`, or a dot segment once decoded): no entry's `*` stands for it. */
+function hasAmbiguousSegment(url: string): boolean {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return true;
+  }
+  return pathname.split("/").some((seg) => {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(seg);
+    } catch {
+      return true;
+    }
+    return decoded.includes("/") || decoded.includes("\\") || decoded === "." || decoded === "..";
+  });
+}
+
+/**
+ * The list as one request meets it, or null when no list is set (every write
+ * is judged by the mode alone). `method` is the method it was sent with: the
+ * request is listed only when every write method a server could act on for it
+ * (policy.ts writeMethodsNamed) has an entry, and `entry` is the judged method's.
+ */
 export function writeAllowListFor(
   setting: { entries: readonly AllowedWrite[]; andModeRules: boolean } | null,
   appUrl: string,
-  method: string,
-  url: string,
+  request: { method: string; url: string; headers?: Record<string, string>; body?: string | null },
 ): WriteAllowList | null {
   if (!setting) return null;
-  const entry = matchAllowedWrite(setting.entries, appUrl, method, url);
-  return { listed: entry !== null, entry: entry ?? undefined, andModeRules: setting.andModeRules };
+  const entry = matchAllowedWrite(setting.entries, appUrl, writeMethod(request).method, request.url);
+  const every = writeMethodsNamed(request).every((m) => matchAllowedWrite(setting.entries, appUrl, m, request.url) !== null);
+  const listed = entry !== null && every;
+  return { listed, entry: listed ? entry : undefined, andModeRules: setting.andModeRules };
+}
+
+/**
+ * The mode whose sign-in rule exempts a POST: with a list of allowed writes,
+ * observe's narrow one in every mode, since read-only's path rule lets out any
+ * POST with `verify`, `session` or `password` in its path (policy.ts isAuthExempt).
+ */
+export function signInRuleMode(mode: WriteMode, allowList: WriteAllowList | null | undefined): WriteMode {
+  return allowList && mode !== "destructive" ? "observe" : mode;
 }

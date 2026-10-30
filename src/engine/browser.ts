@@ -248,9 +248,9 @@ import {
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { bestEffort, settleWithin } from "./best-effort.js";
-import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
 import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
+import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
 import { readMachineSockets } from "./tcp-table.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
@@ -2032,7 +2032,7 @@ export class BrowserEngine {
           foreign: () => this.foreignWriteOf(req, rule),
           offApp: () => offAppPageWrite(this.baseUrl, this.page?.url(), req.url(), this.embedMoves.movedTo),
           authList: this.guard.authListFor(req.url()),
-          allowList: this.guard.allowListFor(method, req.url()),
+          allowList: this.guard.allowListFor({ method: req.method(), url: req.url(), headers: req.headers(), body: req.postData() }),
         })
       )
         return;

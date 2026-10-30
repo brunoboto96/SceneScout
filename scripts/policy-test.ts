@@ -5514,6 +5514,48 @@ test("RouteGuard: a method override is judged as the method it names against the
   );
 });
 
+test("RouteGuard: a request naming two write methods is listed only when the list names both", async () => {
+  const { send } = guardRig("read-only", { allowedWrites: ALLOW_RIG });
+  const form = { "content-type": "application/x-www-form-urlencoded" };
+  assert.equal(await send("PUT", "/api/things/7", { body: "{}", headers: { "x-http-method-override": "DELETE" } }).done, "fulfill 403", "a PUT naming DELETE");
+  assert.equal(await send("PUT", "/api/things/7", { body: "{}", headers: { "x-http-method-override": "PUT" } }).done, "fallback", "a PUT naming PUT");
+  assert.equal(
+    await send("POST", "/api/things/7", { body: "_method=DELETE", headers: { ...form, "x-http-method-override": "PUT" } }).done,
+    "fulfill 403",
+    "a header naming PUT, a body naming DELETE",
+  );
+  assert.equal(
+    await send("POST", "/api/things/7", { body: "_method=PUT", headers: { ...form, "x-http-method-override": "PUT" } }).done,
+    "fallback",
+    "both naming PUT",
+  );
+  const both = guardRig("read-only", { allowedWrites: [...ALLOW_RIG, "DELETE /api/things/*"] });
+  assert.equal(
+    await both.send("PUT", "/api/things/7", { body: "{}", headers: { "x-http-method-override": "DELETE" } }).done,
+    "fallback",
+    "PUT and DELETE both listed",
+  );
+});
+
+test("RouteGuard: an entry's * does not stand for a segment holding an encoded slash or a dot segment", async () => {
+  const { send } = guardRig("read-only", { allowedWrites: ALLOW_RIG });
+  assert.equal(await send("PUT", "/api/things/7", { body: "{}" }).done, "fallback");
+  assert.equal(await send("PUT", "/api/things/7%2F..%2F..%2Fadmin", { body: "{}" }).done, "fulfill 403", "an encoded slash");
+  assert.equal(await send("PUT", "/api/things/a%5Cb", { body: "{}" }).done, "fulfill 403", "an encoded backslash");
+  assert.equal(await send("PUT", "/api/things/%2e%2e%2fadmin", { body: "{}" }).done, "fulfill 403", "encoded dots and slash");
+  assert.equal(await send("PUT", "/api/things/a%20b", { body: "{}" }).done, "fallback", "an encoded space is one segment");
+});
+
+test("RouteGuard: with a list, a POST counts as a sign-in only by observe's narrow rule, in every mode", async () => {
+  for (const rule of ["read-only", "safe-write"] as const) {
+    for (const path of ["/api/orders/7/verify", "/api/users/5/password", "/api/session/7/extend"]) {
+      assert.equal(await guardRig(rule, {}).send("POST", path, { body: "{}" }).done, "fallback", `${rule} ${path}: no list, the path rule lets it out`);
+      assert.equal(await guardRig(rule, { allowedWrites: ALLOW_RIG }).send("POST", path, { body: "{}" }).done, "fulfill 403", `${rule} ${path}: unlisted`);
+    }
+    assert.equal(await guardRig(rule, { allowedWrites: ALLOW_RIG }).send("POST", "/api/auth/login", { body: "{}" }).done, "fallback", `${rule}: a sign-in`);
+  }
+});
+
 test("RouteGuard: a list that only narrows (a guided check, a project's own list) still asks the mode", async () => {
   const narrow = { allowedWrites: ALLOW_RIG, allowedAndModeRules: true };
   assert.equal(await guardRig("read-only", narrow).send("POST", "/api/things", { body: "{}" }).done, "fallback", "listed and plain");
@@ -5540,6 +5582,10 @@ test("RouteGuard: the browser-level interception applies the list to a write the
   assert.equal(await unseen("read-only", "POST", "/api/other", ALLOW_RIG), "Fetch.failRequest");
   assert.equal(await unseen("read-only", "DELETE", "/api/things", ALLOW_RIG), "Fetch.failRequest");
   assert.equal(await unseen("read-only", "POST", "/api/other", undefined), "Fetch.continueRequest", "no list: read-only lets a plain POST out");
+  assert.equal(await unseen("read-only", "POST", "/api/orders/7/verify", ALLOW_RIG), "Fetch.failRequest", "a list: only observe's sign-in rule");
+  assert.equal(await unseen("read-only", "POST", "/api/orders/7/verify", undefined), "Fetch.continueRequest", "no list: the path rule");
+  assert.equal(await unseen("read-only", "PUT", "/api/things/7?_method=DELETE", ALLOW_RIG), "Fetch.failRequest", "a PUT naming DELETE");
+  assert.equal(await unseen("read-only", "PUT", "/api/things/7", ALLOW_RIG), "Fetch.continueRequest");
 });
 
 test("policy explain: with a list, each verdict equals the route handler's, in every mode and for every kind of request", async () => {
@@ -5557,6 +5603,15 @@ test("policy explain: with a list, each verdict equals the route handler's, in e
     { method: "POST", path: "/api/things/7?_method=PUT", body: "{}" },
     { method: "POST", path: "/api/things?_method=PUT", body: "{}" },
     { method: "GET", path: "/api/things" },
+    { method: "PUT", path: "/api/things/7", body: "{}", headers: { "x-http-method-override": "DELETE" } },
+    {
+      method: "POST",
+      path: "/api/things/7",
+      body: "_method=DELETE",
+      headers: { "content-type": "application/x-www-form-urlencoded", "x-http-method-override": "PUT" },
+    },
+    { method: "PUT", path: "/api/things/7%2F..%2Fadmin", body: "{}" },
+    { method: "POST", path: "/api/orders/7/verify", body: "{}" },
   ];
   for (const classifier of ["standard", "strict"] as const)
     for (const andModeRules of [false, true])

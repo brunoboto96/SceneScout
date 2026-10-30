@@ -18,7 +18,7 @@
  * wiring to the browser lives in `browser.ts`.
  */
 import { createHash } from "node:crypto";
-import { NOT_ALLOWED_WRITE_REFUSAL, type WriteAllowList } from "./write-allowlist.js";
+import { NOT_ALLOWED_WRITE_REFUSAL, signInRuleMode, type WriteAllowList } from "./write-allowlist.js";
 import {
   allowsForeignWriteOnSignIn,
   allowsWrite,
@@ -109,7 +109,7 @@ export function judgeUnseenWrite(input: {
   const { mode, method, pathname, destructiveWire } = input;
   if (mode === "destructive" || isReadMethod(method)) return { allow: true };
   if (input.foreign) return { allow: false, why: `sent from a frame of ${input.foreign}` };
-  const authExempt = isAuthExempt(mode, method, pathname, destructiveWire, input.authList);
+  const authExempt = isAuthExempt(signInRuleMode(mode, input.allowList), method, pathname, destructiveWire, input.authList);
   if (input.offApp && !authExempt) return { allow: false, why: `sent from a page of ${input.offApp}, outside the app` };
   if (authExempt) return { allow: true };
   if (input.allowList) {

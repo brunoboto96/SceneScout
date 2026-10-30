@@ -267,6 +267,7 @@ function verdictFor(
   const destructiveWire = isDestructiveRequest(input.url, input.body, settings.classifier);
   const appUrl = input.appUrl;
   const readPost = readPostAllowed({ mode, method, url: input.url, appUrl, body: input.body, destructiveWire, entries: settings.readPosts });
+  const allowList = writeAllowListFor(settings.allowedWrites ?? null, appUrl, input);
   const verdict = routedWriteVerdict({
     rule: mode,
     method,
@@ -277,7 +278,7 @@ function verdictFor(
     offApp: null,
     readPost: readPost !== null,
     authList: settings.authPosts ? { entries: settings.authPosts, appUrl, url: input.url, andSignInPath: settings.authPostsNarrowOnly === true } : null,
-    allowList: writeAllowListFor(settings.allowedWrites ?? null, appUrl, method, input.url),
+    allowList,
   });
   if (verdict.kind === "refuse") return { mode, outcome: "refused", rule: verdict.why, source: "route-guard.ts routedWriteVerdict" };
   if (verdict.kind === "auth")
@@ -286,13 +287,13 @@ function verdictFor(
       outcome: "allowed",
       rule: settings.authPosts
         ? `a sign-in POST listed in ${settings.from?.authPosts ?? AUTH_POSTS_ENV}${settings.authPostsNarrowOnly ? " that also looks like a sign-in by its path" : ""}`
-        : mode === "observe"
-          ? "a sign-in, sign-out or token refresh by its path (observe's narrow sign-in rule)"
+        : mode === "observe" || settings.allowedWrites
+          ? `a sign-in, sign-out or token refresh by its path (observe's narrow sign-in rule${mode === "observe" ? "" : ", which a list of allowed writes applies in every mode"})`
           : "an auth or session request by its path",
       source: "policy.ts isAuthExempt",
     };
   if (verdict.kind === "listed-write") {
-    const entry = writeAllowListFor(settings.allowedWrites ?? null, appUrl, method, input.url)?.entry?.entry ?? "listed";
+    const entry = allowList?.entry?.entry ?? "listed";
     return {
       mode,
       outcome: "allowed",

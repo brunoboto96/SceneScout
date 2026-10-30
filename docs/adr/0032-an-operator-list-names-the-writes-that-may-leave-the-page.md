@@ -25,18 +25,35 @@ modes other than `observe` rest on a guess. Only the method rule is structural
   a guided check) is held to the mode's own rules as well, so it cannot let out a
   write the mode would refuse.
 - **The method is the one the policy judges**, so a `POST` carrying an override
-  that names `DELETE` meets a `DELETE` entry. Reads and the sign-in exemption of
-  `observe` are unchanged; a read `POST` named in `readPosts` also needs an
-  entry when a list is set.
+  that names `DELETE` meets a `DELETE` entry. A request that could be read as
+  more than one write (overrides naming different methods, or a `PUT` carrying
+  one) is listed only when every one of them is, since servers differ in which
+  they honour. Reads are unchanged; a read `POST` named in `readPosts` also
+  needs an entry when a list is set.
+- **A sign-in is recognised by `observe`'s narrow rule in every mode** (or by
+  `authPosts` when the operator sets it). The wider path rule `read-only` and
+  `safe-write` otherwise use lets out any `POST` with `verify`, `session` or
+  `password` in its path, which would be a write the list does not name.
 - **Paths are read as `readPosts` reads them:** exact, `*` for one whole segment,
-  no query, an origin for another site's API.
+  no query, an origin for another site's API. A segment holding an encoded `/`
+  or backslash, or a dot segment once decoded, matches no entry, since a server
+  may read it as more than one segment.
+- **A listed write is not held to the mode's other rules** unless the list only
+  narrows: it goes out of `observe`, out of `read-only` whatever the destructive
+  classifier says, and out of `safe-write` whether or not the run created the
+  record. This is a deliberate trade: the operator's list replaces the
+  classifier and the ownership rule, so an entry is a promise that every write
+  it matches is safe to send.
 
 ## Consequences
 
 - An operator who wants the guarantee to rest on a list can have it, at the cost
   of naming each endpoint the test must write to.
 - A listed endpoint that carries many operations (one GraphQL path) lets all of
-  them out; the list is as narrow as its entries.
+  them out, and `PUT /things/*` lets out a change to any record, not only one
+  the run made; the list is as narrow as its entries.
+- A sign-in only the wider path rule recognised is refused while a list is set,
+  until `authPosts` names it.
 - `scenescout policy explain` and `scenescout config explain` show the list and
   its source, and the route handler and the explanation are held equal by test.
 
