@@ -1,5 +1,5 @@
 # Version updates. Security updates are enabled separately in the repository
-# settings. The two major-version ignores below may also hold back a security
+# settings. The major-version ignores below may also hold back a security
 # fix that only exists in that next major, so watch Dependabot ALERTS for
 # typescript rather than relying on a pull request appearing.
 version: 2
@@ -21,6 +21,10 @@ updates:
       # Types must describe the OLDEST supported Node (engines: >=20), or the
       # compiler stops flagging APIs that do not exist there.
       - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # undici 8 needs Node >= 22.19 and crashes on import on Node 20 (engines:
+      # >=20). Drop this with the Node 20 support, see AGENTS.md.
+      - dependency-name: undici
         update-types: ["version-update:semver-major"]
       # Playwright 1.64 hangs a click whose navigation is answered with 204 No
       # Content (#487). Remove this once a release fixes it.
