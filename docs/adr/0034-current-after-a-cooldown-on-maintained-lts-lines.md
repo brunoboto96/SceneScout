@@ -31,25 +31,30 @@ its first days, and most such releases are found and pulled within a week.
   Node 26 has been LTS since 2026-10-28. Move them to 26 once it has been LTS
   for a few weeks and the full matrix passes on it.
 - **The full matrix proves compatibility.** A change to `engines`, a runtime or
-  a dependency major runs every CI cell (the `full-ci` label), including the
-  oldest supported line.
+  a dependency major passes every CI cell, including the oldest supported line
+  (every pull request that changes code runs them all, ADR 33).
 - **A hold is written down with its exit condition.** A dependency kept back
   gets an ignore rule in `.github/dependabot.yml` and a line under "Pinned
   dependencies" in `AGENTS.md` saying why and what ends it, and a test holds the
   two together where it can.
 
-`install-test` holds these rules: `engines` starts on the oldest LTS line
-maintained on the day the suite runs, from a table of end-of-life dates in that
-suite; the doctor, CI's oldest cell and `@types/node` agree with it; no runtime
-dependency in the lockfile refuses a Node version `engines` admits; both
+`install-test` holds the rules that do not depend on the date: `engines` starts
+on an LTS line; the doctor, CI's oldest cell and `@types/node` agree with it; no
+runtime dependency in the lockfile refuses a Node version `engines` admits; both
 Dependabot ecosystems carry a cooldown; and each action compares the runner's
-Node with the floor by minor.
+Node with the floor by minor. Whether that line is still maintained depends on
+the date, so the weekly `node-lts` workflow checks it, from the table of
+end-of-life dates in `scripts/node-lts.ts`: the floor must be the oldest LTS
+line maintained that day, and every CI cell must be on a maintained line.
+`install-test` holds that rule on fixed dates.
 
 ## Consequences
 
-- On 2027-04-30, when Node 22 reaches end of life, `install-test` fails until
-  the floor moves to 24. That failure is intended: it is the prompt to drop the
-  line. A new LTS line is added to the suite's table when it becomes LTS.
+- From 2027-04-30, when Node 22 reaches end of life, the weekly `node-lts`
+  workflow fails until the floor moves to 24. That failure is intended: it is
+  the prompt to drop the line. A pull request's suite does not fail on that
+  date, so unrelated work is not held up by it. A new LTS line is added to the
+  table in `scripts/node-lts.ts` when it becomes LTS.
 - Users on Node 20, or on 22 before 22.19, must upgrade Node before they
   upgrade SceneScout. The doctor and the actions say so.
 - A fix released in the last 7 days that is not filed as a security advisory

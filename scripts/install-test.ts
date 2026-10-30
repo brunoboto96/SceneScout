@@ -50,6 +50,7 @@ import {
 } from "../src/installer.ts";
 import { atLeastVersion, downloadEnv, installerFailure, NODE_FLOOR } from "../src/installer.ts";
 import { FULL_PLATFORMS } from "./test-plan.mjs";
+import { NODE_LTS_END_OF_LIFE, ltsProblems, maintainedLtsLines } from "./node-lts.ts";
 import { parse as parseYaml } from "yaml";
 import { distTagFor, parseVersions, releasePlan } from "./release-plan.mjs";
 import {
@@ -3249,17 +3250,13 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
   }
 });
 
-// Node's release schedule (github.com/nodejs/Release, schedule.json): each LTS line's end of life.
-// Add a line when it becomes LTS; ADR 34 says when the default moves to it.
-const NODE_LTS_END_OF_LIFE: Record<number, string> = { 20: "2026-04-30", 22: "2027-04-30", 24: "2028-04-30", 26: "2029-04-30" };
-
 /** engines.node read as a lower bound `>=x[.y[.z]]`, or null when it is written another way. */
 function nodeFloor(range: string): string | null {
   const m = /^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(range.trim());
   return m ? `${m[1]}.${m[2] ?? 0}.${m[3] ?? 0}` : null;
 }
 
-test("engines start on the oldest Node LTS line still maintained today, and every place that states the floor agrees", () => {
+test("engines start on an LTS line, and every place that states the floor agrees", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
     engines: { node: string };
     devDependencies: Record<string, string>;
@@ -3267,23 +3264,39 @@ test("engines start on the oldest Node LTS line still maintained today, and ever
   const floor = nodeFloor(pkg.engines.node);
   assert.ok(floor, `engines.node is read as a lower bound, not ${pkg.engines.node}`);
   const floorMajor = Number(floor.split(".")[0]);
-  const today = new Date().toISOString().slice(0, 10);
-  const maintained = Object.entries(NODE_LTS_END_OF_LIFE)
-    .filter(([, end]) => end > today)
-    .map(([major]) => Number(major));
+  // Whether the line is still maintained depends on the date, so node-lts.yml checks that weekly (ADR 34).
   assert.ok(floorMajor in NODE_LTS_END_OF_LIFE, `engines start on Node ${floorMajor}, which is not an LTS line`);
-  assert.equal(
-    floorMajor,
-    Math.min(...maintained),
-    `engines start on Node ${floorMajor}; the oldest LTS line maintained on ${today} is ${Math.min(...maintained)}: raise or lower the floor with its docs, test cell and @types/node (ADR 34)`,
-  );
   assert.equal(NODE_FLOOR, floor, "the doctor checks the engines floor");
-  assert.ok(
-    FULL_PLATFORMS.some((p) => p.node === floorMajor),
-    `CI runs a cell on Node ${floorMajor}, the oldest supported line`,
-  );
-  for (const p of FULL_PLATFORMS) assert.ok(maintained.includes(p.node), `CI's ${p.os} cell runs Node ${p.node}, which is not a maintained LTS line`);
+  assert.equal(Math.min(...FULL_PLATFORMS.map((p) => p.node)), floorMajor, `CI's oldest cell runs the engines floor's line, Node ${floorMajor}`);
+  for (const p of FULL_PLATFORMS) assert.ok(p.node in NODE_LTS_END_OF_LIFE, `CI's ${p.os} cell runs Node ${p.node}, which is not an LTS line`);
   assert.match(pkg.devDependencies["@types/node"], new RegExp(`^\\^${floorMajor}\\.`), "the types describe the oldest supported Node");
+});
+
+test("the weekly LTS check: a floor or a cell on a line past its end of life fails from that day, not the day before", () => {
+  const cells = [22, 24, 24, 24];
+  assert.deepEqual(ltsProblems({ floorMajor: 22, cellMajors: cells, today: "2027-04-29" }), []);
+  const ended = ltsProblems({ floorMajor: 22, cellMajors: cells, today: "2027-04-30" });
+  assert.equal(ended.length, 2, ended.join("\n"));
+  assert.match(ended[0], /engines start on Node 22; the oldest LTS line maintained on 2027-04-30 is 24/);
+  assert.match(ended[1], /cell on Node 22, which is not a maintained LTS line/);
+  assert.deepEqual(ltsProblems({ floorMajor: 24, cellMajors: [24, 26], today: "2027-04-30" }), []);
+  // A floor above the oldest maintained line drops a line users still run.
+  assert.match(ltsProblems({ floorMajor: 24, cellMajors: [24], today: "2026-10-30" }).join(), /oldest LTS line maintained on 2026-10-30 is 22/);
+  assert.match(ltsProblems({ floorMajor: 30, cellMajors: [], today: "2031-01-01" }).join(), /no Node LTS line in the table is maintained/);
+  assert.deepEqual(maintainedLtsLines("2026-10-30"), [22, 24, 26]);
+
+  const wf = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "workflows", "node-lts.yml"), "utf8")) as {
+    on: Record<string, unknown>;
+    permissions: Record<string, string>;
+    jobs: Record<string, { steps: Array<{ run?: string }> }>;
+  };
+  assert.ok("schedule" in wf.on && "workflow_dispatch" in wf.on, "runs weekly and by hand");
+  assert.ok(!("pull_request" in wf.on) && !("push" in wf.on), "a calendar date never fails a pull request");
+  assert.deepEqual(wf.permissions, { contents: "read" });
+  assert.ok(
+    Object.values(wf.jobs).some((j) => j.steps.some((s) => s.run?.includes("scripts/node-lts.ts"))),
+    "a step runs the check",
+  );
 });
 
 test("engines admit no Node that a runtime dependency refuses", () => {
