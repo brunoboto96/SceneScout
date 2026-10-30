@@ -207,6 +207,11 @@ export function marksRouteExercised(input: {
 
 /** The write policy's route handler and browser-level interception for one engine. */
 export class RouteGuard {
+  /** An address as a notice and the action log name it: another site's without its query (authloss.ts logAddress), capped. */
+  private place(url: string): string {
+    return logAddress(url, this.host.appUrl()).slice(0, 140);
+  }
+
   /**
    * Chromium only (browsers.ts `unloadWriteInterception`): the writes the
    * route handler already let through, so the browser-level interception that
@@ -429,11 +434,11 @@ export class RouteGuard {
     if (sent === "GET" && req.resourceType() === "document" && this.host.embedEscapeNavigation(req)) {
       const why = ESCAPE_REFUSAL;
       // Reported like any refusal, so a click whose navigation this stopped does not read as a click that did nothing.
-      this.host.noteBlocked({ at: Date.now(), sig: `navigation to ${req.url().slice(0, 140)}`, answered: false, why, type: req.resourceType(), rule });
+      this.host.noteBlocked({ at: Date.now(), sig: `navigation to ${this.place(req.url())}`, answered: false, why, type: req.resourceType(), rule });
       this.host.logAction({
         action: "write-policy:blocked",
         // Another site's address is logged without its query, as every address the engine keeps is (authloss.ts logAddress).
-        target: `navigation to ${logAddress(req.url(), this.host.appUrl()).slice(0, 140)} (${why})`,
+        target: `navigation to ${this.place(req.url())} (${why})`,
         url: this.host.pageUrl() ?? "",
       });
       this.refusedByPolicy.add(req);
@@ -452,7 +457,7 @@ export class RouteGuard {
       const answered = answersWithRefusal(req.resourceType());
       if (rule === "observe" && method === "POST" && !why && answered && !BENIGN_MUTATION_RE.test(url))
         this.host.noteObserveRefusedPost(url, req.postData(), this.host.sentByMainFrame(req) ? req.headers()["referer"] : undefined);
-      this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered, why, type: req.resourceType(), rule });
+      this.host.noteBlocked({ at: Date.now(), sig: `${label} ${this.place(url)}`, answered, why, type: req.resourceType(), rule });
       this.host.logAction({
         action: "write-policy:blocked",
         target: `${label} ${pathname}${judged.via ? ` (${judged.via})` : ""}${why ? ` (${why})` : ""}`,
@@ -661,7 +666,7 @@ export class RouteGuard {
         if (!refuseLoad) return await answer(true);
         this.unseenRefusals.note(sent, url);
         await answer(false);
-        this.host.noteBlocked({ at: Date.now(), sig: `${label} ${url.slice(0, 140)}`, answered: false, why: DESTRUCTIVE_GET_REFUSAL, type: "document", rule });
+        this.host.noteBlocked({ at: Date.now(), sig: `${label} ${this.place(url)}`, answered: false, why: DESTRUCTIVE_GET_REFUSAL, type: "document", rule });
         this.host.logAction({
           action: "write-policy:blocked",
           target: `${label} ${pathnameOf(url)} (${DESTRUCTIVE_GET_REFUSAL})`,
@@ -723,7 +728,7 @@ export class RouteGuard {
       // Refused and reported as any refusal is. Dropped rather than answered: the page that sent it is going or gone.
       this.host.noteBlocked({
         at: Date.now(),
-        sig: `${label} ${url.slice(0, 140)}`,
+        sig: `${label} ${this.place(url)}`,
         answered: false,
         why: verdict.why,
         type: (event.resourceType ?? "other").toLowerCase(),
@@ -749,13 +754,13 @@ export class RouteGuard {
         try {
           this.host.noteBlocked({
             at: Date.now(),
-            sig: `${method} ${url.slice(0, 140)}`,
+            sig: `${method} ${this.place(url)}`,
             answered: false,
             type: (event.resourceType ?? "other").toLowerCase(),
           });
           this.host.logAction({
             action: "write-policy:blocked",
-            target: `${method} ${logAddress(url, this.host.appUrl()).slice(0, 140)} (not judged: an error in the policy)`,
+            target: `${method} ${this.place(url)} (not judged: an error in the policy)`,
             url: this.host.pageUrl() ?? "",
           });
           this.host.notePolicyBlock();
