@@ -35,6 +35,7 @@ import {
   quietAnswer,
   saidSince,
   type WatchedRequest,
+  holdForLandedPage,
 } from "./claims.js";
 import { POSTMESSAGE_BINDING, describeTokenPost, postMessageCaptureScript, tokenHits, tokenPostKey } from "./postmessage.js";
 import { describeInjection, newInjections, probeQueries, probeScript, probeShape, rememberProbe, type InjectionProbe, type RawHit } from "./injection.js";
@@ -247,7 +248,7 @@ import {
   type TimeLimits,
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
-import { bestEffort, settleWithin } from "./best-effort.js";
+import { bestEffort, readWithin, settleWithin } from "./best-effort.js";
 import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
@@ -1541,16 +1542,15 @@ export class BrowserEngine {
     const page = this.page;
     if (!page || page.isClosed() || requests.length === 0) return;
     if (!requests.some((r) => r.status === null || r.status >= 400)) return;
-    // A page on its way elsewhere has no DOM worth asking, and Chromium holds the question until it lands (#674).
-    if (this.requests.navigating(page.mainFrame())) return;
-    const url = page.url();
-    let state: PageState;
-    try {
-      state = (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
-    } catch {
-      // A page mid-navigation has no DOM to ask.
+    // A page on its way elsewhere is not asked until it lands (#674); the writes are kept for it, within the page-load limit (#707).
+    const navigating = this.requests.navigating(page.mainFrame());
+    if (navigating && (!holdForLandedPage(requests, navigating) || (await this.ownNavigationPending(page, this.limits.navMs, this.actionStartedAt)) !== null))
       return;
-    }
+    if (page.isClosed()) return;
+    const url = page.url();
+    // Bounded: Chromium holds this read while a navigation is on its way, which an address that never answers never ends.
+    const state = (await readWithin(page.evaluate(CLAIM_SCAN_SCRIPT), this.limits.navMs)) as PageState | undefined;
+    if (state === undefined) return;
     // A baseline belongs to the input that took it, and to its page.
     const before = this.inputSince !== null && this.inputSince >= this.actionStartedAt ? this.claimBaseline : null;
     // The acted-on control as the click left it, read only when a refusal makes it matter.

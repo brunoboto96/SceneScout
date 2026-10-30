@@ -19,6 +19,7 @@ import {
   COUNTER_RE,
   emptyStateSubject,
   findContradictions,
+  holdForLandedPage,
   INFRASTRUCTURE_WRITE_RE,
   isBackgroundRequest,
   isRefused,
@@ -584,4 +585,34 @@ test("saidSince: an alert not on the page at the input's start is new; one alrea
   // No baseline: when it arrived is unknown, so it is not tagged.
   assert.equal(saidSince("You do not have permission", null), false);
   assert.equal(saidSince("   ", baseline), false);
+});
+
+// ── writes kept until the page they lead to has landed ──────────────────────
+
+test("a refused write is kept while the page is on its way elsewhere", () => {
+  assert.equal(holdForLandedPage([req({ method: "POST", status: 500 })], true), true);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: null })], true), true);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: 400 })], true), true);
+});
+
+test("nothing is kept when no write was refused, or when the page is not on its way", () => {
+  assert.equal(holdForLandedPage([req({ method: "POST", status: 201 })], true), false);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: 399 })], true), false);
+  assert.equal(holdForLandedPage([], true), false);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: 500 })], false), false);
+});
+
+test("a read that failed, a write the page sent on its own and one the policy dropped are not kept for a page on its way", () => {
+  // A navigation cut short (a load left for another) is a document read with no status; no page that follows answers it.
+  assert.equal(holdForLandedPage([req({ method: "GET", resourceType: "document", status: null })], true), false);
+  assert.equal(holdForLandedPage([req({ method: "GET", status: 500 })], true), false);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: 500, background: true })], true), false);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: null, blockedByPolicy: true })], true), false);
+  // Contrast: the same ledger with a refused write in it is kept.
+  assert.equal(holdForLandedPage([req({ method: "GET", resourceType: "document", status: null }), req({ method: "POST", status: 500 })], true), true);
+});
+
+test("a refused write is kept whatever the case of its method", () => {
+  // fetch sends "patch" as written: only DELETE, GET, HEAD, OPTIONS, POST and PUT are upper-cased.
+  assert.equal(holdForLandedPage([req({ method: "patch", status: 500 })], true), true);
 });

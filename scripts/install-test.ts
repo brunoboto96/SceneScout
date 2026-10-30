@@ -924,6 +924,16 @@ test("the website's tour names each part's file once, under one address, with a 
   );
   assert.equal(new Set(ids).size, ids.length, "and no two share one");
   assert.equal(attr(buttons[0], "aria-current"), "true", "the whole tour is the part shown first");
+  const seconds = (len: string) => Number(len.split(":")[0]) * 60 + Number(len.split(":")[1]);
+  const lens = buttons.map((b, i) => {
+    const shown = /<\/span>([^<]+)<span class="len">(\d+:\d\d)<\/span>/.exec(b.body);
+    assert.ok(shown, `part ${i} shows its title and length`);
+    assert.equal(attr(b, "aria-label"), `${shown[1].trim()}, ${shown[2]}`, `part ${i}'s accessible name is its title and length as shown`);
+    return seconds(shown[2]);
+  });
+  // Lengths are shown rounded down, so the parts' sum may fall short of the whole by under a second each.
+  const partsSum = lens.slice(1).reduce((a, b) => a + b, 0);
+  assert.ok(lens[0] >= partsSum && lens[0] < partsSum + lens.length - 1, `the whole tour (${lens[0]} s) is its parts' length (${partsSum} s)`);
   const video = /<video\b[^>]*>/.exec(html)?.[0] ?? "";
   assert.equal(/\ssrc="([^"]+)"/.exec(video)?.[1], new URL(srcs[0], base).href, "the player starts on the whole tour");
   assert.match(video, /\sid="tour-video"/, "the player has the id the script finds it by");

@@ -22,7 +22,7 @@
  */
 import { flagName, readFlagValue } from "./args.js";
 import { botChallenge, CHALLENGE_BODY_LIMIT, challengeBodyMatters } from "./challenge.js";
-import { checkBaseUrl, detectProvider, KEY_ENV, PROVIDERS, redactKeys, secretValues, type ProviderName } from "./ci.js";
+import { checkBaseUrl, detectProvider, DIRECT_PROVIDERS, KEY_ENV, redactKeys, secretValues, type ProviderName } from "./ci.js";
 import { describeLifetime, judgeLifetime, readLifetime } from "./expiry.js";
 import { egressAllows, readCommandPolicy, refusalText, type PolicyReader } from "./project-config.js";
 import { loginCommand, profilePath, validateRoleName } from "./profiles.js";
@@ -122,7 +122,7 @@ export function parsePreflightArgs(
   let provider: ProviderName | undefined;
   const p = values.get("provider");
   if (p !== undefined) {
-    if (!(PROVIDERS as readonly string[]).includes(p)) return { ok: false, error: `--provider must be one of ${PROVIDERS.join(", ")}` };
+    if (!(DIRECT_PROVIDERS as readonly string[]).includes(p)) return { ok: false, error: `--provider must be one of ${DIRECT_PROVIDERS.join(", ")}` };
     provider = p as ProviderName;
   }
   let baseUrl: string | undefined;
