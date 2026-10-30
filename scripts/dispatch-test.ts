@@ -19,7 +19,7 @@ import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
 import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
-import { bestEffort, settleWithin } from "../src/engine/best-effort.ts";
+import { bestEffort, readWithin, settleWithin } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles, socketsLeft } from "./smoke/leaks.ts";
 import { busiestOwners, parseTasklist, parseTcpTable, readMachineSockets, socketLine, tcpStateCounts, type CommandRunner } from "../src/engine/tcp-table.ts";
@@ -874,4 +874,12 @@ test("settleWithin waits for the work, at most the bound, and never rejects", as
   await settleWithin(new Promise<void>(() => {}), 20);
   assert.ok(Date.now() - started < 1000, "work that never finishes is given up on at the bound");
   await settleWithin(Promise.reject(new Error("gone")), 1000);
+});
+
+test("readWithin gives the value, or undefined when the read rejects or has not settled by the bound", async () => {
+  assert.equal(await readWithin(Promise.resolve(7), 1000), 7);
+  assert.equal(await readWithin(Promise.reject(new Error("gone")), 1000), undefined);
+  const started = Date.now();
+  assert.equal(await readWithin(new Promise<number>(() => {}), 20), undefined);
+  assert.ok(Date.now() - started < 1000, "a read that never answers is given up on at the bound");
 });

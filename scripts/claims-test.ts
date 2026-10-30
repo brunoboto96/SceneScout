@@ -601,3 +601,13 @@ test("nothing is kept when no write was refused, or when the page is not on its 
   assert.equal(holdForLandedPage([], true), false);
   assert.equal(holdForLandedPage([req({ method: "POST", status: 500 })], false), false);
 });
+
+test("a read that failed, a write the page sent on its own and one the policy dropped are not kept for a page on its way", () => {
+  // A navigation cut short (a load left for another) is a document read with no status; no page that follows answers it.
+  assert.equal(holdForLandedPage([req({ method: "GET", resourceType: "document", status: null })], true), false);
+  assert.equal(holdForLandedPage([req({ method: "GET", status: 500 })], true), false);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: 500, background: true })], true), false);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: null, blockedByPolicy: true })], true), false);
+  // Contrast: the same ledger with a refused write in it is kept.
+  assert.equal(holdForLandedPage([req({ method: "GET", resourceType: "document", status: null }), req({ method: "POST", status: 500 })], true), true);
+});
