@@ -23,7 +23,7 @@ updates:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
       # undici 8 needs Node >= 22.19 and crashes on import on Node 20 (engines:
-      # >=20). Drop this with the Node 20 support, see AGENTS.md.
+      # >=20). Drop this once engines start at 22.19 or later, see AGENTS.md.
       - dependency-name: undici
         update-types: ["version-update:semver-major"]
       # Playwright 1.64 hangs a click whose navigation is answered with 204 No
