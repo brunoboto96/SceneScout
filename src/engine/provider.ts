@@ -1,5 +1,5 @@
 /**
- * The two model APIs a CI run can use, as message shapes: what each request
+ * The model APIs a CI run can use, as message shapes: what each request
  * carries and how each reply is read into one provider-neutral turn. Pure: the
  * network is src/ci-run.ts's, so everything here is table-tested with recorded
  * replies and no key.
@@ -7,6 +7,12 @@
  *   anthropic  the Messages API (POST {base}/messages)
  *   openai     the Responses API with function calling (POST {base}/responses),
  *              which any endpoint implementing it can serve via --base-url
+ *   bedrock    the Messages body through Amazon Bedrock's InvokeModel
+ *              (POST {base}/model/{model}/invoke), bearer-token authentication
+ *   vertex     the Messages body through Google Vertex AI's rawPredict
+ *              (POST {base}/{model}:rawPredict), OAuth access-token authentication
+ *   azure      the Responses API on Azure OpenAI (POST {base}/responses),
+ *              authenticated with the `api-key` header
  *
  * Both conversations are append-only: what the model returned goes back
  * exactly as it came (thinking blocks, reasoning items), which is what both
@@ -87,7 +93,7 @@ function parseArgs(raw: unknown): { input?: unknown; argsError?: string } {
 export class AnthropicConversation implements Conversation {
   readonly messages: Array<{ role: "user" | "assistant"; content: unknown }> = [];
   constructor(
-    private readonly o: ConversationOptions,
+    protected readonly o: ConversationOptions,
     kickoff: string,
   ) {
     this.messages.push({ role: "user", content: kickoff });
@@ -154,12 +160,42 @@ export class AnthropicConversation implements Conversation {
   }
 }
 
+/** The Messages body as the two cloud hosts take it: the model is in the path and the API version in the body, not in a header. */
+function cloudClaudeBody(req: HttpRequest, anthropicVersion: string): Record<string, unknown> {
+  const { model: _model, ...rest } = req.body as Record<string, unknown>;
+  return { anthropic_version: anthropicVersion, ...rest };
+}
+
+/** Claude on Amazon Bedrock: the Messages body, InvokeModel, an API key as a bearer token (AWS_BEARER_TOKEN_BEDROCK). */
+export class BedrockConversation extends AnthropicConversation {
+  override request(key: string): HttpRequest {
+    const base = super.request(key);
+    return {
+      url: `${this.o.baseUrl}/model/${encodeURIComponent(this.o.model)}/invoke`,
+      headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${key}` },
+      body: cloudClaudeBody(base, "bedrock-2023-05-31"),
+    };
+  }
+}
+
+/** Claude on Google Vertex AI: the Messages body, rawPredict, an OAuth access token as a bearer token. */
+export class VertexConversation extends AnthropicConversation {
+  override request(key: string): HttpRequest {
+    const base = super.request(key);
+    return {
+      url: `${this.o.baseUrl}/${this.o.model}:rawPredict`,
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+      body: cloudClaudeBody(base, "vertex-2023-10-16"),
+    };
+  }
+}
+
 // ── OpenAI Responses API ────────────────────────────────────────────────────
 
 export class OpenAIConversation implements Conversation {
   readonly input: unknown[] = [];
   constructor(
-    private readonly o: ConversationOptions,
+    protected readonly o: ConversationOptions,
     kickoff: string,
   ) {
     this.input.push({ role: "user", content: kickoff });
@@ -221,6 +257,14 @@ export class OpenAIConversation implements Conversation {
 
   addResults(results: readonly ToolOutcome[]): void {
     for (const r of results) this.input.push({ type: "function_call_output", call_id: r.id, output: r.isError ? `ERROR: ${r.text}` : r.text });
+  }
+}
+
+/** An OpenAI model on Azure OpenAI: the Responses API at the resource's /openai/v1 root, the key in `api-key`, the deployment name as the model. */
+export class AzureOpenAIConversation extends OpenAIConversation {
+  override request(key: string): HttpRequest {
+    const base = super.request(key);
+    return { ...base, headers: { "content-type": "application/json", "api-key": key } };
   }
 }
 

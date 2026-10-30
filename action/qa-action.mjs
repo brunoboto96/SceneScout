@@ -612,7 +612,7 @@ export const MAX_SHOT_BYTES = 5_000_000;
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 /** The environment variables that hold a model's key. The shots stage refuses to run where one is set. */
-export const KEY_ENV_NAMES = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"];
+export const KEY_ENV_NAMES = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "GOOGLE_OAUTH_ACCESS_TOKEN", "AZURE_OPENAI_API_KEY"];
 
 /**
  * The pictures to push from a downloaded artifact: each of SHOT_NAMES that is

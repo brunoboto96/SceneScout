@@ -23,7 +23,7 @@ inputs:
     description: The address of the running app to explore, e.g. http://127.0.0.1:3000. Required.
     required: true
   provider:
-    description: anthropic or openai. Empty means the one whose key is set; required when both are.
+    description: anthropic, openai, bedrock, vertex or azure. Empty means the one whose key is set; required when both are. A cloud (bedrock, vertex, azure) is chosen only by naming it, and needs model.
     required: false
     default: ""
   model:
@@ -226,6 +226,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
       id: node
       shell: bash
       run: |
@@ -239,6 +242,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
       if: steps.node.outputs.present != 'true'
       uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
@@ -251,6 +257,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
         INPUTS: ${{ toJSON(inputs) }}
       run: node "$GITHUB_ACTION_PATH/../action/ci-action.mjs" resolve
 
@@ -258,6 +267,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
       id: cache
       if: inputs.cache == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -271,6 +283,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
         PLAYWRIGHT_CLI: ${{ steps.resolve.outputs.playwright-cli }}
         ENGINE: ${{ steps.resolve.outputs.engine }}
       run: |
@@ -284,6 +299,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
         SCENESCOUT_CLI: ${{ steps.resolve.outputs.cli }}
         TARGET: ${{ steps.resolve.outputs.install-target }}
         PLAYWRIGHT_BROWSERS_PATH: ${{ steps.resolve.outputs.browsers-path }}
@@ -293,6 +311,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
       if: always() && inputs.cache == 'true' && steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
@@ -318,6 +339,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
       if: always() && inputs.upload-artifact == 'true' && steps.run.outputs.json != ''
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
@@ -339,6 +363,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
       if: always() && inputs.upload-sarif == 'true' && steps.run.outputs.sarif != ''
       uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
       with:
@@ -351,6 +378,9 @@ runs:
       env:
         ANTHROPIC_API_KEY: ""
         OPENAI_API_KEY: ""
+        AWS_BEARER_TOKEN_BEDROCK: ""
+        GOOGLE_OAUTH_ACCESS_TOKEN: ""
+        AZURE_OPENAI_API_KEY: ""
         INPUTS: ${{ toJSON(inputs) }}
         EXIT_CODE: ${{ steps.run.outputs.exit-code }}
         ERROR: ${{ steps.run.outputs.error }}
