@@ -248,7 +248,7 @@ import {
   type TimeLimits,
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
-import { bestEffort, heldRead, readWithin, settleWithin, SLOW_READ_MS } from "./best-effort.js";
+import { bestEffort, heldActionMessage, heldRead, readWithin, settleWithin, SLOW_READ_MS } from "./best-effort.js";
 import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
@@ -1489,21 +1489,40 @@ export class BrowserEngine {
   /**
    * Mark the start of a user input: read what the page says now, so a claim
    * already on screen (a status badge, a heading) is not taken for the
-   * page's answer to this input's write. Never fails the action: with no
-   * baseline every text counts, as before.
+   * page's answer to this input's write. An unread baseline does not fail the
+   * action: with none every text counts, as before. Answers where the page's own
+   * navigation is going ("" for a page that did not answer at all) when the
+   * read was held past the page-load limit, so the input is not sent (heldBefore).
    */
-  private async beginInput(): Promise<void> {
+  private async beginInput(): Promise<{ leavingFor: string } | null> {
     this.inputSince = this.actionStartedAt;
     this.claimBaseline = null;
     this.documentLoadSince = null;
     this.actedControl = null;
     const page = this.page;
-    if (!page || page.isClosed()) return;
+    if (!page || page.isClosed()) return null;
     try {
-      this.claimBaseline = (await page.evaluate(CLAIM_SCAN_SCRIPT)) as PageState;
+      const baseline = await this.readHeld(page, page.evaluate(CLAIM_SCAN_SCRIPT), this.limits.navMs, false);
+      if (baseline.stalled) return { leavingFor: baseline.leavingFor };
+      this.claimBaseline = baseline.value as PageState;
     } catch {
       // A page mid-navigation has nothing on screen to excuse.
     }
+    return null;
+  }
+
+  /**
+   * Where the page's own navigation is going when a read of the page, before an action that has no target to look up,
+   * was held past the page-load limit ("" for a page that did not answer at all), else null (readHeld).
+   */
+  private async heldBefore(page: Page): Promise<{ leavingFor: string } | null> {
+    const read = await this.readHeld(page, bestEffort(page.evaluate("0"), 0), this.limits.navMs, false);
+    return read.stalled ? { leavingFor: read.leavingFor } : null;
+  }
+
+  /** The error an action ends with when the page held the read before it (beginInput, heldBefore). */
+  private heldActionError(what: string, held: { leavingFor: string }): Error {
+    return new Error(heldActionMessage(what, held.leavingFor, this.limits.navMs));
   }
 
   /** The page's claims as they stand (CLAIM_SCAN_SCRIPT), or null on a page that cannot be read. */
@@ -3107,23 +3126,37 @@ export class BrowserEngine {
     // The element and the test id are passed as arguments: no value of the
     // page's is written into the code that runs there.
     const scope = this.snapshots.scopeOf(el);
-    const handle = await bestEffort(scope.$(`xpath=${el.xpath}`), null);
-    let live = handle ? await bestEffort(handle.evaluate(liveFactsOf), null) : null;
-    await bestEffort(handle?.dispose());
-    if (!live && el.testid) {
-      // Found again only by a test id the page gives one element: two would leave it guessing.
-      const found = await bestEffort(scope.evaluate(uniqueByTestid, el.testid), null);
-      if (found && found.live.name === el.name) {
-        el = { ...el, xpath: found.xpath };
-        this.snapshots.refs.set(ref, el);
-        live = found.live;
-        this.rebindNote = `\nℹ ${ref} re-bound after a re-render: found again by its unique testid=${el.testid}.`;
-      }
+    const looked = await this.readHeld(
+      page,
+      (async () => {
+        const handle = await bestEffort(scope.$(`xpath=${el.xpath}`), null);
+        const found = handle ? await bestEffort(handle.evaluate(liveFactsOf), null) : null;
+        await bestEffort(handle?.dispose());
+        if (found) return { live: found, reboundXpath: null };
+        if (el.testid) {
+          // Found again only by a test id the page gives one element: two would leave it guessing.
+          const byTestid = await bestEffort(scope.evaluate(uniqueByTestid, el.testid), null);
+          if (byTestid && byTestid.live.name === el.name) {
+            return { live: byTestid.live, reboundXpath: byTestid.xpath };
+          }
+        }
+        return null;
+      })(),
+      this.limits.navMs,
+      false,
+    );
+    if (looked.stalled) throw this.heldActionError(ref, looked);
+    const live = looked.value?.live ?? null;
+    if (looked.value?.reboundXpath) {
+      el = { ...el, xpath: looked.value.reboundXpath };
+      this.snapshots.refs.set(ref, el);
+      this.rebindNote = `\nℹ ${ref} re-bound after a re-render: found again by its unique testid=${el.testid}.`;
     }
     if (!live) {
       throw new Error(`Element ${ref} no longer exists in the DOM — take a new scout_snapshot.`);
     }
-    await this.beginInput();
+    const held = await this.beginInput();
+    if (held) throw this.heldActionError(ref, held);
     if (el.testid && live.testid !== el.testid) {
       this.snapshots.dropRefs(`the element under ${ref} changed`);
       throw new Error(
@@ -4570,7 +4603,8 @@ export class BrowserEngine {
   private async pressNow(key: string): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
-    await this.beginInput();
+    const held = await this.beginInput();
+    if (held) throw this.heldActionError("the focused element", held);
     const refusal = await this.vetFocusedActivation(key);
     if (refusal) return refusal;
     // Identify the focused control BEFORE the key lands — activating it may
@@ -6098,7 +6132,7 @@ export class BrowserEngine {
     const { page, transcript, planStartedAt, continuedPast, onViolation, locatePlanTarget } = run;
     this.actionStartedAt = Date.now();
     // A navigation or a scroll is not input: navigate() moves the action mark itself, and what a scroll loads is the page's own doing.
-    if (step.action !== "navigate" && step.action !== "scroll") await this.beginInput();
+    const held = step.action === "navigate" ? null : step.action === "scroll" ? await this.heldBefore(page) : await this.beginInput();
     // A type step is described by its target, never its value: the value may be a password.
     const desc = `${i + 1}. ${step.action} ${step.target ?? (step.action === "type" ? "(no target)" : (step.value ?? ""))}`;
     // Identity captured BEFORE the action — buttons that relabel themselves
@@ -6117,6 +6151,7 @@ export class BrowserEngine {
     // The form this step may submit, read before it went (forms.ts).
     let form: { kind: "click" | "enter"; probe: FormProbe | null } | null = null;
     try {
+      if (held) throw this.heldActionError(step.action === "scroll" ? "the page" : (step.target ?? "the focused element"), held);
       if (step.action === "navigate") {
         const result = await this.navigate(step.target ?? step.value ?? "/");
         if (result.startsWith("REFUSED")) {
@@ -6604,8 +6639,9 @@ export class BrowserEngine {
     let failure: string | null = null;
     let refusal: string | null = null;
     this.actionStartedAt = Date.now();
-    if (step.action === "click" || step.action === "type" || step.action === "select" || step.action === "press") await this.beginInput();
+    const held = step.action === "click" || step.action === "type" || step.action === "select" || step.action === "press" ? await this.beginInput() : null;
     try {
+      if (held) throw this.heldActionError("target" in step ? (step.target ?? "the page") : "the focused element", held);
       const current = this.requirePage();
       if (step.action === "navigate") {
         const resolved = resolveTarget(this.baseUrl, step.target);
@@ -6797,6 +6833,8 @@ export class BrowserEngine {
   /** scroll, unwatched: watchSignIn runs it. */
   private async scrollUnwatched(to?: "top" | "bottom", by?: number, target?: string): Promise<string> {
     this.actionStartedAt = Date.now();
+    const held = await this.heldBefore(this.requirePage());
+    if (held) throw this.heldActionError(target ?? "the page", held);
     const { refused, note } = target
       ? await scrollContainer(this.requirePage(), target, to, by, this.limits.actionMs)
       : await performScroll(this.requirePage(), to, by);

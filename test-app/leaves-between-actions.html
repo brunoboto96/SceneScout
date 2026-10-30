@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving between actions</title>
+  </head>
+  <body>
+    <main>
+      <h1>Leaving between actions</h1>
+      <button type="button" data-testid="between-go">Go on</button>
+    </main>
+    <script>
+      // Starts a navigation of its own a moment after load, to a page the fixture server holds back (held=1): one that
+      // is on its way, and never lands, when the next action looks for its target.
+      setTimeout(function () {
+        location.href = "/page2.html?held=1";
+      }, 1500);
+    </script>
+  </body>
+</html>
