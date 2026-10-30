@@ -592,10 +592,12 @@ test("saidSince: an alert not on the page at the input's start is new; one alrea
 test("a refused write is kept while the page is on its way elsewhere", () => {
   assert.equal(holdForLandedPage([req({ method: "POST", status: 500 })], true), true);
   assert.equal(holdForLandedPage([req({ method: "POST", status: null })], true), true);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: 400 })], true), true);
 });
 
 test("nothing is kept when no write was refused, or when the page is not on its way", () => {
   assert.equal(holdForLandedPage([req({ method: "POST", status: 201 })], true), false);
+  assert.equal(holdForLandedPage([req({ method: "POST", status: 399 })], true), false);
   assert.equal(holdForLandedPage([], true), false);
   assert.equal(holdForLandedPage([req({ method: "POST", status: 500 })], false), false);
 });
