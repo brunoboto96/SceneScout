@@ -3198,6 +3198,27 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
   }
 });
 
+test("while engines admit a Node older than 22.19, undici stays on 7.x: Dependabot ignores its majors and AGENTS.md records the hold", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { engines: { node: string }; dependencies: Record<string, string> };
+  const cfg = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "dependabot.yml"), "utf8")) as {
+    updates: Array<{ "package-ecosystem": string; ignore?: Array<{ "dependency-name": string; "update-types"?: string[] }> }>;
+  };
+  const ignores = cfg.updates.find((u) => u["package-ecosystem"] === "npm")?.ignore ?? [];
+  const agents = fs.readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8");
+  const hold = agents.split("\n").some((line) => line.startsWith("- **undici stays on 7.x"));
+  const floor = /^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(pkg.engines.node.trim());
+  assert.ok(floor, `engines.node is read as a lower bound, not ${pkg.engines.node}`);
+  const oldest = `${floor[1]}.${floor[2] ?? 0}.${floor[3] ?? 0}`;
+  if (!atLeastVersion(oldest, "22.19.0")) {
+    assert.ok(
+      ignores.some((i) => i["dependency-name"] === "undici" && i["update-types"]?.includes("version-update:semver-major")),
+      `undici 8 needs Node >= 22.19, so Dependabot must ignore its major while engines admit Node ${oldest}`,
+    );
+    assert.ok(hold, `AGENTS.md records the undici hold while engines admit Node ${oldest}`);
+    assert.ok(/^[~^]7\./.test(pkg.dependencies.undici), `undici is published as a 7.x range, not ${pkg.dependencies.undici}`);
+  }
+});
+
 type ReleaseStep = {
   uses?: string;
   run?: string;
