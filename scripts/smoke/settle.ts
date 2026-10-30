@@ -58,6 +58,7 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
   await downloadIsNotWaitedFor(baseUrl, stats);
   await crawlOfAPageThatMovesOnToNowhere(baseUrl);
   await crawlOfAPageThatMovesOnWhileRead(baseUrl);
+  await actionOnAPageThatMovesOnWhileScanned(baseUrl);
 }
 
 async function leftFrames(baseUrl: string, stats: ServerStats): Promise<void> {
@@ -287,6 +288,41 @@ async function crawlOfAPageThatMovesOnWhileRead(baseUrl: string): Promise<void> 
         `${snapMs} ms\n${went.slice(0, 200)}\n${snap.slice(0, 300)}`,
       );
     }
+  } finally {
+    releaseHeldPages();
+    await engine.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The scans after an action reading a page that starts a navigation of its own, to an address that never answers, after
+ * their check for one: on Chromium the scan's read is held until the navigation lands, so it is skipped at the page-load
+ * limit and the action ends. Without that the click never returns.
+ */
+async function actionOnAPageThatMovesOnWhileScanned(baseUrl: string): Promise<void> {
+  console.log("settle: an action whose page moves itself on while it is scanned ends at the page-load limit");
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-settle-scan-"));
+  const engine = new BrowserEngine();
+  engine.sessionKey = "settle-scan";
+  const limitMs = 3000;
+  try {
+    await engine.attach({ url: `${baseUrl}/leaves-while-scanned.html`, projectDir, mode: "read-only", navTimeoutMs: limitMs });
+    const snap = await bounded(engine, "snapshot", engine.snapshot());
+    const ref = /\[(e\d+)\] textbox "Note"/.exec(snap)?.[1] ?? /(e\d+)\s+textbox "Note"/.exec(snap)?.[1];
+    check("the page's field is listed", ref !== undefined, snap.slice(0, 600));
+    const typed = await bounded(engine, "type", engine.type(ref ?? "e1", '<marquee data-probe="1">x</marquee>'));
+    check("typing the payload ends", /^OK: type/.test(typed), typed.slice(0, 400));
+    const button = /\[(e\d+)\] button "Check"/.exec(snap)?.[1] ?? /(e\d+)\s+button "Check"/.exec(snap)?.[1];
+    const t0 = Date.now();
+    const clicked = await bounded(engine, "click", engine.click(button ?? "e2"));
+    const ms = Date.now() - t0;
+    console.log(`  (click: ${ms} ms, page-load limit ${limitMs} ms)`);
+    check(
+      "a click on a page that moves itself on while the scans after it read the page ends within twice the page-load limit",
+      ms < limitMs * 2 + 4000 && /^OK: click/.test(clicked),
+      `${ms} ms\n${clicked.slice(0, 400)}`,
+    );
   } finally {
     releaseHeldPages();
     await engine.close();
