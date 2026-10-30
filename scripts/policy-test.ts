@@ -2531,6 +2531,27 @@ test("RouteGuard: an embed's escape to another site is logged by that site's ori
   assert.ok(!logged[0].includes("pay-session-91c2"), logged[0]);
 });
 
+test("RouteGuard: the blocked-request notice names another site's request by origin and path, and the app's own with its path and query", async () => {
+  {
+    const { blocked, send } = guardRig("read-only", { escape: true });
+    await send("GET", "https://pay.example.net/checkout/start?session=pay-session-91c2&state=x", { type: "document" }).done;
+    assert.equal(blocked.length, 1);
+    assert.equal(blocked[0].sig, "navigation to https://pay.example.net/checkout/start");
+  }
+  {
+    const { blocked, send } = guardRig("read-only");
+    await send("POST", "https://hooks.example.net/collect?token=pay-session-91c2", { body: '{"action":"delete"}' }).done;
+    assert.equal(blocked.length, 1);
+    assert.equal(blocked[0].sig, "POST https://hooks.example.net/collect");
+  }
+  {
+    const { blocked, send } = guardRig("read-only");
+    await send("POST", "/api/things?page=2", { body: '{"action":"delete"}' }).done;
+    assert.equal(blocked.length, 1);
+    assert.equal(blocked[0].sig, "POST https://app.example.com/api/things?page=2");
+  }
+});
+
 test("RouteGuard: each verdict is applied to the request, and a refusal is recorded and reported", async () => {
   // Read-only: a plain POST goes out; the same POST carrying a destructive command is answered with a refusal (the contrastive pair).
   {
