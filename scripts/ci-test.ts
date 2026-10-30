@@ -32,7 +32,7 @@ import {
   type JobInput as FlakeJobInput,
 } from "./flaky/flakes.ts";
 import { retentionDaysOf } from "../action/check-action.mjs";
-import { expectedJobs, FULL_CI_LABEL, FULL_CI_PATHS, FULL_PLATFORMS, isDocsPath, plan, PULL_REQUEST_PLATFORMS, verdict } from "./test-plan.mjs";
+import { expectedJobs, FULL_PLATFORMS, isDocsPath, plan, verdict } from "./test-plan.mjs";
 import {
   agentLoop,
   captureShots,
@@ -2067,7 +2067,7 @@ test("the suite runs on Windows for every pull request that changes code", () =>
   assert.equal(filters.paths, undefined, "a paths filter would skip some pull requests, and the required check with them");
   assert.equal(filters["paths-ignore"], undefined, "a paths-ignore filter would skip some pull requests, and the required check with them");
   assert.equal(workflow.jobs.suite.strategy.matrix.platform, "${{ fromJSON(needs.plan.outputs.platforms) }}", "the suite's platforms come from the plan");
-  for (const platforms of [PULL_REQUEST_PLATFORMS, FULL_PLATFORMS]) {
+  for (const platforms of [FULL_PLATFORMS]) {
     assert.ok(
       platforms.some((c) => c.os === "windows-latest"),
       "the suite has no windows-latest cell",
@@ -2097,38 +2097,33 @@ test("the suite runs on Windows for every pull request that changes code", () =>
 
 const cell = (os: string, node: number) => ({ os, node });
 
-test("test plan: main and dispatched runs get every cell, a pull request Linux and Windows on Node 24", () => {
-  assert.deepEqual(FULL_PLATFORMS, [cell("ubuntu-latest", 22), cell("ubuntu-latest", 24), cell("macos-latest", 24), cell("windows-latest", 24)]);
-  assert.deepEqual(PULL_REQUEST_PLATFORMS, [cell("ubuntu-latest", 24), cell("windows-latest", 24)]);
+test("test plan: every event that changes code gets every cell, a pull request included", () => {
+  const every = [cell("ubuntu-latest", 22), cell("ubuntu-latest", 24), cell("macos-latest", 24), cell("windows-latest", 24)];
+  assert.deepEqual(FULL_PLATFORMS, every);
   const src = ["src/engine/policy.ts"];
-  for (const event of ["push", "workflow_dispatch"]) {
-    // Even a documentation change: what lands on main, and every release, is tested on every cell.
-    for (const files of [src, ["docs/ci.md"], undefined]) {
+  for (const event of ["push", "workflow_dispatch", "pull_request"]) {
+    for (const files of [src, ["scripts/smoke/harness.ts"], ["docs/ci.md", "src/engine/policy.ts"], undefined]) {
       const p = plan({ event, files });
-      assert.equal(p.kind, "code", event);
-      assert.equal(p.full, true, event);
-      assert.deepEqual(p.platforms, FULL_PLATFORMS, event);
+      assert.equal(p.kind, "code", `${event} ${files}`);
+      assert.deepEqual(p.platforms, every, `${event} ${files}`);
     }
   }
-  const pr = plan({ event: "pull_request", files: src });
-  assert.deepEqual([pr.kind, pr.full, pr.platforms], ["code", false, PULL_REQUEST_PLATFORMS]);
+  // Documentation on a push still gets everything: what lands on main is tested on every cell.
+  assert.equal(plan({ event: "push", files: ["docs/ci.md"] }).kind, "code");
+  // No label or path narrows or widens it any more.
+  assert.deepEqual(plan({ event: "pull_request", files: src }), plan({ event: "pull_request", files: ["package.json"] }));
 });
 
-test("test plan: a pull request gets the full matrix by label or by touching browser code, dependencies or the plan", () => {
-  const near = plan({ event: "pull_request", files: ["src/engine/policy.ts"], labels: ["full-ci-later", "wave-2"] });
-  assert.equal(near.full, false, "only the exact label counts");
-  const labelled = plan({ event: "pull_request", files: ["src/engine/policy.ts"], labels: ["wave-2", FULL_CI_LABEL] });
-  assert.deepEqual([labelled.kind, labelled.full, labelled.platforms], ["code", true, FULL_PLATFORMS]);
-  // A documentation-only pull request with the label still runs everything: the label asks for it.
-  assert.equal(plan({ event: "pull_request", files: ["docs/ci.md"], labels: [FULL_CI_LABEL] }).full, true);
-  for (const file of FULL_CI_PATHS) {
-    const p = plan({ event: "pull_request", files: ["docs/ci.md", file] });
-    assert.deepEqual([p.kind, p.full], ["code", true], file);
-  }
-  for (const file of ["src/engine/browsers.ts", "src/browsers.test.ts", "scripts/smoke/harness.ts", "package-lock.json.bak", "docs/package.json"])
-    assert.equal(plan({ event: "pull_request", files: [file] }).full, false, file);
-  assert.ok(FULL_CI_PATHS.includes("src/browsers.ts") && FULL_CI_PATHS.includes("src/engine/browser.ts"));
-  for (const file of FULL_CI_PATHS) assert.ok(fs.existsSync(path.join(REPO, file)), `${file} exists, so a rename does not silently drop it`);
+test("test plan: the full-ci label is gone from the plan, the workflow and the docs that describe the matrix", () => {
+  const planSource = readText(path.join(REPO, "scripts", "test-plan.mjs"));
+  const workflow = readText(path.join(REPO, ".github", "workflows", "test.yml"));
+  for (const [name, text] of [
+    ["test-plan.mjs", planSource],
+    ["test.yml", workflow],
+    ["AGENTS.md", readText(path.join(REPO, "AGENTS.md"))],
+    ["CONTRIBUTING.md", readText(path.join(REPO, "CONTRIBUTING.md"))],
+  ])
+    assert.doesNotMatch(text, /full-ci/, `${name} still mentions the full-ci label`);
 });
 
 test("test plan: only prose outside what the suites read as data makes a pull request docs-only", () => {
@@ -2143,7 +2138,7 @@ test("test plan: only prose outside what the suites read as data makes a pull re
   ];
   for (const file of docs) assert.equal(isDocsPath(file), true, file);
   const p = plan({ event: "pull_request", files: docs });
-  assert.deepEqual([p.kind, p.full], ["docs", false]);
+  assert.equal(p.kind, "docs");
   // Markdown the code or the suites read as data, each beside the docs path it nearly is.
   for (const file of [
     "skills/scenescout/SKILL.md",
@@ -2162,44 +2157,39 @@ test("test plan: only prose outside what the suites read as data makes a pull re
   // Files that could not be listed: everything runs.
   for (const files of [undefined, []]) {
     const unknown = plan({ event: "pull_request", files });
-    assert.deepEqual([unknown.kind, unknown.full], ["code", true]);
+    assert.deepEqual([unknown.kind, unknown.platforms], ["code", FULL_PLATFORMS]);
   }
 });
 
 /** The needs context of the test job, with every job given a result. */
-const NEEDS = (kind: string, full: boolean, results: Record<string, string>, planResult = "success") => ({
-  plan: { result: planResult, outputs: planResult === "success" ? { kind, full: String(full), platforms: "[]" } : {} },
+const NEEDS = (kind: string, results: Record<string, string>, planResult = "success") => ({
+  plan: { result: planResult, outputs: planResult === "success" ? { kind, platforms: "[]" } : {} },
   ...Object.fromEntries(Object.entries(results).map(([job, result]) => [job, { result, outputs: {} }])),
 });
 
 test("test plan: the required check passes only when every planned job passed and every other was skipped", () => {
   const docsRun = { docs: "success", suite: "skipped", "cross-browser": "skipped", "check-action": "skipped", "ci-action": "skipped" };
-  const prRun = { docs: "skipped", suite: "success", "cross-browser": "skipped", "check-action": "success", "ci-action": "success" };
-  const fullRun = { ...prRun, "cross-browser": "success" };
-  assert.deepEqual(verdict(NEEDS("docs", false, docsRun)), []);
-  assert.deepEqual(verdict(NEEDS("code", false, prRun)), []);
-  assert.deepEqual(verdict(NEEDS("code", true, fullRun)), []);
+  const prRun = { docs: "skipped", suite: "success", "cross-browser": "success", "check-action": "success", "ci-action": "success" };
+  assert.deepEqual(verdict(NEEDS("docs", docsRun)), []);
+  assert.deepEqual(verdict(NEEDS("code", prRun)), []);
   // Each failing case beside the passing one it differs from in one result.
   const cases: Array<[string, Record<string, unknown>]> = [
-    ["the docs job failed", NEEDS("docs", false, { ...docsRun, docs: "failure" })],
-    ["a suite cell failed", NEEDS("code", false, { ...prRun, suite: "failure" })],
-    ["the suite was skipped though the plan runs it", NEEDS("code", false, { ...prRun, suite: "skipped" })],
-    ["the cross-browser jobs were cancelled", NEEDS("code", true, { ...fullRun, "cross-browser": "cancelled" })],
-    ["the cross-browser jobs were skipped on a full run", NEEDS("code", true, { ...fullRun, "cross-browser": "skipped" })],
-    ["an action job failed", NEEDS("code", false, { ...prRun, "ci-action": "failure" })],
-    ["a job the plan leaves out ran", NEEDS("code", false, { ...prRun, docs: "success" })],
-    ["a job is missing from needs", NEEDS("code", false, { suite: "success", "check-action": "success", "ci-action": "success", docs: "skipped" })],
+    ["the docs job failed", NEEDS("docs", { ...docsRun, docs: "failure" })],
+    ["a suite cell failed", NEEDS("code", { ...prRun, suite: "failure" })],
+    ["the suite was skipped though the plan runs it", NEEDS("code", { ...prRun, suite: "skipped" })],
+    ["the cross-browser jobs were cancelled", NEEDS("code", { ...prRun, "cross-browser": "cancelled" })],
+    ["the cross-browser jobs were skipped on a code run", NEEDS("code", { ...prRun, "cross-browser": "skipped" })],
+    ["an action job failed", NEEDS("code", { ...prRun, "ci-action": "failure" })],
+    ["a job the plan leaves out ran", NEEDS("code", { ...prRun, docs: "success" })],
+    ["a job is missing from needs", NEEDS("code", { suite: "success", "check-action": "success", "ci-action": "success", docs: "skipped" })],
     [
       "the plan failed and everything after it was skipped",
-      NEEDS("", false, { docs: "skipped", suite: "skipped", "cross-browser": "skipped", "check-action": "skipped", "ci-action": "skipped" }, "failure"),
+      NEEDS("", { docs: "skipped", suite: "skipped", "cross-browser": "skipped", "check-action": "skipped", "ci-action": "skipped" }, "failure"),
     ],
-    ["the plan wrote no kind", { ...NEEDS("code", false, prRun), plan: { result: "success", outputs: {} } }],
+    ["the plan wrote no kind", { ...NEEDS("code", prRun), plan: { result: "success", outputs: {} } }],
     // Outputs a step wrote before the job was cancelled or failed are still in needs: the result decides, not the outputs.
-    [
-      "the plan was cancelled after writing its outputs",
-      { ...NEEDS("code", false, prRun), plan: { result: "cancelled", outputs: { kind: "code", full: "false" } } },
-    ],
-    ["the plan failed after writing its outputs", { ...NEEDS("code", false, prRun), plan: { result: "failure", outputs: { kind: "code", full: "false" } } }],
+    ["the plan was cancelled after writing its outputs", { ...NEEDS("code", prRun), plan: { result: "cancelled", outputs: { kind: "code" } } }],
+    ["the plan failed after writing its outputs", { ...NEEDS("code", prRun), plan: { result: "failure", outputs: { kind: "code" } } }],
   ];
   for (const [what, needs] of cases) assert.notDeepEqual(verdict(needs), [], what);
 });
@@ -2221,10 +2211,10 @@ test("test plan: the script's commands write the plan as outputs and exit by the
         .split("\n")
         .map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
     );
-    assert.deepEqual(outputs, { kind: "docs", full: "false", platforms: JSON.stringify(PULL_REQUEST_PLATFORMS) });
+    assert.deepEqual(outputs, { kind: "docs", platforms: JSON.stringify(FULL_PLATFORMS) });
     const docsRun = { docs: "success", suite: "skipped", "cross-browser": "skipped", "check-action": "skipped", "ci-action": "skipped" };
-    assert.equal(run("verdict", { NEEDS: JSON.stringify(NEEDS("docs", false, docsRun)) }).status, 0);
-    assert.equal(run("verdict", { NEEDS: JSON.stringify(NEEDS("docs", false, { ...docsRun, docs: "failure" })) }).status, 1);
+    assert.equal(run("verdict", { NEEDS: JSON.stringify(NEEDS("docs", docsRun)) }).status, 0);
+    assert.equal(run("verdict", { NEEDS: JSON.stringify(NEEDS("docs", { ...docsRun, docs: "failure" })) }).status, 1);
     assert.equal(run("plan", { EVENT: "push" }).status, 1, "no GITHUB_OUTPUT is an error, not a silent pass");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -2243,25 +2233,22 @@ test("test plan: test.yml runs each job when the plan says, and the required che
     planSteps.some((s) => /git diff --name-only --no-renames HEAD\^1 HEAD/.test(s.run ?? "")),
     "the pull request's change is the merge commit against its base, with a moved file listed under its old path too",
   );
-  assert.deepEqual(Object.keys(jobs.plan.outputs ?? {}).sort(), ["full", "kind", "platforms"]);
+  assert.deepEqual(Object.keys(jobs.plan.outputs ?? {}).sort(), ["kind", "platforms"]);
   // The diff needs the merge commit's first parent; one commit of history would fail the plan on every pull request.
   const planCheckout = planSteps.find((s) => (s.uses ?? "").startsWith("actions/checkout@"));
   assert.equal(planCheckout?.with?.["fetch-depth"], "${{ github.event_name == 'pull_request' && 2 || 1 }}");
-  // The plan reads what the diff step listed: a broken wire would drop the label, and the cells it asks for, without a failure.
+  // The plan reads what the diff step listed: a broken wire would turn a docs-only pull request into a code one, or the reverse, without a failure.
   const diffStep = planSteps.find((s) => s.id === "diff");
   assert.equal(diffStep?.if, "github.event_name == 'pull_request'");
   const planStep = planSteps.find((s) => s.id === "plan");
   assert.deepEqual(planStep?.env, {
     EVENT: "${{ github.event_name }}",
     FILES: "${{ steps.diff.outputs.files }}",
-    LABELS: "${{ steps.diff.outputs.labels }}",
   });
   const diffRun = diffStep?.run ?? "";
-  // Every label, not the first page of thirty.
-  assert.match(diffRun, /gh api --paginate "repos\/\$REPO\/issues\/\$PR\/labels" --jq '\.\[\]\.name'/);
   // File names come from the pull request, so the multi-line outputs' delimiter must be one a file name cannot guess:
   // a file named after a fixed delimiter would end the list early and could leave a code change off it.
-  for (const name of ["files", "labels"]) {
+  for (const name of ["files"]) {
     const opener = new RegExp(`echo "${name}<<(\\$[A-Za-z_{][A-Za-z_}]*)"`).exec(diffRun);
     assert.ok(opener, `${name} is written with a delimiter held in a variable`);
     assert.ok(diffRun.includes(`echo "${opener[1]}"`), `${name}'s delimiter closes it`);
@@ -2271,23 +2258,19 @@ test("test plan: test.yml runs each job when the plan says, and the required che
   const conditions: Record<string, string> = {
     docs: "needs.plan.outputs.kind == 'docs'",
     suite: "needs.plan.outputs.kind == 'code'",
-    "cross-browser": "needs.plan.outputs.full == 'true'",
+    "cross-browser": "needs.plan.outputs.kind == 'code'",
     "check-action": "needs.plan.outputs.kind == 'code'",
     "ci-action": "needs.plan.outputs.kind == 'code'",
   };
-  assert.deepEqual(Object.keys(conditions).sort(), Object.keys(expectedJobs({ kind: "code", full: true })).sort());
+  assert.deepEqual(Object.keys(conditions).sort(), Object.keys(expectedJobs({ kind: "code" })).sort());
   for (const [job, condition] of Object.entries(conditions)) {
     assert.equal(jobs[job].needs, "plan", job);
     assert.equal(jobs[job].if, condition, job);
   }
-  for (const p of [
-    { kind: "docs", full: false },
-    { kind: "code", full: false },
-    { kind: "code", full: true },
-  ]) {
+  for (const p of [{ kind: "docs" }, { kind: "code" }]) {
     const expected = expectedJobs(p);
     for (const [job, condition] of Object.entries(conditions)) {
-      const runs = condition.endsWith("== 'docs'") ? p.kind === "docs" : condition.includes("full") ? p.full : p.kind === "code";
+      const runs = condition.endsWith("== 'docs'") ? p.kind === "docs" : p.kind === "code";
       assert.equal(runs, expected[job as keyof typeof expected], `${job} on ${JSON.stringify(p)}`);
     }
   }

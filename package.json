@@ -100,6 +100,7 @@
     "hygiene-test": "tsx --test scripts/hygiene-test.ts",
     "fuzz-rates": "tsx scripts/policy-fuzz.ts --write-guide",
     "sensitive-rates": "tsx scripts/sensitive-fuzz.ts --write-guide",
+    "tool-params": "npm run build && tsx scripts/tool-params.ts --write-guide",
     "guide-test": "tsx --test scripts/guide-test.ts",
     "pace-test": "tsx --test scripts/pace-test.ts",
     "limits-test": "tsx --test scripts/limits-test.ts",

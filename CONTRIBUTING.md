@@ -98,12 +98,12 @@ approval, and only the maintainer can merge or publish a release. Review may
 take a while; a pull request that is small, tested and in scope is reviewed
 first.
 
-A pull request's CI runs Chromium on Linux and Windows with Node 24. macOS,
-Node 22, Firefox and WebKit run after the merge, on `main`; a pull request
-that changes only documentation runs the unit suites and mcp-check only. Ask
-for the `full-ci` label when your change may behave differently in another
-browser or on another platform. [ADR 26](docs/adr/0026-a-pull-request-runs-the-cells-it-can-break-and-main-runs-them-all.md)
-has what runs where.
+A pull request's CI runs the same cells as `main`: the suite on Linux,
+Windows and macOS with Chromium (Linux on Node 22 and 24), and the browser
+suite on Firefox and WebKit on Linux. A pull request that
+changes only documentation runs the unit suites and `mcp-check` only.
+[ADR 33](docs/adr/0033-every-pull-request-runs-every-cell.md) has what runs
+where.
 
 ### A check that keeps failing
 
