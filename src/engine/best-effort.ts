@@ -40,28 +40,56 @@ export async function settleWithin(p: Promise<unknown>, ms: number): Promise<voi
   ]);
 }
 
-/** How a read that a stalled page may hold ended: with its value, or released after `ms` (heldRead). */
-export type HeldRead<T> = { stalled: false; value: T } | { stalled: true };
+/**
+ * How a read that a stalled page may hold ended (heldRead): with its value, or given up on, `navigating` saying whether
+ * a navigation of the page's own was on its way then (and so was ended, when a release was given).
+ */
+export type HeldRead<T> = { stalled: false; value: T } | { stalled: true; navigating: boolean };
+
+/** How long a read slower than its limit, with no navigation on its way, is still waited for before it is released. */
+export const SLOW_READ_MS = 60_000;
+/** How often a read past its limit looks again for a navigation on its way. */
+export const HELD_READ_TICK_MS = 100;
 
 /**
  * `work`, a read the page may hold for as long as a navigation of its own is on its way (page.evaluate has no limit of
- * its own). When it has not settled after `ms`, `release` runs (it ends that navigation), and the read is given `ms`
- * more to fail; the answer is then `stalled`. Never waits longer than twice `ms`, and rejects only as `work` does
- * before the limit.
+ * its own). Once it has not settled after `ms`, `release` runs (it ends that navigation) as soon as `navigating()` says
+ * one is on its way, and the read is given `ms` more to fail; the answer is then `stalled`. A read with nothing on its way
+ * is only slow: it is waited for `slowMs` more, then left, never released, as there is no navigation to end. With
+ * `release` null a held read is left too, for a read that may be skipped without ending the page's navigation. Rejects
+ * only as `work` does before it is released or left.
  */
-export async function heldRead<T>(work: Promise<T>, ms: number, release: () => Promise<unknown>): Promise<HeldRead<T>> {
-  let timer: NodeJS.Timeout | undefined;
+export async function heldRead<T>(
+  work: Promise<T>,
+  ms: number,
+  release: (() => Promise<unknown>) | null,
+  navigating: () => boolean = () => true,
+  slowMs: number = SLOW_READ_MS,
+  tickMs: number = HELD_READ_TICK_MS,
+): Promise<HeldRead<T>> {
   const early = work.then((value): HeldRead<T> => ({ stalled: false, value }));
+  const first = await within(early, ms);
+  if (first !== "late") return first;
+  for (let waited = 0; !navigating() && waited < slowMs; waited += tickMs) {
+    const next = await within(early, Math.min(tickMs, slowMs - waited));
+    if (next !== "late") return next;
+  }
+  if (!navigating()) return { stalled: true, navigating: false };
+  if (release === null) return { stalled: true, navigating: true };
+  await bestEffort(release());
+  await settleWithin(work, ms);
+  return { stalled: true, navigating: true };
+}
+
+/** `p`'s value, or "late" after `ms`, clearing the timer either way. */
+async function within<T>(p: Promise<T>, ms: number): Promise<T | "late"> {
+  let timer: NodeJS.Timeout | undefined;
   const late = new Promise<"late">((resolve) => {
     timer = setTimeout(() => resolve("late"), ms);
   });
   try {
-    const first = await Promise.race([early, late]);
-    if (first !== "late") return first;
+    return await Promise.race([p, late]);
   } finally {
     clearTimeout(timer);
   }
-  await bestEffort(release());
-  await settleWithin(work, ms);
-  return { stalled: true };
 }
