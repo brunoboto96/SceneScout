@@ -19,7 +19,7 @@ import { revealedLines } from "../src/engine/hover.ts";
 import { explainLaunchFailure, isMissingBrowser, readyBrowser, type BrowserReadyDeps } from "../src/engine/launch.ts";
 import { browserPresence, type InstallTarget } from "../src/browsers.ts";
 import { orphanPids } from "../src/engine/reaper.ts";
-import { bestEffort, heldRead, readWithin, ScanGate, settleWithin } from "../src/engine/best-effort.ts";
+import { bestEffort, heldActionMessage, heldRead, readWithin, ScanGate, settleWithin, SLOW_READ_MS } from "../src/engine/best-effort.ts";
 import { boundedTeardown } from "../src/engine/teardown.ts";
 import { descendants, extraHandles, socketsLeft } from "./smoke/leaks.ts";
 import { busiestOwners, parseTasklist, parseTcpTable, readMachineSockets, socketLine, tcpStateCounts, type CommandRunner } from "../src/engine/tcp-table.ts";
@@ -1041,4 +1041,14 @@ test("ScanGate drops what a read returns after the scan was given up on, whether
 
 test("ScanGate passes a failing read through to the caller", async () => {
   await assert.rejects(new ScanGate().keep(Promise.reject(new Error("Execution context was destroyed"))), /Execution context/);
+});
+
+test("heldActionMessage names the ref, where the page is going and the limit, and with no navigation on its way the whole wait the read had, saying nothing of one", () => {
+  const going = heldActionMessage("e4", "http://example.test/next", 3000);
+  assert.match(going, /^Could not act on e4: a navigation of its own is on its way to http:\/\/example\.test\/next /);
+  assert.match(going, /within 3000 ms/);
+  assert.match(going, /new scout_snapshot/);
+  const slow = heldActionMessage("e4", "", 3000);
+  assert.match(slow, new RegExp(`^Could not act on e4: the page did not answer within ${3000 + SLOW_READ_MS} ms`));
+  assert.doesNotMatch(slow, /navigation/);
 });

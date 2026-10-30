@@ -1,6 +1,6 @@
 {
   "name": "scenescout",
-  "version": "3.31.1",
+  "version": "3.32.0",
   "description": "SceneScout — exploratory UI testing for AI coding agents. An MCP server that gives any agent (Claude Code, Cursor, VS Code Copilot, Codex, Gemini CLI and others) a structured view of a running web app, always-on oracles, a network-level write policy, memory across runs and a gap-checked report.",
   "license": "MIT",
   "author": "brunoboto96",
@@ -100,6 +100,7 @@
     "hygiene-test": "tsx --test scripts/hygiene-test.ts",
     "fuzz-rates": "tsx scripts/policy-fuzz.ts --write-guide",
     "sensitive-rates": "tsx scripts/sensitive-fuzz.ts --write-guide",
+    "tool-params": "npm run build && tsx scripts/tool-params.ts --write-guide",
     "guide-test": "tsx --test scripts/guide-test.ts",
     "pace-test": "tsx --test scripts/pace-test.ts",
     "limits-test": "tsx --test scripts/limits-test.ts",

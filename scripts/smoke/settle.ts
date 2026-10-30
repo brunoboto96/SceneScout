@@ -62,6 +62,7 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
   await actionOnAPageThatMovesOnWhileScanned(baseUrl);
   await scanGivenUpOnAddsNothingLate(baseUrl, "finds-while-leaving.html", "dom_injection");
   await scanGivenUpOnAddsNothingLate(baseUrl, "claims-while-leaving.html", "false_success");
+  await actionOnAPageThatMovedOnBeforeIt(baseUrl);
 }
 
 async function leftFrames(baseUrl: string, stats: ServerStats): Promise<void> {
@@ -391,5 +392,47 @@ async function scanGivenUpOnAddsNothingLate(baseUrl: string, fixture: string, ki
     releaseHeldPages();
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * An action on a page that started a navigation of its own, to an address that never answers, before the action: on
+ * Chromium every read of the page is held until the navigation lands. A click (the lookup of its target), a key press
+ * and a scroll (the read before each), and a plan's step each end at the page-load limit and say a navigation is on
+ * its way, and where to.
+ */
+async function actionOnAPageThatMovedOnBeforeIt(baseUrl: string): Promise<void> {
+  console.log("settle: an action whose page started a navigation of its own before it ends at the page-load limit");
+  const limitMs = 3000;
+  const actions: Array<[string, (engine: BrowserEngine, ref: string) => Promise<string>]> = [
+    ["a click", (engine, ref) => engine.click(ref)],
+    ["a key press", (engine) => engine.press("Enter")],
+    ["a scroll", (engine) => engine.scroll("bottom")],
+    ["a plan's click step", (engine) => engine.runPlan([{ action: "click", target: "testid=between-go" }])],
+  ];
+  for (const [what, act] of actions) {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-settle-before-"));
+    const engine = new BrowserEngine();
+    engine.sessionKey = "settle-before";
+    try {
+      await engine.attach({ url: `${baseUrl}/leaves-between-actions.html`, projectDir, mode: "read-only", navTimeoutMs: limitMs });
+      const snap = await bounded(engine, "snapshot", engine.snapshot());
+      const ref = /\[(e\d+)\] button "Go on"/.exec(snap)?.[1] ?? /(e\d+)\s+button "Go on"/.exec(snap)?.[1];
+      check(`the page's button is listed (before ${what})`, ref !== undefined, snap.slice(0, 600));
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      const t0 = Date.now();
+      const said = await bounded(engine, what, act(engine, ref ?? "e1"));
+      const ms = Date.now() - t0;
+      console.log(`  (${what}: ${ms} ms, page-load limit ${limitMs} ms)`);
+      check(
+        `${what} on a page whose own navigation is on its way ends within twice the page-load limit, saying so`,
+        BROWSER !== "chromium" || (ms < limitMs * 2 + 4000 && /navigation of its own is on its way/.test(said) && /page2\.html\?held=1/.test(said)),
+        `${ms} ms\n${said.slice(0, 400)}`,
+      );
+    } finally {
+      releaseHeldPages();
+      await engine.close();
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
   }
 }

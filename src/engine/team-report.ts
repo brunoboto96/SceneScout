@@ -206,9 +206,12 @@ export function sha256Hex(data: string | Uint8Array): string {
 
 // ── Markdown ────────────────────────────────────────────────────────────────
 
-/** A table cell's text: one line, and no pipe to end the cell early. */
+/** A table cell's text: one line, and no pipe to end the cell early. The backslash is escaped first so `\|` in the text stays one escaped pipe. */
 function mdCell(text: string): string {
-  return text.replace(/\r?\n+/g, " ").replace(/\|/g, "\\|");
+  return text
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|");
 }
 
 /** A UTC time as the report shows it. */

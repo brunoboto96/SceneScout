@@ -1,5 +1,20 @@
 # scenescout
 
+## 3.32.0
+
+### Minor Changes
+
+- b7860ef: The operator can name the writes that may leave the page. The config key `allowedWrites` (a list of `METHOD /path` entries, narrowed by `SCENESCOUT_ALLOWED_WRITES`) makes every other write refused in `observe`, `read-only` and `safe-write`, and lets a listed one out whatever its path or body looks like, so the guarantee rests on the list rather than on pattern matching. A method override is judged as the method it names (a request naming two write methods needs an entry for each), a sign-in is recognised only by observe's narrow rule or `authPosts` while a list is set, a project's own file and a guided check can only narrow the list, and `scenescout policy explain` and `scenescout config explain` show the list and where it came from.
+- 20b7879: `scenescout ci --provider bedrock|vertex|azure` calls a model through Amazon Bedrock, Google Vertex AI or Azure OpenAI directly, with the credential and address read from the environment and no gateway. A cloud is chosen only by naming it, needs `--model`, and its credential is redacted like the other keys.
+
+### Patch Changes
+
+- 16255b6: A crawl or a snapshot of a page that starts a navigation of its own while it is being read no longer waits on that page without limit: the read is released at the page-load limit and the route or snapshot is reported as a navigation pending to the address the page was going to. The checks run on the page after an action are skipped, rather than waited on, when such a navigation holds them past that limit.
+- 52572a8: A refused save followed by a success page that arrives after the settle wait is now reported as `false_success`. The refused writes are kept until the page they lead to has landed (within the page-load limit) and that page is judged, instead of being dropped when the action settled mid-navigation.
+- 4bbc1ce: The write-guard notice names a blocked request to another site by its origin and path, so a sign-in provider's query is not shown to the agent. A request to the app keeps its full address.
+- 7cbd319: With a saved sign-in, a navigation waits for the address to hold still before the origin fence judges where the page is, and a redirect to another site that its sign-in verdict sees later is taken back by the fence too, so a page sent to another site just after the load is taken back and logged as an origin-fence bounce, whatever the machine's speed.
+- 7f484c9: A field named as a passphrase in two words ("Pass phrase", `pass_phrase`, `passPhrase`) is now taken for a secret field, so what is typed into it is masked. A secret's two-word name followed by a word about it ("API key count", "Pass phrase hint") now reads as a setting, as `token_count` already did, so its value is no longer masked. The Safety model guide also publishes the measured miss and false-alarm rates of the redaction (secret fields, typed values, secret parameters, email addresses, phone numbers and card numbers), from a seeded generated corpus that a test holds equal to a fresh run.
+
 ## 3.31.1
 
 ### Patch Changes

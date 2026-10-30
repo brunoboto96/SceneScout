@@ -135,8 +135,8 @@ function preflight(command: Subcommand, args: readonly string[]): Preflight {
 }
 
 export interface CliHandlers {
-  /** Print the usage text and exit with this code. */
-  usage: (exitCode: number) => never;
+  /** Print the usage text and leave this exit code for the process to end with; the caller returns. */
+  usage: (exitCode: number) => void;
   version: () => void;
   /** A command line the preflight refused: print the sentence and exit non-zero. */
   refuse: (message: string) => never;

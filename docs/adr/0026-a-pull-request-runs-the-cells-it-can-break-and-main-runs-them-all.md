@@ -1,6 +1,6 @@
 # 26. A pull request runs the cells it can break, and main runs them all
 
-Status: accepted
+Status: superseded by [ADR 33](0033-every-pull-request-runs-every-cell.md). The documentation-only `docs` job, the required `test` check and the concurrency groups below still apply; a pull request that changes code now runs every cell, and the `full-ci` label is gone.
 
 ## Context
 
