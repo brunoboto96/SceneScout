@@ -8,7 +8,7 @@ SceneScout checked http://app.test on 2026-01-01 09:00 UTC, for 13 minutes, with
 | 1 | Blocks users | Saving a thing says it worked when it did not | /things/new | The page said something worked when the server had refused it | The page reports only what really happened. |
 | 2 | Annoying | The error hides behind the banner | /login | Something is confusing to use | It is clear what to do and what happened. |
 | 3 | Cosmetic | A label is clipped | / | Something else is wrong | The app behaves the way a person using it would expect. |
-| 4 | Annoying | The orders page fails to load its list | /orders?page=2#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
+| 4 | Annoying | The orders page fails to load its list | /orders?page=2\#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
 
 2 problems found by earlier runs were not checked again this time. They are listed in the technical details below.
 
@@ -153,7 +153,7 @@ SceneScout checked http://app.test on 2026-01-01 09:00 UTC, for 13 minutes, with
 | 1 | Blocks users | Saving a thing says it worked when it did not | /things/new | The page said something worked when the server had refused it | The page reports only what really happened. |
 | 2 | Annoying | The error hides behind the banner | /login | Something is confusing to use | It is clear what to do and what happened. |
 | 3 | Cosmetic | A label is clipped | / | Something else is wrong | The app behaves the way a person using it would expect. |
-| 4 | Annoying | The orders page fails to load its list | /orders?page=2#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
+| 4 | Annoying | The orders page fails to load its list | /orders?page=2\#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
 
 2 problems found by earlier runs were not checked again this time.
 

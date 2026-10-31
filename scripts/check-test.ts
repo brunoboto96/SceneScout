@@ -703,7 +703,7 @@ test("routes that are not pages are listed apart, and do not count as routes che
   const r: CheckResult = { ...result([]), routes: pages, resources };
   const report = formatCheck(r);
   assert.match(report, /· 2 route\(s\) ·/);
-  assert.match(report, /## Not pages[\s\S]*\| \/feed \| 200 \| application\/rss\+xml \|/);
+  assert.match(report, /## Not pages[\s\S]*\| \/feed \| 200 \| application\/rss\\\+xml \|/);
   assert.doesNotMatch(report.split("## Not pages")[0], /\| \/feed \|/);
   assert.doesNotMatch(formatCheck(result([])), /## Not pages/);
   const json = toSummaryJson(r, "1") as { routes: Array<{ path: string }>; resources: unknown[] };
@@ -823,6 +823,16 @@ test("a backtick in a route cannot close the code span it is shown in", () => {
   const md = formatCheck({ ...result([{ ...issue("high"), routes: ["/a`b"] }]), unvisited: ["/c``d"] });
   assert.ok(md.includes("`` /a`b ``"), md);
   assert.ok(md.includes("``` /c``d ```"), md);
+});
+
+test("link, image and HTML syntax in evidence, an embed's origin or a re-test note is shown as text, not rendered", () => {
+  const image = "![p](https://t.example/p.png)";
+  const html = '<img src="https://t.example/q.png">';
+  const md = formatCheck(result([{ ...issue("high"), evidence: `${image} [go](https://t.example/) ${html}`, embed: `https://e.example/${image}` }]));
+  assert.ok(!/(^|[^\\])!\[[^\]]*\]\(/.test(md), md);
+  assert.ok(!/(^|[^\\])\[[^\]]*\]\(/.test(md), md);
+  assert.ok(!md.includes("<img"), md);
+  assert.ok(md.includes("\\!\\[p\\]\\(https://t.example/p.png\\)"), "the evidence still reads as it came");
 });
 
 test("a pipe in evidence cannot break the report's markdown", () => {

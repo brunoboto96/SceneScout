@@ -615,6 +615,7 @@ test("action: the template input is forwarded, the report is the one check.json 
 // ── the team report ─────────────────────────────────────────────────────────
 
 const TEAM_GOLDEN = path.join(ROOT, "scripts", "golden", "team-report.html");
+const TEAM_MD_GOLDEN = path.join(ROOT, "scripts", "golden", "team-report.md");
 const CHECK_START = "2026-10-16T09:00:00.000Z";
 
 function finding(id: string, over: Partial<Finding> = {}): Finding {
@@ -772,6 +773,57 @@ test("team report: every word the app supplied is escaped, and the page runs not
   // In the Markdown, a pipe in the address cannot end the cover's cell early.
   const md = teamReportMarkdown(teamReportData(teamSource({ address: "https://a.example/|b" })), new Set());
   assert.ok(md.includes("| Site | https://a.example/\\|b |"), md.split("\n").slice(0, 6).join("\n"));
+});
+
+test("golden: the same check renders the same team report Markdown", () => {
+  const md = teamReportMarkdown(teamReportData(teamSource()), new Set(["recordings/main/finding-a1a1a1a1a1.png"]));
+  if (process.env.UPDATE_GOLDEN === "1") fs.writeFileSync(TEAM_MD_GOLDEN, md);
+  assert.equal(
+    md,
+    readText(TEAM_MD_GOLDEN),
+    "the team report's Markdown changed: if that was intended, run UPDATE_GOLDEN=1 npm run report-test and review the diff",
+  );
+  assert.ok(md.includes("](recordings/main/finding-a1a1a1a1a1.png)"), "the engine's own picture link stays live");
+});
+
+test("team report: text from the app is inert in the Markdown, outside the tables as well as in them", () => {
+  const image = "![pixel](https://tracker.example/p.png)";
+  const link = "[click here](https://phish.example/login)";
+  const data = teamReportData(
+    teamSource({
+      gaps: [`a route ${link} never visited\n## Injected heading`],
+      findings: [
+        finding("a1a1a1a1a1", {
+          title: `Title line one\n# Injected heading ${image}`,
+          detail: `Detail ${link}\n\n- injected item`,
+          url: `https://staging.example.com/${encodeURIComponent(image)}`,
+          repro: [`click button "${image}" @ https://staging.example.com/x`, `type "x\n1. injected step" @ https://staging.example.com/x`],
+          seenOn: [`/also/${link}`],
+          picture: "recordings/main/finding-a1a1a1a1a1.png",
+          pictureShot: { width: 1, height: 1, frame: "element", label: `alt ${image}`, at: CHECK_START },
+        } as Partial<Finding>),
+        finding("d4d4d4d4d4", {
+          title: `Not a bug ${link}`,
+          feedback: { verdict: "not-a-bug", reason: `reason\n## Injected ${image}`, at: CHECK_START },
+        } as Partial<Finding>),
+      ],
+    }),
+  );
+  const card = data.cards.find((c) => c.id === "a1a1a1a1a1");
+  assert.ok(card?.picture, "the card keeps its picture, whose alt text is the hostile label");
+  const md = teamReportMarkdown(data, new Set([card.picture.file]));
+  const lines = md.split("\n");
+  assert.ok(!/(^|[^\\])!\[[^\]]*\]\(http/.test(md), `no live image reference to an outside address:\n${md}`);
+  assert.ok(!/(^|[^\\!])\[[^\]]*\]\(http/.test(md), `no live link to an outside address:\n${md}`);
+  assert.deepEqual(
+    lines.filter((l) => /^#{1,6} .*Injected/.test(l) && !l.startsWith("### 1. ")),
+    [],
+    "a newline in page text never starts a heading",
+  );
+  assert.ok(!lines.some((l) => /^(- |\d+\. )injected/.test(l)), "nor a list item");
+  const heading = lines.find((l) => l.startsWith("### 1. "));
+  assert.ok(heading?.includes("Title line one") && heading.includes("Injected heading"), `the whole title stays on its heading line: ${heading}`);
+  assert.ok(md.includes("\\!\\[pixel\\]\\(https:\u200b//tracker.example/p.png\\)"), "the image reference is shown as text");
 });
 
 test("team report: a backslash in a cover cell is escaped, so a backslash then pipe stays one cell and the text round-trips", () => {

@@ -1480,7 +1480,7 @@ test("lanes: a run split in two plans, runs both lanes at once on their own sess
       },
     );
     assert.match(run.summary, /\| Lanes \| 2 of 2 asked ran at once, sharing the caps below \|/);
-    assert.match(run.summary, /\| orders\+1 \| \/orders, \/settings \| 3 \| 3 \| 300 \| done \|/);
+    assert.match(run.summary, /\| orders\\\+1 \| \/orders, \/settings \| 3 \| 3 \| 300 \| done \|/);
     assert.ok(fs.readFileSync(path.join(dir, ".scenescout", "ci", "report.md"), "utf8").includes(`Written from ${PLANNER_SESSION}.`));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -3540,6 +3540,10 @@ test("summary: a backslash and a pipe in a cell cannot break the table's columns
     ["C:\\dir|x\ny", "C:\\\\dir\\|x y"],
     // A lone carriage return is a line break too.
     ["x\ry", "x y"],
+    // Link, image and HTML syntax from the page is shown as text where the summary is rendered.
+    ["![p](https://t.example/p.png)", "\\!\\[p\\]\\(https://t.example/p.png\\)"],
+    ["[go](https://t.example/)", "\\[go\\]\\(https://t.example/\\)"],
+    ['<img src="https://t.example/p.png">', '&lt;img src="https://t.example/p.png"&gt;'],
   ];
   for (const [title, expected] of rows) {
     const md = ciSummaryMarkdown(RESULT({ findings: [finding({ title })] }));
@@ -4445,7 +4449,7 @@ test("from run: a fresh one-loop run plans nothing and is told nothing; a contin
   assert.match(cont.kickoff, /   \/: never worked on by it[\s\S]*   \/stock: never worked on by it/);
   assert.match(cont.kickoff, /\/orders: submit the form\(s\) never submitted: form#new-order/);
   assert.deepEqual(cont.run.json.fromRun, { mode: "continue", source: cont.file, runId: "run-earlier", recordAt: "2026-10-07T09:00:00.000Z" });
-  assert.match(cont.run.summary, /\| Started from \| continued from the run recorded in .*ci\.json \(its report of 2026-10-07T09:00:00\.000Z\) \|/);
+  assert.match(cont.run.summary, /\| Started from \| continued from the run recorded in .*ci\.json \\\(its report of 2026-10-07T09:00:00\.000Z\\\) \|/);
   assert.ok(
     cont.run.lines.some((l) => /^From run: 6 route\(s\) it never worked on, 1 with work left, 0 worked through\.$/.test(l)),
     cont.run.lines.join("\n"),

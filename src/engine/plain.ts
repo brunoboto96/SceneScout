@@ -14,6 +14,7 @@ import { isWorthALook, knownFeedback, seenOnOf, type Finding, type FindingCatego
 import type { OracleKind, OracleViolation } from "./oracles.js";
 import type { WriteMode } from "./policy.js";
 import { MODE_CARE_LABEL } from "./guided-words.js";
+import { escapeMarkdownText } from "./inert-text.js";
 import { fromJs } from "./js-regex.js";
 
 /** Which parts a report carries: the plain view and the technical one ("both"), or one of them. */
@@ -133,13 +134,12 @@ function control(target: string, kind = "control"): string {
 }
 
 /**
- * Step text and a finding's title hold what the app named (a control, an option, a file), so these run on the
+ * Step text holds what the app named (a control, an option, a file), so these run on the
  * linear-time engine (ADR 29): on JavaScript's, a long run of `" = `, of ` ← ` or of tabs took time quadratic in its
  * length (#618).
  */
 const SELECTED_RE = fromJs(String.raw`^(\w+ ".*") = (.*)$`, "", { needs: [" = "] });
 const UPLOADED_RE = fromJs(String.raw` ← (.+?) \(`, "", { needs: [" ← "] });
-const TITLE_LINE_BREAK_RE = fromJs(String.raw`\s*\r?\n\s*`, "", { needs: ["\n"] });
 
 /** One action-log step, split into what was done, to what, and on which page. */
 function splitStep(line: string): { action: string; target: string; url: string } {
@@ -281,15 +281,20 @@ export interface PlainRun {
 }
 
 /**
- * Make app-controlled text safe inside a Markdown table cell. The backslash
- * must be escaped FIRST: escaping only the pipe turns an input of `\|` into
- * `\\|`, which Markdown reads as a literal backslash followed by a live
- * column separator — the app's own error text could then break the table, or
- * forge an extra column in a report people trust. Newlines end a row, so they
- * are flattened too.
+ * App text in a Markdown table cell: one line, escaped by escapeMarkdownText
+ * (inert-text.ts), so a pipe cannot end the cell or forge a column and no
+ * link, image or markup renders. The HTML report and the live view decode it once.
  */
 export function escapeTableCell(text: string): string {
-  return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+  return escapeMarkdownText(text.replace(/\r?\n|\r/g, " "));
+}
+
+/**
+ * App text as a code span in a table cell: codeSpan, with each pipe as `\|`,
+ * which GitHub-flavoured Markdown reads as a pipe even inside a code span.
+ */
+export function tableCodeSpan(text: string): string {
+  return codeSpan(text).replace(/\|/g, "\\|");
 }
 
 /**
@@ -302,26 +307,39 @@ export function escapeSummaryText(text: string): string {
 }
 
 /**
- * App text written into a Markdown line that sits inside a `<details>` fold,
- * where a `</details>` or `<summary>` in it would close or reopen the fold on
- * GitHub. `&`, `<` and `>` become entities; the HTML report and the live view
- * decode them once. Backticks are dropped: a code span shows an entity
- * literally on GitHub, so a backticked title would read `&lt;` there, and a
- * title without its code styling is the lesser loss. With `keepNewlines` the
- * line breaks stay (a finding's detail); otherwise they are flattened.
+ * App text written into a Markdown line of the report, in a fold or out of
+ * one: escaped by escapeMarkdownText (inert-text.ts), so a `</details>` in it
+ * cannot close a fold and no link, image, heading or emphasis renders. The
+ * HTML report and the live view decode it once. With `keepNewlines` the line
+ * breaks stay (a finding's detail); otherwise they are flattened.
  */
 export function escapeFoldText(text: string, keepNewlines = false): string {
-  const escaped = text.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] as string).replace(/`/g, "");
-  return keepNewlines ? escaped : escaped.replace(/\r?\n/g, " ");
+  if (!keepNewlines) return escapeMarkdownText(text.replace(/\r?\n|\r/g, " "));
+  // A kept line starts no list, setext underline or indented code: its indent goes and a leading `-`, `=` or `1.` is escaped.
+  return text
+    .split(/\r?\n|\r/)
+    .map((line) =>
+      escapeMarkdownText(line.replace(/^[ \t]+/, ""))
+        .replace(/^([-=])/, "\\$1")
+        .replace(/^(\d+)([.)])/, "$1\\$2"),
+    )
+    .join("\n");
 }
 
 /**
- * A web address written into a fold. Entities would break it on GitHub (an
- * autolink keeps `&amp;` in its href and shows it), so `<` and `>` are
- * percent-encoded instead, as a browser sends them, and `&` stays as it is.
+ * A web address written into the report. Entities would break it on GitHub (an
+ * autolink keeps `&amp;` in its href and shows it), so `<`, `>`, `[`, `]` and
+ * the backtick are percent-encoded instead, as a browser may send them, which
+ * leaves no tag, link, image or code span to open; `&` stays as it is.
  */
 export function foldUrl(url: string): string {
-  return url.replace(/</g, "%3C").replace(/>/g, "%3E").replace(/\r?\n/g, " ");
+  return url
+    .replace(/</g, "%3C")
+    .replace(/>/g, "%3E")
+    .replace(/\[/g, "%5B")
+    .replace(/\]/g, "%5D")
+    .replace(/`/g, "%60")
+    .replace(/\r?\n|\r/g, " ");
 }
 
 /**
@@ -421,7 +439,7 @@ export function plainSummary(input: PlainInput): string[] {
     lines.push(``, `The run left ${count(input.gaps.length, "thing")} unchecked.${input.audience === "qa" ? "" : " The technical details list which."}`);
     if (input.audience === "qa") {
       lines.push(``);
-      for (const g of input.gaps) lines.push(`- ${g}`);
+      for (const g of input.gaps) lines.push(`- ${escapeFoldText(g)}`);
     }
   }
   return lines;
@@ -601,9 +619,9 @@ export function formatEvidenceSection(input: Pick<PlainInput, "current" | "lastF
     const card = plainCard(f, { lastFrame: input.lastFrames?.get(f.id) });
     if (!card.picture) return;
     lines.push(
-      `### ${i + 1}. ${TITLE_LINE_BREAK_RE.replace(card.title, " ")}`,
+      `### ${i + 1}. ${escapeFoldText(card.title)}`,
       ``,
-      `**${card.impact}** · on ${card.page}`,
+      `**${card.impact}** · on ${escapeFoldText(card.page)}`,
       ``,
       `${FINDING_ANCHOR_OPEN}${card.id}${FINDING_ANCHOR_CLOSE}`,
       ``,

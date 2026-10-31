@@ -90,6 +90,7 @@ import {
 } from "../src/engine/guided-words.ts";
 import { CARD_IMPACTS, cardActions as engineCardActions, cardText, errorAction, guidedProgress, nextActions } from "../src/engine/progress.ts";
 import { plainCard } from "../src/engine/plain.ts";
+import { decodeMarkdownText, escapeMarkdownText } from "../src/engine/inert-text.ts";
 import { AREA_FIELDS, FORM_CHOICES } from "../src/intake.ts";
 import { FEEDBACK_VERDICTS, type Finding } from "../src/engine/memory.ts";
 import * as mod from "../mods/scenescout-mod/hooks/pane.js";
@@ -958,7 +959,7 @@ test("the report panel hides an Evidence item's finding comment and shows a fold
   // report.md carries an Evidence item's finding id in a comment no Markdown
   // viewer shows, and escapes a finding title in a heading inside the folded
   // technical details. The panel sets text, so it must drop the one and decode
-  // the other. A heading outside a fold is written raw and read raw.
+  // the other. A heading outside a fold is escaped and decoded the same way.
   const md = [
     "## Evidence",
     "",
@@ -980,8 +981,8 @@ test("the report panel hides an Evidence item's finding comment and shows a fold
   const all = textOf(root);
   assert.doesNotMatch(all, /<!--|0a1b2c3d4e/, "the finding comment is not shown");
   assert.ok(
-    root.children.some((c) => c.tag === "h4" && textOf(c) === "1. Raw &lt; outside"),
-    "a heading outside a fold is not decoded",
+    root.children.some((c) => c.tag === "h4" && textOf(c) === "1. Raw < outside"),
+    "a heading outside a fold is escaped by report.md too, and decoded once",
   );
   const fold = root.children.find((c) => c.tag === "details");
   assert.ok(fold);
@@ -991,7 +992,21 @@ test("the report panel hides an Evidence item's finding comment and shows a fold
   );
 });
 
-test("the report panel decodes escaped text in a fold's paragraphs and lists once, and leaves the same text outside a fold as written", () => {
+test("the report panel reads report.md's escaping back as the engine's decoder does: in a heading, a list, a table cell and around a code span", () => {
+  const texts = ["![p](https://t.example/p.png) [a](b) <i> & `tick` \\| *x* _y_ #1 $5 ~z~", "a \\ b | c"];
+  for (const text of texts) {
+    const e = escapeMarkdownText(text);
+    assert.equal(decodeMarkdownText(e), text, "the engine's decoder round-trips");
+    const root = renderLiveReport([`### ${e}`, "", `- ${e} \`raw \\| code\``, "", "| A |", "|---|", `| ${e} |`].join("\n"));
+    const h = root.children.find((c) => c.tag === "h4");
+    assert.equal(textOf(h!), text);
+    assert.equal(textOf(root.children.find((c) => c.tag === "ul")!), `${text} raw \\| code`, "a code span outside a table is shown as written");
+    const cells = root.children.find((c) => c.tag === "table")!;
+    assert.equal(textOf(cells.children[1]), text);
+  }
+});
+
+test("the report panel decodes escaped text in paragraphs and lists once, in a fold and out of one", () => {
   const md = [
     "## Summary",
     "",
@@ -1010,7 +1025,11 @@ test("the report panel decodes escaped text in a fold's paragraphs and lists onc
   ].join("\n");
   const root = renderLiveReport(md);
   const outside = root.children.filter((c) => c.tag === "p" || c.tag === "ul").map(textOf);
-  assert.deepEqual(outside, ["Outside &lt;b&gt; paragraph.", "Outside &lt;b&gt; item"], "outside a fold nothing is decoded");
+  assert.deepEqual(
+    outside,
+    ["Outside <b> paragraph.", "Outside <b> item"],
+    "outside a fold, report.md escapes app text the same way, so it is decoded once too",
+  );
   const fold = root.children.find((c) => c.tag === "details");
   assert.ok(fold);
   const para = fold.children.find((c) => c.tag === "p");

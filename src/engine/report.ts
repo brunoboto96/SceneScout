@@ -29,6 +29,7 @@ import {
   escapeFoldText,
   escapeTableCell,
   foldUrl,
+  tableCodeSpan,
   formatPlainSection,
   pictureOf,
   TECHNICAL_HEADING,
@@ -86,7 +87,7 @@ function violationRollup(oracleLog: OracleViolation[]): string[] {
     ``,
     `| Count | Signature |`,
     `|---|---|`,
-    ...top.map(([sig, g]) => `| ${g.count} | \`${escapeTableCell(sig)}\` |`),
+    ...top.map(([sig, g]) => `| ${g.count} | ${tableCodeSpan(sig)} |`),
     ``,
   ];
 }
@@ -120,7 +121,7 @@ export function embedSection(violations: readonly OracleViolation[], coverage: {
     );
     for (const [origin, sigs] of byOrigin) {
       for (const [sig, count] of [...sigs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)) {
-        lines.push(`| \`${escapeTableCell(origin)}\` | ${count} | \`${escapeTableCell(sig)}\` |`);
+        lines.push(`| ${tableCodeSpan(origin)} | ${count} | ${tableCodeSpan(sig)} |`);
       }
     }
     lines.push(``);
@@ -150,7 +151,7 @@ function projectName(dir: string): string {
  * when there are none. The first bullet names the id, as a finding's does, so
  * the live view hangs the frames recorded around it under the entry.
  */
-function formatWorthALook(items: readonly Finding[], sessionStart: string, folded = false): string[] {
+function formatWorthALook(items: readonly Finding[], sessionStart: string): string[] {
   if (items.length === 0) return [];
   const lines = [
     `## Worth a look (${items.length})`,
@@ -159,15 +160,15 @@ function formatWorthALook(items: readonly Finding[], sessionStart: string, folde
     ``,
   ];
   for (const f of items) {
-    // Inside the fold a title is text, as a finding's is (findingRenderer).
-    lines.push(`### ${folded ? escapeFoldText(f.title) : f.title}`, ``);
+    // A title is app text, escaped as a finding's is (findingRenderer).
+    lines.push(`### ${escapeFoldText(f.title)}`, ``);
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}${f.foundAt >= sessionStart ? "" : " · seen in an earlier run"}`);
     const convention = f.convention ?? "a convention the finding does not name";
-    lines.push(`- **A defect only if** your project uses ${folded ? escapeFoldText(convention) : convention}`);
+    lines.push(`- **A defect only if** your project uses ${escapeFoldText(convention)}`);
     if (f.evidence) lines.push(`- **Seen:** ${codeSpan(f.evidence)}`);
-    lines.push(`- **Where:** ${codeSpan(f.state)} (${folded ? foldUrl(f.url) : f.url})${alsoSeenOn(f)}`);
+    lines.push(`- **Where:** ${codeSpan(f.state)} (${foldUrl(f.url)})${alsoSeenOn(f)}`);
     lines.push(...pictureLine(f));
-    lines.push(``, folded ? escapeFoldText(f.detail, true) : f.detail, ``);
+    lines.push(``, escapeFoldText(f.detail, true), ``);
   }
   return lines;
 }
@@ -848,14 +849,14 @@ export function generateReport(
   // ---- The tickets the run was given, criterion by criterion. ----
   const ticketRun = memory.ticketsThisRun();
   const ticketInput: TicketReportInput = { tickets: ticketRun.tickets, verdicts: ticketRun.verdicts, findings: memory.findings };
-  lines.push(...formatTicketsTechnical(ticketInput, foldsTechnical(extras)));
+  lines.push(...formatTicketsTechnical(ticketInput));
 
   // The sections in the report's order; each writes its own lines.
   const scores = pageScoreSection(lines, memory);
   roleMatrixSection(lines, memory);
   const gaps = gapLedgerSection(lines, memory, extras);
   findingSections(lines, current, historical, extras, now);
-  lines.push(...formatWorthALook(worthALook, memory.sessionStart, foldsTechnical(extras)));
+  lines.push(...formatWorthALook(worthALook, memory.sessionStart));
   resolvedSection(lines, resolved, extras, now);
   runSettingsSections(lines, extras);
   trailingSections(lines, memory, oracleLog, extras, cov);
@@ -962,9 +963,7 @@ function pageScoreSection(lines: string[], memory: MemoryStore): Array<[string, 
       const overall = alone === sc.overall ? `**${sc.overall}**` : `**${sc.overall}** (${alone})`;
       // Older scores carry no deductions; their Why is left blank rather than claiming there were none.
       const why = sc.deductions ? (sc.deductions.length === 0 ? "no deductions" : sc.deductions.slice(0, WHY_SHOWN).map(formatDeduction).join(" · ")) : "";
-      lines.push(
-        `| ${escapeTableCell(codeSpan(route))} | ${overall} | ${sc.a11y} | ${sc.craft} | ${sc.consistency} | ${sc.clarity} | ${escapeTableCell(why)} | ${age} |`,
-      );
+      lines.push(`| ${tableCodeSpan(route)} | ${overall} | ${sc.a11y} | ${sc.craft} | ${sc.consistency} | ${sc.clarity} | ${escapeTableCell(why)} | ${age} |`);
     }
     lines.push(``);
   }
@@ -1016,10 +1015,10 @@ function roleMatrixSection(lines: string[], memory: MemoryStore): void {
     lines.push(`|---|${roles.map(() => "---").join("|")}|`);
     for (const rt of differing.slice(0, 25)) {
       lines.push(
-        `| \`${rt}\` | ${roles
+        `| ${tableCodeSpan(rt)} | ${roles
           .map((r) => {
             const o = roleAccess[r][rt];
-            return o === "reached" ? "✓" : o ? `✗ ${o.replace(/\|/g, "/")}` : "—";
+            return o === "reached" ? "✓" : o ? `✗ ${escapeTableCell(o)}` : "—";
           })
           .join(" | ")} |`,
       );
@@ -1040,7 +1039,7 @@ function gapLedgerSection(lines: string[], memory: MemoryStore, extras: ReportEx
       `Empty — every known route visited, exercised, audited; journeys measured; multi-role compared. This is what a complete extensive run looks like.`,
     );
   } else {
-    for (const g of gaps) lines.push(`- ⚠ ${g}`);
+    for (const g of gaps) lines.push(`- ⚠ ${escapeFoldText(g)}`);
   }
   // Non-gating disclosures: what the ledger's heuristics declined to judge.
   // Printed so a suppressed entry is visible rather than absent, but kept out
@@ -1051,7 +1050,7 @@ function gapLedgerSection(lines: string[], memory: MemoryStore, extras: ReportEx
     lines.push(``);
     lines.push(
       `- ℹ ${noSubmitControl.length} route(s) had inputs filled but NO recognizable submit control, so they are NOT counted as unsubmitted forms above. ` +
-        `Filters and read-only views look like this — but so does a real form whose submit is icon-only or unlabeled, so scan the list: ${noSubmitControl.slice(0, 10).join(", ")}${noSubmitControl.length > 10 ? " …" : ""}`,
+        `Filters and read-only views look like this — but so does a real form whose submit is icon-only or unlabeled, so scan the list: ${escapeFoldText(noSubmitControl.slice(0, 10).join(", "))}${noSubmitControl.length > 10 ? " …" : ""}`,
     );
   }
   lines.push(``);
@@ -1061,8 +1060,8 @@ function gapLedgerSection(lines: string[], memory: MemoryStore, extras: ReportEx
 /** A finding's full entry, written to `lines`: open, or `complete` for a resolved one. */
 function findingRenderer(lines: string[], folded = false): (f: Finding, complete?: boolean) => void {
   const renderFinding = (f: Finding, complete = false): void => {
-    // Inside the fold a title is text: a `</details>` in it would close the fold.
-    const title = folded ? escapeFoldText(f.title) : f.title;
+    // A title is app text, escaped: a `</details>` in it cannot close a fold, nor link or image syntax render.
+    const title = escapeFoldText(f.title);
     lines.push(complete ? `### 🟢 [COMPLETE] ${title}` : `### ${SEVERITY_ICON[f.severity]} [${f.severity.toUpperCase()}] ${title}`);
     lines.push(``);
     if (complete) lines.push(`- **Resolved** (was ${f.severity})`);
@@ -1070,25 +1069,23 @@ function findingRenderer(lines: string[], folded = false): (f: Finding, complete
     lines.push(`- **Id:** \`${f.id}\` · **Category:** ${f.category}`);
     // App text in a code span keeps its own fence, and outside one it is escaped in the fold, so neither can close it.
     if (f.evidence) lines.push(`- **Evidence:** ${codeSpan(f.evidence)}`);
-    lines.push(`- **Where:** ${codeSpan(f.state)} (${folded ? foldUrl(f.url) : f.url})${alsoSeenOn(f)}`);
+    lines.push(`- **Where:** ${codeSpan(f.state)} (${foldUrl(f.url)})${alsoSeenOn(f)}`);
     lines.push(...pictureLine(f));
     lines.push(`- **Seen in runs:** ${f.runs}`);
     // A merge the model made is shown with what was filed, so a wrong one can be seen, and refiled as its own defect (ADR 4).
     for (const m of judgedMergesOf(f)) {
       lines.push(
-        `- **Merged by the dedup judge** (p_same ${m.pSame.toFixed(2)}, ${m.at.slice(0, 10)}): [${m.severity}] ${folded ? escapeFoldText(m.title) : m.title}, filed as ${m.category}${m.evidence ? ` with evidence ${codeSpan(m.evidence)}` : ""}`,
+        `- **Merged by the dedup judge** (p_same ${m.pSame.toFixed(2)}, ${m.at.slice(0, 10)}): [${m.severity}] ${escapeFoldText(m.title)}, filed as ${m.category}${m.evidence ? ` with evidence ${codeSpan(m.evidence)}` : ""}`,
       );
     }
     // Only printed once somebody has re-tested it. A finding nobody has looked
     // at again says nothing here, which is the honest thing for it to say.
     if (f.verdict && f.verifiedAt) {
-      lines.push(
-        `- **Re-tested:**${sayVerification(f).replace(/^ · /, " ")}${f.verifyNote ? ` — ${folded ? escapeFoldText(f.verifyNote) : f.verifyNote}` : ""}`,
-      );
+      lines.push(`- **Re-tested:**${sayVerification(f).replace(/^ · /, " ")}${f.verifyNote ? ` — ${escapeFoldText(f.verifyNote)}` : ""}`);
     }
     lines.push(``);
-    // Inside the fold, a detail line that is itself a fold's tag would open or close one; it is written as text.
-    lines.push(folded ? escapeFoldText(f.detail, true) : f.detail);
+    // A detail line that is itself a fold's tag would open or close one; it is written as text.
+    lines.push(escapeFoldText(f.detail, true));
     lines.push(``);
     if (f.repro.length > 0) {
       // Inside the folded technical part the trace is a plain list: a fold in
@@ -1179,7 +1176,7 @@ function runSettingsSections(lines: string[], extras: ReportExtras | undefined):
     lines.push(``);
     lines.push(`Safe-write mode created these resources; delete them if the environment should stay pristine:`);
     lines.push(``);
-    for (const r of extras.createdResources.slice(0, 50)) lines.push(`- \`${r}\``);
+    for (const r of extras.createdResources.slice(0, 50)) lines.push(`- ${codeSpan(r)}`);
     lines.push(``);
   }
 
@@ -1194,7 +1191,7 @@ function runSettingsSections(lines: string[], extras: ReportExtras | undefined):
           : `Named as trusted, but not applied: trust only counts in safe-write mode, and this run was ${extras.mode ?? "read-only"}:`,
     );
     lines.push(``);
-    for (const o of extras.trustedEmbeds) lines.push(`- \`${o}\``);
+    for (const o of extras.trustedEmbeds) lines.push(`- ${codeSpan(o)}`);
     lines.push(``);
   }
 
@@ -1207,7 +1204,7 @@ function runSettingsSections(lines: string[], extras: ReportExtras | undefined):
         : `Named as reads, but not applied: they only count in observe mode, and this run was ${extras.mode ?? "read-only"}:`,
     );
     lines.push(``);
-    for (const e of extras.readPosts) lines.push(`- \`${e}\``);
+    for (const e of extras.readPosts) lines.push(`- ${codeSpan(e)}`);
     lines.push(``);
   }
 }
@@ -1232,7 +1229,7 @@ function trailingSections(
     lines.push(`## Unexplored surface (for the next run)`);
     lines.push(``);
     for (const u of cov.unexercised.slice(0, 30)) {
-      lines.push(`- \`${u.state}\`: ${u.keys.slice(0, 8).join(", ")}${u.keys.length > 8 ? ` … +${u.keys.length - 8}` : ""}`);
+      lines.push(`- ${codeSpan(u.state)}: ${escapeFoldText(u.keys.slice(0, 8).join(", "))}${u.keys.length > 8 ? ` … +${u.keys.length - 8}` : ""}`);
     }
     lines.push(``);
   }
