@@ -6573,13 +6573,13 @@ test("browserHostsPolicy: the list as a Content-Security-Policy that names the a
     "https://cdn.example.net:*",
     "https://*.assets.example.org:8443",
   ])
-    assert.ok(fetchFrom.includes(source), source);
-  assert.ok(!fetchFrom.some((s) => s.includes("[")), "an IPv6 host CSP cannot spell is left out, and refused");
-  assert.ok(!fetchFrom.includes("*") && !fetchFrom.includes("http:") && !fetchFrom.includes("https:"), "no source stands for every host");
-  const connect = directives.get("connect-src")!;
-  assert.ok(connect.includes("wss://cdn.example.net:*") && connect.includes("ws://app.example.com:80"));
+    assert.ok(new Set(fetchFrom).has(source), source);
+  assert.ok(!fetchFrom.some((s) => s.startsWith("http://[") || s.startsWith("https://[")), "an IPv6 host CSP cannot spell is left out, and refused");
+  assert.ok(!["*", "http:", "https:"].some((s) => new Set(fetchFrom).has(s)), "no source stands for every host");
+  const connect = new Set(directives.get("connect-src"));
+  assert.ok(connect.has("wss://cdn.example.net:*") && connect.has("ws://app.example.com:80"));
   // WebKit lets a bare ws: or wss: source match an http or https address: one would let a fetch's redirect out.
-  assert.ok(!connect.includes("ws:") && !connect.includes("wss:"));
+  assert.ok(!connect.has("ws:") && !connect.has("wss:"));
   assert.ok(!directives.get("form-action")!.includes("'unsafe-inline'"));
   // Joined to the document's own policy, so it only narrows.
   assert.equal(withBrowserHostsPolicy(undefined, policy), policy);
