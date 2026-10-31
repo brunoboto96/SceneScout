@@ -6038,35 +6038,40 @@ test("hosts: config explain shows the list and where it came from", () => {
 });
 
 test("hosts: scenescout login reads the launch file joined with the project's own, and opens no window off the list", () => {
+  // Keyed by the resolved path, so the same test reads its files on Windows, where a path is joined with backslashes.
   const files = new Map([
-    ["/srv/.scenescout/config.json", JSON.stringify({ hosts: ["app.example.com", "idp.example.com"] })],
-    ["/p/.scenescout/config.json", JSON.stringify({ hosts: ["app.example.com"] })],
+    [path.resolve("/srv/.scenescout/config.json"), JSON.stringify({ hosts: ["app.example.com", "idp.example.com"] })],
+    [path.resolve("/p/.scenescout/config.json"), JSON.stringify({ hosts: ["app.example.com"] })],
   ]);
-  const disk = { exists: (f: string) => files.has(f), read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+  const disk = { exists: (f: string) => files.has(path.resolve(f)), read: (f: string) => files.get(path.resolve(f))!, realpath: (f: string) => f };
   assert.equal(loginHostRefusal({}, "/srv", "/elsewhere", "https://idp.example.com/login", disk), null);
   // The project's own file narrowed the list, so the host the operator also allows is refused in that project.
   const narrowed = loginHostRefusal({}, "/srv", "/p", "https://idp.example.com/login", disk);
   assert.ok(narrowed !== null && narrowed.includes("the sign-in URL is on idp.example.com"), narrowed ?? "");
   assert.ok(!narrowed.includes("Do not retry"), "a command is run by a person");
   assert.equal(loginHostRefusal({}, "/none", "/none", "https://anything.example.org/", disk), null, "no file: any host");
-  files.set("/bad/.scenescout/config.json", JSON.stringify({ hosts: ["https://x"] }));
+  files.set(path.resolve("/bad/.scenescout/config.json"), JSON.stringify({ hosts: ["https://x"] }));
   assert.ok(loginHostRefusal({}, "/bad", "/none", "https://x.example.com/", disk)?.includes('"hosts"'));
 });
 
 test("projectsRoot: scenescout login's project folder and an earlier run's record are held inside it, as an attach's folder is", () => {
-  const files = new Map([["/srv/.scenescout/config.json", JSON.stringify({ projectsRoot: "/work" })]]);
-  const disk = { exists: (f: string) => files.has(f) || f === "/work", read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+  const r = (f: string) => path.resolve(f);
+  const files = new Map([[r("/srv/.scenescout/config.json"), JSON.stringify({ projectsRoot: "/work" })]]);
+  const disk = { exists: (f: string) => files.has(r(f)) || r(f) === r("/work"), read: (f: string) => files.get(r(f))!, realpath: (f: string) => f };
   const outside = loginHostRefusal({}, "/srv", "/elsewhere", "https://app.example.com/login", disk);
-  assert.ok(outside !== null && outside.includes("the project folder /elsewhere is outside the config's projectsRoot /work"), outside ?? "");
+  assert.ok(outside !== null && outside.includes(`the project folder ${r("/elsewhere")} is outside the config's projectsRoot ${r("/work")}`), outside ?? "");
   assert.equal(loginHostRefusal({}, "/srv", "/work/app", "https://app.example.com/login", disk), null, "the contrast: a folder inside it");
   const { loaded } = readCommandPolicy({}, "/srv", "/work/app", disk) as { ok: true; loaded: LoadedPolicy };
   const record = runRecordRefusal(loaded, "/tmp/other/ci.json", disk);
-  assert.ok(record !== null && record.includes("the earlier run's record /tmp/other/ci.json is outside the config's projectsRoot /work"), record ?? "");
+  assert.ok(
+    record !== null && record.includes(`the earlier run's record ${r("/tmp/other/ci.json")} is outside the config's projectsRoot ${r("/work")}`),
+    record ?? "",
+  );
   assert.equal(runRecordRefusal(loaded, "/work/app/.scenescout/ci.json", disk), null);
   assert.equal(runRecordRefusal(NO_POLICY, "/tmp/other/ci.json", disk), null, "no projectsRoot: any record");
   // ci --from-run goes through configureCommand, before any key or browser is needed.
   const ci = configureCommand({}, "/srv", "/work/app", [], { mode: "observe", fromRun: { path: "/tmp/other/ci.json" } }, disk);
-  assert.ok(!ci.ok && ci.error.includes("the earlier run's record /tmp/other/ci.json is outside"), JSON.stringify(ci));
+  assert.ok(!ci.ok && ci.error.includes(`the earlier run's record ${r("/tmp/other/ci.json")} is outside`), JSON.stringify(ci));
   assert.ok(configureCommand({}, "/srv", "/work/app", [], { mode: "observe", fromRun: { path: "/work/app/ci.json" } }, disk).ok);
 });
 
