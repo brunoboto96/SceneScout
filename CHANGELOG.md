@@ -1,5 +1,28 @@
 # scenescout
 
+## 3.34.0
+
+### Minor Changes
+
+- 7628cd7: The operator's config file takes a `hosts` key (and `SCENESCOUT_HOSTS`, which may narrow it): the only hosts SceneScout may start the browser on. An attach, `scout_login`, `scenescout login`, `scenescout check`, a first look and `scenescout ci` (with its `--compare-url`) on another host are refused with the reason, and a `/scenescout qa` comment starts no run on a preview or base URL whose host the default branch's list does not name. `scenescout config explain` shows the list and where it came from.
+
+### Patch Changes
+
+- 76e8328: The output of `scenescout check`, `ci`, `export`, `login`, `doctor`, `preflight`, `policy explain`, `config explain` and a first run (`scenescout <url>`) read through a pipe now arrives whole. On macOS a command could exit before standard output and standard error had drained, so a long report piped to another program or a CI log could lose its end. The MCP server's start-up refusals wait for standard error in the same way.
+  
+  A reader that stops early, such as `| head`, no longer turns a command's exit code into 1 with an EPIPE trace: the command keeps its own exit code.
+- e4e8e9f: Text a run keeps is now cleared of more credential shapes: the rest of an `sk-proj-…` key after an underscore or a hyphen (only its first part was removed), GitHub fine-grained tokens (`github_pat_…`), Slack app tokens (`xapp-…`), webhook signing secrets (`whsec_…`), SendGrid keys (`SG.….…`), Hugging Face tokens (`hf_…`), Basic credentials whose base64 holds no digit, a value after `api key` with a space, a value set against a name such as `aws_secret_access_key`, `signing_key`, `private_key` or `credentials`, OpenAI service-account and admin keys (`sk-svcacct-…`, `sk-admin-…`) and AWS temporary access key ids (`ASIA…`). Class names and ids joined after a key's marker (`sk-test-results-page`) and fetch's `credentials: 'include'` are left as they were. The guided choices' credential check now refuses "sign in as sam.lee with …": a dot inside a user name ended the phrase it reads. The measured miss and false-alarm rates of these shapes are published in the Safety model guide.
+  
+  A project's kept findings and session logs are cleaned again with this redaction the first time a newer engine opens them.
+- eb52659: With a saved sign-in, a page that goes to sign-in is now reported even when the browser is slow to report the move. A navigation answered with a page counts as on its way until the browser reports the new page, rather than for half a second after its answer arrived, so attaching with a sign-in that no longer works is AUTH FAILED, and navigate and crawl judge the page where it went. A call that reads the page (a scroll, a snapshot) and the note after an action wait for such a navigation before reading the address, so a page that went to sign-in during the call is reported by that call. Seen on Firefox and on a loaded Windows runner.
+- b4840cd: `scenescout login` refusing an address outside the operator's `hosts` now exits once its message has been written, like every other refusal.
+- 778cd2f: The guide's MCP tool parameters table lists the fields of nested parameters (a `scout_run_plan` step's `steps[].action`, `steps[].target` and the rest, `scout_guided_plan`'s `choices.*`, `scout_cards`'s `filter.*`) with whether each is required, and the build holds them, and the fields the skill shows in a call, to the schemas the server serves. The skill shows a `scout_run_plan` call with its steps' fields.
+- 7628cd7: `projectsRoot` now also holds `scenescout login --project` and the earlier run's record that `scout_lane_brief`'s `fromRun` and `ci --from-run` read. The guided plan and prompts take a stricter `maxMode` from the site's own project file into account, not only the operator's file. A write let through by the route handler no longer excuses a copy at the browser level that carries a method override naming another method.
+- 8eb9bb7: A snapshot of `about:blank`, where SceneScout leaves a page whose read was held by a navigation that never landed, no longer records it as a new state of the app or reports a dead end: it says the session is not on a page of the app, which page was left and why, and to navigate to it again. A released snapshot says the page was left and to navigate to it again, rather than to take a snapshot again later. A crawled route or a navigation whose page sent itself to `about:blank` is not counted as covered, and a recorded check names that page as `about:blank` rather than as the path `blank`.
+- 20804eb: The notice of state-changing requests a session sent, the double-submit signal and the WebSocket lists (the observe limit notice and a replayed check's report) now name a request to another site by its origin and path, without its query, as the write guard's refusal notice does. A request to the app keeps its path and query, and a repeated request to another site still counts as one request sent twice. `scout_network`'s listing and a contradiction finding (refused_empty, false_success) name another site's request the same way: the listing printed its whole URL, and a finding its path and query without its origin.
+  
+  A check whose page or replayed page load ends on another site that answers with an error status reports that once, as the page's own failure, rather than again as a request error.
+
 ## 3.33.0
 
 ### Minor Changes
