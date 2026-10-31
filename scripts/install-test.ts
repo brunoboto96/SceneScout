@@ -2406,24 +2406,35 @@ test("exitWhenDrained exits with its code only after a long stdout and stderr ha
   }
 });
 
+/**
+ * A config whose allowed writes `policy explain` prints in full: about 150 KB of output from a short command line,
+ * since Linux caps one argument at 128 KB and Windows a whole command line at 32 KB.
+ */
+function longConfig(dir: string): string {
+  const file = path.join(dir, "long-config.json");
+  const allowedWrites = Array.from({ length: 50 }, (_, i) => `POST /api/things${i}/${"a".repeat(3000)}`);
+  fs.writeFileSync(file, JSON.stringify({ allowedWrites }));
+  return file;
+}
+
 test("a command that ends with an exit code, read through a pipe, arrives whole as it does into a file (#740)", () => {
   const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const cli = path.join(repo, "src", "cli.ts");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-exit-"));
   try {
-    // `policy explain` sends nothing and prints the address it was given, so a long address is a long output.
-    const argv = ["--import", "tsx", cli, "policy", "explain", "POST", `https://app.example/api/things?q=${"a".repeat(300_000)}`];
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: dir, USERPROFILE: dir };
-    delete env.SCENESCOUT_CONFIG;
+    const argv = ["--import", "tsx", cli, "policy", "explain", "POST", "https://app.example/api/things"];
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: dir, USERPROFILE: dir, SCENESCOUT_CONFIG: longConfig(dir) };
     const target = path.join(dir, "out.txt");
     const fd = fs.openSync(target, "w");
     const toFile = spawnSync(process.execPath, argv, { stdio: ["ignore", fd, "pipe"], cwd: repo, env });
     fs.closeSync(fd);
+    assert.ifError(toFile.error);
     assert.equal(toFile.status, 0, String(toFile.stderr));
     const whole = fs.readFileSync(target, "utf8");
-    assert.ok(whole.length > 300_000);
+    assert.ok(whole.length > 128 * 1024, "longer than a pipe's buffer");
     const piped = spawnSync(process.execPath, argv, { encoding: "utf8", cwd: repo, env, maxBuffer: 1 << 24 });
-    assert.equal(piped.status, 0);
+    assert.ifError(piped.error);
+    assert.equal(piped.status, 0, piped.stderr);
     assert.equal(piped.stdout, whole);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -2472,6 +2483,7 @@ function throughHead(argv: string[], which: "stdout" | "stderr", dir: string, en
     cwd: repo,
     env: { ...env, OTHER: other, STATUS: status },
   });
+  assert.ifError(run.error);
   assert.equal(run.status, 0, String(run.stderr));
   return { code: Number(fs.readFileSync(status, "utf8").trim()), other: fs.readFileSync(other, "utf8") };
 }
@@ -2479,10 +2491,8 @@ function throughHead(argv: string[], which: "stdout" | "stderr", dir: string, en
 test("a command whose reader has gone (`| head`) exits with its own code and prints no EPIPE trace (#740)", { skip: process.platform === "win32" }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-epipe-"));
   try {
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: dir, USERPROFILE: dir };
-    delete env.SCENESCOUT_CONFIG;
-    const long = `https://app.example/api/things?q=${"a".repeat(300_000)}`;
-    const policy = throughHead(["policy", "explain", "POST", long], "stdout", dir, env);
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: dir, USERPROFILE: dir, SCENESCOUT_CONFIG: longConfig(dir) };
+    const policy = throughHead(["policy", "explain", "POST", "https://app.example/api/things"], "stdout", dir, env);
     assert.equal(policy.code, 0, policy.other.slice(0, 500));
     assert.equal(policy.other, "");
     // The usage path sets the exit code and returns (#736): its 0 and its 1 survive a gone reader too.
@@ -2493,7 +2503,7 @@ test("a command whose reader has gone (`| head`) exits with its own code and pri
     assert.equal(bare.code, 1, bare.other.slice(0, 500));
     assert.equal(bare.other, "");
     // A long refusal goes to stderr: with stderr's reader gone it still exits with the refusal's 1, and stdout stays empty.
-    const refused = throughHead(["scan", `--${"x".repeat(300_000)}`], "stderr", dir, env);
+    const refused = throughHead(["scan", `--${"x".repeat(20_000)}`], "stderr", dir, env);
     assert.equal(refused.code, 1);
     assert.equal(refused.other, "");
   } finally {
