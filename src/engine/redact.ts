@@ -16,6 +16,8 @@ const isAlnum = (c: string) => isAsciiDigit(c) || isAsciiLetter(c);
 const isWordChar = (c: string | undefined) => c !== undefined && (isAlnum(c) || c === "_");
 /** The characters of a bearer or basic credential. */
 const isTokenChar = (c: string) => isAlnum(c) || "._~+/=-".includes(c);
+/** The characters of a base64url run: a key's tail that may hold `_` and `-`. */
+const isBase64UrlChar = (c: string) => isAlnum(c) || c === "_" || c === "-";
 /** The characters of a keyword-led value. */
 const isValueChar = (c: string) => isAlnum(c) || "._~+/=".includes(c);
 const DIGIT = new LinearRegex("[0-9]");
@@ -46,6 +48,18 @@ interface SecretPattern {
 }
 
 const fixed = (text: string) => (): string => text;
+
+/** Whether `value` is whole base64 of printable text with a colon after its first character, as Basic credentials are. */
+function decodesToUserPassword(value: string): boolean {
+  if (value.length % 4 !== 0) return false;
+  const decoded = Buffer.from(value, "base64").toString("latin1");
+  if (decoded.indexOf(":") < 1) return false;
+  for (let i = 0; i < decoded.length; i++) {
+    const code = decoded.charCodeAt(i);
+    if (code < 0x20 || code > 0x7e) return false;
+  }
+  return true;
+}
 
 /** The characters a keyword-led value's run is read in, for its entropy signal: the value's own, and a hyphen. */
 const isRunChar = isTokenChar;
@@ -102,6 +116,8 @@ function runExtender(inRun: (c: string) => boolean): (match: { end: number }, te
 }
 
 const tokenRun = runExtender(isTokenChar);
+const markedKeyRun = runExtender(isBase64UrlChar);
+const alnumRun = runExtender(isAlnum);
 /** `extend` for a bearer or basic token: its run, and on to the end of a card number the run stops inside. */
 function tokenExtender(match: { end: number }, text: string): number {
   const end = tokenRun(match, text);
@@ -129,13 +145,19 @@ const SECRET_PATTERNS: SecretPattern[] = [
   { re: new LinearRegex(String.raw`\bAIza[0-9A-Za-z_-]{30,}`, { needs: ["aiza"] }), replace: fixed("AIza[redacted]") },
   { re: new LinearRegex(String.raw`\bglpat-[A-Za-z0-9_-]{20,}`, { needs: ["glpat-"] }), replace: fixed("glpat-[redacted]") },
   { re: new LinearRegex(String.raw`\bnpm_[A-Za-z0-9]{36,}`, { needs: ["npm_"] }), replace: fixed("npm_[redacted]") },
+  { re: new LinearRegex(String.raw`\bgithub_pat_[A-Za-z0-9_]{22,}`, { needs: ["github_pat_"] }), replace: fixed("github_pat_[redacted]") },
+  { re: new LinearRegex(String.raw`\bxapp-[0-9]-[A-Za-z0-9-]{20,}`, { needs: ["xapp-"] }), replace: fixed("xapp-[redacted]") },
+  { re: new LinearRegex(String.raw`\bwhsec_[A-Za-z0-9+/=]{20,}`, { needs: ["whsec_"] }), replace: fixed("whsec_[redacted]") },
+  { re: new LinearRegex(String.raw`\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}`, { needs: ["sg."] }), replace: fixed("SG.[redacted]") },
+  { re: new LinearRegex(String.raw`\bhf_[A-Za-z0-9]{30,}`, { needs: ["hf_"] }), replace: fixed("hf_[redacted]") },
   // Needs the environment marker (sk_live_…) or a digit in the tail, or it
   // eats ordinary identifiers: "pk_customer_identifier" became "pk_[redacted]".
-  // Each tail is read to its least length, then to the end of its run.
+  // Each tail is read to its least length, then to the end of its run: after the marker, one that may hold `_` and `-`
+  // (sk-proj-…), or the rest of the key was left readable.
   {
-    re: new LinearRegex(String.raw`\b(sk|pk|rk)[-_](?:((?:live|test|proj)[-_][A-Za-z0-9]{8})|([A-Za-z0-9]{8}))`, {
+    re: new LinearRegex(String.raw`\b(sk|pk|rk)[-_](?:((?:live|test|proj)[-_][A-Za-z0-9_-]{8})|([A-Za-z0-9]{8}))`, {
       needs: ["k-", "k_"],
-      extend: runExtender(isAlnum),
+      extend: (match, text) => (match.groups[2] !== undefined ? markedKeyRun(match, text) : alnumRun(match, text)),
       accept: ({ groups, text }) => groups[2] !== undefined || DIGIT.test(text.slice((groups[1] ?? "").length + 1)),
     }),
     replace: (g) => `${g[1]}_[redacted]`,
@@ -154,6 +176,17 @@ const SECRET_PATTERNS: SecretPattern[] = [
     }),
     replace: (g) => `${g[1]} [redacted]`,
   },
+  // Basic credentials whose base64 holds no digit ("dXNlcjpwYXNz"): the run is whole base64 that decodes to
+  // `user:password` in printable characters, which prose of the same letters is not. The last group is the lookahead:
+  // no token character next, unless it is a full stop that ends the sentence.
+  {
+    re: new LinearRegex(String.raw`\b((?i:Basic))[${SPACE}]+([A-Za-z0-9+/]{8,}={0,2})($|[^A-Za-z0-9._~+/=-]|\.(?:$|[^A-Za-z0-9._~+/=-]))`, {
+      needs: ["basic"],
+      lookahead: true,
+      accept: ({ groups }) => decodesToUserPassword(groups[2] ?? ""),
+    }),
+    replace: (g) => `${g[1]} [redacted]`,
+  },
   // A bearer token of letters only is still a token when it is one unbroken run: prose joins its words with hyphens.
   // Not Basic: "basic internationalization" is prose of the same shape. The last group is the lookahead.
   {
@@ -169,7 +202,7 @@ const SECRET_PATTERNS: SecretPattern[] = [
   // requirements are not enforced" became "Password [redacted] are not
   // enforced", and a mangled finding just reads as the agent writing nonsense.
   {
-    re: new LinearRegex(String.raw`\b((?i:api[-_]?key|secret|password|token))(["'${SPACE}:=]+)[A-Za-z0-9._~+/=]{12}`, {
+    re: new LinearRegex(String.raw`\b((?i:api[-_ ]?key|secret|password|token))(["'${SPACE}:=]+)[A-Za-z0-9._~+/=]{12}`, {
       needs: ["key", "secret", "password", "token"],
       extend: runExtender(isValueChar),
       accept: ({ index, groups }, text) => runEntropy.check(text, index + (groups[1] ?? "").length + (groups[2] ?? "").length),
@@ -206,9 +239,10 @@ const SECRET_PATTERNS: SecretPattern[] = [
  */
 const SET_SECRET_RE = new LinearRegex(
   // The value does not start with "[" (a value already masked).
-  String.raw`\b((?:[A-Za-z]+[-_]?)??(?i:password|passwd|pwd|passphrase|secret|api[-_]?key|token))` +
+  // A name may be several words before its secret's (`aws_secret_access_key`).
+  String.raw`\b((?:[A-Za-z]+[-_]?)*?(?i:password|passwd|pwd|passphrase|secret|api[-_ ]?key|(?:private|signing|session|access|encryption|master)[-_]?key|credentials?|token))` +
     String.raw`([${SPACE}]*["']?[${SPACE}]*[:=：＝][${SPACE}]*["']?)([^${SPACE}"',;)}\][][^${SPACE}"',;)}\]]*)`,
-  { needs: ["passw", "pwd", "passphrase", "secret", "key", "token"] },
+  { needs: ["passw", "pwd", "passphrase", "secret", "key", "credential", "token"] },
 );
 const MASKED_SHOWN = new LinearRegex("^[•●∙·*]+$");
 const LETTERS_ONLY = new LinearRegex(String.raw`^\p{L}+$`);

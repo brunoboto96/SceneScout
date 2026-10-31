@@ -28,9 +28,10 @@ import { writeOwnerOnlySync } from "./owner-file.js";
  * more field words, cards split by slashes, spelled-out email addresses and
  * more words for a phone (#550). 3: a secret set after a refused one
  * (`password:secret ＝…`), and the rest of a card number a Bearer or Basic
- * token stops inside (#619).
+ * token stops inside (#619). 4: more providers' keys and the rest of a marked key's tail, Basic credentials with no
+ * digit, and more secrets' names before a value (#538).
  */
-export const REDACTION_VERSION = 3;
+export const REDACTION_VERSION = 4;
 
 type Redact = (text: string) => string;
 

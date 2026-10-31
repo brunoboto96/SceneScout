@@ -376,6 +376,12 @@ test("credentials: a sign-in written as a pair, after 'pass' or as 'enter X when
   assert.equal(holdsCredential(`the password for it is ${secret}`), true);
 });
 
+test("holdsCredential: a dotted user name does not end the sign-in phrase; a full stop that ends the sentence does", () => {
+  assert.equal(holdsCredential("Sign in as sam.okafor with Ejrcvll14 and check the dashboard"), true);
+  assert.equal(holdsCredential("Log in as qa.lead.two with Summer24! then open the cart"), true);
+  assert.equal(holdsCredential("Sign in as sam. Then with v2.4.1 open, check the dashboard"), false);
+});
+
 // ---- The confirmation rule, each as a contrastive pair ----
 
 test("confirmation: may submit forms on this computer needs none; the same choice on another address needs one", () => {

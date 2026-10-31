@@ -119,6 +119,16 @@ import {
   sensitiveRates,
 } from "./sensitive-fuzz.ts";
 import { maskingHandler, maskPageText, maskToolResult } from "../src/engine/redact.ts";
+import {
+  PUBLISHED_CASES as REDACT_PUBLISHED_CASES,
+  PUBLISHED_SEED as REDACT_PUBLISHED_SEED,
+  RATES_BEGIN as REDACT_RATES_BEGIN,
+  RATES_END as REDACT_RATES_END,
+  REDACTION_DETECTORS,
+  ratesMarkdown as redactRatesMarkdown,
+  redactCases,
+  redactRates,
+} from "./redact-fuzz.ts";
 import { MASK_COLOR, MAX_FIELD_MASKS, masksToPaint, SECRET_BY_ATTRIBUTE } from "../src/engine/secret-pixels.ts";
 import { REDACTION_VERSION } from "../src/engine/memory-scrub.ts";
 import type { FromRunNote, RunRecord } from "../src/engine/from-run.ts";
@@ -955,6 +965,33 @@ test("a store cleaned before a secret set after a refused one was masked is clea
   // Marked as cleaned by this redaction: nothing is read again, so what it holds stays as written.
   const [kept] = write(REDACTION_VERSION).slice(1);
   assert.ok(kept.includes("Abc123def456xyz") && kept.includes("1111 1111 1111"), "a store this redaction already cleaned is not cleaned again");
+});
+
+test("a store cleaned before the credential corpus's shapes were masked is cleaned again (#538)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-memtest-"));
+  dirs.push(dir);
+  const memDir = path.join(dir, MEMORY_DIRNAME);
+  fs.mkdirSync(memDir, { recursive: true });
+  const tail = "c2VaHzZW-TrV3qSvJaF6LeE0JDp";
+  const finding = {
+    id: "f1",
+    severity: "high",
+    category: "privacy",
+    title: "Error page echoes the key",
+    detail: `the page printed ${"sk-proj"}-qfXSuFS2au1zn_${tail}`,
+    evidence: "Authorization: Basic dXNlcjpwYXNzd29yZA==",
+    url: "http://localhost:3000/login",
+    state: "/login#1",
+    repro: ['click button "Sign in"'],
+    foundAt: "2025-01-01T00:00:00.000Z",
+    runs: 1,
+  };
+  // Marked as cleaned by redaction 3, which let both through.
+  fs.writeFileSync(path.join(memDir, "memory.json"), JSON.stringify({ version: 1, states: {}, findings: [finding], redactedWith: 3 }));
+  openStore(dir).flush();
+  const memory = fs.readFileSync(path.join(memDir, "memory.json"), "utf8");
+  assert.ok(!memory.includes(tail) && !memory.includes("dXNlcjpwYXNzd29yZA"), memory);
+  assert.ok(REDACTION_VERSION >= 4, "the redaction learned to hide more in #538, so its version is raised");
 });
 
 test("opening a store it cannot clean leaves it as it was: a memory.json of an unknown version, a folder it may not write", () => {
@@ -5130,4 +5167,90 @@ test("sensitive corpus: the rates are bounded, so a detector that regresses fail
   assert.ok(asked.secret > 0 && asked.missed === asked.secret, `question-worded secrets read: ${asked.secret - asked.missed} of ${asked.secret}`);
   const all = sensitiveRates(cases);
   assert.ok(all.falseAlarmRate < 0.05, `false-alarm rate ${all.falseAlarmRate}`);
+});
+
+test("credential corpus: the generator is seeded and every detector has credential and near-miss shapes", () => {
+  assert.deepEqual(redactCases(350, 7), redactCases(350, 7));
+  assert.notDeepEqual(redactCases(350, 7), redactCases(350, 8));
+  const cases = redactCases(REDACT_PUBLISHED_CASES, REDACT_PUBLISHED_SEED);
+  for (const detector of [...REDACTION_DETECTORS, "guided-choice credential"] as const) {
+    const mine = cases.filter((c) => c.detector === detector);
+    assert.ok(mine.some((c) => c.secret) && mine.some((c) => !c.secret), `${detector} needs credential and near-miss shapes`);
+  }
+  for (const c of cases) if (c.secret && c.hidden !== undefined) assert.ok(c.text.includes(c.hidden), `${c.shape}: ${c.text}`);
+});
+
+test("credential corpus: the rates in the Safety model guide are the corpus script's output", () => {
+  const guide = fs.readFileSync(new URL("../docs/guide/Safety-model.md", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const a = guide.indexOf(REDACT_RATES_BEGIN);
+  const b = guide.indexOf(REDACT_RATES_END);
+  assert.ok(a >= 0 && b > a, "docs/guide/Safety-model.md lost its redact-rates markers");
+  assert.equal(
+    guide.slice(a, b + REDACT_RATES_END.length),
+    redactRatesMarkdown(),
+    "the published credential rates differ from a fresh seeded run: a pattern or the corpus changed. Regenerate them with `npm run redact-rates` and commit the guide.",
+  );
+});
+
+test("credential corpus: only the misses and false alarms the guide names as kept on purpose", () => {
+  const cases = redactCases(REDACT_PUBLISHED_CASES, REDACT_PUBLISHED_SEED);
+  const shapes = (rates: { wrongShapes: Record<string, number> }) => Object.keys(rates.wrongShapes).sort();
+  // A key with no prefix of its own cannot be told from an id or a hash without a name before it.
+  assert.deepEqual(
+    shapes(
+      redactRates(
+        cases.filter((c) => c.secret),
+        REDACTION_DETECTORS,
+      ),
+    ),
+    ["key with no prefix of its own"],
+  );
+  // Bearer before one long word of letters only is redacted: a bearer token can be letters only.
+  assert.deepEqual(
+    shapes(
+      redactRates(
+        cases.filter((c) => !c.secret),
+        REDACTION_DETECTORS,
+      ),
+    ),
+    ["scheme word in prose"],
+  );
+  // "the password is hunter" cannot be told from "the password is required".
+  assert.deepEqual(shapes(redactRates(cases, "guided-choice credential")), ["letters-only password in a sentence"]);
+});
+
+test("redactSecrets masks the credential shapes the corpus found readable; their near misses stay", () => {
+  const masked: Array<[string, string]> = [
+    // A key's tail after its marker may hold `_` and `-`: the run after the first one was left readable.
+    [`{"value":"${"sk-proj"}-__qfXSuFS2au1zn-c2VaHzZW-TrV3qSvJaF6LeE0JDp"}`, "c2VaHzZW-TrV3qSvJaF6LeE0JDp"],
+    [`${"sk-proj"}-lgTmO9MRUrraBDnRPlBq_iiSEtm5nMdQIw4PxCVf`, "iiSEtm5nMdQIw4PxCVf"],
+    [`${"github"}_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz0123456789ABCDEFGHIJKLMN`, "mnopqrstuvwxyz0123456789"],
+    [`app token ${"xapp"}-1-A0B1C2D3E4F-1234567890123-abcdef0123456789abcdef`, "abcdef0123456789abcdef"],
+    [`signing ${"whsec"}_Ab3dEf6hIj9kLm2nOp5qRs8t`, "Ab3dEf6hIj9kLm2nOp5qRs8t"],
+    [`mail key ${"SG"}.Ab3dEf6hIj9kLm2nOp5q.Rs8tUv1wXy4zAb7cDe0fGh3i`, "Rs8tUv1wXy4zAb7cDe0fGh3i"],
+    [`model hub ${"hf"}_Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z`, "Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z"],
+    // Base64 of `qa-lead:ou91h5apys6` holds no digit; it decodes to a user and a password.
+    ["Authorization: Basic cWEtbGVhZDpvdTkxaDVhcHlzNg==.", "cWEtbGVhZDpvdTkxaDVhcHlzNg"],
+    ["Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA"],
+    ["aws_secret_access_key = N5g9qFVYrF1xI4KtWk9FYp1xvJqLMsVxydFD", "N5g9qFVYrF1xI4KtWk9FYp1xvJqLMsVxydFD"],
+    ["signing_key: icl67qpZZpkwgSz/eMfkWYKhwaS/x", "icl67qpZZpkwgSz/eMfkWYKhwaS/x"],
+    ["credentials=Fq8sPZ2kLm0vN4", "Fq8sPZ2kLm0vN4"],
+    ["api key bWQG7NjkP02lLiAz7q6t9qGZ4zeac, retrying", "bWQG7NjkP02lLiAz7q6t9qGZ4zeac"],
+  ];
+  for (const [text, secret] of masked) assertMasked(text, secret);
+  for (const kept of [
+    "Keys start with the github_pat_ prefix and are shown once.",
+    "Rotate any whsec_ key now.",
+    "hf_hub_download fails offline",
+    "SG.Header.Title overlaps the menu",
+    "Basic internationalization is enabled.",
+    "Basic configuration applies.",
+    "aws_secret_access_key: required",
+    "API key rotation is overdue.",
+    "Password: required (min 8)",
+    "Token: missing (after refresh)",
+    // A status word, then an aside in brackets, is a settings page's label, not a value set against the name.
+    "Change password: Done (saved)",
+  ])
+    assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
 });
