@@ -5236,6 +5236,12 @@ test("redactSecrets masks the credential shapes the corpus found readable; their
     ["signing_key: icl67qpZZpkwgSz/eMfkWYKhwaS/x", "icl67qpZZpkwgSz/eMfkWYKhwaS/x"],
     ["credentials=Fq8sPZ2kLm0vN4", "Fq8sPZ2kLm0vN4"],
     ["api key bWQG7NjkP02lLiAz7q6t9qGZ4zeac, retrying", "bWQG7NjkP02lLiAz7q6t9qGZ4zeac"],
+    // OpenAI's service-account and admin keys, and an AWS temporary access key id.
+    [`${"sk-svcacct"}-Ab3dEf6hIj9kLm2nOp5q_Rs8tUv1wXy4zAb7cDe0fGh3i`, "Rs8tUv1wXy4zAb7cDe0fGh3i"],
+    [`${"sk-admin"}-Ab3dEf6hIj9kLm2nOp5q-Rs8tUv1wXy4zAb7cDe0fGh3i`, "Rs8tUv1wXy4zAb7cDe0fGh3i"],
+    [`key id ${"ASIA"}QX7Z2KD4RN5LW3PB`, "QX7Z2KD4RN5LW3PB"],
+    // A marked tail of letters only as long as an issued key is still a key.
+    [`${"sk_live"}_${"abcdefghijkl".repeat(2)}`, "abcdefghijkl".repeat(2)],
   ];
   for (const [text, secret] of masked) assertMasked(text, secret);
   for (const kept of [
@@ -5251,6 +5257,14 @@ test("redactSecrets masks the credential shapes the corpus found readable; their
     "Token: missing (after refresh)",
     // A status word, then an aside in brackets, is a settings page's label, not a value set against the name.
     "Change password: Done (saved)",
+    // Words joined after a marker are a class name or an id, not a key's tail.
+    'class="sk-test-results-page"',
+    "pk_live_preview_widget is hidden",
+    "rk-admin-dashboard-link",
+    // fetch's credentials modes are a request setting.
+    "fetch(url, { credentials: 'include' })",
+    'credentials: "omit"',
+    "credentials: same-origin.",
   ])
     assert.equal(redactSecrets(kept), kept, `must not touch: ${kept}`);
 });

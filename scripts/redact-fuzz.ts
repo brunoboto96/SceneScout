@@ -118,6 +118,8 @@ export function redactCases(n = 3500, seed = 538): RedactCase[] {
     () => ["SG.", `${mixed(BASE64URL, 22)}.${mixed(BASE64URL, 43)}`],
     () => ["hf_", mixed(ALNUM, 34)],
     () => ["xapp-", `1-${mixed(UPPER + DIGITS, 11)}-${digits(13)}-${mixed(ALNUM, 64)}`],
+    () => [`sk-${pick(["svcacct", "admin"])}-`, mixed(BASE64URL, int(60, 120))],
+    () => ["ASIA", mixed(UPPER + DIGITS, 16)],
   ];
   // A key with no prefix of its own (hex, or base64 as some secret access keys are): nothing in it says key.
   const unprefixedKey = (): string => pick([from("0123456789abcdef", 32), mixed(`${ALNUM}/+`, 40)]);
@@ -145,6 +147,8 @@ export function redactCases(n = 3500, seed = 538): RedactCase[] {
           `${pick(["pk", "sk", "rk"])}_${pick(["customer", "default", "primary", "order", "widget"])}_${pick(["identifier", "settings", "lookup", "reference"])}`,
           `hf_${pick(["hub", "model", "cache"])}_${pick(["download", "revision", "dir"])}`,
           `SG.${pick(["Header", "Footer"])}.${pick(["Title", "Link"])}`,
+          `${pick(["sk", "pk", "rk"])}-${pick(["test", "live", "admin"])}-${pick(["results", "preview", "coverage"])}-${pick(["page", "panel", "widget"])}`,
+          `${pick(["sk", "pk"])}_live_${pick(["preview", "search"])}_${pick(["widget", "results"])}`,
         ]),
       ),
     () =>
@@ -152,6 +156,19 @@ export function redactCases(n = 3500, seed = 538): RedactCase[] {
         "provider key",
         "prefix inside a longer word",
         `${pick(["risk", "disk", "task", "desk"])}_${pick(["score", "usage", "queue"])}_${digits(int(2, 6))}${pick(["days", "items", "rows"])}`,
+      ),
+    () =>
+      plain(
+        "provider key",
+        "ordinary page value",
+        pick([
+          `commit ${from("0123456789abcdef", 40)} merged`,
+          `id ${from("0123456789abcdef", 8)}-${from("0123456789abcdef", 4)}-4${from("0123456789abcdef", 3)}-a${from("0123456789abcdef", 3)}-${from("0123456789abcdef", 12)}`,
+          `sha256:${from("0123456789abcdef", 64)}`,
+          `<img src="data:image/png;base64,iVBORw0KGgo${from(`${ALNUM}+/`, int(40, 160))}==">`,
+          `class="css-${from(LOWER + DIGITS, 6)} sc-${from(LOWER + UPPER, 6)} ${pick(["btn-primary", "MuiButton-root", "tw-flex"])}"`,
+          `Order #${pick(["", "A-", "SO-"])}${digits(int(6, 10))} shipped`,
+        ]),
       ),
     () => plain("provider key", "key too short to be issued", `${pick(["ghp_", "glpat-", "npm_", "AKIA"])}${from(ALNUM, int(3, 7))}`),
   ];
@@ -264,6 +281,12 @@ export function redactCases(n = 3500, seed = 538): RedactCase[] {
         "value after a secret's name",
         "sentence about the field",
         `${cap(secretWord())} ${pick(["requirements are not enforced", "must be at least twelve characters", "reset emails are delayed", "rotation is overdue"])}.`,
+      ),
+    () =>
+      plain(
+        "value after a secret's name",
+        "request setting named credentials",
+        `fetch(url, { credentials: ${pick(["'include'", '"omit"', "'same-origin'", "include"])} })`,
       ),
     () => plain("value after a secret's name", "value shown masked", `${secretWord()}: ${"•".repeat(int(4, 12))}`),
     () =>
@@ -451,11 +474,12 @@ export const RATES_END = "<!-- redact-rates:end -->";
 /** What each shape looks like, for the guide's tables: every generated shape needs one. */
 const SHAPE_NOTES: Record<string, string> = {
   "key with a provider's prefix":
-    "`sk-ant-…`, `xoxb-…`, `AIza…`, `glpat-…`, `npm_…`, `sk_live_…`, `sk-proj-…`, `ghp_…`, `AKIA…`, `github_pat_…`, `whsec_…`, `SG.….…`, `hf_…`, `xapp-…`",
+    "`sk-ant-…`, `xoxb-…`, `AIza…`, `glpat-…`, `npm_…`, `sk_live_…`, `sk-proj-…`, `ghp_…`, `AKIA…`, `github_pat_…`, `whsec_…`, `SG.….…`, `hf_…`, `xapp-…`, `sk-svcacct-…`, `sk-admin-…`, `ASIA…`",
   "key quoted in JSON": '`{"apiKey":"ghp_…"}`',
   "key with no prefix of its own": "32 hex digits, or 40 characters of base64, with no name before them",
   "prefix named in prose": '"Keys start with the `ghp_` prefix."',
-  "identifier shaped like a key": "`pk_customer_identifier`, `hf_hub_download`, `SG.Header.Title`",
+  "identifier shaped like a key": "`pk_customer_identifier`, `hf_hub_download`, `SG.Header.Title`, `sk-test-results-page`",
+  "ordinary page value": "a commit SHA, a UUID, a `sha256:` digest, `data:image/png;base64,…`, CSS class names, an order number",
   "prefix inside a longer word": "`risk_score_7days`, `disk_usage_12rows`",
   "key too short to be issued": "`ghp_` or `AKIA` and a few characters",
   "bearer token": "`Authorization: Bearer …` with a digit in it",
@@ -478,6 +502,7 @@ const SHAPE_NOTES: Record<string, string> = {
   "name outside the patterns": "`aws_secret_access_key = …`, `private_key: …`, `auth_token=…`, `signing_key=…`",
   "word about the field": '"Password: required.", "Token: revoked."',
   "sentence about the field": '"Password requirements are not enforced."',
+  "request setting named credentials": "`fetch(url, { credentials: 'include' })`",
   "value shown masked": "`password: ••••••`",
   "name that holds a secret's word": "`token_count: 3`, `password_hint: enabled`",
   "PIN after its word": '"PIN 4821", "PIN code: 482193"',

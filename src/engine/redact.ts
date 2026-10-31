@@ -155,15 +155,22 @@ const SECRET_PATTERNS: SecretPattern[] = [
   // Each tail is read to its least length, then to the end of its run: after the marker, one that may hold `_` and `-`
   // (sk-proj-…), or the rest of the key was left readable.
   {
-    re: new LinearRegex(String.raw`\b(sk|pk|rk)[-_](?:((?:live|test|proj)[-_][A-Za-z0-9_-]{8})|([A-Za-z0-9]{8}))`, {
+    // A marked tail of letters only that joins runs with `_` or `-` must be as long as an issued key's (24), or it is
+    // words: "sk-test-results-page".
+    re: new LinearRegex(String.raw`\b(sk|pk|rk)[-_](?:((?:live|test|proj|svcacct|admin)[-_])[A-Za-z0-9_-]{8}|([A-Za-z0-9]{8}))`, {
       needs: ["k-", "k_"],
       extend: (match, text) => (match.groups[2] !== undefined ? markedKeyRun(match, text) : alnumRun(match, text)),
-      accept: ({ groups, text }) => groups[2] !== undefined || DIGIT.test(text.slice((groups[1] ?? "").length + 1)),
+      accept: ({ groups, text }) => {
+        const tail = text.slice((groups[1] ?? "").length + 1 + (groups[2] ?? "").length);
+        if (DIGIT.test(tail)) return true;
+        return groups[2] !== undefined && ((!tail.includes("_") && !tail.includes("-")) || tail.length >= 24);
+      },
     }),
     replace: (g) => `${g[1]}_[redacted]`,
   },
   { re: new LinearRegex(String.raw`\bgh[pousr]_[A-Za-z0-9]{16,}`, { needs: ["gh"] }), replace: fixed("gh?_[redacted]") },
-  { re: new LinearRegex(String.raw`\bAKIA[0-9A-Z]{12,}`, { needs: ["akia"] }), replace: fixed("AKIA[redacted]") },
+  // A long-term access key id (AKIA) or a temporary one from STS (ASIA).
+  { re: new LinearRegex(String.raw`\b(AKIA|ASIA)[0-9A-Z]{12,}`, { needs: ["akia", "asia"] }), replace: (g) => `${g[1]}[redacted]` },
   // Keep the scheme that actually matched: rewriting a Basic-auth finding to
   // say "Bearer" silently changes what the finding claims.
   // Same entropy requirement as the keyword rule: "Basic authentication-required"
@@ -245,6 +252,8 @@ const SET_SECRET_RE = new LinearRegex(
   { needs: ["passw", "pwd", "passphrase", "secret", "key", "credential", "token"] },
 );
 const MASKED_SHOWN = new LinearRegex("^[•●∙·*]+$");
+/** fetch's `credentials` modes: a request setting, not a secret ("credentials: 'include'"). */
+const FETCH_CREDENTIALS_MODES: ReadonlySet<string> = new Set(["include", "omit", "same-origin"]);
 const LETTERS_ONLY = new LinearRegex(String.raw`^\p{L}+$`);
 /** What may follow a value of letters only for it to end its clause. */
 const CLAUSE_END = new LinearRegex(String.raw`^(?:[${SPACE}]*$|[${SPACE}]*[,;)}\]"'\n]|\.(?:[${SPACE}]|$))`);
@@ -281,6 +290,7 @@ function maskSetSecrets(text: string): { text: string; hits: number } {
       // Empty, or the dots or stars a masked value is shown as (the engine's own "•••• (masked: …)" included).
       value === "" ||
       MASKED_SHOWN.test(value) ||
+      (name.toLowerCase().endsWith("credentials") && FETCH_CREDENTIALS_MODES.has(value.toLowerCase())) ||
       (LETTERS_ONLY.test(value)
         ? FIELD_WORDS.has(value.toLowerCase()) || !endsClause(stop, text, match.end)
         : value.length < 3 && !sep.includes('"') && !sep.includes("'"));

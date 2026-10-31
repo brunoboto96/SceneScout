@@ -346,22 +346,22 @@ Run: 7,000 generated inputs, seed 538, in equal shares per detector.
 
 | Detector | Credentials left readable (or let through) | Text without a credential altered (or refused) |
 | --- | --- | --- |
-| provider key | 143 of 429 (33.3%) | 0 of 571 (0.0%) |
-| bearer or basic token | 0 of 600 (0.0%) | 26 of 400 (6.5%) |
+| provider key | 125 of 375 (33.3%) | 0 of 625 (0.0%) |
+| bearer or basic token | 0 of 600 (0.0%) | 27 of 400 (6.8%) |
 | JSON web token | 0 of 500 (0.0%) | 0 of 500 (0.0%) |
 | private key block | 0 of 500 (0.0%) | 0 of 500 (0.0%) |
-| value after a secret's name | 0 of 556 (0.0%) | 0 of 444 (0.0%) |
+| value after a secret's name | 0 of 500 (0.0%) | 0 of 500 (0.0%) |
 | PIN or sign-in code | 0 of 501 (0.0%) | 0 of 499 (0.0%) |
-| All six credential shapes | 143 of 3086 (4.6%) | 26 of 2914 (0.9%) |
+| All six credential shapes | 125 of 2976 (4.2%) | 27 of 3024 (0.9%) |
 | guided-choice credential | 62 of 566 (11.0%) | 0 of 434 (0.0%) |
 
 Credential shapes (a miss is a credential left readable, or for the guided check let through):
 
 | Detector | Shape | Looks like | Inputs | Misses |
 | --- | --- | --- | --- | --- |
-| provider key | key quoted in JSON | `{"apiKey":"ghp_…"}` | 143 | 0 (0.0%) |
-| provider key | key with a provider's prefix | `sk-ant-…`, `xoxb-…`, `AIza…`, `glpat-…`, `npm_…`, `sk_live_…`, `sk-proj-…`, `ghp_…`, `AKIA…`, `github_pat_…`, `whsec_…`, `SG.….…`, `hf_…`, `xapp-…` | 143 | 0 (0.0%) |
-| provider key | key with no prefix of its own | 32 hex digits, or 40 characters of base64, with no name before them | 143 | 143 (100.0%) |
+| provider key | key quoted in JSON | `{"apiKey":"ghp_…"}` | 125 | 0 (0.0%) |
+| provider key | key with a provider's prefix | `sk-ant-…`, `xoxb-…`, `AIza…`, `glpat-…`, `npm_…`, `sk_live_…`, `sk-proj-…`, `ghp_…`, `AKIA…`, `github_pat_…`, `whsec_…`, `SG.….…`, `hf_…`, `xapp-…`, `sk-svcacct-…`, `sk-admin-…`, `ASIA…` | 125 | 0 (0.0%) |
+| provider key | key with no prefix of its own | 32 hex digits, or 40 characters of base64, with no name before them | 125 | 125 (100.0%) |
 | bearer or basic token | basic credentials | `Authorization: Basic …`, base64 of `user:password` | 200 | 0 (0.0%) |
 | bearer or basic token | bearer token | `Authorization: Bearer …` with a digit in it | 200 | 0 (0.0%) |
 | bearer or basic token | bearer token of letters only | `Authorization: Bearer …` of letters only | 200 | 0 (0.0%) |
@@ -369,11 +369,11 @@ Credential shapes (a miss is a credential left readable, or for the guided check
 | JSON web token | token in a JSON body | `{"access_token":"eyJ…"}` | 250 | 0 (0.0%) |
 | private key block | block cut off before its end | a private key's `BEGIN` line and body, no `END` | 250 | 0 (0.0%) |
 | private key block | whole block | a PEM or PGP private key, `BEGIN` to `END` | 250 | 0 (0.0%) |
-| value after a secret's name | letters-only value ending its clause | `password: …` of letters only, then a comma or the end | 111 | 0 (0.0%) |
-| value after a secret's name | name outside the patterns | `aws_secret_access_key = …`, `private_key: …`, `auth_token=…`, `signing_key=…` | 111 | 0 (0.0%) |
-| value after a secret's name | token after its word, no separator but a space | `token …` with digits and letters | 111 | 0 (0.0%) |
-| value after a secret's name | value in a JSON pair | `{"password":"…"}` | 111 | 0 (0.0%) |
-| value after a secret's name | value set with a colon or equals | `password: …`, `client_secret=…` | 112 | 0 (0.0%) |
+| value after a secret's name | letters-only value ending its clause | `password: …` of letters only, then a comma or the end | 100 | 0 (0.0%) |
+| value after a secret's name | name outside the patterns | `aws_secret_access_key = …`, `private_key: …`, `auth_token=…`, `signing_key=…` | 100 | 0 (0.0%) |
+| value after a secret's name | token after its word, no separator but a space | `token …` with digits and letters | 100 | 0 (0.0%) |
+| value after a secret's name | value in a JSON pair | `{"password":"…"}` | 100 | 0 (0.0%) |
+| value after a secret's name | value set with a colon or equals | `password: …`, `client_secret=…` | 100 | 0 (0.0%) |
 | PIN or sign-in code | PIN after its word | "PIN 4821", "PIN code: 482193" | 167 | 0 (0.0%) |
 | PIN or sign-in code | code in two groups of three | "Your code is 482 913" | 167 | 0 (0.0%) |
 | PIN or sign-in code | sign-in code after its word | "Your verification code is 482913", "OTP 48291355" | 167 | 0 (0.0%) |
@@ -391,20 +391,22 @@ Near-miss shapes (a false alarm is text with no credential in it altered, or for
 
 | Detector | Shape | Looks like | Inputs | False alarms |
 | --- | --- | --- | --- | --- |
-| provider key | identifier shaped like a key | `pk_customer_identifier`, `hf_hub_download`, `SG.Header.Title` | 143 | 0 (0.0%) |
-| provider key | key too short to be issued | `ghp_` or `AKIA` and a few characters | 142 | 0 (0.0%) |
-| provider key | prefix inside a longer word | `risk_score_7days`, `disk_usage_12rows` | 143 | 0 (0.0%) |
-| provider key | prefix named in prose | "Keys start with the `ghp_` prefix." | 143 | 0 (0.0%) |
+| provider key | identifier shaped like a key | `pk_customer_identifier`, `hf_hub_download`, `SG.Header.Title`, `sk-test-results-page` | 125 | 0 (0.0%) |
+| provider key | key too short to be issued | `ghp_` or `AKIA` and a few characters | 125 | 0 (0.0%) |
+| provider key | ordinary page value | a commit SHA, a UUID, a `sha256:` digest, `data:image/png;base64,…`, CSS class names, an order number | 125 | 0 (0.0%) |
+| provider key | prefix inside a longer word | `risk_score_7days`, `disk_usage_12rows` | 125 | 0 (0.0%) |
+| provider key | prefix named in prose | "Keys start with the `ghp_` prefix." | 125 | 0 (0.0%) |
 | bearer or basic token | scheme word before short words | "Bearer tokens expire after an hour." | 200 | 0 (0.0%) |
-| bearer or basic token | scheme word in prose | "Basic authentication-required is enabled.", "Bearer internationalization applies." | 200 | 26 (13.0%) |
+| bearer or basic token | scheme word in prose | "Basic authentication-required is enabled.", "Bearer internationalization applies." | 200 | 27 (13.5%) |
 | JSON web token | short value that starts the same way | `eyJ` and a few characters | 250 | 0 (0.0%) |
 | JSON web token | token prefix named in prose | "A JSON web token starts with eyJ …" | 250 | 0 (0.0%) |
 | private key block | private key named in prose | "Upload your private key." | 250 | 0 (0.0%) |
 | private key block | public key or certificate block | `BEGIN PUBLIC KEY`, `BEGIN CERTIFICATE` | 250 | 0 (0.0%) |
-| value after a secret's name | name that holds a secret's word | `token_count: 3`, `password_hint: enabled` | 111 | 0 (0.0%) |
-| value after a secret's name | sentence about the field | "Password requirements are not enforced." | 111 | 0 (0.0%) |
-| value after a secret's name | value shown masked | `password: ••••••` | 111 | 0 (0.0%) |
-| value after a secret's name | word about the field | "Password: required.", "Token: revoked." | 111 | 0 (0.0%) |
+| value after a secret's name | name that holds a secret's word | `token_count: 3`, `password_hint: enabled` | 100 | 0 (0.0%) |
+| value after a secret's name | request setting named credentials | `fetch(url, { credentials: 'include' })` | 100 | 0 (0.0%) |
+| value after a secret's name | sentence about the field | "Password requirements are not enforced." | 100 | 0 (0.0%) |
+| value after a secret's name | value shown masked | `password: ••••••` | 100 | 0 (0.0%) |
+| value after a secret's name | word about the field | "Password: required.", "Token: revoked." | 100 | 0 (0.0%) |
 | PIN or sign-in code | code of another kind | "error code 404123", "promo code 482913", "postal code …" | 167 | 0 (0.0%) |
 | PIN or sign-in code | date or range after the word | "code 2026-10-31", "code 100000-199999" | 166 | 0 (0.0%) |
 | PIN or sign-in code | number too short or too long for a code | "code 123", "PIN 48291355012" | 166 | 0 (0.0%) |
