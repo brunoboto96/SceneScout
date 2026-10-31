@@ -247,6 +247,88 @@ export const NAME_SRC = `(el) => (${PICK_NAME_SRC})((${NAME_FACTS_SRC})(el))`;
 export const ACCESSIBLE_NAME_SRC = `(el) => (${NAME_SRC})(el).name`;
 
 /**
+ * What an element's markup says a click on it, or a submit of its form, sends
+ * (policy.ts ControlFacts), as page-side source. A link: the address it loads,
+ * when it is a real page load (http or https, not an anchor in this page),
+ * the write method a script library is told to send it as (`data-method`,
+ * `data-turbo-method`), and whether it has a click handler a script can see.
+ * A submit button: its form's method and action, with the button's
+ * `formmethod` and `formaction` over the form's, whether the action is
+ * written in the markup, a `_method` field naming another method, and whether
+ * the form has a submit handler. A reset button: that it is one. A form: its
+ * own submission, for an Enter that submits it with no submit button. Any
+ * element: the write a script library is told to send when it is clicked
+ * (`hx-delete`, `hx-post` and the like), the first one it names.
+ */
+export const CONTROL_FACTS_SRC = `(el) => {
+    const facts = {};
+    const tag = el.tagName;
+    const handler = (n) => n.hasAttribute("onclick") || typeof n.onclick === "function";
+    for (const m of ["delete", "put", "patch", "post"]) {
+      const to = el.getAttribute("hx-" + m) ?? el.getAttribute("data-hx-" + m);
+      if (to === null) continue;
+      let at = to;
+      try {
+        at = new URL(to, document.baseURI).href;
+      } catch (e) {
+        at = to; // judged as written: an address the browser cannot resolve
+      }
+      facts.sends = { method: m.toUpperCase(), url: at.slice(0, 2000) };
+      break;
+    }
+    const submission = (form, by) => {
+      const attr = (name) => (by && by.hasAttribute("form" + name) ? by.getAttribute("form" + name) : form.getAttribute(name));
+      const m = (attr("method") || "").trim().toLowerCase();
+      const action = by && by.hasAttribute("formaction") ? by.formAction : form.action;
+      const field = Array.from(form.elements || []).find((f) => (f.name || "").toLowerCase() === "_method");
+      const out = {
+        method: m === "post" || m === "dialog" ? m : "get",
+        action: String(action || "").slice(0, 2000),
+        declared: (attr("action") || "").trim() !== "",
+        handler: form.hasAttribute("onsubmit") || typeof form.onsubmit === "function",
+      };
+      if (field && field.value) out.override = String(field.value).trim().slice(0, 20);
+      return out;
+    };
+    if (tag === "A") {
+      const raw = (el.getAttribute("href") || "").trim();
+      let url = null;
+      try {
+        url = el.href ? new URL(el.href) : null;
+      } catch (e) {
+        url = null; // an address the browser cannot parse states no page load: judged by its text
+      }
+      const here = new URL(location.href);
+      const inPage = !raw || raw.startsWith("#") || (url && url.hash && url.origin === here.origin && url.pathname === here.pathname && url.search === here.search);
+      if (url && (url.protocol === "http:" || url.protocol === "https:") && !inPage) facts.href = el.href.slice(0, 2000);
+      const m = el.getAttribute("data-method") || el.getAttribute("data-turbo-method");
+      if (m) facts.linkMethod = m.trim().slice(0, 20);
+      if (handler(el)) facts.handler = true;
+    } else if (tag === "BUTTON" || tag === "INPUT") {
+      const type = (el.type || "").toLowerCase();
+      if (handler(el)) facts.handler = true;
+      if (type === "reset") facts.reset = true;
+      else if ((type === "submit" || type === "image") && el.form) facts.submit = submission(el.form, el);
+    } else if (tag === "FORM") {
+      facts.submit = submission(el, null);
+    }
+    return facts;
+  }`;
+
+/**
+ * What an Enter in a field submits, as page-side source: the label of its
+ * form's first submit button and the facts of that button, or of the form
+ * itself when it has none (policy.ts submitRefusalLabel). Null outside a form.
+ */
+export const ENTER_SUBMIT_SRC = `(node) => {
+    const f = node.form || node.closest("form");
+    if (!f) return null;
+    const s = f.querySelector('[type="submit"], button:not([type="button"]):not([type="reset"])');
+    const label = s ? (s.getAttribute("aria-label") || s.innerText || s.getAttribute("data-testid") || "").trim().slice(0, 120) : "";
+    return { label, facts: (${CONTROL_FACTS_SRC})(s || f) };
+  }`;
+
+/**
  * What the label policy reads of an element besides its name (policy.ts
  * destructiveLabelOf), as page-side source shared by the snapshot and the
  * live re-check before an action, so the two cannot judge differently.
@@ -257,6 +339,7 @@ export const ACCESSIBLE_NAME_SRC = `(el) => (${NAME_SRC})(el).name`;
  * element's centre point, which is where a click on the element lands. Boxes,
  * not a hit test, so it reads the same whether or not the element is scrolled
  * into view, and every covering control is named, not only the topmost.
+ * `facts`: what its markup says a click on it sends (CONTROL_FACTS_SRC).
  */
 export const POLICY_TEXT_SRC = `(el) => {
     const CONTROL = 'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], [role="menuitem"], ' +
@@ -287,7 +370,7 @@ export const POLICY_TEXT_SRC = `(el) => {
       const tid = c.getAttribute("data-testid");
       if (tid && centre.length < 10) centre.push(tid);
     }
-    return { ownText, centre };
+    return { ownText, centre, facts: (${CONTROL_FACTS_SRC})(el) };
   }`;
 
 /**

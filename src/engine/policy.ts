@@ -7,7 +7,7 @@ import { isIdSegment } from "./fingerprint.js";
 import { fromJs, registerJsPattern } from "./js-regex.js";
 import { isSpace, LinearRegex, SPACE } from "./linear-regex.js";
 import { scriptLiteral } from "./script-literal.js";
-import { identifierWords, strictIsDestructive, type WriteClassifier } from "./strict-writes.js";
+import { destructiveGet, identifierWords, strictIsDestructive, type WriteClassifier } from "./strict-writes.js";
 
 /** A label's word as the destructive patterns read it: `\bword\b`, case folded as JavaScript's `i` flag does without `u`. */
 const word = (source: string, needs?: readonly string[]): LinearRegex => fromJs(String.raw`\b${source}\b`, "i", needs ? { needs } : {});
@@ -506,6 +506,143 @@ export interface JudgedControl {
   centre?: readonly string[] | null;
   /** Whether a user can act on it (collector.ts isInteractive). False for an element listed only for its test id or text. */
   interactive?: boolean;
+  /** What its markup says a click on it sends, read in the page; absent when it could not be read. */
+  facts?: ControlFacts | null;
+  /** Whether the session refuses destructive page loads (strict-writes.ts destructiveGet): only then does a page load's address make it destructive. */
+  refuseDestructiveGets?: boolean;
+}
+
+/** A form submission as its markup states it (page-sources.ts CONTROL_FACTS_SRC). */
+export interface SubmitFacts {
+  /** The method the browser sends it with: `get`, `post`, or `dialog` (closes a dialog, sends nothing). */
+  method: string;
+  /** The address it is sent to, resolved; the page's own address when the markup names none. */
+  action: string;
+  /** Whether the markup names the action (`action` or `formaction`), rather than the browser defaulting to this page. */
+  declared: boolean;
+  /** The method a `_method` field names, which many server frameworks act on in place of POST. */
+  override?: string | null;
+  /** Whether the form has a submit handler a script can see. */
+  handler?: boolean;
+}
+
+/** What an element's markup says a click on it sends, read in the page (page-sources.ts CONTROL_FACTS_SRC). */
+export interface ControlFacts {
+  /** A link's address, when following it is a page load (http or https, not an anchor in the same page). */
+  href?: string | null;
+  /** The write method a script library sends the link as (`data-method`, `data-turbo-method`). */
+  linkMethod?: string | null;
+  /** Whether the element has a click handler a script can see. */
+  handler?: boolean;
+  /** A reset button: it clears its form's fields in the page. */
+  reset?: boolean;
+  /** A submit button's (or a form's own) submission. */
+  submit?: SubmitFacts | null;
+  /** The write a script library is told to send on a click (`hx-delete`, `hx-post`, …): its method and resolved address. */
+  sends?: { method: string; url: string } | null;
+}
+
+/** An address as a refusal names it: its path, with a query shown only as present (it may carry a token). */
+function addressLabel(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.pathname}${u.search ? "?…" : ""}`;
+  } catch {
+    // Not a full URL: the path as written, cut at its query.
+    const cut = [url.indexOf("?"), url.indexOf("#")].filter((i) => i >= 0);
+    return cut.length > 0 ? url.slice(0, Math.min(...cut)) : url;
+  }
+}
+
+/** An address that is a command: a destructive verb in its path (the wire's rule) or a page load a server may act on (destructiveGet). */
+function commandAddress(url: string): boolean {
+  return isDestructiveRequest(url, null) || destructiveGet(url);
+}
+
+const WRITE_OVERRIDES = new Set(["DELETE", "PUT", "PATCH"]);
+
+/**
+ * What a control's facts decide: `{ destructive: label }` when they show it
+ * sends a destructive command, `{ destructive: null }` when they show it only
+ * loads a page or clears a form in the page, and null when they decide
+ * nothing and its text is judged instead. Facts decide before text, as
+ * sensitive.ts secretFieldKind reads a field's type before its name:
+ *
+ * - A link a script library sends as a DELETE is destructive, whatever it
+ *   says. A plain page load, with no click handler a script can see, only
+ *   loads a page and is never refused for its label ("Delete account"
+ *   leading to a help page); when the session refuses destructive page loads,
+ *   one whose address is such a load (destructiveGet: `/items/3/delete`,
+ *   `?action=delete`) is destructive whatever it says. With that refusal off,
+ *   such a link is followed like any other, as the Safety model promises.
+ * - A submit button whose form posts to a command, or sends DELETE through a
+ *   `_method` field, is destructive, however mild its label ("Confirm",
+ *   "Continue"). A GET to an action the markup names, with no submit handler,
+ *   is a page load, judged as a link is. A POST elsewhere, a `method="dialog"` form (a confirm
+ *   dialog whose script acts on the answer) and a form with no action of its
+ *   own (a script's form, sent nowhere the markup says) are judged by text.
+ * - A reset button with no click handler clears its form's fields in the
+ *   page and sends nothing.
+ * - Any element a script library is told to send a DELETE from, or a write
+ *   to a command address (`hx-delete`, `hx-post="/items/3/archive"`), is
+ *   destructive; one told to send another write is never cleared by its
+ *   other facts.
+ *
+ * A script can still act on a click its markup does not show (a handler
+ * added with addEventListener); whatever it sends, the wire policy judges.
+ */
+export function controlFactVerdict(f: ControlFacts | null | undefined, opts: { refuseDestructiveGets?: boolean } = {}): { destructive: string | null } | null {
+  if (!f) return null;
+  if (f.sends) {
+    const sent = f.sends.method.toUpperCase();
+    if (sent === "DELETE" || commandAddress(f.sends.url)) return { destructive: `control sending ${sent} to ${addressLabel(f.sends.url)}` };
+  }
+  // Another write a script library sends is judged on the network; like a click handler, it keeps the element from being cleared.
+  const scripted = !!f.handler || !!f.sends;
+  if (f.href) {
+    const sent = (f.linkMethod ?? "get").trim().toUpperCase() || "GET";
+    if (sent === "DELETE") return { destructive: `link sending DELETE to ${addressLabel(f.href)}` };
+    if (sent !== "GET") return commandAddress(f.href) ? { destructive: `link sending ${sent} to ${addressLabel(f.href)}` } : null;
+    if (opts.refuseDestructiveGets && destructiveGet(f.href)) return { destructive: `link to ${addressLabel(f.href)}` };
+    return scripted ? null : { destructive: null };
+  }
+  const s = f.submit;
+  if (s) {
+    if (s.method === "dialog") return null;
+    const override = (s.override ?? "").trim().toUpperCase();
+    const sent = s.method === "post" ? (WRITE_OVERRIDES.has(override) ? override : "POST") : "GET";
+    if (sent === "DELETE") return { destructive: `form sending DELETE to ${addressLabel(s.action)}` };
+    // The page's own address counts only where the browser would really send to it: a POST with no action named.
+    if (sent !== "GET") return commandAddress(s.action) ? { destructive: `form sending ${sent} to ${addressLabel(s.action)}` } : null;
+    if (!s.declared) return null;
+    // A GET is a page load: its address decides only as the route handler's would (route-guard.ts refusedPageLoad).
+    if (opts.refuseDestructiveGets && destructiveGet(s.action)) return { destructive: `form sending GET to ${addressLabel(s.action)}` };
+    return s.handler || scripted ? null : { destructive: null };
+  }
+  if (f.reset && !scripted) return { destructive: null };
+  return null;
+}
+
+/** What an Enter in a field submits (page-sources.ts ENTER_SUBMIT_SRC): its submit button's label, and the facts of that button or of the form. */
+export interface EnterSubmit {
+  label: string;
+  facts?: ControlFacts | null;
+}
+
+/** Why an Enter that submits this form is refused, or null: the submission's facts first, then the submit button's label. */
+export function submitRefusalLabel(submit: EnterSubmit | null | undefined, opts: { refuseDestructiveGets?: boolean } = {}): string | null {
+  if (!submit) return null;
+  return judgedByFacts(submit.facts, () => (isDestructive(submit.label) ? submit.label : null), opts);
+}
+
+/** A control's facts first (controlFactVerdict), and its text only when they decide nothing. */
+export function judgedByFacts(
+  facts: ControlFacts | null | undefined,
+  byText: () => string | null,
+  opts: { refuseDestructiveGets?: boolean } = {},
+): string | null {
+  const verdict = controlFactVerdict(facts, opts);
+  return verdict ? verdict.destructive : byText();
 }
 
 /** The most words a click target's own text may have and still be read as its command. */
@@ -559,8 +696,18 @@ const LABELLED_CONTROL_ROLES = new Set([
  *
  * When the page could not say what the own text is, the whole name stands in
  * and is judged whole, so a reading that failed can only refuse more.
+ *
+ * Before any of that, what its markup says a click sends (controlFactVerdict):
+ * a link's address, a submit button's form method and action, a reset button.
+ * Text is judged only when those decide nothing; facts that could not be read
+ * decide nothing.
  */
 export function destructiveLabelOf(c: JudgedControl): string | null {
+  return judgedByFacts(c.facts, () => destructiveTextOf(c), { refuseDestructiveGets: c.refuseDestructiveGets });
+}
+
+/** The text half of destructiveLabelOf: which of a control's labels is judged, and the first destructive one. */
+function destructiveTextOf(c: JudgedControl): string | null {
   const first = (...labels: Array<string | null | undefined>): string | null =>
     labels.find((l): l is string => typeof l === "string" && l.length > 0 && isDestructive(l)) ?? null;
   const centre = c.centre ?? [];

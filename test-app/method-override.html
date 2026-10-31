@@ -17,6 +17,12 @@
         <input type="hidden" name="id" value="3" />
         <button type="submit" data-testid="override-form-submit">Send form</button>
       </form>
+      <!-- The same form with the _method field added by the page's script as it submits: its markup names no override
+           before the click, so only the request the browser sends carries it. -->
+      <form method="post" action="/api/override/scripted-form" data-testid="override-scripted-form">
+        <input type="hidden" name="id" value="3" />
+        <button type="submit" data-testid="override-scripted-submit">Send scripted form</button>
+      </form>
     </main>
     <script>
       // A POST that names another method: servers that honour an override act on the method named, so the write policy
@@ -32,6 +38,12 @@
       post("override-http-method", "/api/override/http-method", { "X-HTTP-Method": "DELETE" });
       post("override-method-override", "/api/override/method-override", { "X-Method-Override": "DELETE" });
       post("override-query", "/api/override/query?_method=DELETE");
+      document.querySelector('[data-testid="override-scripted-form"]').addEventListener("submit", (event) => {
+        const field = Object.assign(document.createElement("input"), { type: "hidden", name: "_method", value: "delete" });
+        event.target.append(field);
+        // Taken out once the request is built, so a page the refused submit leaves in place names no override in its markup.
+        setTimeout(() => field.remove(), 0);
+      });
       // Sent as the page is left: in Chromium these reach the browser-level interception, not the route handler.
       addEventListener("pagehide", () => {
         navigator.sendBeacon("/api/override/beacon-plain", "id=3");
