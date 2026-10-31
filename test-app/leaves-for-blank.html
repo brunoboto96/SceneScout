@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving (for a blank page)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="leaves-blank-heading">Leaving</h1>
+    </main>
+    <script>
+      // Moves itself, just after load, to about:blank: a page of no app. Its twin, leaves-for-page.html, moves to a page
+      // of the app instead.
+      setTimeout(function () {
+        location.href = "about:blank";
+      }, 40);
+    </script>
+  </body>
+</html>

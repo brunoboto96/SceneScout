@@ -32,7 +32,12 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       storageStatePath: deadState,
     });
     check("attach detects a storage state that did not sign in", attachOut.includes("AUTH FAILED"), attachOut);
-    check("...and names the file to regenerate", attachOut.includes("expired-fixture.json"), attachOut);
+    // The warning line itself names the file: the attach line names it too, as auth=<file>, whatever the verdict.
+    check(
+      "...and names the file to regenerate",
+      attachOut.split("\n").some((line) => line.includes("AUTH FAILED") && line.includes("expired-fixture.json")),
+      attachOut,
+    );
 
     // Absolute URLs: this engine attached AT /gated.html, so its baseUrl
     // carries that path and a relative target would concatenate onto it.

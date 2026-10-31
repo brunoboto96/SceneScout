@@ -17,15 +17,217 @@ export interface ListedTool {
   inputSchema: { properties?: Record<string, unknown>; required?: string[] };
 }
 
+/** One parameter a call fills in: a top-level one by name, a field of an object as `parent.field`, of an array's objects as `parent[].field`. */
+export interface ToolParam {
+  name: string;
+  required: boolean;
+  /** A map such as headers: the keys a call gives under it are the caller's own. */
+  map?: true;
+}
+
+type SchemaNode = {
+  type?: unknown;
+  properties?: Record<string, unknown>;
+  required?: unknown;
+  items?: unknown;
+  anyOf?: unknown;
+  oneOf?: unknown;
+  allOf?: unknown;
+  additionalProperties?: unknown;
+  $ref?: unknown;
+  prefixItems?: unknown;
+  patternProperties?: unknown;
+};
+
+/** Whether a node is a map of named keys to values (`z.record`): extra keys allowed, none named. */
+function isMap(node: SchemaNode): boolean {
+  const extra = node.additionalProperties;
+  if (node.properties === undefined && extra !== null && typeof extra === "object" && Object.keys(extra).length > 0) return true;
+  return [node.anyOf, node.oneOf].some((b) => Array.isArray(b) && b.some((x) => isMap((x ?? {}) as SchemaNode)));
+}
+
+/**
+ * Every parameter a person fills in by hand, in schema order: each property,
+ * then the fields of an object it holds or of the objects an array of it holds,
+ * at any depth. A field is required when its own object requires it (a
+ * required field of an optional object is still listed as required: it is
+ * required whenever the object is given). A union's branches are read beside
+ * the node's own properties, and a field one branch requires but another
+ * lacks is listed as optional.
+ */
+export function toolParams(schema: unknown, prefix = ""): ToolParam[] {
+  const node = (schema ?? {}) as SchemaNode;
+  // A shape this walk does not read would list nothing under it and so hold nothing: refuse it instead.
+  const cannot = (what: string): never => {
+    throw new Error(`${prefix || "(root)"}: ${what} cannot be read into tool parameters; extend toolParams for it`);
+  };
+  if (node.$ref !== undefined) cannot("a $ref");
+  if (node.prefixItems !== undefined || Array.isArray(node.items)) cannot("a tuple");
+  if (node.patternProperties !== undefined) cannot("patternProperties");
+  if (isMap(node) && toolParams(node.additionalProperties, `${prefix}{}`).length > 0) cannot("a map of objects");
+  if (node.items !== undefined) return toolParams(node.items, `${prefix}[]`);
+  const out: ToolParam[] = [];
+  if (node.properties && typeof node.properties === "object") {
+    const required = new Set(Array.isArray(node.required) ? (node.required as string[]) : []);
+    for (const [key, child] of Object.entries(node.properties)) {
+      const name = prefix ? `${prefix}.${key}` : key;
+      out.push({ name, required: required.has(key), ...(isMap((child ?? {}) as SchemaNode) ? { map: true as const } : {}) });
+      out.push(...toolParams(child, name));
+    }
+  }
+  // Every part of an allOf applies: a field any part requires is required.
+  for (const part of Array.isArray(node.allOf) ? node.allOf : [])
+    for (const p of toolParams(part, prefix)) {
+      const own = out.find((o) => o.name === p.name);
+      if (own) own.required ||= p.required;
+      else out.push(p);
+    }
+  // A branch with no fields (`null` in a nullable object) says nothing about which fields are required.
+  const branches = ([node.anyOf, node.oneOf].find(Array.isArray) as unknown[] | undefined) ?? [];
+  const lists = branches.map((b) => toolParams(b, prefix)).filter((l) => l.length > 0);
+  for (const list of lists)
+    for (const p of list) {
+      const everywhere = lists.every((l) => l.some((q) => q.name === p.name && q.required));
+      const own = out.find((o) => o.name === p.name);
+      if (own) own.required ||= everywhere;
+      else out.push({ name: p.name, required: everywhere });
+    }
+  return out;
+}
+
+/** The keys of a shown call (as shownCalls gives them) that the schema does not take; a key under a map parameter is the caller's own. */
+export function unknownParams(keys: readonly string[], schema: unknown): string[] {
+  const params = toolParams(schema);
+  const maps = params.filter((p) => p.map).map((p) => `${p.name}.`);
+  return keys.filter((k) => !params.some((p) => p.name === k) && !maps.some((m) => k.startsWith(m)));
+}
+
+/**
+ * The calls a document shows, such as `scout_scroll {target: "…"}` or
+ * `scout_run_plan {steps: [{action: "click", target}]}`: each tool with the
+ * parameter names its braces give, nested ones as toolParams names them.
+ * Quoted text is skipped, so a value's braces or colons name nothing.
+ */
+export function shownCalls(text: string): Array<{ tool: string; params: string[] }> {
+  const out: Array<{ tool: string; params: string[] }> = [];
+  for (const m of text.matchAll(/\b(scout_[a-z_]+)\s*\{/g)) {
+    const params: string[] = [];
+    readObject(text, (m.index ?? 0) + m[0].length, "", params);
+    out.push({ tool: m[1], params });
+  }
+  return out;
+}
+
+/** Reads an object literal's keys from just inside its `{` into `params`; returns the index after its `}` (or the text's end). */
+function readObject(text: string, at: number, prefix: string, params: string[]): number {
+  let i = at;
+  let expectKey = true;
+  let key = "";
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "}") return i + 1;
+    if (c === "\n" && text[i + 1] === "\n") return i;
+    if ((c === '"' || c === "'") && atTokenStart(text, i)) {
+      const end = closingQuote(text, i);
+      const quoted = text.slice(i + 1, end);
+      i = Math.min(end + 1, text.length);
+      if (expectKey && /^\s*:/.test(text.slice(i))) key = quoted;
+      continue;
+    }
+    if (expectKey && /[A-Za-z]/.test(c)) {
+      const word = /^[A-Za-z][A-Za-z0-9]*/.exec(text.slice(i))![0];
+      i += word.length;
+      key = word;
+      params.push(prefix ? `${prefix}.${word}` : word);
+      expectKey = false;
+      continue;
+    }
+    if (expectKey && key && c === ":") {
+      params.push(prefix ? `${prefix}.${key}` : key);
+      expectKey = false;
+      i += 1;
+      continue;
+    }
+    if (c === ":") {
+      expectKey = false;
+      i += 1;
+      continue;
+    }
+    if (c === ",") {
+      expectKey = true;
+      key = "";
+      i += 1;
+      continue;
+    }
+    if (c === "{") {
+      i = readObject(text, i + 1, key ? (prefix ? `${prefix}.${key}` : key) : prefix, params);
+      continue;
+    }
+    if (c === "[") {
+      i = readArray(text, i + 1, key ? `${prefix ? `${prefix}.${key}` : key}[]` : prefix, params);
+      continue;
+    }
+    i += 1;
+  }
+  return i;
+}
+
+/** Reads an array literal from just inside its `[`: each object in it adds its keys under `prefix`. */
+function readArray(text: string, at: number, prefix: string, params: string[]): number {
+  let i = at;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "]") return i + 1;
+    if (c === "\n" && text[i + 1] === "\n") return i;
+    if ((c === '"' || c === "'") && atTokenStart(text, i)) {
+      i = Math.min(closingQuote(text, i) + 1, text.length);
+      continue;
+    }
+    if (c === "{") {
+      i = readObject(text, i + 1, prefix, params);
+      continue;
+    }
+    if (c === "[") {
+      i = readArray(text, i + 1, `${prefix}[]`, params);
+      continue;
+    }
+    i += 1;
+  }
+  return i;
+}
+
+/** Whether a quote at `at` opens a string: it starts a key or a value (after `{`, `[`, `,` or `:`), not an apostrophe inside a word. */
+function atTokenStart(text: string, at: number): boolean {
+  const before = /\S?\s*$/.exec(text.slice(Math.max(0, at - 40), at))![0].trim();
+  return before === "" || "{[,:".includes(before);
+}
+
+/** The index of the quote closing the one at `at`, or of the paragraph's end when it is not closed there. */
+function closingQuote(text: string, at: number): number {
+  const end = text.indexOf(text[at], at + 1);
+  const paragraph = text.indexOf("\n\n", at);
+  if (end < 0) return paragraph < 0 ? text.length : paragraph - 1;
+  return paragraph >= 0 && paragraph < end ? paragraph - 1 : end;
+}
+
 export function toolParamsMarkdown(tools: readonly ListedTool[]): string {
   const rows = tools
     .filter((t) => !OWN_TABLE_TOOLS.has(t.name))
     .map((t) => {
-      const required = new Set(t.inputSchema.required ?? []);
-      const params = Object.keys(t.inputSchema.properties ?? {}).map((p) => `\`${p}\` (${required.has(p) ? "required" : "optional"})`);
+      const params = toolParams(t.inputSchema).map((p) => `\`${p.name}\` (${p.required ? "required" : "optional"})`);
       return `| \`${t.name}\` | ${params.length > 0 ? params.join(", ") : "none"} |`;
     });
   return [TOOL_PARAMS_BEGIN, "", "| Tool | Parameters |", "|---|---|", ...rows, "", TOOL_PARAMS_END].join("\n");
+}
+
+/** The parameters a row of that table lists, as toolParams gives them. */
+export function listedParams(cell: string): ToolParam[] {
+  return cell.trim() === "none"
+    ? []
+    : [...cell.matchAll(/`([A-Za-z][A-Za-z0-9]*(?:\[\])*(?:\.[A-Za-z][A-Za-z0-9]*(?:\[\])*)*)`\s*\((required|optional)\)/g)].map((m) => ({
+        name: m[1],
+        required: m[2] === "required",
+      }));
 }
 
 /** The text between the markers, markers included, or undefined when either is missing. */
