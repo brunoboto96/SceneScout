@@ -89,6 +89,7 @@ const UNSET: Record<ConfigKey, string> = {
   allowedWrites: "no list (writes are judged by the mode)",
   redactPageText: "off",
   hosts: "any host",
+  browserHosts: "any host",
 };
 
 /** One layer of the config: a file, the keys it sets itself and the preset it started from. */
@@ -243,6 +244,11 @@ export function explainConfig(input: {
       const via = hosts.setting?.from;
       if (via && via !== "the SceneScout config")
         source = via.includes("narrowed by") ? `${source}, narrowed by ${via.split("narrowed by ")[1]}` : `environment ${via}`;
+    } else if (key === "browserHosts") {
+      value = rules.browserHosts ?? undefined;
+      const via = rules.from.browserHosts;
+      if (via && via !== "the SceneScout config")
+        source = via.includes("narrowed by") ? `${source}, narrowed by ${via.split("narrowed by ")[1]}` : `environment ${via}`;
     } else if (key === "readPosts") {
       if (resolved.settings.readPosts !== undefined) {
         value = resolved.settings.readPosts;
@@ -263,6 +269,8 @@ export function explainConfig(input: {
       shownAs += ", each only when it also looks like a sign-in by its path";
     if (key === "allowedWrites" && rules.allowedWrites?.andModeRules && rules.allowedWrites.entries.length > 0)
       shownAs += ", each only when the mode would also let it out";
+    // The app's own host is always reachable: the list names what else is.
+    if (key === "browserHosts" && rules.browserHosts) shownAs = rules.browserHosts.length === 0 ? "the app's host only" : `the app's host and ${shownAs}`;
     rows.push({ key, value: shownAs, source });
   }
   return { files: loaded.sources, rows, notes };

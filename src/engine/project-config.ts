@@ -60,6 +60,7 @@ import { DEDUP_ENV, DEDUP_MODES, type DedupMode } from "./ci.js";
 import { flagName } from "./args.js";
 import { CONFIG_FILE_NAME, MEMORY_DIRNAME } from "./memory-dir.js";
 import { HOSTS_ENV, hostEntries, hostKey, hostsFromEnv, matchHost, MAX_HOSTS, shownHostEntry } from "./hosts.js";
+import { BROWSER_HOSTS_ENV } from "./browser-hosts.js";
 
 /** The environment variable naming the operator's config file, read before the launch directory's. */
 export const CONFIG_ENV = "SCENESCOUT_CONFIG";
@@ -92,6 +93,7 @@ export const CONFIG_KEYS = [
   "allowedWrites",
   "redactPageText",
   "hosts",
+  "browserHosts",
 ] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 
@@ -263,6 +265,7 @@ export const NO_POLICY: LoadedPolicy = { policy: {}, sources: [] };
  * which no preset sets because the strict classifier refuses writes the
  * standard one lets out and a sign-in list names one app's endpoints; and
  * redactPageText, which changes what the agent reads rather than what it may do; and allowedWrites and hosts, which name one app's endpoints and addresses.
+ * A preset's browserHosts is [], the app's own host alone, which needs no address named.
  */
 export type PresetPolicy = Required<
   Omit<
@@ -290,6 +293,7 @@ export const PRESET_POLICY: Record<Preset, PresetPolicy> = {
     evidence: "file",
     uploads: "fixtures",
     refuseDestructiveGets: true,
+    browserHosts: [],
   },
 };
 
@@ -407,6 +411,8 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
   if (!trustedEmbeds.ok) return trustedEmbeds;
   const hosts = list("hosts", MAX_HOSTS, (entries) => hostEntries(entries).rejected.map(shownHostEntry));
   if (!hosts.ok) return hosts;
+  const browserHosts = list("browserHosts", MAX_HOSTS, (entries) => hostEntries(entries).rejected.map(shownHostEntry));
+  if (!browserHosts.ok) return browserHosts;
 
   const base: Policy = preset.value ? structuredClone(PRESET_POLICY[preset.value]) : {};
   const set: Policy = {
@@ -425,6 +431,7 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
     allowedWrites: allowedWrites.value,
     redactPageText: redactPageText.value,
     hosts: hosts.value?.map(hostKey),
+    browserHosts: browserHosts.value?.map(hostKey),
   };
   for (const [k, v] of Object.entries(set)) if (v !== undefined) (base as Record<string, unknown>)[k] = v;
   return { ok: true, policy: base };
@@ -481,6 +488,8 @@ export function tightenPolicy(a: Policy, b: Policy): Policy {
       a.allowedWrites && b.allowedWrites ? intersect(b.allowedWrites, a.allowedWrites, allowedWriteKey) : (a.allowedWrites ?? b.allowedWrites);
   if (a.allowedWrites ? a.allowedWritesNarrowOnly === true : b.allowedWrites !== undefined) out.allowedWritesNarrowOnly = true;
   if (a.hosts || b.hosts) out.hosts = a.hosts && b.hosts ? intersect(b.hosts, a.hosts, hostKey) : (a.hosts ?? b.hosts);
+  if (a.browserHosts || b.browserHosts)
+    out.browserHosts = a.browserHosts && b.browserHosts ? intersect(b.browserHosts, a.browserHosts, hostKey) : (a.browserHosts ?? b.browserHosts);
   // The operator's only: withProjectPolicy refuses a project's file that sets it.
   if (a.projectsRoot) out.projectsRoot = a.projectsRoot;
   return out;
@@ -753,6 +762,12 @@ export interface WriteRulesPolicy {
   allowedWrites?: string[];
   /** Not a key, so no file sets it: true when `allowedWrites` came from a project's own file alone (tightenPolicy), so the list only narrows the mode's rules. */
   allowedWritesNarrowOnly?: boolean;
+  /**
+   * The hosts a page may reach besides the app's own (browser-hosts.ts): every
+   * request to any other host is refused, in every mode. [] is the app's host
+   * alone. SCENESCOUT_BROWSER_HOSTS may narrow it. Unset: any host, as without a file.
+   */
+  browserHosts?: string[];
 }
 
 /** The sign-in allowlist a session judges by: its entries, and whether a POST must also look like a sign-in (policy.ts isAuthExempt). */
@@ -767,6 +782,7 @@ export interface WriteRulesSources {
   refuseDestructiveGets?: string;
   authPosts?: string;
   allowedWrites?: string;
+  browserHosts?: string;
 }
 
 /** The write-judgement settings a session runs with (writeRulesSettings), as the browser engine takes them from the attach. */
@@ -776,6 +792,8 @@ export interface SessionWriteRules {
   authPosts: AuthPostsSetting | null;
   /** The list of writes that may leave the page, or null when none is set (the mode alone judges writes). */
   allowedWrites: AllowedWritesSetting | null;
+  /** The hosts a page may reach besides the app's, or null when any host may be reached (browser-hosts.ts). */
+  browserHosts: string[] | null;
   notes: string[];
   from: WriteRulesSources;
 }
@@ -828,11 +846,14 @@ export function writeRulesSettings(file: WriteRulesPolicy, env: Record<string, s
   const andSignInPath = guided || (file.authPostsNarrowOnly === true && fromEnv.length === 0);
   const writes = allowedWritesSetting(file, env, guided, notes);
   if (writes) from.allowedWrites = writes.from;
+  const browserHosts = browserHostsSetting(file, env, notes);
+  if (browserHosts) from.browserHosts = browserHosts.from;
   return {
     writeClassifier,
     refuseDestructiveGets,
     authPosts: entries === null ? null : { entries, andSignInPath },
     allowedWrites: writes ? writes.setting : null,
+    browserHosts: browserHosts ? browserHosts.entries : null,
     notes,
     from,
   };
@@ -873,6 +894,28 @@ function allowedWritesSetting(
 }
 
 /**
+ * The hosts a page may reach besides the app's: the file's list, narrowed to
+ * the entries SCENESCOUT_BROWSER_HOSTS also names when it is set; with no file
+ * list, the environment's; null when neither sets one. An environment entry
+ * that is not a host throws, naming the variable, so a misspelt lock never
+ * reads as none.
+ */
+function browserHostsSetting(file: WriteRulesPolicy, env: Record<string, string | undefined>, notes: string[]): { entries: string[]; from: string } | null {
+  const fromEnv = hostsFromEnv(env[BROWSER_HOSTS_ENV]);
+  const bad = hostEntries(fromEnv).rejected.map(shownHostEntry);
+  if (bad.length > 0) throw new Error(`${BROWSER_HOSTS_ENV} has entries that are not hosts: ${quoted(bad)}`);
+  if (fromEnv.length > MAX_HOSTS) throw new Error(`${BROWSER_HOSTS_ENV} may name at most ${MAX_HOSTS} hosts`);
+  if (file.browserHosts) {
+    if (fromEnv.length === 0) return { entries: [...file.browserHosts], from: BY_CONFIG };
+    const entries = intersect(fromEnv.map(hostKey), file.browserHosts, hostKey);
+    const dropped = fromEnv.filter((e) => !entries.includes(hostKey(e)));
+    if (dropped.length > 0) notes.push(`${BROWSER_HOSTS_ENV} entries the config does not list were left out: ${quoted(dropped)}`);
+    return { entries, from: `${BY_CONFIG}, narrowed by ${BROWSER_HOSTS_ENV}` };
+  }
+  return fromEnv.length > 0 ? { entries: fromEnv.map(hostKey), from: BROWSER_HOSTS_ENV } : null;
+}
+
+/**
  * What the config's write-judgement locks did, for the attach's and a
  * command's "Config:" line: each lock the config turned on, then the notes
  * writeRulesSettings made (an environment value the config lowered or lost
@@ -897,6 +940,10 @@ export function writeRulesNote(policy: WriteRulesPolicy, rules: SessionWriteRule
       `allowedWrites: ${which}${andModeRules && entries.length > 0 ? `, and a listed write must also pass the mode's own rules (${policy.allowedWritesNarrowOnly === true ? "the list is the project's own" : "a guided check"})` : ""}`,
     );
   }
+  if (policy.browserHosts && rules.browserHosts)
+    out.push(
+      `browserHosts: the page may reach only the app's own host${rules.browserHosts.length > 0 ? ` and ${quoted(rules.browserHosts)}` : ""}; every other host is refused`,
+    );
   return [...out, ...rules.notes];
 }
 

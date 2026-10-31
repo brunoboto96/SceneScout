@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Browser hosts</title>
+  </head>
+  <body>
+    <!-- A page that reaches out: a script, an image and a worker's request through the app's redirect, an object, a WebSocket, a peer connection and a link through a redirect, each from the loopback port named by ?otherPort=, another host than the page's. -->
+    <h1>Browser hosts</h1>
+    <p data-testid="script-state">script: pending</p>
+    <p data-testid="socket-state">socket: pending</p>
+    <p data-testid="hop-state">image through a redirect: pending</p>
+    <p data-testid="peer-state">peer connections: pending</p>
+    <a data-testid="redirect-link" id="redirect-link" href="#">Leave through a redirect</a>
+    <script>
+      // Only a port is read from the address, so the page reaches nothing but a loopback server.
+      const port = Number.parseInt(new URLSearchParams(location.search).get("otherPort") || "", 10);
+      const other = Number.isInteger(port) && port > 0 && port < 65536 ? "http://127.0.0.1:" + port : location.origin;
+      const scriptState = document.querySelector("[data-testid=script-state]");
+      const socketState = document.querySelector("[data-testid=socket-state]");
+      const script = document.createElement("script");
+      script.src = other + "/browser-hosts.js";
+      script.onload = () => (scriptState.textContent = "script: " + (window.browserHostsScript || "ran nothing"));
+      script.onerror = () => (scriptState.textContent = "script: failed");
+      document.head.appendChild(script);
+      const hopState = document.querySelector("[data-testid=hop-state]");
+      const hop = new Image();
+      // The landing page is not an image, so it settles as an error whether or not it arrived: the server counts it.
+      hop.onload = hop.onerror = () => (hopState.textContent = "image through a redirect: settled");
+      hop.src = "/browser-hosts-redirect?to=" + encodeURIComponent(other) + "&image=1";
+      const object = document.createElement("object");
+      object.data = other + "/browser-hosts.js?object=1";
+      document.body.appendChild(object);
+      new Worker("/browser-hosts-worker.js?to=" + encodeURIComponent(other));
+      try {
+        const socket = new WebSocket(other.replace(/^http/, "ws") + "/browser-hosts-socket");
+        socket.onclose = (e) => (socketState.textContent = "socket: closed " + e.code);
+      } catch (e) {
+        socketState.textContent = "socket: refused to open";
+      }
+      document.querySelector("[data-testid=peer-state]").textContent =
+        "peer connections: " + (typeof RTCPeerConnection === "function" ? "available" : "unavailable");
+      document.getElementById("redirect-link").href = "/browser-hosts-redirect?to=" + encodeURIComponent(other);
+    </script>
+  </body>
+</html>
