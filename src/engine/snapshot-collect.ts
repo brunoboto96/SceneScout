@@ -30,7 +30,7 @@ import {
 import { elementKey, keyAliasSteps, normalizePath, ordinalKeys, routeBase, type InteractableInfo } from "./fingerprint.js";
 import { FORMS_INVENTORY_SCRIPT, formIdentity, formStatus, isNavigationTeardown, type FormFacts } from "./forms.js";
 import { NAME_RULE, type KeyAliasSteps } from "./memory.js";
-import { destructiveLabelOf } from "./policy.js";
+import { destructiveLabelOf, type ControlFacts } from "./policy.js";
 import { stillNavigating } from "./limits.js";
 import { recheckBusy, recheckWait } from "./settle.js";
 
@@ -164,6 +164,8 @@ export interface SnapshotHost {
    * when the latest action started (`changedAt`), all on Date.now's clock.
    */
   requests(): { inFlight: number; lastRequestStart: number; changedAt: number };
+  /** Whether the session refuses destructive page loads, which decides whether a link's address marks it (policy.ts controlFactVerdict). */
+  refuseDestructiveGets?(): boolean;
 }
 
 /** The interactables of the page the host drives, their refs, and the snapshots kept for diffs. */
@@ -256,6 +258,7 @@ export class SnapshotCollector {
       /** Read for the label policy only (page-sources.ts POLICY_TEXT_SRC); not kept on the listed element. */
       ownText?: string;
       centre?: string[];
+      facts?: ControlFacts;
       interactive?: boolean;
       ariaHidden?: boolean;
       liveOnly?: boolean;
@@ -332,13 +335,13 @@ export class SnapshotCollector {
     const aliases = keyAliasSteps(bases);
     const built = all.map(({ raw: el, frame, tag }, i) => {
       const key = keys[i];
-      const { ownText: _ownText, centre: _centre, cut: _cut, priorNames: _priorNames, ...listed } = el;
+      const { ownText: _ownText, centre: _centre, facts: _facts, cut: _cut, priorNames: _priorNames, ...listed } = el;
       const full: SnapshotElement = {
         ...listed,
         ...(tag ? { frame: tag } : {}),
         // Judged on the real label, then masked: the policy must see what a click would press.
         // A message is not a control: "Could not delete" in an alert is not a Delete button.
-        destructive: el.liveOnly ? false : destructiveLabelOf(el) !== null,
+        destructive: el.liveOnly ? false : destructiveLabelOf({ ...el, refuseDestructiveGets: this.host.refuseDestructiveGets?.() ?? false }) !== null,
         ...(tag?.foreign ? { name: masksForeignName(el.tag, el.role) ? MASKED_NAME : capForeignName(el.name) } : {}),
         ...(tag?.foreign && el.href ? { href: stripForeignHref(el.href) } : {}),
         ref: "",

@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>History entry</title>
+    <!-- Rewrites its own history entry to the address in ?to=, as a client-side router does, so the entry holds an
+         address no request was sent to. Going back to it later must be judged by that address. -->
+    <script>
+      const to = new URLSearchParams(location.search).get("to");
+      if (to && to.startsWith("/")) history.replaceState(null, "", to);
+    </script>
+  </head>
+  <body>
+    <main><h1>History entry</h1></main>
+  </body>
+</html>

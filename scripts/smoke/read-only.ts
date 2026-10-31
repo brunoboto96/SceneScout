@@ -1138,6 +1138,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
   }
   await failuresAtTheActionLimit({ baseUrl, projectDir, stats } as SmokeContext);
   await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
+  await controlFacts({ baseUrl, projectDir, stats } as SmokeContext);
   await readPosts({ baseUrl, projectDir, stats } as SmokeContext);
   await allowedWrites({ baseUrl, projectDir, stats } as SmokeContext);
   await methodOverrides({ baseUrl, projectDir, stats } as SmokeContext);
@@ -1305,9 +1306,19 @@ async function methodOverrides({ baseUrl, projectDir, stats }: SmokeContext): Pr
     }
     const formRef = snap.match(/(e\d+) button "Send form"/)?.[1];
     if (!formRef) throw new Error(`Send form not found in:\n${snap}`);
-    const form = await engine.click(formRef);
-    check("a native form carrying _method=delete is refused", form.includes("WRITE-POLICY blocked") && /POST as DELETE/.test(form), form);
+    const marked = await engine.click(formRef);
+    check(
+      "a native form whose markup carries _method=delete is refused by its facts before it is sent",
+      marked.includes("REFUSED") && marked.includes("form sending DELETE to /api/override/form"),
+      marked,
+    );
     check("...and never reached the server", writesTo("POST /api/override/form") === 0, JSON.stringify(stats.writes));
+    // The same form whose script adds the field as it submits: nothing in its markup says so, so the wire judges it.
+    const scriptedRef = snap.match(/(e\d+) button "Send scripted form"/)?.[1];
+    if (!scriptedRef) throw new Error(`Send scripted form not found in:\n${snap}`);
+    const form = await engine.click(scriptedRef);
+    check("a native form sending _method=delete is refused on the wire", form.includes("WRITE-POLICY blocked") && /POST as DELETE/.test(form), form);
+    check("...and never reached the server", writesTo("POST /api/override/scripted-form") === 0, JSON.stringify(stats.writes));
     // Chromium shows its error page in place of the dropped navigation, some time after the navigation fails; the click
     // waits for it and goes back. Read too early, the session was left on the error page, where the plain scout_request
     // below failed with "Failed to fetch". Firefox and WebKit stay on the page.
@@ -1328,13 +1339,13 @@ async function methodOverrides({ baseUrl, projectDir, stats }: SmokeContext): Pr
     // "continue": the page's 403 for the refused form is a console error, which would otherwise end the plan at step 1.
     const plan = await engine.runPlan(
       [
-        { action: "click", target: "testid=override-form-submit" },
+        { action: "click", target: "testid=override-scripted-submit" },
         { action: "click", target: "testid=override-plain" },
       ],
       "continue",
     );
     check("run_plan: a step clicking the refused form is refused and the plan goes on", /^PLAN \(2\/2 steps ran\)/.test(plan) && !/FAILED/.test(plan), plan);
-    check("...and the form never reached the server", writesTo("POST /api/override/form") === 0, JSON.stringify(stats.writes));
+    check("...and the form never reached the server", writesTo("POST /api/override/scripted-form") === 0, JSON.stringify(stats.writes));
     check(
       "...and the next step runs on the page, not the browser's error page",
       /\n2\. click testid=override-plain → OK \(http[^)]*\/method-override\.html\)/.test(plan),
@@ -1373,6 +1384,123 @@ async function methodOverrides({ baseUrl, projectDir, stats }: SmokeContext): Pr
     check("...while /things/3 reaches the server", (stats.loads["GET /things/3"] ?? 0) >= 1, JSON.stringify(stats.loads));
     const listing = await strict.navigate("/blog/archive");
     check("...while /blog/archive, a listing page, loads", !/WRITE-POLICY blocked/.test(listing), listing);
+    // A history entry whose address a script rewrote: no request was ever sent to it, and the back-forward cache may
+    // restore it without one, so going back is judged by the entry's address before anything loads.
+    await strict.navigate("/history-command.html?to=/things/9/cancel");
+    await strict.navigate("/page2.html");
+    const back = await strict.goBack();
+    check(
+      "going back to an entry at a command address is refused before it loads",
+      back.startsWith("NOT MOVED BACK") && back.includes("/things/9/cancel"),
+      back,
+    );
+    check("...and the session stays where it was", /page is still http[^\s]*\/page2\.html/.test(back), back);
+    check("...and the server never received it", (stats.loads["GET /things/9/cancel"] ?? 0) === 0, JSON.stringify(stats.loads));
+    await strict.navigate("/history-command.html?to=/form-landing");
+    await strict.navigate("/page2.html");
+    const plainBack = await strict.goBack();
+    check(
+      "...while going back to an entry at an ordinary address goes back",
+      !plainBack.startsWith("NOT MOVED BACK") && /\/form-landing/.test(plainBack),
+      plainBack,
+    );
+  } finally {
+    delete process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS;
+    await strict.close().catch(() => {});
+  }
+}
+
+/**
+ * A control is judged by what its markup says a click sends before its label
+ * (policy.ts controlFactVerdict): each pair on control-facts.html shares a
+ * label and differs only in that, and the verdicts differ with it, for a
+ * click, a plan step, an Enter typed into the form and a key pressed in it.
+ */
+async function controlFacts({ baseUrl, projectDir, stats }: SmokeContext): Promise<void> {
+  const writesTo = (key: string): number => stats.writes[key] ?? 0;
+  const engine = new BrowserEngine();
+  try {
+    console.log("read-only: a control's facts decide before its label");
+    await engine.attach({ url: baseUrl, projectDir, mode: "read-only" });
+    const open = async (): Promise<(testid: string) => { ref: string; line: string }> => {
+      await engine.navigate("/control-facts.html");
+      const snap = await engine.snapshot(true);
+      return (testid) => {
+        const m = snap.match(new RegExp(`(e\\d+) [^\\n]*\\[testid=${testid}[,\\]][^\\n]*`));
+        if (!m) throw new Error(`control-facts fixture: no element with testid ${testid} in:\n${snap}`);
+        return { ref: m[1], line: m[0] };
+      };
+    };
+    let lineOf = await open();
+    const marked = (testid: string): boolean => lineOf(testid).line.includes("DESTRUCTIVE");
+    check(
+      "a Confirm button whose form posts to a command address is marked destructive",
+      marked("facts-command-confirm"),
+      lineOf("facts-command-confirm").line,
+    );
+    check("...the same label posting to an ordinary address is not", !marked("facts-plain-confirm"), lineOf("facts-plain-confirm").line);
+    check("a Delete button whose form only GETs a named page is not marked destructive", !marked("facts-get-delete"), lineOf("facts-get-delete").line);
+    check("...the same label on a form naming no action is", marked("facts-script-delete"), lineOf("facts-script-delete").line);
+    check("a Delete account link that loads a page is not marked destructive", !marked("facts-help-link"), lineOf("facts-help-link").line);
+    check(
+      "...nor is a link to a command address while destructive page loads are let out (the default)",
+      !marked("facts-command-link"),
+      lineOf("facts-command-link").line,
+    );
+    check("an Open button a script library sends a DELETE from is marked destructive", marked("facts-hx-delete"), lineOf("facts-hx-delete").line);
+    check("...the same button without it is not", !marked("facts-hx-plain"), lineOf("facts-hx-plain").line);
+    check("a reset button labelled Reset all data is not marked destructive", !marked("facts-reset"), lineOf("facts-reset").line);
+    check("...the same label on a plain button is", marked("facts-reset-scripted"), lineOf("facts-reset-scripted").line);
+
+    const confirm = await engine.click(lineOf("facts-command-confirm").ref);
+    check("clicking Confirm on the command form is refused", confirm.includes("REFUSED") && confirm.includes("/things/9/cancel"), confirm);
+    check("...and it did not reach the server", writesTo("POST /things/9/cancel") === 0, JSON.stringify(stats.writes));
+    const typed = await engine.type(lineOf("facts-command-note").ref, "a note", true);
+    check("an Enter typed into the command form is withheld", typed.includes("did NOT press Enter"), typed);
+    await engine.type(lineOf("facts-command-note").ref, "a note");
+    const pressed = await engine.press("Enter");
+    check("...and so is Enter pressed in its field", pressed.includes("REFUSED"), pressed);
+    const plan = await engine.runPlan([{ action: "click", target: "testid=facts-command-confirm" }]);
+    check("...and a plan's click on it", /REFUSED[^\n]*\/things\/9\/cancel/.test(plan), plan);
+    check("...and none of them reached the server", writesTo("POST /things/9/cancel") === 0, JSON.stringify(stats.writes));
+
+    lineOf = await open();
+    const reset = await engine.click(lineOf("facts-reset").ref);
+    check("clicking the reset button is allowed", !reset.includes("REFUSED"), reset);
+    const plain = writesTo("POST /form-landing");
+    lineOf = await open();
+    const sent = await engine.click(lineOf("facts-plain-confirm").ref);
+    check(
+      "clicking Confirm on the ordinary form is allowed and its POST arrives",
+      !sent.includes("REFUSED") && writesTo("POST /form-landing") === plain + 1,
+      sent,
+    );
+    lineOf = await open();
+    const helped = await engine.click(lineOf("facts-help-link").ref);
+    check("clicking the Delete account link loads its page", !helped.includes("REFUSED") && /URL now: http[^\s]*\/page2\.html/.test(helped), helped);
+    lineOf = await open();
+    const searched = await engine.click(lineOf("facts-get-delete").ref);
+    check(
+      "clicking the GET form's Delete loads the page it names",
+      !searched.includes("REFUSED") && /URL now: http[^\s]*\/page2\.html/.test(searched),
+      searched,
+    );
+  } finally {
+    await engine.close().catch(() => {});
+  }
+  // With destructive page loads refused, the link's address decides as the route handler's rule would.
+  process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS = "1";
+  const strict = new BrowserEngine();
+  try {
+    await strict.attach({ url: baseUrl, projectDir, mode: "read-only" });
+    await strict.navigate("/control-facts.html");
+    const snap = await strict.snapshot(true);
+    const line = snap.match(/(e\d+) [^\n]*\[testid=facts-command-link[,\]][^\n]*/);
+    if (!line) throw new Error(`control-facts fixture: no command link in:\n${snap}`);
+    check("with destructive page loads refused, a link to a command address is marked destructive", line[0].includes("DESTRUCTIVE"), line[0]);
+    const link = await strict.click(line[1]);
+    check("...and clicking it is refused", link.includes("REFUSED") && link.includes("/things/3/delete"), link);
+    check("...and the load never reached the server", (stats.loads["GET /things/3/delete"] ?? 0) === 0, JSON.stringify(stats.loads));
   } finally {
     delete process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS;
     await strict.close().catch(() => {});
