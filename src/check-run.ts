@@ -216,7 +216,7 @@ export async function runCheck(
     const retestPages = plan && !options.paths ? await loadRetestPages(run, plan, routes) : [];
     const baselines = await pictureBaselines(run, inputs, routes);
     const { flowRuns, flowFrames, flowVideos } = await replayFlows(run, runFlows);
-    const retest = plan ? retestOf(plan, routes, retestPages) : null;
+    const retest = plan ? retestOf(plan, routes, retestPages, options.url) : null;
     const replay =
       run.record || run.video
         ? recordReplay({
@@ -444,7 +444,12 @@ async function replayFlows(run: CheckRun, runFlows: readonly Flow[]): Promise<Fl
 }
 
 /** The re-test of the open findings, against the crawl's routes and the pages loaded only to re-test. */
-function retestOf(plan: ReturnType<typeof checkRetestPlan>, routes: readonly RouteHealth[], retestPages: readonly RouteHealth[]): CheckResult["retest"] {
+function retestOf(
+  plan: ReturnType<typeof checkRetestPlan>,
+  routes: readonly RouteHealth[],
+  retestPages: readonly RouteHealth[],
+  appUrl: string,
+): CheckResult["retest"] {
   return {
     open: plan.open,
     extraPages: retestPages.length,
@@ -456,7 +461,7 @@ function retestOf(plan: ReturnType<typeof checkRetestPlan>, routes: readonly Rou
         ...(r.loadError !== undefined ? { loadError: r.loadError } : {}),
         loginRedirect: r.loginRedirect,
         ...(r.challenge !== undefined ? { challenge: r.challenge } : {}),
-        httpErrors: withoutOwnResponse(r)
+        httpErrors: withoutOwnResponse(r, appUrl)
           .violations.filter((v) => v.kind === "http_error")
           .map((v) => v.detail),
       })),
@@ -478,7 +483,7 @@ function checkResultOf(
   },
 ): CheckResult {
   const { routes, timeLimitReached, flowRuns, baselines, retest, replay } = ran;
-  const { pages: measured, resources } = splitResources(redactRoutes(routes.map(withoutOwnResponse)));
+  const { pages: measured, resources } = splitResources(redactRoutes(routes.map((r) => withoutOwnResponse(r, options.url))));
   const flows = redactFlowRuns(flowRuns);
   const pictured = baselines ? redactBaselineRun(baselines) : null;
   // Signed in only when given a session: with none, a route that sends the browser to sign-in needs one, and is not a lost session.

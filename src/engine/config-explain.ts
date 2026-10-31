@@ -23,6 +23,7 @@ import { evidenceSettings, type EvidenceMode } from "./capture.js";
 import { READ_POSTS_ENV, readPostsSetting } from "./policy.js";
 import {
   CONFIG_KEYS,
+  hostsSetting,
   parsePolicy,
   PRESET_POLICY,
   readCommandPolicy,
@@ -87,6 +88,7 @@ const UNSET: Record<ConfigKey, string> = {
   authPosts: "no list (sign-in is recognised by its path)",
   allowedWrites: "no list (writes are judged by the mode)",
   redactPageText: "off",
+  hosts: "any host",
 };
 
 /** One layer of the config: a file, the keys it sets itself and the preset it started from. */
@@ -180,6 +182,9 @@ export function explainConfig(input: {
   notes.push(...resolved.notes);
   const rules = writeRulesSettings(loaded.policy, env, false);
   notes.push(...rules.notes);
+  const hosts = hostsSetting(loaded.policy, env);
+  if (!hosts.ok) throw new Error(hosts.error);
+  if (hosts.setting) notes.push(...hosts.setting.notes);
   const rows: ConfigRow[] = [];
   const policy = loaded.policy as Record<string, unknown>;
   /** Where the joined files' value of a key came from. */
@@ -231,6 +236,11 @@ export function explainConfig(input: {
     } else if (key === "allowedWrites") {
       value = rules.allowedWrites?.entries;
       const via = rules.from.allowedWrites;
+      if (via && via !== "the SceneScout config")
+        source = via.includes("narrowed by") ? `${source}, narrowed by ${via.split("narrowed by ")[1]}` : `environment ${via}`;
+    } else if (key === "hosts") {
+      value = hosts.setting?.entries;
+      const via = hosts.setting?.from;
       if (via && via !== "the SceneScout config")
         source = via.includes("narrowed by") ? `${source}, narrowed by ${via.split("narrowed by ")[1]}` : `environment ${via}`;
     } else if (key === "readPosts") {

@@ -67,6 +67,8 @@ export interface WatchedRequest {
    * answer to it, so a refused one is never paired with a success claim.
    */
   background?: boolean;
+  /** Set when the request went to another site: its origin and path (offOriginPlace), which name it in place of its path and query. */
+  elsewhere?: string;
 }
 
 /** Whether this request is one whose refusal the page should be admitting to. */
@@ -421,7 +423,7 @@ function shortUrl(url: string): string {
 }
 
 function say(req: WatchedRequest): string {
-  return `${req.method} ${shortUrl(req.url)} ${req.status === null ? "failed" : req.status}`;
+  return `${req.method} ${req.elsewhere ?? shortUrl(req.url)} ${req.status === null ? "failed" : req.status}`;
 }
 
 /** Said after a contradiction whose refusal the write policy wrote, so nobody goes looking for it in the server's logs. */

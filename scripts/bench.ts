@@ -30,6 +30,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { exitWhenDrained } from "../src/commands.ts";
 import {
   archiveApp,
   checkKeyForArchive,
@@ -174,7 +175,7 @@ if (values.archive) {
         ? `\nNo lane routes were recorded, so "not mine" verdicts in this run are read by their wording. Routes are kept when scout_lane_report folds a report while the lane's session is attached.`
         : ""),
   );
-  process.exit(0);
+  await exitWhenDrained(0);
 }
 
 if (values.all) {
@@ -205,7 +206,7 @@ if (values.all) {
       );
     }
   });
-  process.exit(0);
+  await exitWhenDrained(0);
 }
 
 const target = positionals[0];

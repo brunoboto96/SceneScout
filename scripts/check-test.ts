@@ -208,6 +208,7 @@ import {
   redactRoutes,
   refusedFlowReason,
   withoutOwnResponse,
+  ownResponseDetail,
   summarise,
   networkSection,
   requestNetworkFailure,
@@ -1530,12 +1531,26 @@ test("a failing page is one issue: its own response is not counted again as a re
             { kind: "http_error", severity: "high", detail: httpErrorDetail("GET", `${ORIGIN}/api/data`, 500), url },
           ],
         }),
+        ORIGIN,
       ),
     ],
     ORIGIN,
   );
   assert.deepEqual(issues.map((i) => i.rule).sort(), ["route-server-error", "server-error"]);
   assert.equal(issues.find((i) => i.rule === "server-error")!.evidence, "GET /api/data → HTTP 500");
+});
+
+test("a page that ended on another site with an error status is one issue: its own response matches the oracle's origin-and-path record", () => {
+  const url = "https://sso.example.net/denied?state=st-91c2#top";
+  const oracle = httpErrorDetail("GET", "https://sso.example.net/denied", 403);
+  const r = withoutOwnResponse(
+    route({ path: "/account", url, status: 403, violations: [{ kind: "http_error", severity: "medium", detail: oracle, url }] }),
+    ORIGIN,
+  );
+  assert.deepEqual(r.violations, [], "the oracle's record of the page's own response is dropped");
+  assert.equal(ownResponseDetail(url, 403, ORIGIN), oracle);
+  // The app's own page keeps its query, as the oracle records it.
+  assert.equal(ownResponseDetail(`${ORIGIN}/reset?step=2#a`, 404, ORIGIN), `GET ${ORIGIN}/reset?step=2 → HTTP 404`);
 });
 
 test("a token in a route's link is redacted everywhere the route is written", () => {
@@ -1589,6 +1604,7 @@ test("a page's own error status is one issue even when its URL carried a token, 
         status: 404,
         violations: [{ kind: "http_error", severity: "medium", detail: httpErrorDetail("GET", raw.replace(/#.*$/, ""), 404), url: raw }],
       }),
+      ORIGIN,
     ),
   ]);
   assert.deepEqual(

@@ -102,6 +102,7 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
   - `policy.ts`
   - `project-config.ts`: the operator's config file and what it lets an argument loosen
   - `write-allowlist.ts`: the operator's list of allowed writes: its entries, which request a list names, and the sign-in rule while a list is set (policy-test)
+  - `hosts.ts`: the operator's list of hosts the browser may start on: its entries and which address a list names (policy-test; the `/scenescout qa` gate's copy is held equal to it in qa-test)
   - `route-guard.ts`: the write policy on the wire: the order the route handler applies its rules in, and when a write marks its page exercised
   - `policy-explain.ts`: `scenescout policy explain`, one request's verdict in each mode, from the route handler's own functions
   - `config-explain.ts`: `scenescout config explain`, each config key's resolved value and where it came from, through the functions an attach resolves them with
