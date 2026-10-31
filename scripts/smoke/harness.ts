@@ -22,6 +22,8 @@ export const BROWSER = defaultEngine(process.env);
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appDir = path.join(here, "..", "..", "test-app");
+/** The worker scripts the fixtures register, served by name so a request path never becomes a file path. */
+const WORKER_SCRIPTS = ["sw.js", "navigate-sw.js"] as const;
 
 /** What the fixture server saw, so a suite can assert on what actually reached it. */
 export interface ServerStats {
@@ -136,8 +138,8 @@ export function settle(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Requests for a page asked with `held=1`, waiting for the suite to let them be answered. */
-const heldPages = new Set<() => void>();
+/** Requests for a page asked with `held=1`, waiting for the suite to let them be answered, each with the address it asked for. */
+const heldPages = new Map<() => void, string>();
 
 /** How many `held=1` page requests the fixture server is holding. */
 export function heldPageCount(): number {
@@ -145,13 +147,12 @@ export function heldPageCount(): number {
 }
 
 /**
- * Answer every `held=1` page request held so far. A held page is a request
- * provably still in flight for as long as a suite needs it to be, where a
- * server timer would only make it likely.
+ * Answer every `held=1` page request held so far, or only those whose path is `pathname`. A held page is a request
+ * provably still in flight for as long as a suite needs it to be, where a server timer would only make it likely.
  */
-export function releaseHeldPages(): void {
-  const waiting = [...heldPages];
-  heldPages.clear();
+export function releaseHeldPages(pathname?: string): void {
+  const waiting = [...heldPages].filter(([, url]) => pathname === undefined || url.split("?")[0] === pathname).map(([answer]) => answer);
+  for (const answer of waiting) heldPages.delete(answer);
   for (const answer of waiting) answer();
 }
 
@@ -345,7 +346,7 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
         req.url = (req.url ?? "/").replace(held, (_, before: string, after: string) => (after ? before : "")).replace(/\?$/, "");
         handle(req, res);
       };
-      heldPages.add(answer);
+      heldPages.set(answer, req.url ?? "/");
       res.on("close", () => heldPages.delete(answer));
       return;
     }
@@ -756,10 +757,11 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       res.end(JSON.stringify({ id: "7", name: "existing item" }));
       return;
     }
-    if (urlPath === "/sw.js") {
+    const workerScript = WORKER_SCRIPTS.find((name) => urlPath === `/${name}`);
+    if (workerScript) {
       // A worker script must be served as JavaScript or registration is refused.
       res.writeHead(200, { "content-type": "text/javascript" });
-      res.end(fs.readFileSync(path.join(appDir, "sw.js")));
+      res.end(fs.readFileSync(path.join(appDir, workerScript)));
       return;
     }
     if (urlPath === "/api/items/999" && req.method === "DELETE") stats.workerDeletes += 1;

@@ -115,6 +115,28 @@ export async function readWithin<T>(work: Promise<T>, ms: number): Promise<T | u
 }
 
 /**
+ * Whether a scan may still add what it reads. Closed once the scan was given up on (a navigation of the page's own held
+ * it), so a read that completes after the page has landed adds nothing to the next action's findings.
+ */
+export class ScanGate {
+  private open = true;
+
+  get closed(): boolean {
+    return !this.open;
+  }
+
+  close(): void {
+    this.open = false;
+  }
+
+  /** `read`'s value, or undefined when the gate closed before it settled. A rejection passes through. */
+  async keep<T>(read: Promise<T>): Promise<T | undefined> {
+    const value = await read;
+    return this.open ? value : undefined;
+  }
+}
+
+/**
  * What an action says when the page's own navigation held the lookup of its target past `limitMs`: where the page was
  * going (empty when no navigation was on its way, and the read was then waited on SLOW_READ_MS more), and what to do
  * next.

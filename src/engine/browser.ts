@@ -248,7 +248,7 @@ import {
   type TimeLimits,
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
-import { bestEffort, heldActionMessage, heldRead, readWithin, settleWithin, SLOW_READ_MS } from "./best-effort.js";
+import { bestEffort, heldActionMessage, heldRead, readWithin, ScanGate, settleWithin, SLOW_READ_MS } from "./best-effort.js";
 import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
@@ -1558,7 +1558,9 @@ export class BrowserEngine {
    * about ONE action, and carrying a refusal forward would blame the next
    * action's page for the previous action's request.
    */
-  private async scanForContradictions(): Promise<void> {
+  private async scanForContradictions(gate: ScanGate = new ScanGate()): Promise<void> {
+    // A scan given up on before it started leaves the ledger to the action it belongs to.
+    if (gate.closed) return;
     const requests = this.watchedResponses;
     this.watchedResponses = [];
     const acted = this.actedControl;
@@ -1588,6 +1590,8 @@ export class BrowserEngine {
         // The control's document went away: nothing left to show the change.
       }
     }
+    // Either read above may be held by a navigation of the page's own past the point the scan was given up on.
+    if (gate.closed) return;
     for (const found of findContradictions(requests, state, before, acted && actedNow ? { before: acted.before, after: actedNow } : null)) {
       // Once per refused request a session, except that a high reading of it
       // replaces an earlier medium one (#413).
@@ -1633,19 +1637,22 @@ export class BrowserEngine {
   /** Contradiction signatures already reported this session — the same refused endpoint on every page must not flood the run. */
   private contradictionsReported = new Map<string, "high" | "medium">();
 
-  private async scanForInjections(): Promise<void> {
+  private async scanForInjections(gate: ScanGate = new ScanGate()): Promise<void> {
     const page = this.page;
     // One copy for the whole scan: the list is shared with every lane, and
     // another lane typing a payload during the await below would shift the
     // indices the hits are matched back to.
     const probes = this.probes;
-    if (!page || page.isClosed() || probes.length === 0) return;
+    if (!page || page.isClosed() || probes.length === 0 || gate.closed) return;
     // On its way elsewhere: Chromium would hold the question until the page lands (#674); the next drain looks again.
     if (this.requests.navigating(page.mainFrame())) return;
     const url = page.url();
     let hits: RawHit[];
     try {
-      hits = (await page.evaluate(probeScript(probeQueries(probes)))) as RawHit[];
+      const read = await gate.keep(page.evaluate(probeScript(probeQueries(probes))));
+      // Given up on while the page was held: it has moved on, and what it reads now is the next action's to find.
+      if (read === undefined) return;
+      hits = read as RawHit[];
     } catch {
       // A page mid-navigation has no DOM to ask; the next drain looks again.
       return;
@@ -2483,16 +2490,18 @@ export class BrowserEngine {
     const page = this.page;
     if (!page || page.isClosed()) return;
     this.traceStep(page.url(), "scans");
-    await this.readHeld(
+    const gate = new ScanGate();
+    const scanned = await this.readHeld(
       page,
       (async () => {
-        await this.scanForInjections();
-        await this.scanForContradictions();
+        await this.scanForInjections(gate);
+        await this.scanForContradictions(gate);
         if (also) await also();
       })(),
       this.limits.navMs,
       false,
     );
+    if (scanned.stalled) gate.close();
   }
 
   /**
