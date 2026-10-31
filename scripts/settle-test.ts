@@ -21,9 +21,11 @@ import {
   keepWaitingForNavigation,
   keepWatchingUrl,
   NAVIGATION_COMMIT_GRACE_MS,
+  navigationAnswersPage,
   normalizePace,
   ownNavigationLanded,
   PACE_MAX_MS,
+  PAGE_COMMIT_CAP_MS,
   QUIET_MS,
   RECHECK_BUSY_CAP_MS,
   RECHECK_CAP_MS,
@@ -670,6 +672,97 @@ test("a navigation request is on its way from its start until its frame commits 
   t.ended("hop-1", false, 8000);
   t.started("hop-2", "main", true);
   assert.equal(t.navigating("main", 8000 + NAVIGATION_COMMIT_GRACE_MS * 10), true);
+});
+
+test("which navigation answers are a page their frame will commit", () => {
+  const html = { "content-type": "text/html; charset=utf-8" };
+  assert.equal(navigationAnswersPage(200, html), true);
+  assert.equal(navigationAnswersPage(200, { "content-type": "application/XHTML+xml" }), true);
+  assert.equal(navigationAnswersPage(404, html), true, "an error page is still a page");
+  assert.equal(navigationAnswersPage(500, html), true);
+  assert.equal(navigationAnswersPage(302, { ...html, location: "/login" }), false, "a redirect hop: the answer is still to come");
+  assert.equal(navigationAnswersPage(204, html), false, "no content: nothing to commit");
+  assert.equal(navigationAnswersPage(205, html), false);
+  assert.equal(navigationAnswersPage(200, { ...html, "content-disposition": "attachment; filename=a.html" }), false, "a download");
+  assert.equal(navigationAnswersPage(200, { ...html, "content-disposition": "inline" }), true);
+  assert.equal(navigationAnswersPage(200, { "content-type": "application/pdf" }), false, "a file");
+  assert.equal(navigationAnswersPage(200, { "content-type": "application/json" }), false);
+  assert.equal(navigationAnswersPage(200, {}), false, "no content type is not taken for a page");
+});
+
+test("a navigation answered with a page is on its way until its frame commits it, however late the commit is reported (#726)", () => {
+  // Firefox reports a navigation's request finishing and its frame committing the page separately; on a loaded
+  // machine the commit came more than NAVIGATION_COMMIT_GRACE_MS after the finish. Counted as no longer on its way,
+  // the attach's URL watch then ended on the address before the page's redirect to sign-in. Contrastive pair: the
+  // same timing for an answer that is not a page (a 204) is not on its way once the grace has passed.
+  const t = tracker();
+  t.started("to-login", "main", true);
+  t.answered("to-login", true);
+  t.ended("to-login", false, 1000);
+  assert.equal(t.navigating("main", 1000 + NAVIGATION_COMMIT_GRACE_MS + 1500), true, "finished, its commit not yet reported");
+  t.navigated("main");
+  assert.equal(t.navigating("main", 1000 + NAVIGATION_COMMIT_GRACE_MS + 1501), false, "committed");
+  t.started("no-content", "main", true);
+  t.answered("no-content", false);
+  t.ended("no-content", false, 5000);
+  assert.equal(t.navigating("main", 5000 + NAVIGATION_COMMIT_GRACE_MS), false, "a 204 never commits");
+  // A page whose commit never arrives is on its way no longer than PAGE_COMMIT_CAP_MS.
+  t.started("never-commits", "main", true);
+  t.answered("never-commits", true);
+  t.ended("never-commits", false, 9000);
+  assert.equal(t.navigating("main", 9000 + PAGE_COMMIT_CAP_MS - 1), true);
+  assert.equal(t.navigating("main", 9000 + PAGE_COMMIT_CAP_MS), false);
+  // A redirect hop answered first, then the page it leads to: the hop is not the page, the page is.
+  t.started("hop", "main", true);
+  t.answered("hop", false);
+  t.ended("hop", false, 20_000);
+  t.started("landing", "main", true);
+  t.answered("landing", true);
+  t.ended("landing", false, 20_010);
+  assert.equal(t.navigating("main", 20_010 + NAVIGATION_COMMIT_GRACE_MS * 3), true);
+  // Only a navigation answered with a page is committing: one still waiting for its answer, or answered with a 204, is not.
+  t.started("waiting", "main", true);
+  assert.equal(t.committing("main", 20_020), false, "no answer yet");
+  t.answered("waiting", true);
+  assert.equal(t.committing("main", 20_021), true, "answered with a page, its body still arriving");
+  t.ended("waiting", false, 20_030);
+  assert.equal(t.committing("main", 20_030 + NAVIGATION_COMMIT_GRACE_MS * 3), true, "finished, its commit not yet reported");
+  t.navigated("main");
+  assert.equal(t.committing("main", 20_031), false, "committed");
+  t.started("empty", "main", true);
+  t.answered("empty", false);
+  t.ended("empty", false, 20_040);
+  assert.equal(t.committing("main", 20_041), false, "a 204 has nothing to commit");
+});
+
+test("the attach's sign-in verdict waits for a redirect to sign-in whose commit is reported late (#726)", async () => {
+  // The guard's request to the sign-in page started during the settle and finished just after the watch began, and the
+  // browser reported the commit 1.5 s after that: past NAVIGATION_COMMIT_GRACE_MS and past the watch's quiet window.
+  // The stale profile was read as signed in. Contrastive pair: the same timing when the answer is not a page.
+  const run = async (page: boolean): Promise<{ url: string; tookMs: number }> => {
+    const stand = standInPage("http://app.test/private");
+    const t = tracker();
+    const begun = stand.clock;
+    t.started("to-login", "main", true, begun - 30);
+    let finished = false;
+    stand.onTick = () => {
+      if (!finished && stand.clock - begun >= 50) {
+        finished = true;
+        t.answered("to-login", page);
+        t.ended("to-login", false, stand.clock);
+      }
+      if (page && stand.clock - begun >= 1550 && stand.href.endsWith("/private")) {
+        stand.href = "http://app.test/login";
+        t.navigated("main");
+      }
+    };
+    const url = await stableUrlOf(() => stand, stand.now, { navigating: () => t.navigating("main", stand.clock), quietMs: ATTACH_URL_QUIET_MS });
+    return { url, tookMs: stand.clock - begun };
+  };
+  assert.equal((await run(true)).url, "http://app.test/login");
+  const empty = await run(false);
+  assert.equal(empty.url, "http://app.test/private");
+  assert.ok(empty.tookMs <= ATTACH_URL_QUIET_MS + SETTLE_TICK_MS, `an answer that never commits does not hold the watch (${empty.tookMs} ms)`);
 });
 
 test("a navigation answered with a download is not on its way, while its file is still arriving", () => {

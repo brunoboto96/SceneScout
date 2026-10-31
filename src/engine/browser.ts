@@ -120,6 +120,7 @@ import {
   CRAWL_URL_HELD_MS,
   describePace,
   InFlightRequests,
+  navigationAnswersPage,
   normalizePace,
   ownNavigationLanded,
   RECHECK_OPEN_MS,
@@ -1991,6 +1992,8 @@ export class BrowserEngine {
     });
     context.on("response", (res) => {
       answered.answer(res.request(), res.status());
+      // A page answer keeps its navigation on its way until the frame commits it, however late that is reported (settle.ts).
+      requests.answered(res.request(), res.request().isNavigationRequest() && navigationAnswersPage(res.status(), res.headers()));
       this.noteAuthAnswer(res);
       this.noteUnauthenticated(res);
       this.noteDocumentLoad(res.request());
@@ -2603,7 +2606,7 @@ export class BrowserEngine {
       } catch (err) {
         // A call that judged its own landing has recorded it, and an action's own landing is said here: the next call
         // must not take either for a page that went to sign-in on its own. A read leaves it for the next call to judge.
-        const own = call === "moves" ? this.ownSignInNote() : "";
+        const own = call === "moves" ? await this.ownSignInNote() : "";
         if (call === "judges") this.noteSeen();
         const notice = before + own;
         if (!notice) throw err;
@@ -2647,8 +2650,8 @@ export class BrowserEngine {
       return "";
     }
     if (verdict === "note") return this.ownSignInNote();
-    const page = this.page;
-    if (!page || page.isClosed()) return "";
+    const page = await this.landedPage();
+    if (!page) return "";
     const now = page.url();
     const seen = this.seenUrl;
     this.seenUrl = now;
@@ -2670,14 +2673,29 @@ export class BrowserEngine {
   }
 
   /**
+   * The driven page, for a sign-in verdict that reads its address once, after a navigation of its own that has been
+   * answered with a page has committed, within the page-load limit: the browser can report the commit well after the
+   * answer, and read in between, the address is the page it is leaving (#726). A navigation still waiting for its
+   * answer is not waited for here. Null when there is no open page.
+   */
+  private async landedPage(): Promise<Page | null> {
+    const page = this.page;
+    if (!page || page.isClosed()) return null;
+    const frame = page.mainFrame();
+    if (this.requests.committing(frame))
+      await ownNavigationLanded(page, () => !page.isClosed() && this.requests.committing(frame), this.limits.navMs, Date.now());
+    return page.isClosed() || page !== this.page ? null : page;
+  }
+
+  /**
    * An action that ended on a sign-in page it did not start on: a sign-out, a "Log in" link, or a sign-in that ran out.
    * Said, never counted (authloss.ts lateSignInVerdict), and the address is noted so the next call does not count it.
    * The session counts as signed out on purpose from then on (AuthLossTracker.signOut) until an action takes it off a
    * sign-in page into the app again (authloss.ts leftSignIn), as signing in through the app's form does.
    */
-  private ownSignInNote(): string {
-    const page = this.page;
-    if (!page || page.isClosed()) return "";
+  private async ownSignInNote(): Promise<string> {
+    const page = await this.landedPage();
+    if (!page) return "";
     const now = page.url();
     const seen = this.seenUrl;
     this.seenUrl = now;
