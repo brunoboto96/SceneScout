@@ -542,8 +542,8 @@ test("the plain section answers each ticket: totals, a table of criteria, why ea
     "",
     "| | Acceptance criterion | Result |",
     "|---|---|---|",
-    '| AC1 | The export button downloads a file | Failed: "Export throws" (problem 2 below) |',
-    "| AC2 | The file has a / header row | Passed (unsure) |",
+    '| AC1 | The export button downloads a file | Failed: "Export throws" \\(problem 2 below\\) |',
+    "| AC2 | The file has a \\| header row | Passed \\(unsure\\) |",
     "| AC3 | Admins can schedule an export | Not tested: the account the run used could not reach this part of the site |",
     "| AC4 | The file is mailed | Not tested: it is outside what this run could check |",
     "| AC5 | Nobody judged this | Not tested: no result was recorded for it |",
@@ -560,11 +560,25 @@ test("the plain section answers each ticket: totals, a table of criteria, why ea
   // Without pictures (none taken yet), the table stands alone; a finding the plain view does not list is named by id.
   const bare = formatTicketsPlain({ ...reportInput, pictureOf: () => undefined, problemNumber: new Map() });
   assert.ok(!bare.some((l) => l.startsWith("![")));
-  assert.ok(bare.includes('| AC1 | The export button downloads a file | Failed: "Export throws" (finding aaaaaaaaaa) |'));
+  assert.ok(bare.includes('| AC1 | The export button downloads a file | Failed: "Export throws" \\(finding aaaaaaaaaa\\) |'));
   // Observe's reason, in words.
   const observed = formatTicketsPlain({ ...reportInput, verdicts: [verdict({ verdict: "not-tested", untestedBecause: "observe-blocked" })] });
   assert.ok(observed.some((l) => l.includes("Not tested: the run was only allowed to look, not to send changes, so this could not be tried")));
   assert.deepEqual(formatTicketsPlain({ ...reportInput, tickets: [] }), [], "no tickets, no section");
+});
+
+test("a ticket's id, title, note and criteria are written into the report as text: no link or image from a ticket renders", () => {
+  const image = "![p](https://t.example/p.png)";
+  const tickets: Ticket[] = [
+    { id: "WID-9", title: `Title ${image}`, source: `pasted ${image}`, note: `Note ${image}`, criteria: [] },
+    { id: "WID-8", title: "Has one", source: "pasted", criteria: [{ id: "AC1", text: `Shows ${image}`, shape: "bullet" }] },
+  ];
+  const input = { ...reportInput, tickets, verdicts: [] };
+  for (const lines of [formatTicketsPlain(input), formatTicketsTechnical(input)]) {
+    const md = lines.join("\n");
+    assert.ok(md.includes("\\!\\[p\\]\\(https\\://t.example/p.png\\)"), md);
+    assert.ok(!/(^|[^\\])!\[[^\]]*\]\(http/.test(md), md);
+  }
 });
 
 test("the technical section keeps every verdict's confidence, finding ids, reason and sessions", () => {
@@ -635,7 +649,7 @@ test("the report answers the tickets in the plain view first and the technical r
   assert.ok(at("### The tickets") < at("<details><summary>1. Export throws</summary>"), "the tickets come before each problem in full");
   assert.ok(at("<details><summary>1. Export throws</summary>") < at("## Technical details"));
   assert.ok(at("## Technical details") < at("## Acceptance criteria"));
-  assert.ok(md.includes('| AC1 | Downloads a file | Failed: "Export throws" (problem 1 below) |'));
+  assert.ok(md.includes('| AC1 | Downloads a file | Failed: "Export throws" \\(problem 1 below\\) |'));
   assert.match(both.summary, /TICKETS: 1 ticket, 2 criteria — 1 failed and 1 was not tested/);
 
   const qa = generateReport(store, [], { ...extras, report: "qa" }, { write: false }).markdown;

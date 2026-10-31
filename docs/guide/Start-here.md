@@ -245,6 +245,8 @@ The level is a contract that `scout_report` enforces for what the engine can see
 
 `report.html` opens from the file, offline, on a phone, in dark mode and in print, and loads nothing from outside the file. A Markdown viewer that does not fold `<details>` shows every part unfolded.
 
+Text that came from the app (titles, steps, details, addresses, ticket text) is written into `report.md` inert: on one line where a line break would start a heading or end a table cell, and with Markdown and HTML escaped, so a link, an image, a heading or a fold tag in it shows as text and loads nothing wherever the Markdown is pasted. A web address in it is text too, not a link; the page each problem is on stays a link. `report.html` and the live view read it back as the app wrote it. The team report's Markdown, the check's report and the CI run's summary are written the same way.
+
 When the run was given tickets, the Summary answers them after the problems table: for each ticket, every acceptance criterion as passed, failed or not tested. A failed criterion names the problems that show it; one not tested says why (the account used could not reach it, the run was only allowed to look, or it was outside what the run could check). A verdict the agent was not sure of is marked unsure.
 
 ### The team report

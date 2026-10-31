@@ -13,6 +13,7 @@
  * It lives apart from browser.ts so the precedence, the bounds and the
  * parsing are table-tested (scripts/limits-test.ts) without a browser.
  */
+import { codeSpan } from "./inert-text.js";
 import { fromJs } from "./js-regex.js";
 import { browserNetworkCause, CAUSE_WORDS } from "./network-failure.js";
 
@@ -380,7 +381,9 @@ export function formatLoadRetries(retries: readonly LoadRetry[]): string[] {
     ``,
     `A page load the machine refused a socket for is loaded once more, and so is one that failed on the network when ${NETWORK_RETRY_ENV} is on. Each was retried once; a load that failed again is reported where it failed.`,
     ``,
-    ...retries.map((r) => `- \`${r.url}\` (session ${r.session}): retried after ${r.cause} (${retryWhy(r.cause)}), at ${r.at}. Sockets then: ${r.sockets}`),
+    ...retries.map(
+      (r) => `- ${codeSpan(r.url)} (session ${r.session}): retried after ${r.cause} (${retryWhy(r.cause)}), at ${r.at}. Sockets then: ${r.sockets}`,
+    ),
     ``,
   ];
 }

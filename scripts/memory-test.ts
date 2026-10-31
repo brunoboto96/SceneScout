@@ -4573,7 +4573,7 @@ test("a run started from an earlier one: noted from another process, kept throug
       ["r1"],
     );
     const report = generateReport(store, [], undefined, { write: false }).markdown;
-    assert.match(report, /\| Started from \| continued from the run recorded in prev\/ci\.json \(its report of 2026-10-07T09:00:00\.000Z\) \|/);
+    assert.match(report, /\| Started from \| continued from the run recorded in prev\/ci\.json \\\(its report of 2026-10-07T09:00:00\.000Z\\\) \|/);
     // A server that never folded it in still keeps it when it writes: the merge unions the notes.
     const other = new MemoryStore(dir);
     noteFromRunOnDisk(dir, note(new Date().toISOString(), "r2"));

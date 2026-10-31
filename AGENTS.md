@@ -155,6 +155,7 @@ SceneScout is a **generic** exploratory-testing engine used against arbitrary we
   - `csp.ts`: the Content-Security-Policy a saved page carries
   - `sensitive.ts`: which fields are secret, the mask their typed value gets, and the email, phone and card-number redaction
   - `linear-regex.ts`: the linear-time regular expressions redaction and the credential check run on, and how a lookaround is written for them
+  - `inert-text.ts`: app text made inert for every Markdown writer (the export's issue body, the team report, the check's report and the CI summary, the run report) and read back once by the pages that render it (export-test, report-test, contract-test, live-test)
   - `credential.ts`: whether text a person wrote into the guided choices holds a credential
   - `memory-scrub.ts`: cleaning what an older engine kept in clear, once
   - `secret-pixels.ts`: which fields a picture paints over

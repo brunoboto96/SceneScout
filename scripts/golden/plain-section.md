@@ -8,7 +8,7 @@ SceneScout checked http://app.test on 2026-01-01 09:00 UTC, for 13 minutes, with
 | 1 | Blocks users | Saving a thing says it worked when it did not | /things/new | The page said something worked when the server had refused it | The page reports only what really happened. |
 | 2 | Annoying | The error hides behind the banner | /login | Something is confusing to use | It is clear what to do and what happened. |
 | 3 | Cosmetic | A label is clipped | / | Something else is wrong | The app behaves the way a person using it would expect. |
-| 4 | Annoying | The orders page fails to load its list | /orders?page=2#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
+| 4 | Annoying | The orders page fails to load its list | /orders?page=2\#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
 
 2 problems found by earlier runs were not checked again this time. They are listed in the technical details below.
 
@@ -33,7 +33,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/things/new
+1. Go to http\://app.test/things/new
 2. Type "A thing" into the "Name" field and press Enter
 3. Click the "Save" button
 
@@ -60,7 +60,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/login
+1. Go to http\://app.test/login
 2. Double-click the "Sign in" button
 3. Choose "Narnia" in the "Country" list
 
@@ -104,7 +104,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/orders?page=2
+1. Go to http\://app.test/orders?page=2
 2. Scroll down
 
 **What was expected:** The action completes, or the page says clearly why it could not.
@@ -153,7 +153,7 @@ SceneScout checked http://app.test on 2026-01-01 09:00 UTC, for 13 minutes, with
 | 1 | Blocks users | Saving a thing says it worked when it did not | /things/new | The page said something worked when the server had refused it | The page reports only what really happened. |
 | 2 | Annoying | The error hides behind the banner | /login | Something is confusing to use | It is clear what to do and what happened. |
 | 3 | Cosmetic | A label is clipped | / | Something else is wrong | The app behaves the way a person using it would expect. |
-| 4 | Annoying | The orders page fails to load its list | /orders?page=2#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
+| 4 | Annoying | The orders page fails to load its list | /orders?page=2\#top | The server refused or failed a request | The action completes, or the page says clearly why it could not. |
 
 2 problems found by earlier runs were not checked again this time.
 
@@ -181,7 +181,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/things/new
+1. Go to http\://app.test/things/new
 2. Type "A thing" into the "Name" field and press Enter
 3. Click the "Save" button
 
@@ -207,7 +207,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/login
+1. Go to http\://app.test/login
 2. Double-click the "Sign in" button
 3. Choose "Narnia" in the "Country" list
 
@@ -249,7 +249,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/orders?page=2
+1. Go to http\://app.test/orders?page=2
 2. Scroll down
 
 **What was expected:** The action completes, or the page says clearly why it could not.

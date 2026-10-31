@@ -18,6 +18,7 @@ import { CHECK_RULES, WORTH_A_LOOK_RULES } from "./check.js";
 import { readFindings } from "./ci.js";
 import { isWorthALook, redactSecrets, type ActionLogEntry, type Finding } from "./memory.js";
 import { retryAfterMs } from "./provider.js";
+import { inertMarkdown, inertPlain, oneLine } from "./inert-text.js";
 import { answerTicket, type CriterionVerdict, type Ticket } from "./tickets.js";
 
 const TRACKERS = ["github", "jira"] as const;
@@ -685,67 +686,9 @@ export function jiraRevision(summary: unknown, description: unknown): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
-// ── inert text ──────────────────────────────────────────────────────────────
+// ── inert text (inert-text.ts) ──────────────────────────────────────────────
 
-/**
- * C0 and C1 controls and every bidirectional control (Unicode's Bidi_Control
- * set: U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069): each run becomes
- * a space, so nothing is invisible and nothing reorders the line. The same set
- * as the qa reply's (action/qa-action.mjs), which export-test holds it to.
- */
-export const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g;
-
-/** One line: control, bidirectional-override and line-break characters become spaces; runs of space collapse; at most `max`. */
-export function oneLine(text: unknown, max: number): string {
-  let s = String(text ?? "")
-    .replace(CONTROL_CHARS, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (s.length > max) s = `${s.slice(0, max - 1)}…`;
-  return s;
-}
-
-/**
- * Zero-width spaces where a tracker would otherwise act on text: after `@`
- * (a mention, an email autolink), inside `://` and `www.` (a link), between
- * `#`, `GH-` or `issues/`, `pull/`, `discussions/` and a number (a
- * cross-reference), and inside the marker's word (so quoted text cannot claim
- * to be another finding's issue).
- */
-function breakTriggers(s: string): string {
-  return s
-    .replace(/@/g, "@\u200b")
-    .replace(/:\/\//g, ":\u200b//")
-    .replace(/www\./gi, (m) => `${m.slice(0, 3)}\u200b.`)
-    .replace(/#(?=\d)/g, "#\u200b")
-    .replace(/\bgh-(?=\d)/gi, (m) => `${m.slice(0, 2)}\u200b-`)
-    .replace(/\/(issues|pulls?|discussions)\/(?=\d)/gi, "/$1/\u200b")
-    .replace(/scenescout-finding/gi, (m) => `${m.slice(0, 10)}\u200b${m.slice(10)}`);
-}
-
-/**
- * Text for a GitHub Markdown body: one line, HTML-escaped, every Markdown
- * punctuation mark backslash-escaped, and every trigger broken. A backslash
- * does not stop GitHub rendering `$…$` as maths, so each `$` gets a
- * zero-width space before it instead. This is the escaping of the
- * `/scenescout qa` reply (action/qa-action.mjs `inert`) character for
- * character, which export-test holds it to, plus the marker break.
- */
-export function inertMarkdown(text: unknown, max = 160): string {
-  return breakTriggers(
-    oneLine(text, max)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/([\\`*_{}[\]()#+!|~])/g, "\\$1")
-      .replace(/\$/g, "\u200b$"),
-  );
-}
-
-/** Text a tracker shows as it is (an issue title, a Jira text node): one line, every trigger broken, nothing escaped. */
-export function inertPlain(text: unknown, max = 160): string {
-  return breakTriggers(oneLine(text, max));
-}
+export { CONTROL_CHARS, inertMarkdown, inertPlain, oneLine } from "./inert-text.js";
 
 // ── what an issue says ──────────────────────────────────────────────────────
 
