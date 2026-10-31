@@ -23,6 +23,7 @@
  */
 import { UNAUTHENTICATED_STATUSES } from "./authloss.js";
 import { bestEffort } from "./best-effort.js";
+import { answersNavigation, mediaTypeOf } from "./crawl.js";
 
 /** No request has started for this long and none is in flight: the page has settled. */
 export const QUIET_MS = 120;
@@ -206,8 +207,30 @@ export function recheckWait(s: RecheckState): number | null {
   return Math.min(RECHECK_WAITS_MS[Math.min(n - 1, RECHECK_WAITS_MS.length - 1)], cap - s.elapsedMs, young ? untilOld : Infinity);
 }
 
-/** How long a navigation that finished without failing still counts as on its way, waiting for its frame to commit it. */
+/**
+ * How long a navigation that finished without failing still counts as on its way, waiting for its frame to commit it,
+ * when its answer was not a page (navigationAnswersPage): a 204 or a file never commits, so the wait for one is short.
+ */
 export const NAVIGATION_COMMIT_GRACE_MS = 500;
+/**
+ * How long a navigation answered with a page still counts as on its way after it finished, if its frame never reports
+ * the commit. The browser reports a page's request finishing and its frame committing it separately, and on a loaded
+ * machine Firefox reported the commit more than NAVIGATION_COMMIT_GRACE_MS after the request finished. This bound is
+ * only for a commit that never arrives; the waits that read `navigating` have their own caps.
+ */
+export const PAGE_COMMIT_CAP_MS = 10_000;
+
+/**
+ * Whether a navigation's answer is a page its frame will commit: a page media type (text/html, XHTML), a status that
+ * carries a document (not a redirect hop, not 204 or 205), and not sent as an attachment. `headers` are the response's,
+ * with lowercase names. A missing content type is not taken for a page.
+ */
+export function navigationAnswersPage(status: number, headers: Readonly<Record<string, string | undefined>>): boolean {
+  if (!answersNavigation(status, headers["location"]) || status === 204 || status === 205) return false;
+  if ((headers["content-disposition"] ?? "").trim().toLowerCase().startsWith("attachment")) return false;
+  const type = mediaTypeOf(headers["content-type"]);
+  return type === "text/html" || type === "application/xhtml+xml";
+}
 
 /**
  * Which requests are still in flight, for the wait above.
@@ -226,11 +249,11 @@ export const NAVIGATION_COMMIT_GRACE_MS = 500;
  * types so it is tested without a browser.
  */
 export class InFlightRequests<R, F> {
-  private readonly open = new Map<R, { frame: F | undefined; order: number; at: number }>();
+  private readonly open = new Map<R, { frame: F | undefined; order: number; at: number; page?: boolean }>();
   /** Per frame, the order of the latest navigation request it sent that has not yet committed. */
   private readonly pendingNavigation = new Map<F, number>();
-  /** Per frame, when its pending navigation request finished without failing (it may still be about to commit). */
-  private readonly finishedNavigation = new Map<F, number>();
+  /** Per frame, when its pending navigation request finished without failing (it may still be about to commit), and whether its answer was a page. */
+  private readonly finishedNavigation = new Map<F, { at: number; page: boolean }>();
   private order = 0;
 
   /** A request started. `frame` is undefined for one no frame sent (a worker's). */
@@ -241,6 +264,12 @@ export class InFlightRequests<R, F> {
       this.pendingNavigation.set(frame, order);
       this.finishedNavigation.delete(frame);
     }
+  }
+
+  /** A request's response arrived; `page` is whether it is a page its frame will commit (navigationAnswersPage). */
+  answered(request: R, page: boolean): void {
+    const held = this.open.get(request);
+    if (held) held.page = page;
   }
 
   /**
@@ -256,7 +285,7 @@ export class InFlightRequests<R, F> {
     if (failed) {
       this.pendingNavigation.delete(held.frame);
       this.finishedNavigation.delete(held.frame);
-    } else this.finishedNavigation.set(held.frame, at);
+    } else this.finishedNavigation.set(held.frame, { at, page: held.page === true });
   }
 
   /**
@@ -325,18 +354,34 @@ export class InFlightRequests<R, F> {
 
   /**
    * Whether `frame` has a navigation on its way: its latest navigation request
-   * is still open, or finished without failing less than
-   * NAVIGATION_COMMIT_GRACE_MS ago and has not been committed (a document's
-   * body can end before the frame commits it). One that finished long enough
-   * ago without committing (a 204, a download) never will, and one that failed
-   * (refused, aborted) never will either: neither counts.
+   * is still open, or finished without failing and has not been committed (a
+   * document's body can end before the frame commits it). One answered with a
+   * page counts until its frame commits it, to PAGE_COMMIT_CAP_MS, however late
+   * the browser reports the commit; any other answer counts for
+   * NAVIGATION_COMMIT_GRACE_MS, because one that has not committed by then (a
+   * 204, a download) never will. One that failed (refused, aborted) never
+   * will either: it does not count.
    */
   navigating(frame: F, now: number = Date.now()): boolean {
     const order = this.pendingNavigation.get(frame);
     if (order === undefined) return false;
-    const finishedAt = this.finishedNavigation.get(frame);
-    if (finishedAt !== undefined) return now - finishedAt < NAVIGATION_COMMIT_GRACE_MS;
+    const finished = this.finishedNavigation.get(frame);
+    if (finished !== undefined) return now - finished.at < (finished.page ? PAGE_COMMIT_CAP_MS : NAVIGATION_COMMIT_GRACE_MS);
     for (const held of this.open.values()) if (held.frame === frame && held.order === order) return true;
+    return false;
+  }
+
+  /**
+   * Whether `frame`'s navigation on its way has already been answered with a page, so its commit is all that is left:
+   * the address is about to change, though the browser may report it late. Bounded by PAGE_COMMIT_CAP_MS from the
+   * finish, as navigating is.
+   */
+  committing(frame: F, now: number = Date.now()): boolean {
+    const order = this.pendingNavigation.get(frame);
+    if (order === undefined) return false;
+    const finished = this.finishedNavigation.get(frame);
+    if (finished !== undefined) return finished.page && now - finished.at < PAGE_COMMIT_CAP_MS;
+    for (const held of this.open.values()) if (held.frame === frame && held.order === order) return held.page === true;
     return false;
   }
 }

@@ -98,6 +98,7 @@ import {
   splitRefusals,
   statusMatches,
   urlMatches,
+  flowPlace,
   videoSecretWarning,
   type FlowRun,
   type FlowStep,
@@ -2330,6 +2331,16 @@ test("flows: a URL pattern sees the path, query and hash, never the origin", () 
   assert.ok(urlMatches("tab=open", "http://x/things?tab=open"));
   assert.ok(!urlMatches("^127", "http://127.0.0.1:3000/"));
   assert.ok(!urlMatches("^/things/\\d+$", "http://x/things/new"));
+});
+
+test("flows: a flow's result names a page of the app by its path and query, and the blank page never as a path", () => {
+  assert.equal(flowPlace("http://127.0.0.1:3000/things/42?tab=open#top"), "/things/42?tab=open");
+  // new URL("about:blank").pathname is "blank", which read as a route of the app.
+  assert.equal(flowPlace("about:blank"), "about:blank");
+  // A browser's error page names the failed address in its own query: never repeated.
+  assert.equal(flowPlace("about:neterror?e=dnsNotFound&u=http%3A//127.0.0.1/things%3Fkey%3Dabc"), "about:neterror");
+  assert.equal(flowPlace("chrome-error://chromewebdata/"), "a page that is not the app's");
+  assert.equal(flowPlace(""), "a page that is not the app's");
 });
 
 test("flows: an expected request matches by method and path, with * for one segment and a status or a class", () => {
