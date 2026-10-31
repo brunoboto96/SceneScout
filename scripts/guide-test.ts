@@ -26,6 +26,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { listedParams, shownCalls, toolParams, toolParamsMarkdown, toolParamsSection, unknownParams } from "./tool-params.ts";
 import { CHECK_OPTION_NAMES, CHECK_RULES, parseCheckArgs, WORTH_A_LOOK_RULES } from "../src/engine/check.ts";
 import { CI_OPTION_NAMES, CLOUD_ADDRESS_ENV, DEDUP_MODES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
 import { CONFIG_KEYS, PRESET_POLICY, PRESETS, UPLOAD_MODES } from "../src/engine/project-config.ts";
@@ -1119,4 +1120,176 @@ test("the mod settings table lists exactly the settings the mod's manifest asks 
   const manifest = JSON.parse(read("mods/scenescout-mod/.claude-plugin/plugin.json")) as { userConfig: Record<string, unknown> };
   const listed = sorted(tableIn(REFERENCE, "## Claude Code mod settings").map((r) => nameIn(r[0])));
   assert.deepEqual(listed, sorted(Object.keys(manifest.userConfig)));
+});
+
+// ── nested tool parameters (the MCP tool parameters table, held by mcp-check) ──
+
+/** A run_plan-shaped schema: a required array of steps, each with a required action and optional fields; and an optional filter object. */
+const PLAN_SCHEMA = {
+  type: "object",
+  properties: {
+    steps: {
+      type: "array",
+      items: { type: "object", properties: { action: { type: "string" }, target: { type: "string" }, value: { type: "string" } }, required: ["action"] },
+    },
+    filter: { type: "object", properties: { impact: { type: "string" } } },
+    session: { type: "string" },
+  },
+  required: ["steps"],
+};
+
+test("tool parameters: a nested object's and an array item's fields are listed by path and required-ness", () => {
+  assert.deepEqual(toolParams(PLAN_SCHEMA), [
+    { name: "steps", required: true },
+    { name: "steps[].action", required: true },
+    { name: "steps[].target", required: false },
+    { name: "steps[].value", required: false },
+    { name: "filter", required: false },
+    { name: "filter.impact", required: false },
+    { name: "session", required: false },
+  ]);
+  // A union's field is required only where every branch requires it.
+  const union = {
+    type: "object",
+    properties: {
+      x: {
+        anyOf: [
+          { type: "object", properties: { a: {}, b: {} }, required: ["a", "b"] },
+          { type: "object", properties: { a: {} }, required: ["a"] },
+        ],
+      },
+    },
+  };
+  assert.deepEqual(toolParams(union), [
+    { name: "x", required: false },
+    { name: "x.a", required: true },
+    { name: "x.b", required: false },
+  ]);
+  // A nullable object: its null branch has no fields and leaves a required field required.
+  const nullable = { type: "object", properties: { x: { anyOf: [{ type: "object", properties: { a: {} }, required: ["a"] }, { type: "null" }] } } };
+  assert.deepEqual(toolParams(nullable), [
+    { name: "x", required: false },
+    { name: "x.a", required: true },
+  ]);
+  // Properties beside a union keep their own and add the branches'.
+  const both = {
+    type: "object",
+    properties: { a: {} },
+    anyOf: [
+      { type: "object", properties: { a: {}, b: {} }, required: ["a"] },
+      { type: "object", properties: { a: {} }, required: ["a"] },
+    ],
+  };
+  assert.deepEqual(toolParams(both), [
+    { name: "a", required: true },
+    { name: "b", required: false },
+  ]);
+});
+
+test("tool parameters: the table round-trips nested fields, and a renamed or newly required nested field changes it", () => {
+  const md = toolParamsMarkdown([{ name: "scout_run_plan", inputSchema: PLAN_SCHEMA }]);
+  const row = md.split("\n").find((l) => l.startsWith("| `scout_run_plan`"))!;
+  assert.deepEqual(listedParams(row.split("|")[2]), toolParams(PLAN_SCHEMA));
+  assert.ok(row.includes("`steps[].target` (optional)"), row);
+  const renamed = structuredClone(PLAN_SCHEMA);
+  const step = renamed.properties.steps.items as { properties: Record<string, unknown>; required: string[] };
+  step.properties = { action: step.properties.action, selector: step.properties.target, value: step.properties.value };
+  assert.notEqual(toolParamsMarkdown([{ name: "scout_run_plan", inputSchema: renamed }]), md, "a renamed step field no longer matches the guide");
+  const stricter = structuredClone(PLAN_SCHEMA);
+  (stricter.properties.steps.items as { required: string[] }).required = ["action", "target"];
+  assert.notEqual(toolParamsMarkdown([{ name: "scout_run_plan", inputSchema: stricter }]), md, "nor does one that became required");
+  assert.equal(toolParamsSection(`x\n${md}\ny`), md);
+});
+
+test("shown calls: nested keys are read as paths, shorthand and quoted keys count, quoted values name nothing", () => {
+  assert.deepEqual(shownCalls('Call `scout_run_plan {steps: [{action: "click", target: "text={a: b}"}, {action, value}], onViolation: "continue"}` now.'), [
+    { tool: "scout_run_plan", params: ["steps", "steps[].action", "steps[].target", "steps[].action", "steps[].value", "onViolation"] },
+  ]);
+  assert.deepEqual(shownCalls('`scout_verify {id, verdict, note}` and `scout_cards {filter: {"impact": "high"}}`'), [
+    { tool: "scout_verify", params: ["id", "verdict", "note"] },
+    { tool: "scout_cards", params: ["filter", "filter.impact"] },
+  ]);
+  // An apostrophe in a value is not a quote, and a quote never runs past its paragraph.
+  assert.deepEqual(shownCalls("`scout_feedback {id, reason: it's fine, bogus}`"), [{ tool: "scout_feedback", params: ["id", "reason", "bogus"] }]);
+  assert.deepEqual(shownCalls("`scout_note {text: \"don't}`\n\nThen see: a {b}."), [{ tool: "scout_note", params: ["text"] }]);
+  assert.deepEqual(shownCalls("`scout_session {area: 'forms'}` and the person's choice"), [{ tool: "scout_session", params: ["area"] }]);
+  // The contrast: a call naming a step field the schema renamed is a parameter the tool does not take.
+  const renamed = toolParams({
+    ...PLAN_SCHEMA,
+    properties: { ...PLAN_SCHEMA.properties, steps: { type: "array", items: { type: "object", properties: { action: {}, selector: {} } } } },
+  }).map((p) => p.name);
+  const [call] = shownCalls('scout_run_plan {steps: [{action: "click", target: "testid=save"}]}');
+  assert.deepEqual(
+    call.params.filter((p) => !renamed.includes(p)),
+    ["steps[].target"],
+  );
+  assert.deepEqual(
+    call.params.filter(
+      (p) =>
+        !toolParams(PLAN_SCHEMA)
+          .map((q) => q.name)
+          .includes(p),
+    ),
+    [],
+  );
+});
+
+test("shown calls: a map parameter's keys are the caller's own, and a misnamed map is still caught", () => {
+  const schema = {
+    type: "object",
+    properties: { url: { type: "string" }, headers: { type: "object", propertyNames: { type: "string" }, additionalProperties: { type: "string" } } },
+    required: ["url"],
+  };
+  assert.deepEqual(toolParams(schema), [
+    { name: "url", required: true },
+    { name: "headers", required: false, map: true },
+  ]);
+  const [shown] = shownCalls('scout_request {url, headers: {Accept: "text/plain"}}');
+  assert.deepEqual(unknownParams(shown.params, schema), []);
+  const [misnamed] = shownCalls('scout_request {url, header: {Accept: "text/plain"}}');
+  assert.deepEqual(unknownParams(misnamed.params, schema), ["header", "header.Accept"]);
+  const [renamedStep] = shownCalls('scout_run_plan {steps: [{action: "click", target: "testid=save"}]}');
+  assert.deepEqual(
+    unknownParams(renamedStep.params, {
+      type: "object",
+      properties: { steps: { type: "array", items: { type: "object", properties: { action: {}, selector: {} } } } },
+    }),
+    ["steps[].target"],
+  );
+});
+
+test("tool parameters: allOf merges its parts, and a nested shape the walk cannot read fails rather than listing nothing", () => {
+  assert.deepEqual(
+    toolParams({
+      type: "object",
+      properties: {
+        x: {
+          allOf: [
+            { type: "object", properties: { a: {} }, required: ["a"] },
+            { type: "object", properties: { b: {} } },
+          ],
+        },
+      },
+    }),
+    [
+      { name: "x", required: false },
+      { name: "x.a", required: true },
+      { name: "x.b", required: false },
+    ],
+  );
+  // A field the node names itself and a part requires is required.
+  assert.deepEqual(toolParams({ type: "object", properties: { a: {} }, allOf: [{ type: "object", properties: { a: {} }, required: ["a"] }] }), [
+    { name: "a", required: true },
+  ]);
+  const unreadable = [
+    { type: "object", properties: { x: { $ref: "#/$defs/thing" } } },
+    { type: "object", properties: { x: { type: "object", additionalProperties: { type: "object", properties: { a: {} } } } } },
+    { type: "object", properties: { x: { type: "array", prefixItems: [{ type: "object", properties: { a: {} } }] } } },
+    { type: "object", properties: { x: { type: "object", patternProperties: { "^a": { type: "string" } } } } },
+  ];
+  for (const schema of unreadable) assert.throws(() => toolParams(schema), /x: .*cannot be read/, JSON.stringify(schema));
+  // A map of plain values is read (as a map), not refused.
+  assert.deepEqual(toolParams({ type: "object", properties: { x: { type: "object", additionalProperties: { type: "string" } } } }), [
+    { name: "x", required: false, map: true },
+  ]);
 });

@@ -18,7 +18,7 @@ import { siteFolderName } from "../dist/engine/project-folder.js";
 import { MCP_APP_MIME, STATUS_PANE_URI, STATUS_POLL_TOOL, STATUS_TOOL } from "../dist/engine/status-pane.js";
 import { CommandExit, exitWhenDrained, exitWith } from "../dist/commands.js";
 import { asLf } from "./checkout.ts";
-import { OWN_TABLE_TOOLS, toolParamsMarkdown, toolParamsSection } from "./tool-params.ts";
+import { listedParams, OWN_TABLE_TOOLS, shownCalls, toolParams, toolParamsMarkdown, toolParamsSection, unknownParams } from "./tool-params.ts";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -2200,11 +2200,12 @@ async function main(): Promise<void> {
   // internal detail. Everything else must be findable in the skill.
   const PARAM_EXEMPT = new Set(["session", "projectPath", "force", "full"]);
   const paramGaps: string[] = [];
+  // Nested fields too (a run_plan step's `action`, `target`, `value`): by the field's own name.
   for (const tool of tools) {
-    const schema = tool.inputSchema as { properties?: Record<string, unknown> } | undefined;
-    for (const param of Object.keys(schema?.properties ?? {})) {
-      if (PARAM_EXEMPT.has(param)) continue;
-      if (!skill.includes(param)) paramGaps.push(`${tool.name}.${param}`);
+    for (const { name } of toolParams(tool.inputSchema)) {
+      const field = name.split(".").pop()!;
+      if (PARAM_EXEMPT.has(field)) continue;
+      if (!skill.includes(field)) paramGaps.push(`${tool.name}.${name}`);
     }
   }
   if (paramGaps.length > 0) {
@@ -2218,18 +2219,32 @@ async function main(): Promise<void> {
   console.log(`✓ skill documents every non-exempt tool parameter`);
 
   // A parameter the skill shows in a call, such as `scout_scroll {target: "…"}`, must be one the tool takes: the word elsewhere in the skill does not count.
-  const skillCallGaps: string[] = [];
-  for (const m of skill.matchAll(/\b(scout_[a-z_]+)\s*\{([^}]*)\}/g)) {
-    const tool = tools.find((t) => t.name === m[1]);
-    if (!tool) continue;
-    const params = Object.keys((tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {});
-    for (const item of m[2].split(",")) {
-      const key = item.match(/^\s*([A-Za-z]+)\s*(?::|$)/)?.[1];
-      if (key && !params.includes(key)) skillCallGaps.push(`${m[1]} has no parameter ${key}`);
+  // Nested ones too: `scout_run_plan {steps: [{action, target}]}` names steps[].action and steps[].target.
+  const callGaps = (text: string, against: readonly { name: string; inputSchema: unknown }[]): string[] => {
+    const gaps: string[] = [];
+    for (const call of shownCalls(text)) {
+      const tool = against.find((t) => t.name === call.tool);
+      if (!tool) continue;
+      for (const key of unknownParams(call.params, tool.inputSchema)) gaps.push(`${call.tool} has no parameter ${key}`);
     }
-  }
+    return gaps;
+  };
+  const skillCallGaps = callGaps(skill, tools);
   if (skillCallGaps.length > 0) fail(`the skill shows calls with parameters the tool does not take:\n  ${skillCallGaps.join("\n  ")}`);
-  console.log(`✓ every parameter the skill shows in a call is one the tool takes`);
+  // The contrast: the same skill against a run_plan whose step field `target` were renamed must fail, nested as it is.
+  const renamedTarget = tools.map((t) => {
+    if (t.name !== "scout_run_plan") return t;
+    const schema = structuredClone(t.inputSchema);
+    const step = (schema.properties?.steps as { items?: { properties?: Record<string, unknown> } } | undefined)?.items?.properties;
+    if (!step || !("target" in step)) return fail("scout_run_plan's steps have no `target` field: update this contrast to a field they have");
+    step.selector = step.target;
+    delete step.target;
+    return { ...t, inputSchema: schema };
+  });
+  if (!callGaps(skill, renamedTarget).includes("scout_run_plan has no parameter steps[].target"))
+    fail("the skill-call check would not notice a renamed run_plan step field: the skill should show a scout_run_plan call with its steps' fields");
+  if (toolParamsMarkdown(renamedTarget) === toolParamsMarkdown(tools)) fail("the tool parameters table would not change for a renamed run_plan step field");
+  console.log(`✓ every parameter the skill shows in a call is one the tool takes, nested ones included`);
 
   // The guide (docs/guide/) names tools and their parameters for people, and
   // its configuration reference lists scout_attach's options. Both are held
@@ -2240,14 +2255,8 @@ async function main(): Promise<void> {
   for (const file of fs.readdirSync(guideDir).filter((f) => f.endsWith(".md"))) {
     const text = asLf(fs.readFileSync(path.join(guideDir, file), "utf8"));
     for (const m of text.matchAll(/\b(scout_[a-z_]+)\b/g)) if (!m[1].endsWith("_") && !names.includes(m[1])) guideGaps.push(`${file}: no tool ${m[1]}`);
-    // `scout_attach {role: "admin"}`, `scout_verify {id, verdict, note}`: each key must be a parameter.
-    for (const m of text.matchAll(/\b(scout_[a-z_]+)\s*\{([^}]*)\}/g)) {
-      const params = schemaOf.get(m[1]) ?? [];
-      for (const item of m[2].split(",")) {
-        const key = item.match(/^\s*([A-Za-z]+)\s*(?::|$)/)?.[1];
-        if (key && !params.includes(key)) guideGaps.push(`${file}: ${m[1]} has no parameter ${key}`);
-      }
-    }
+    // `scout_attach {role: "admin"}`, `scout_verify {id, verdict, note}`: each key, nested ones too, must be a parameter.
+    for (const gap of callGaps(text, tools)) guideGaps.push(`${file}: ${gap}`);
   }
   const reference = asLf(fs.readFileSync(path.join(guideDir, "Configuration-reference.md"), "utf8"));
   const attachSection = (reference.split("\n## `scout_attach` options\n")[1] ?? "").split("\n## ")[0];
@@ -2281,14 +2290,11 @@ async function main(): Promise<void> {
   for (const tool of tableTools) {
     const cell = listedTools.get(tool.name);
     if (cell === undefined) continue;
-    const schema = tool.inputSchema as { properties?: Record<string, unknown>; required?: string[] };
-    const served = Object.keys(schema.properties ?? {}).map((name) => `${name}:${(schema.required ?? []).includes(name)}`);
-    const listedParams =
-      cell === "none" ? [] : [...cell.matchAll(/`([A-Za-z][A-Za-z0-9]*)`\s*\((required|optional)\)/g)].map((m) => `${m[1]}:${m[2] === "required"}`);
-    if (JSON.stringify([...listedParams].sort()) !== JSON.stringify([...served].sort()))
-      guideGaps.push(
-        `Configuration-reference.md lists ${tool.name} parameters [${listedParams.join(", ")}], the server has [${served.join(", ")}] (name:required)`,
-      );
+    // Nested fields too, as `steps[].target` (optional): renaming one, or changing whether it is required, shows here.
+    const served = toolParams(tool.inputSchema).map((p) => `${p.name}:${p.required}`);
+    const listed = listedParams(cell).map((p) => `${p.name}:${p.required}`);
+    if (JSON.stringify([...listed].sort()) !== JSON.stringify([...served].sort()))
+      guideGaps.push(`Configuration-reference.md lists ${tool.name} parameters [${listed.join(", ")}], the server has [${served.join(", ")}] (name:required)`);
   }
   // The same table word for word, so it stays what `npm run tool-params` writes rather than a hand edit of it.
   if (toolParamsSection(reference) !== toolParamsMarkdown(tools))
