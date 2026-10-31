@@ -124,6 +124,7 @@ import {
   SIGNED_OUT_ROUTES,
   logAddress,
   offOriginPlace,
+  socketAddress,
   signInPlace,
 } from "../src/engine/authloss.ts";
 import {
@@ -151,6 +152,7 @@ import {
   refusedPageLoad,
   RouteGuard,
   routedWriteVerdict,
+  sentWriteSig,
   type BlockedRequest,
   type RouteGuardHost,
 } from "../src/engine/route-guard.ts";
@@ -2456,6 +2458,7 @@ function guardRig(
   const calls: GuardCall[] = [];
   const blocked: BlockedRequest[] = [];
   const logged: string[] = [];
+  const sentWrites: string[] = [];
   const owned = new Set<string>();
   const host: RouteGuardHost = {
     appUrl: () => "https://app.example.com",
@@ -2469,7 +2472,7 @@ function guardRig(
     },
     logAction: (e) => void (calls.push(`log ${e.action}`), logged.push(e.target)),
     notePolicyBlock: () => void calls.push("notePolicyBlock"),
-    noteSentWrite: () => void calls.push("noteSentWrite"),
+    noteSentWrite: (e) => void (calls.push("noteSentWrite"), sentWrites.push(e.sig)),
     foreignWriteOf: (_req, r) => (opts.foreignUnder ? opts.foreignUnder(r) : (opts.foreign ?? null)),
     embedEscapeNavigation: () => opts.escape === true,
     frameDocumentKind: () => opts.frameDoc ?? null,
@@ -2525,7 +2528,7 @@ function guardRig(
     const done = guard.handle(route as unknown as Route).then(() => outcome);
     return { request: request as unknown as Request, done };
   };
-  return { calls, logged, guard, send, blocked };
+  return { calls, logged, guard, send, blocked, sentWrites };
 }
 
 test("RouteGuard: an embed's escape to another site is logged by that site's origin and path, never its query", async () => {
@@ -2557,6 +2560,73 @@ test("RouteGuard: the blocked-request notice names another site's request by ori
     assert.equal(blocked.length, 1);
     assert.equal(blocked[0].sig, "POST https://app.example.com/api/things?page=2");
   }
+});
+
+test("socketAddress: a WebSocket to another site is named by origin and path, one to the app's own host as it is", () => {
+  const cases: Array<[string, string, string, string]> = [
+    [
+      "wss://live.example.net/socket?token=ws-session-77ab",
+      "https://app.example.com",
+      "wss://live.example.net/socket",
+      "another site's socket loses its query",
+    ],
+    ["wss://app.example.com/live?room=4", "https://app.example.com", "wss://app.example.com/live?room=4", "the app's own host over wss is kept whole"],
+    ["ws://app.test:8080/live?room=4", "http://app.test:8080", "ws://app.test:8080/live?room=4", "and over ws"],
+    ["ws://app.example.com/live?token=t", "http://app.test", "ws://app.example.com/live", "another host is another site"],
+    ["wss://app.test:9443/live?token=t", "https://app.test", "wss://app.test:9443/live", "another port is another site"],
+    ["https://hooks.example.net/x?token=t", "https://app.example.com", "https://hooks.example.net/x", "a page address follows logAddress"],
+    ["not a url", "https://app.example.com", "", "an address that cannot be read is written as nothing"],
+  ];
+  for (const [url, base, want, why] of cases) assert.equal(socketAddress(url, base), want, why);
+});
+
+test("sentWriteSig: another site's write is named by origin and path, the app's own keeps its path and query", () => {
+  const app = "https://app.example.com";
+  const cases: Array<[string, string, string]> = [
+    ["POST", "https://hooks.example.net/collect?token=pay-session-91c2&state=x", "POST https://hooks.example.net/collect"],
+    ["PUT", "https://app.example.com/api/things/7?draft=1", "PUT https://app.example.com/api/things/7?draft=1"],
+    ["DELETE", "https://app.example.com/api/things/7", "DELETE https://app.example.com/api/things/7"],
+    ["POST (as DELETE)", "http://app.example.com/api/things", "POST (as DELETE) http://app.example.com/api/things"],
+    ["POST", `https://hooks.example.net/${"p".repeat(200)}?state=x`, `POST https://hooks.example.net/${"p".repeat(200)}`.slice(0, 5 + 120)],
+  ];
+  for (const [label, url, want] of cases) assert.equal(sentWriteSig(label, url, app), want, url);
+});
+
+test("sentWriteSig: a double-submit to another site counts as two of one request, two different requests as one each", () => {
+  const app = "https://app.example.com";
+  const count = (urls: string[]) => {
+    const counts = new Map<string, number>();
+    for (const sig of urls.map((u) => sentWriteSig("POST", u, app))) counts.set(sig, (counts.get(sig) ?? 0) + 1);
+    return [...counts.entries()];
+  };
+  assert.deepEqual(count(["https://hooks.example.net/collect?state=a1", "https://hooks.example.net/collect?state=a1"]), [
+    ["POST https://hooks.example.net/collect", 2],
+  ]);
+  assert.deepEqual(count(["https://hooks.example.net/collect?state=a1", "https://hooks.example.net/other?state=a1"]), [
+    ["POST https://hooks.example.net/collect", 1],
+    ["POST https://hooks.example.net/other", 1],
+  ]);
+  assert.deepEqual(count(["https://app.example.com/api/orders?n=1", "https://app.example.com/api/orders?n=2"]), [
+    ["POST https://app.example.com/api/orders?n=1", 1],
+    ["POST https://app.example.com/api/orders?n=2", 1],
+  ]);
+});
+
+test("RouteGuard: a write let out at the browser level is noted by another site's origin and path, the app's own with its query", async () => {
+  const { guard, sentWrites } = guardRig("safe-write");
+  const unseen = (url: string) =>
+    (guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+      { send: async () => {} },
+      { requestId: "1", resourceType: "Ping", request: { url, method: "POST", headers: { Origin: "https://app.example.com" }, postData: "{}" } },
+    );
+  await unseen("https://hooks.example.net/orders?state=pay-session-91c2");
+  await unseen("https://hooks.example.net/orders?state=pay-session-91c2");
+  await unseen("https://app.example.com/api/orders?page=2");
+  assert.deepEqual(sentWrites, [
+    "POST https://hooks.example.net/orders",
+    "POST https://hooks.example.net/orders",
+    "POST https://app.example.com/api/orders?page=2",
+  ]);
 });
 
 test("RouteGuard: each verdict is applied to the request, and a refusal is recorded and reported", async () => {

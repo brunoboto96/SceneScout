@@ -73,6 +73,15 @@ export function pathnameOf(url: string): string {
 }
 
 /**
+ * A write that went out as the sent-writes notice and the double-submit count name it: the method, and the address as
+ * logAddress keeps it (another site's by origin and path, the app's own with its query), capped. Both places that note a
+ * sent write build it here, so a repeated request reads as one signature in either.
+ */
+export function sentWriteSig(label: string, url: string, appUrl: string): string {
+  return `${label} ${logAddress(url, appUrl).slice(0, 120)}`;
+}
+
+/**
  * Whether a page load of this address is refused for what it names: a destructive command (strict-writes.ts
  * destructiveGet), in observe and read-only, when that refusal is turned on. Asked by the route handler, by the
  * browser-level check of a redirect's later hops, and by the allowlist header's own sends of a redirect's hops within
@@ -757,7 +766,7 @@ export class RouteGuard {
       await answer(verdict.allow);
       if (verdict.allow) {
         // Reported like any other write that went out, as the request event does for a routed one.
-        if (!BENIGN_MUTATION_RE.test(url)) this.host.noteSentWrite({ at: Date.now(), sig: `${label} ${url.slice(0, 120)}` });
+        if (!BENIGN_MUTATION_RE.test(url)) this.host.noteSentWrite({ at: Date.now(), sig: sentWriteSig(label, url, this.host.appUrl()) });
         return;
       }
       // Refused and reported as any refusal is. Dropped rather than answered: the page that sent it is going or gone.

@@ -47,6 +47,7 @@ import {
   lateSignInVerdict,
   leftSignIn,
   logAddress,
+  socketAddress,
   offOriginPlace,
   signInPlace,
   UNAUTHENTICATED_STATUSES,
@@ -249,7 +250,7 @@ import {
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { bestEffort, heldActionMessage, heldRead, readWithin, ScanGate, settleWithin, SLOW_READ_MS } from "./best-effort.js";
-import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
+import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, sentWriteSig, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
 import { readMachineSockets } from "./tcp-table.js";
@@ -1952,7 +1953,7 @@ export class BrowserEngine {
     // changed server state are at least REPORTED in read-only runs.
     this.openSockets.clear();
     this.socketsWarned = false;
-    const watchSockets = (p: Page): void => void p.on("websocket", (ws) => this.openSockets.add(ws.url().slice(0, 120)));
+    const watchSockets = (p: Page): void => void p.on("websocket", (ws) => this.openSockets.add(socketAddress(ws.url(), this.baseUrl).slice(0, 120)));
     // A request whose document goes away mid-body gets no finished or failed
     // event, so a frame that commits a navigation, is removed, or closes with
     // its page drops what it left in flight (the rule is in settle.ts).
@@ -2046,7 +2047,7 @@ export class BrowserEngine {
       // tester mutated — reporting them trains the driver to ignore the notice.
       if (BENIGN_MUTATION_RE.test(req.url())) return;
       if (this.mutationRequests.length < 20) {
-        this.mutationRequests.push({ at: Date.now(), sig: `${method} ${req.url().slice(0, 120)}`, req });
+        this.mutationRequests.push({ at: Date.now(), sig: sentWriteSig(method, req.url(), this.baseUrl), req });
       }
       // Gap-ledger fact: this route's forms/actions were actually EXERCISED,
       // not just looked at — the difference between visited and tested.
@@ -6524,7 +6525,7 @@ export class BrowserEngine {
     const appOrigin = new URL(this.baseUrl).origin;
     const refusedBackground: string[] = [];
     const websockets = new Set<string>();
-    const onSocket = (ws: import("playwright").WebSocket): void => void websockets.add(ws.url().slice(0, 120));
+    const onSocket = (ws: import("playwright").WebSocket): void => void websockets.add(socketAddress(ws.url(), this.baseUrl).slice(0, 120));
     page.on("websocket", onSocket);
     /** Refused writes since the last call that a step is charged with; background ones (beacons, pings) are only listed (splitRefusals). */
     const ownRefusals = (): string[] => {
