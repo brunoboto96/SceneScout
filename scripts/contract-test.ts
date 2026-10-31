@@ -21,7 +21,17 @@ import { MemoryStore, reachedRoutes, type ActionLogEntry } from "../src/engine/m
 import { COLLECT_INTERACTABLES_SCRIPT, MASKED_NAME } from "../src/engine/collector.ts";
 import { FORMS_INVENTORY_SCRIPT } from "../src/engine/forms.ts";
 import { RECHECK_EMPTY_AGE_MS } from "../src/engine/settle.ts";
-import { keyAtXpath, PAGE_AGE_SCRIPT, SnapshotCollector, SNAPSHOTS_KEPT, type SnapshotElement } from "../src/engine/snapshot-collect.ts";
+import {
+  isAppPage,
+  keyAtXpath,
+  navigationPendingSnapshot,
+  notAppLanding,
+  notAppPageSnapshot,
+  PAGE_AGE_SCRIPT,
+  SnapshotCollector,
+  SNAPSHOTS_KEPT,
+  type SnapshotElement,
+} from "../src/engine/snapshot-collect.ts";
 import { formatNeverSubmittedEmpty } from "../src/engine/forms.ts";
 import {
   classifyFilledStates,
@@ -1989,6 +1999,65 @@ test("saved-page policy check: a script or handler it cannot see would pass a pa
 });
 
 // ---- snapshot collection: refs, kept snapshots and the hydration retry (snapshot-collect.ts) ----
+
+test("snapshot: only an http, https or file address is a page of the app a snapshot may record", () => {
+  for (const url of ["http://localhost:3000/things/1", "https://app.example/", "file:///srv/app/index.html"]) assert.equal(isAppPage(url), true, url);
+  // The blank page the engine leaves a page for, the browsers' own pages, and documents with no place in the app.
+  for (const url of [
+    "about:blank",
+    "about:neterror?e=dnsNotFound",
+    "chrome-error://chromewebdata/",
+    "data:text/html,<p>x",
+    "blob:http://localhost:3000/9a1",
+    "",
+    "/things/1",
+  ]) {
+    assert.equal(isAppPage(url), false, url);
+  }
+});
+
+test("snapshot: a released read says the page was left and to navigate to it again; a pending one says to wait", () => {
+  const released = navigationPendingSnapshot("http://localhost:3000/next", 3000, { why: "released", from: "http://localhost:3000/things/1" });
+  const [first, second] = released.split("\n");
+  assert.match(first, /^NAVIGATION PENDING: the page moved itself on to http:\/\/localhost:3000\/next, which had not loaded/);
+  assert.doesNotMatch(first, /about:blank/, "the first line names where the page was going, never the blank page");
+  assert.match(second, /left for about:blank/);
+  assert.match(second, /scout_navigate to http:\/\/localhost:3000\/things\/1 to load it again/);
+  assert.doesNotMatch(released, /again later/);
+  // The contrast: not released, the navigation is still on its way and may land.
+  const waiting = navigationPendingSnapshot("http://localhost:3000/next", 3000, null);
+  assert.match(waiting, /take scout_snapshot again later\.$/);
+  assert.doesNotMatch(waiting, /about:blank|\n/);
+});
+
+test("snapshot: a page that is not the app's records nothing and says how to come back", () => {
+  const released = notAppPageSnapshot("about:blank", { why: "released", from: "http://localhost:3000/things/1" });
+  assert.match(
+    released,
+    /^NOT A PAGE OF THE APP: the session is on about:blank, where SceneScout left http:\/\/localhost:3000\/things\/1 because a read of it was held/,
+  );
+  assert.match(released, /scout_navigate to http:\/\/localhost:3000\/things\/1 to load it again/);
+  assert.match(
+    notAppPageSnapshot("about:blank", { why: "pending", from: "http://localhost:3000/a" }),
+    /the crawl found a navigation of its own still on its way.*scout_navigate to http:\/\/localhost:3000\/a to load it again/,
+  );
+  // An address that reads as a destructive command is never offered as the way back.
+  const destructive = notAppPageSnapshot("about:blank", { why: "destructive", from: "http://localhost:3000/things/9/delete" });
+  assert.match(destructive, /loading its address again could act on the server/);
+  assert.doesNotMatch(destructive, /scout_navigate to http/);
+  // A blank page the engine did not leave a page for, and a browser's error page, named without a reason.
+  assert.equal(
+    notAppPageSnapshot("about:blank", null),
+    "NOT A PAGE OF THE APP: the session is on about:blank, not a page of the app, so nothing was recorded from it. scout_navigate to a page of the app to go on.",
+  );
+  assert.match(notAppPageSnapshot("chrome-error://chromewebdata/", null), /the session is on a chrome-error address, not a page of the app/);
+  // A note about a blank page is not applied to another address.
+  assert.doesNotMatch(notAppPageSnapshot("chrome-error://chromewebdata/", { why: "released", from: "http://localhost:3000/a" }), /localhost/);
+  // A data: address is named by its scheme only: what it carries is not repeated.
+  assert.equal(notAppLanding("data:text/html,<p>secret</p>"), "the page went to a data address, which is not a page of the app");
+  assert.equal(notAppLanding("about:blank"), "the page went to about:blank, which is not a page of the app");
+  for (const said of [notAppPageSnapshot("about:blank", null), notAppLanding("about:blank")]) assert.doesNotMatch(said, /DEAD END/);
+});
 
 type RawStandIn = {
   tag: string;

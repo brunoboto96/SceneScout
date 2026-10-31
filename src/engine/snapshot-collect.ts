@@ -31,6 +31,7 @@ import { elementKey, keyAliasSteps, normalizePath, ordinalKeys, routeBase, type 
 import { FORMS_INVENTORY_SCRIPT, formIdentity, formStatus, isNavigationTeardown, type FormFacts } from "./forms.js";
 import { NAME_RULE, type KeyAliasSteps } from "./memory.js";
 import { destructiveLabelOf } from "./policy.js";
+import { stillNavigating } from "./limits.js";
 import { recheckBusy, recheckWait } from "./settle.js";
 
 /**
@@ -457,4 +458,80 @@ export class SnapshotCollector {
     if (el.frame && frame.url() !== el.frame.url) throw new Error(`The frame holding ${el.ref} has navigated — take a new scout_snapshot.`);
     return frame;
   }
+}
+
+/**
+ * Whether the main frame's address is a page of the app a snapshot may record as a state: an http, https or file
+ * address. about:blank (where the engine leaves a page it stopped), a browser's error page, data: and blob: are not.
+ */
+export function isAppPage(url: string): boolean {
+  try {
+    const { protocol } = new URL(url);
+    return protocol === "http:" || protocol === "https:" || protocol === "file:";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why the engine itself left a page of the app for about:blank, and the address it left (redacted): a read the page's
+ * own navigation held was released ("released"), a crawled route's navigation was still on its way at the page-load
+ * limit ("pending"), or the page to go back to has an address that reads as a destructive command ("destructive").
+ */
+export interface LeftForBlank {
+  why: "released" | "pending" | "destructive";
+  from: string;
+}
+
+const LEFT_WHEN: Record<LeftForBlank["why"], string> = {
+  released: "a read of it was held by a navigation of its own that never landed",
+  pending: "the crawl found a navigation of its own still on its way at the page-load limit",
+  destructive: "loading its address again could act on the server",
+};
+
+/** How to get back to the page the engine left. */
+function comeBack(left: LeftForBlank): string {
+  return left.why === "destructive"
+    ? "scout_navigate to another page of the app to go on"
+    : `scout_navigate to ${left.from} to load it again; taking scout_snapshot again will not bring it back`;
+}
+
+/**
+ * What a snapshot answers when the page is on its way to `url` and cannot be read. `left`: the read was released by
+ * leaving the page for about:blank, so waiting does not help; said on a second line, as the first names where the page
+ * was going and never the blank page.
+ */
+export function navigationPendingSnapshot(url: string, navMs: number, left: LeftForBlank | null): string {
+  const pending = `NAVIGATION PENDING: ${stillNavigating(url, "nav", navMs)}.`;
+  if (left === null) return `${pending} Nothing on the page can be read until that navigation lands; navigate elsewhere, or take scout_snapshot again later.`;
+  return `${pending}\nThe page was left for about:blank to end that navigation, and nothing of it was recorded: ${comeBack(left)}.`;
+}
+
+/** A page's address as a sentence names it when it is not the app's: about: as it is, any other by its scheme alone. */
+function notAppAddress(url: string): string {
+  try {
+    const { protocol } = new URL(url);
+    return protocol === "about:" ? url : `a ${protocol.slice(0, -1)} address`;
+  } catch {
+    return "an address that cannot be read";
+  }
+}
+
+/** Why a crawled route that landed on a page that is not the app's (isAppPage false) was not read. */
+export function notAppLanding(url: string): string {
+  return `the page went to ${notAppAddress(url)}, which is not a page of the app`;
+}
+
+/**
+ * What a snapshot answers instead of reading a page that is not the app's (isAppPage false): nothing is recorded as a
+ * state and no dead end is reported. `left` is why the engine left the page there, when it did.
+ */
+export function notAppPageSnapshot(url: string, left: LeftForBlank | null): string {
+  if (left !== null && url === "about:blank") {
+    return (
+      `NOT A PAGE OF THE APP: the session is on about:blank, where SceneScout left ${left.from} because ${LEFT_WHEN[left.why]}. ` +
+      `Nothing was recorded from it: ${comeBack(left)}.`
+    );
+  }
+  return `NOT A PAGE OF THE APP: the session is on ${notAppAddress(url)}, not a page of the app, so nothing was recorded from it. scout_navigate to a page of the app to go on.`;
 }

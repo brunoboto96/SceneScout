@@ -59,6 +59,7 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
   await downloadIsNotWaitedFor(baseUrl, stats);
   await crawlOfAPageThatMovesOnToNowhere(baseUrl);
   await crawlOfAPageThatMovesOnWhileRead(baseUrl);
+  await pageThatLeavesForBlank(baseUrl);
   await actionOnAPageThatMovesOnWhileScanned(baseUrl);
   await scanGivenUpOnAddsNothingLate(baseUrl, "finds-while-leaving.html", "dom_injection");
   await scanGivenUpOnAddsNothingLate(baseUrl, "claims-while-leaving.html", "false_success");
@@ -276,6 +277,13 @@ async function crawlOfAPageThatMovesOnWhileRead(baseUrl: string): Promise<void> 
         !/NAVIGATION PENDING/.test(after),
         `${Date.now() - t1} ms\n${after.slice(0, 300)}`,
       );
+      check(
+        "...and says the session is on the blank page the crawl left that route for, and to navigate to the route again, recording no state and no dead end",
+        /^NOT A PAGE OF THE APP: the session is on about:blank, where SceneScout left http[^\s]*\/leaves-after-read\.html /.test(after) &&
+          /scout_navigate to http[^\s]*\/leaves-after-read\.html to load it again/.test(after) &&
+          !/DEAD END|^State: /m.test(after),
+        after.slice(0, 400),
+      );
     }
     // The same pages reached by a navigation and then read by a snapshot.
     for (const route of ["leaves-while-read", "leaves-after-read"]) {
@@ -291,9 +299,83 @@ async function crawlOfAPageThatMovesOnWhileRead(baseUrl: string): Promise<void> 
           (BROWSER !== "chromium" || /^NAVIGATION PENDING: the page moved itself on to http[^\s]*\/page2\.html\?held=1/.test(snap)),
         `${snapMs} ms\n${went.slice(0, 200)}\n${snap.slice(0, 300)}`,
       );
+      if (BROWSER === "chromium") {
+        check(
+          "...and says the page was left, to navigate to it again rather than snapshot again later",
+          new RegExp(
+            `\\nThe page was left for about:blank to end that navigation, and nothing of it was recorded: scout_navigate to http[^\\s]*/${route}\\.html to load it again`,
+          ).test(snap) && !/again later/.test(snap),
+          snap.slice(0, 500),
+        );
+        const next = await bounded(engine, "snapshot", engine.snapshot());
+        check(
+          "...and the snapshot after it records nothing of the blank page and reports no dead end",
+          /^NOT A PAGE OF THE APP: /.test(next) && !/DEAD END|^State: /m.test(next),
+          next.slice(0, 400),
+        );
+      }
     }
+    await engine.close();
+    check(
+      "...and no state of the blank page is kept in the project's memory",
+      !keptStateUrls(projectDir).some((u) => !/^https?:/.test(u)),
+      keptStateUrls(projectDir).join("\n"),
+    );
   } finally {
     releaseHeldPages();
+    await engine.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/** The address of every page state the project's memory keeps. */
+function keptStateUrls(projectDir: string): string[] {
+  const memory = JSON.parse(fs.readFileSync(path.join(projectDir, ".scenescout", "memory.json"), "utf8")) as { states?: Record<string, { url: string }> };
+  return Object.values(memory.states ?? {}).map((s) => s.url);
+}
+
+/**
+ * A page that sends itself to about:blank just after it loads, crawled and then navigated to and read. The blank page is
+ * no page of the app: the crawl reports the route as not read, the snapshot says the session is not on the app, and
+ * neither keeps a state of it nor reports a dead end. Contrastive pair: the same page moving on to a page of the app
+ * (leaves-for-page.html), which is read where it landed.
+ */
+async function pageThatLeavesForBlank(baseUrl: string): Promise<void> {
+  console.log("settle: a page that sends itself to about:blank is not recorded as a state of the app");
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-settle-blank-"));
+  const engine = new BrowserEngine();
+  engine.sessionKey = "settle-blank";
+  try {
+    await engine.attach({ url: `${baseUrl}/covered.html`, projectDir, mode: "read-only", navTimeoutMs: 3000 });
+    const out = await bounded(engine, "crawl", engine.crawl(["/leaves-for-blank.html", "/leaves-for-page.html"]));
+    check(
+      "a crawled route whose page went to about:blank is not read, saying it left the app",
+      /\/leaves-for-blank\.html — LOAD FAILED/.test(out) && /\/leaves-for-blank\.html: the page went to about:blank, which is not a page of the app/.test(out),
+      out,
+    );
+    check("...and the same page moving on to a page of the app is read where it landed (the contrast)", /\/leaves-for-page\.html — 200/.test(out), out);
+    await bounded(engine, "navigate", engine.navigate(`${baseUrl}/leaves-for-blank.html`));
+    let left = "";
+    await eventually(async () => /^NOT A PAGE OF THE APP: /.test((left = await bounded(engine, "snapshot", engine.snapshot()))), 5000, 250);
+    check(
+      "a snapshot once that page went to about:blank says the session is not on the app, with no state and no dead end",
+      /^NOT A PAGE OF THE APP: the session is on about:blank, not a page of the app/.test(left) && !/DEAD END|^State: /m.test(left),
+      left.slice(0, 400),
+    );
+    await engine.close();
+    const kept = keptStateUrls(projectDir);
+    check(
+      "...and the project's memory keeps the page of the app it landed on and no state of the blank page",
+      kept.some((u) => /\/page2\.html/.test(u)) && !kept.some((u) => !/^https?:/.test(u)),
+      kept.join("\n"),
+    );
+    const memoryText = fs.readFileSync(path.join(projectDir, ".scenescout", "memory.json"), "utf8");
+    check(
+      "...and records no route as covered by landing on the blank page",
+      !/landed:blank|"blank"/.test(memoryText),
+      memoryText.match(/.{0,80}blank.{0,80}/g)?.join("\n") ?? "",
+    );
+  } finally {
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
   }

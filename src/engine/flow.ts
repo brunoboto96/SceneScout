@@ -28,6 +28,7 @@ import { fromJs } from "./js-regex.js";
 import { MEMORY_DIRNAME, SELF_IGNORE_KEEP } from "./memory.js";
 import { secretWordKind } from "./sensitive.js";
 import { validateRoleName } from "./profiles.js";
+import { isAppPage } from "./snapshot-collect.js";
 
 /** Most steps one flow may hold. A longer flow is several flows, and each would fail more usefully on its own. */
 const MAX_FLOW_STEPS = 50;
@@ -503,6 +504,16 @@ export function repeatFailure(until: FlowSingleStep, max: number, reason: string
 /** Whether a step acts on the page (and so opens a new window for expect-request) rather than reading it. */
 export function isAction(step: FlowStep): boolean {
   return !step.action.startsWith("expect-");
+}
+
+/**
+ * Where a flow's page is, as its result names it: a page of the app by its path and query, and one that is not
+ * (about:blank, a browser's error page) as it is, so it never reads as a path of the app ("blank").
+ */
+export function flowPlace(url: string): string {
+  if (!isAppPage(url)) return url.startsWith("about:") ? url : "a page that is not the app's";
+  const u = new URL(url);
+  return `${u.pathname}${u.search}`;
 }
 
 /** Path, query and hash: what an expect-url pattern is tested against, so the same flow passes on a laptop and a preview deployment. */
