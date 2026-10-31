@@ -941,7 +941,7 @@ async function login(args: string[]): Promise<never> {
   const offHost = loginHostRefusal(process.env, process.cwd(), options.projectDir, options.url, fsPolicyReader);
   if (offHost) {
     console.error(`scenescout login: ${offHost}`);
-    process.exit(1);
+    exitWith(1);
   }
   if (options.script) {
     // Everything is checked before a browser launches; each problem names a variable, never a value.
