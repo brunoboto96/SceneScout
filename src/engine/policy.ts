@@ -508,6 +508,8 @@ export interface JudgedControl {
   interactive?: boolean;
   /** What its markup says a click on it sends, read in the page; absent when it could not be read. */
   facts?: ControlFacts | null;
+  /** Whether the session refuses destructive page loads (strict-writes.ts destructiveGet): only then does a page load's address make it destructive. */
+  refuseDestructiveGets?: boolean;
 }
 
 /** A form submission as its markup states it (page-sources.ts CONTROL_FACTS_SRC). */
@@ -566,15 +568,17 @@ const WRITE_OVERRIDES = new Set(["DELETE", "PUT", "PATCH"]);
  * nothing and its text is judged instead. Facts decide before text, as
  * sensitive.ts secretFieldKind reads a field's type before its name:
  *
- * - A link whose address is a command (`/items/3/delete`, `?action=delete`),
- *   or that a script library sends as a DELETE, is destructive, whatever it
- *   says. One that is a plain page load to any other address, with no click
- *   handler a script can see, only loads a page: "Delete account" leading to
- *   a help page is not refused.
+ * - A link a script library sends as a DELETE is destructive, whatever it
+ *   says. A plain page load, with no click handler a script can see, only
+ *   loads a page and is never refused for its label ("Delete account"
+ *   leading to a help page); when the session refuses destructive page loads,
+ *   one whose address is such a load (destructiveGet: `/items/3/delete`,
+ *   `?action=delete`) is destructive whatever it says. With that refusal off,
+ *   such a link is followed like any other, as the Safety model promises.
  * - A submit button whose form posts to a command, or sends DELETE through a
  *   `_method` field, is destructive, however mild its label ("Confirm",
  *   "Continue"). A GET to an action the markup names, with no submit handler,
- *   only loads a page. A POST elsewhere, a `method="dialog"` form (a confirm
+ *   is a page load, judged as a link is. A POST elsewhere, a `method="dialog"` form (a confirm
  *   dialog whose script acts on the answer) and a form with no action of its
  *   own (a script's form, sent nowhere the markup says) are judged by text.
  * - A reset button with no click handler clears its form's fields in the
@@ -587,7 +591,7 @@ const WRITE_OVERRIDES = new Set(["DELETE", "PUT", "PATCH"]);
  * A script can still act on a click its markup does not show (a handler
  * added with addEventListener); whatever it sends, the wire policy judges.
  */
-export function controlFactVerdict(f: ControlFacts | null | undefined): { destructive: string | null } | null {
+export function controlFactVerdict(f: ControlFacts | null | undefined, opts: { refuseDestructiveGets?: boolean } = {}): { destructive: string | null } | null {
   if (!f) return null;
   if (f.sends) {
     const sent = f.sends.method.toUpperCase();
@@ -598,8 +602,9 @@ export function controlFactVerdict(f: ControlFacts | null | undefined): { destru
   if (f.href) {
     const sent = (f.linkMethod ?? "get").trim().toUpperCase() || "GET";
     if (sent === "DELETE") return { destructive: `link sending DELETE to ${addressLabel(f.href)}` };
-    if (commandAddress(f.href)) return { destructive: `link to ${addressLabel(f.href)}` };
-    return sent === "GET" && !scripted ? { destructive: null } : null;
+    if (sent !== "GET") return commandAddress(f.href) ? { destructive: `link sending ${sent} to ${addressLabel(f.href)}` } : null;
+    if (opts.refuseDestructiveGets && destructiveGet(f.href)) return { destructive: `link to ${addressLabel(f.href)}` };
+    return scripted ? null : { destructive: null };
   }
   const s = f.submit;
   if (s) {
@@ -608,8 +613,11 @@ export function controlFactVerdict(f: ControlFacts | null | undefined): { destru
     const sent = s.method === "post" ? (WRITE_OVERRIDES.has(override) ? override : "POST") : "GET";
     if (sent === "DELETE") return { destructive: `form sending DELETE to ${addressLabel(s.action)}` };
     // The page's own address counts only where the browser would really send to it: a POST with no action named.
-    if ((s.declared || s.method === "post") && commandAddress(s.action)) return { destructive: `form sending ${sent} to ${addressLabel(s.action)}` };
-    return sent === "GET" && s.declared && !s.handler && !scripted ? { destructive: null } : null;
+    if (sent !== "GET") return commandAddress(s.action) ? { destructive: `form sending ${sent} to ${addressLabel(s.action)}` } : null;
+    if (!s.declared) return null;
+    // A GET is a page load: its address decides only as the route handler's would (route-guard.ts refusedPageLoad).
+    if (opts.refuseDestructiveGets && destructiveGet(s.action)) return { destructive: `form sending GET to ${addressLabel(s.action)}` };
+    return s.handler || scripted ? null : { destructive: null };
   }
   if (f.reset && !scripted) return { destructive: null };
   return null;
@@ -622,14 +630,18 @@ export interface EnterSubmit {
 }
 
 /** Why an Enter that submits this form is refused, or null: the submission's facts first, then the submit button's label. */
-export function submitRefusalLabel(submit: EnterSubmit | null | undefined): string | null {
+export function submitRefusalLabel(submit: EnterSubmit | null | undefined, opts: { refuseDestructiveGets?: boolean } = {}): string | null {
   if (!submit) return null;
-  return judgedByFacts(submit.facts, () => (isDestructive(submit.label) ? submit.label : null));
+  return judgedByFacts(submit.facts, () => (isDestructive(submit.label) ? submit.label : null), opts);
 }
 
 /** A control's facts first (controlFactVerdict), and its text only when they decide nothing. */
-export function judgedByFacts(facts: ControlFacts | null | undefined, byText: () => string | null): string | null {
-  const verdict = controlFactVerdict(facts);
+export function judgedByFacts(
+  facts: ControlFacts | null | undefined,
+  byText: () => string | null,
+  opts: { refuseDestructiveGets?: boolean } = {},
+): string | null {
+  const verdict = controlFactVerdict(facts, opts);
   return verdict ? verdict.destructive : byText();
 }
 
@@ -691,7 +703,7 @@ const LABELLED_CONTROL_ROLES = new Set([
  * decide nothing.
  */
 export function destructiveLabelOf(c: JudgedControl): string | null {
-  return judgedByFacts(c.facts, () => destructiveTextOf(c));
+  return judgedByFacts(c.facts, () => destructiveTextOf(c), { refuseDestructiveGets: c.refuseDestructiveGets });
 }
 
 /** The text half of destructiveLabelOf: which of a control's labels is judged, and the first destructive one. */

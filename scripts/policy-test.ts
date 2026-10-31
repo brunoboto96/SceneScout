@@ -159,6 +159,7 @@ import {
   marksRouteExercised,
   pathnameOf,
   refusedPageLoad,
+  backEntryVerdict,
   RouteGuard,
   routedWriteVerdict,
   sentWriteSig,
@@ -2151,8 +2152,10 @@ test("an element that is not a control is not judged by the record text it shows
 });
 
 test("a control's facts decide before its label: the same label flips with what the markup says a click sends", () => {
-  const button = (name: string, facts: ControlFacts | null) => destructiveLabelOf({ tag: "button", role: "button", name, testid: null, facts });
-  const link = (name: string, facts: ControlFacts | null) => destructiveLabelOf({ tag: "a", role: "link", name, testid: null, facts });
+  const button = (name: string, facts: ControlFacts | null) =>
+    destructiveLabelOf({ tag: "button", role: "button", name, testid: null, facts, refuseDestructiveGets: true });
+  const link = (name: string, facts: ControlFacts | null) =>
+    destructiveLabelOf({ tag: "a", role: "link", name, testid: null, facts, refuseDestructiveGets: true });
   const post = (action: string, extra: Partial<NonNullable<ControlFacts["submit"]>> = {}): ControlFacts => ({
     submit: { method: "post", action, declared: true, ...extra },
   });
@@ -2225,6 +2228,58 @@ test("a control's facts decide before its label: the same label flips with what 
   assert.equal(destructiveLabelOf({ tag: "a", role: "link", name: "Help", testid: "delete-link", facts: { href: "https://app.test/help" } }), null);
   assert.deepEqual(controlFactVerdict(null), null);
   assert.deepEqual(controlFactVerdict({}), null);
+});
+
+test("a page load's address refuses a link or a GET form only when destructive page loads are refused, as the Safety model promises", () => {
+  const link = (name: string, href: string, refuseDestructiveGets: boolean) =>
+    destructiveLabelOf({ tag: "a", role: "link", name, testid: null, facts: { href: `https://app.test${href}` }, refuseDestructiveGets });
+  // Off (the default): a link is followed like any other, whatever its address or label, as before facts were read.
+  for (const [name, href] of [
+    ["Open record", "/things/3/delete"],
+    ["Delete", "/items/3/delete"],
+    ["Archive", "/blog/archive"],
+    ["How to delete your account", "/help/how-to-delete-your-account"],
+    ["Cancellation policy", "/cancel-policy"],
+    ["Orders", "/orders/3"],
+    ["Edit", "/things/3/edit"],
+  ]) {
+    assert.equal(link(name, href, false), null, `${href} with destructive page loads allowed`);
+  }
+  // On: the route handler's own rule (destructiveGet) decides, so a listing page named like a verb still loads.
+  assert.equal(link("Open record", "/things/3/delete", true), "link to /things/3/delete");
+  assert.equal(link("Archive", "/blog/archive", true), null, "a listing page, which the route handler lets load");
+  assert.equal(link("Orders", "/orders/3", true), null);
+  assert.equal(link("Edit", "/things/3/edit", true), null);
+  // A GET form is a page load too; a POST to a command address is a write, refused either way.
+  const form = (method: string, action: string, refuseDestructiveGets: boolean) =>
+    destructiveLabelOf({
+      tag: "button",
+      role: "button",
+      name: "Continue",
+      testid: null,
+      facts: { submit: { method, action: `https://app.test${action}`, declared: true } },
+      refuseDestructiveGets,
+    });
+  assert.equal(form("get", "/things?action=delete", false), null);
+  assert.equal(form("get", "/things?action=delete", true), "form sending GET to /things?…");
+  assert.equal(form("post", "/things/9/cancel", false), "form sending POST to /things/9/cancel");
+  // A link a script library sends as a DELETE is a write: refused with the page-load rule off.
+  assert.equal(
+    destructiveLabelOf({ tag: "a", role: "link", name: "Open", testid: null, facts: { href: "https://app.test/things/3", linkMethod: "delete" } }),
+    "link sending DELETE to /things/3",
+  );
+});
+
+test("backEntryVerdict: a back to a command address is refused, and one the page cannot name is said to be unread", () => {
+  assert.equal(backEntryVerdict("read-only", true, "https://app.test/things/9/cancel"), "refuse");
+  assert.equal(backEntryVerdict("observe", true, "https://app.test/things/9/cancel"), "refuse");
+  assert.equal(backEntryVerdict("read-only", true, "https://app.test/things/9"), "go");
+  assert.equal(backEntryVerdict("read-only", false, "https://app.test/things/9/cancel"), "go", "the refusal is off");
+  assert.equal(backEntryVerdict("safe-write", true, "https://app.test/things/9/cancel"), "go", "not judged outside observe and read-only");
+  assert.equal(backEntryVerdict("read-only", true, null), "go", "no entry the API names: judged as it loads");
+  assert.equal(backEntryVerdict("read-only", true, false), "unread", "no Navigation API");
+  assert.equal(backEntryVerdict("read-only", true, undefined), "unread", "the read failed");
+  assert.equal(backEntryVerdict("read-only", false, false), "go");
 });
 
 test("an Enter that submits a form is judged by the submission's facts, then by its submit button's label", () => {

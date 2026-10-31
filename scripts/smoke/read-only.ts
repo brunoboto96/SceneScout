@@ -1442,7 +1442,11 @@ async function controlFacts({ baseUrl, projectDir, stats }: SmokeContext): Promi
     check("a Delete button whose form only GETs a named page is not marked destructive", !marked("facts-get-delete"), lineOf("facts-get-delete").line);
     check("...the same label on a form naming no action is", marked("facts-script-delete"), lineOf("facts-script-delete").line);
     check("a Delete account link that loads a page is not marked destructive", !marked("facts-help-link"), lineOf("facts-help-link").line);
-    check("...a link to a command address is, whatever it says", marked("facts-command-link"), lineOf("facts-command-link").line);
+    check(
+      "...nor is a link to a command address while destructive page loads are let out (the default)",
+      !marked("facts-command-link"),
+      lineOf("facts-command-link").line,
+    );
     check("an Open button a script library sends a DELETE from is marked destructive", marked("facts-hx-delete"), lineOf("facts-hx-delete").line);
     check("...the same button without it is not", !marked("facts-hx-plain"), lineOf("facts-hx-plain").line);
     check("a reset button labelled Reset all data is not marked destructive", !marked("facts-reset"), lineOf("facts-reset").line);
@@ -1450,13 +1454,7 @@ async function controlFacts({ baseUrl, projectDir, stats }: SmokeContext): Promi
 
     const confirm = await engine.click(lineOf("facts-command-confirm").ref);
     check("clicking Confirm on the command form is refused", confirm.includes("REFUSED") && confirm.includes("/things/9/cancel"), confirm);
-    const link = await engine.click(lineOf("facts-command-link").ref);
-    check("clicking the link to a command address is refused", link.includes("REFUSED"), link);
-    check(
-      "...and neither reached the server",
-      writesTo("POST /things/9/cancel") === 0 && (stats.loads["GET /things/3/delete"] ?? 0) === 0,
-      JSON.stringify(stats),
-    );
+    check("...and it did not reach the server", writesTo("POST /things/9/cancel") === 0, JSON.stringify(stats.writes));
     const typed = await engine.type(lineOf("facts-command-note").ref, "a note", true);
     check("an Enter typed into the command form is withheld", typed.includes("did NOT press Enter"), typed);
     await engine.type(lineOf("facts-command-note").ref, "a note");
@@ -1489,6 +1487,23 @@ async function controlFacts({ baseUrl, projectDir, stats }: SmokeContext): Promi
     );
   } finally {
     await engine.close().catch(() => {});
+  }
+  // With destructive page loads refused, the link's address decides as the route handler's rule would.
+  process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS = "1";
+  const strict = new BrowserEngine();
+  try {
+    await strict.attach({ url: baseUrl, projectDir, mode: "read-only" });
+    await strict.navigate("/control-facts.html");
+    const snap = await strict.snapshot(true);
+    const line = snap.match(/(e\d+) [^\n]*\[testid=facts-command-link[,\]][^\n]*/);
+    if (!line) throw new Error(`control-facts fixture: no command link in:\n${snap}`);
+    check("with destructive page loads refused, a link to a command address is marked destructive", line[0].includes("DESTRUCTIVE"), line[0]);
+    const link = await strict.click(line[1]);
+    check("...and clicking it is refused", link.includes("REFUSED") && link.includes("/things/3/delete"), link);
+    check("...and the load never reached the server", (stats.loads["GET /things/3/delete"] ?? 0) === 0, JSON.stringify(stats.loads));
+  } finally {
+    delete process.env.SCENESCOUT_REFUSE_DESTRUCTIVE_GETS;
+    await strict.close().catch(() => {});
   }
 }
 

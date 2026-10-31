@@ -164,6 +164,8 @@ export interface SnapshotHost {
    * when the latest action started (`changedAt`), all on Date.now's clock.
    */
   requests(): { inFlight: number; lastRequestStart: number; changedAt: number };
+  /** Whether the session refuses destructive page loads, which decides whether a link's address marks it (policy.ts controlFactVerdict). */
+  refuseDestructiveGets?(): boolean;
 }
 
 /** The interactables of the page the host drives, their refs, and the snapshots kept for diffs. */
@@ -339,7 +341,7 @@ export class SnapshotCollector {
         ...(tag ? { frame: tag } : {}),
         // Judged on the real label, then masked: the policy must see what a click would press.
         // A message is not a control: "Could not delete" in an alert is not a Delete button.
-        destructive: el.liveOnly ? false : destructiveLabelOf(el) !== null,
+        destructive: el.liveOnly ? false : destructiveLabelOf({ ...el, refuseDestructiveGets: this.host.refuseDestructiveGets?.() ?? false }) !== null,
         ...(tag?.foreign ? { name: masksForeignName(el.tag, el.role) ? MASKED_NAME : capForeignName(el.name) } : {}),
         ...(tag?.foreign && el.href ? { href: stripForeignHref(el.href) } : {}),
         ref: "",

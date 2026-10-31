@@ -265,7 +265,7 @@ import {
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { bestEffort, heldActionMessage, heldRead, readWithin, ScanGate, settleWithin, SLOW_READ_MS } from "./best-effort.js";
-import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, sentWriteSig, type BlockedRequest } from "./route-guard.js";
+import { backEntryVerdict, marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, sentWriteSig, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
 import { readMachineSockets } from "./tcp-table.js";
@@ -615,13 +615,25 @@ const uniqueByTestid = new Function(
  * Page-side: the address of the history entry before the current one, from the Navigation API, or null when the page
  * cannot say (no such API, the first entry, or an entry of another origin, whose address the API withholds).
  */
+/**
+ * Page-side: the address of the history entry before the current one, from the Navigation API; null when there is none
+ * the API names (the first entry, or an entry of another origin, whose address it withholds), and false when the page
+ * has no Navigation API.
+ */
 const PREVIOUS_ENTRY_SCRIPT =
-  `(() => { if (typeof navigation === "undefined" || !navigation.currentEntry) return null; ` +
+  `(() => { if (typeof navigation === "undefined" || !navigation.currentEntry || typeof navigation.entries !== "function") return false; ` +
   `const i = navigation.currentEntry.index; const e = i > 0 ? navigation.entries()[i - 1] : null; ` +
   `return e && e.url ? e.url : null; })()`;
 
 /** Page-side: what an Enter in this field submits (page-sources.ts ENTER_SUBMIT_SRC). */
 const enterSubmitOf = new Function("node", `return (${ENTER_SUBMIT_SRC})(node);`) as (node: Element) => EnterSubmit | null;
+
+/** Page-side: what an Enter in the element at this XPath submits, null when it is gone; the XPath is an argument, not code. */
+const enterSubmitAt = new Function(
+  "xpath",
+  `const node = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue; ` +
+    `return node ? (${ENTER_SUBMIT_SRC})(node) : null;`,
+) as (xpath: string) => EnterSubmit | null;
 
 /** Page-side: the focused element's label and facts, and what an Enter in it submits when it is a field of a form. */
 const focusedActivationOf = new Function(
@@ -914,6 +926,7 @@ export class BrowserEngine {
     harvestRoutes: (elements) => this.harvestRoutes(elements),
     // Only young requests: a stream the page keeps open for its whole life is not content on its way (settle.ts RECHECK_OPEN_MS).
     requests: () => ({ inFlight: this.requests.openWithin(RECHECK_OPEN_MS), lastRequestStart: this.lastRequestStart, changedAt: this.actionStartedAt }),
+    refuseDestructiveGets: () => this.refuseDestructiveGets,
   });
   private currentFingerprint = "";
   /** URL at the time of the last snapshot — refs are valid only while it matches. */
@@ -3333,6 +3346,7 @@ export class BrowserEngine {
       centre: live.centre,
       interactive: el.interactive,
       facts: live.facts,
+      refuseDestructiveGets: this.refuseDestructiveGets,
     });
     if (el.destructive || now !== null) {
       return destructiveRefusal(now ?? (liveLabel || el.name || el.testid || el.ref), this.mode);
@@ -4195,11 +4209,8 @@ export class BrowserEngine {
       // Enter inside a form submits it — check the form's submit target, or
       // pressEnter becomes a read-only bypass for destructive submits.
       if (this.readOnly) {
-        const submit = (await bestEffort(
-          this.snapshots.scopeOf(el).evaluate(`(() => { const node = ${xpathLookup(el.xpath)}; return node ? (${ENTER_SUBMIT_SRC})(node) : null; })()`),
-          null,
-        )) as EnterSubmit | null;
-        const submitLabel = submitRefusalLabel(submit);
+        const submit = (await bestEffort(this.snapshots.scopeOf(el).evaluate(enterSubmitAt, el.xpath), null)) as EnterSubmit | null;
+        const submitLabel = submitRefusalLabel(submit, { refuseDestructiveGets: this.refuseDestructiveGets });
         if (submitLabel !== null) {
           this.logAction({ action: "type:enter-refused", target: submitLabel, url: page.url() });
           return `Filled ${el.role} "${el.name}" but did NOT press Enter. ` + destructiveRefusal(submitLabel, this.mode);
@@ -4643,7 +4654,10 @@ export class BrowserEngine {
     const focused = await this.focusedFrame(page);
     const read = await bestEffort(focused.evaluate(focusedActivationOf, /Enter$/i.test(key)), null);
     // Its own facts first, then its label; an Enter in a form's field is also the form's submit.
-    const focusedLabel = read ? (judgedByFacts(read.facts, () => (isDestructive(read.label) ? read.label : null)) ?? submitRefusalLabel(read.submit)) : null;
+    const gets = { refuseDestructiveGets: this.refuseDestructiveGets };
+    const focusedLabel = read
+      ? (judgedByFacts(read.facts, () => (isDestructive(read.label) ? read.label : null), gets) ?? submitRefusalLabel(read.submit, gets))
+      : null;
     if (focusedLabel !== null) {
       this.logAction({ action: "press:refused", target: focusedLabel, url: page.url() });
       return destructiveRefusal(focusedLabel, this.mode);
@@ -5688,9 +5702,18 @@ export class BrowserEngine {
     const page = this.requirePage();
     // A load the history serves from the back-forward cache sends no request for the route handler to judge, so the
     // destructive page-load rule is asked here, of the entry going back reaches, before anything is loaded.
+    let unread = "";
     if (this.refuseDestructiveGets) {
-      const entry = await bestEffort(page.evaluate(PREVIOUS_ENTRY_SCRIPT), null);
-      if (typeof entry === "string" && refusedPageLoad(this.writeRule.at(), true, entry)) {
+      const read = await bestEffort(page.evaluate(PREVIOUS_ENTRY_SCRIPT), undefined);
+      const entry = typeof read === "string" || read === null || read === false ? read : undefined;
+      const verdict = backEntryVerdict(this.writeRule.at(), true, entry);
+      if (verdict === "unread") {
+        this.logAction({ action: "back:entry-unread", target: "", url: page.url() });
+        unread =
+          "\nNote: the page could not name the history entry going back reaches, so it was not judged before loading; " +
+          "a load of it over the network is still judged, but one the browser restores from its cache is not.";
+      }
+      if (verdict === "refuse" && typeof entry === "string") {
         const address = logAddress(entry, this.baseUrl);
         this.logAction({ action: "back:refused", target: address, url: page.url() });
         return (
@@ -5713,7 +5736,7 @@ export class BrowserEngine {
           url: page.url(),
         });
       });
-      return await this.afterAction("back", "");
+      return (await this.afterAction("back", "")) + unread;
     } finally {
       this.leaveChoice = undefined;
     }
@@ -6327,7 +6350,7 @@ export class BrowserEngine {
               ? pickIsDestructive(step.value, preTestid, pick ? pick.label : null)
                 ? named
                 : null
-              : judgedByFacts(facts, () => (isDestructive(label, step.value) ? named : null));
+              : judgedByFacts(facts, () => (isDestructive(label, step.value) ? named : null), { refuseDestructiveGets: this.refuseDestructiveGets });
         if (refusedAs !== null) {
           transcript.push(`${desc} → ${destructiveRefusal(refusedAs, this.mode)}`);
           return "stop";
@@ -6353,7 +6376,9 @@ export class BrowserEngine {
           note = (await this.fillOrAppend(loc, step.value ?? "", step.replace ?? false, label)).note;
           if (step.pressEnter) {
             if (this.readOnly) {
-              const submitLabel = submitRefusalLabel(await bestEffort(loc.evaluate(enterSubmitOf, undefined, { timeout: TARGET_READ_MS }), null));
+              const submitLabel = submitRefusalLabel(await bestEffort(loc.evaluate(enterSubmitOf, undefined, { timeout: TARGET_READ_MS }), null), {
+                refuseDestructiveGets: this.refuseDestructiveGets,
+              });
               if (submitLabel !== null) {
                 transcript.push(`${desc} → filled, Enter withheld: ${destructiveRefusal(submitLabel, this.mode)}`);
                 return "stop";
@@ -6799,7 +6824,9 @@ export class BrowserEngine {
                 ? pickIsDestructive(step.value, testid, await BrowserEngine.chosenOptionLabel(loc, step.value))
                   ? label || step.target
                   : null
-                : judgedByFacts(facts, () => (isDestructive(label, step.action === "select" ? step.value : undefined) ? label || step.target : null));
+                : judgedByFacts(facts, () => (isDestructive(label, step.action === "select" ? step.value : undefined) ? label || step.target : null), {
+                    refuseDestructiveGets: this.refuseDestructiveGets,
+                  });
           if (refusedAs !== null) {
             refusal = destructiveRefusal(refusedAs, this.mode);
           } else if (step.action === "click") {
@@ -6811,7 +6838,9 @@ export class BrowserEngine {
             await this.fillOrAppend(loc, step.value, step.replace ?? false);
             if (step.pressEnter) {
               const submitLabel = this.readOnly
-                ? submitRefusalLabel(await bestEffort(loc.evaluate(enterSubmitOf, undefined, { timeout: TARGET_READ_MS }), null))
+                ? submitRefusalLabel(await bestEffort(loc.evaluate(enterSubmitOf, undefined, { timeout: TARGET_READ_MS }), null), {
+                    refuseDestructiveGets: this.refuseDestructiveGets,
+                  })
                 : null;
               if (submitLabel !== null) refusal = destructiveRefusal(submitLabel, this.mode);
               else await loc.press("Enter", { timeout: actionMs });

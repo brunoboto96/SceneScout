@@ -91,6 +91,19 @@ export function refusedPageLoad(rule: WriteMode, refuseDestructiveGets: boolean,
   return (rule === "observe" || rule === "read-only") && refuseDestructiveGets && destructiveGet(url);
 }
 
+/**
+ * What a back may do under the destructive page-load rule, from the entry it reaches as the page's Navigation API
+ * names it: `refuse` when that entry is a refused page load, `unread` when the page could not say (no Navigation API,
+ * or the read failed), so only a load over the network is judged (by the route handler), and `go` otherwise. A null
+ * entry is one the API withholds or that does not exist (the first entry, another origin's), which the origin fence and
+ * the route handler judge as it loads.
+ */
+export function backEntryVerdict(rule: WriteMode, refuseDestructiveGets: boolean, entry: string | null | false | undefined): "refuse" | "unread" | "go" {
+  if (!refuseDestructiveGets || (rule !== "observe" && rule !== "read-only")) return "go";
+  if (entry === false || entry === undefined) return "unread";
+  return entry !== null && refusedPageLoad(rule, true, entry) ? "refuse" : "go";
+}
+
 /** A write the policy refused, as the engine's next notice reports it. */
 export interface BlockedRequest {
   at: number;
