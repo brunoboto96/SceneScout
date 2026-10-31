@@ -97,6 +97,7 @@ import {
   describeStep,
   elementStateMatches,
   FLOW_AFTER_LAST_STEP_MS,
+  flowPlace,
   isAction,
   matchRequest,
   notActionable,
@@ -129,7 +130,18 @@ import {
   settlePage,
   stableUrlOf,
 } from "./settle.js";
-import { FRAME_READ_MS, PAGE_AGE_SCRIPT, SnapshotCollector, withinFrameLimit, type SnapshotElement } from "./snapshot-collect.js";
+import {
+  FRAME_READ_MS,
+  isAppPage,
+  notAppPageSnapshot,
+  PAGE_AGE_SCRIPT,
+  navigationPendingSnapshot,
+  notAppLanding,
+  SnapshotCollector,
+  withinFrameLimit,
+  type LeftForBlank,
+  type SnapshotElement,
+} from "./snapshot-collect.js";
 import {
   AnsweredNavigationError,
   answeredNavigationFailure,
@@ -848,15 +860,12 @@ const RECORD_SHOT_TIMEOUT_MS = 2500;
 /** How long a repeat step waits for its condition after each round of its actions, before running them again. */
 const REPEAT_CHECK_MS = 1000;
 
-/** What a snapshot answers when the page is on its way to `url` and cannot be read. */
-function navigationPendingSnapshot(url: string, navMs: number): string {
-  return `NAVIGATION PENDING: ${stillNavigating(url, "nav", navMs)}. Nothing on the page can be read until that navigation lands; navigate elsewhere, or take scout_snapshot again later.`;
-}
-
 export class BrowserEngine {
   private browser: Browser | null = null;
   /** How long an action and a page load may take; set at attach (limits.ts). */
   private limits: TimeLimits = DEFAULT_TIME_LIMITS;
+  /** The page the engine itself last left for about:blank, and why: what a snapshot of that blank page says. */
+  private leftForBlank: { page: Page; left: LeftForBlank } | null = null;
   /** The network settings from the environment, read at attach: the retry of a load that failed on the network, the proxy and the allowlist header. */
   private network: { retry: boolean; proxy: BrowserProxy | null; appHeader: AppHeader | null } = { retry: false, proxy: null, appHeader: null };
   /** The limits this session runs with, so the server can size its watchdogs to them. */
@@ -1345,7 +1354,7 @@ export class BrowserEngine {
       // Only a COMPLETED journey is a measurement of task ease. An abandoned
       // one proves the task is blocked — a high-severity finding — and must
       // not also close the gap that says ease was never measured.
-      this.memory?.markRouteFact(normalizePath(j.startUrl), { journeys: 1, journeysCompleted: completed ? 1 : 0 });
+      if (isAppPage(j.startUrl)) this.memory?.markRouteFact(normalizePath(j.startUrl), { journeys: 1, journeysCompleted: completed ? 1 : 0 });
     } catch {
       /* fact recording is best-effort */
     }
@@ -2076,7 +2085,7 @@ export class BrowserEngine {
       )
         return;
       const pageUrl = this.page?.url();
-      if (pageUrl && this.memory) {
+      if (pageUrl && isAppPage(pageUrl) && this.memory) {
         try {
           this.memory.markRouteFact(normalizePath(pageUrl), { mutated: true });
         } catch {
@@ -2470,6 +2479,7 @@ export class BrowserEngine {
         ? () => {
             leavingFor = goingTo();
             this.traceStep(page.url(), `read held past ${limitMs} ms: released (the page was going to ${leavingFor})`);
+            this.leftForBlank = { page, left: { why: "released", from: redactSecrets(page.url()) } };
             return page.goto("about:blank", { timeout: this.limits.backNavMs });
           }
         : null,
@@ -2814,6 +2824,8 @@ export class BrowserEngine {
     const { elements, forms, aliases } = await this.snapshots.collect();
     const url = page.url();
     const fp = fingerprintState(url, trackedElements(elements));
+    // Not registered on a page that is not the app's: none of its keys can then be marked exercised.
+    if (!isAppPage(url)) return { fp, elements, url };
     this.memory?.visitState(
       fp,
       logAddress(url, this.baseUrl),
@@ -2911,15 +2923,24 @@ export class BrowserEngine {
     // page-load limit since the last action, and reported rather than read when it has not landed by then.
     const pending = await this.ownNavigationPending(page, this.limits.navMs, this.actionStartedAt);
     if (pending !== null) {
-      return navigationPendingSnapshot(pending, this.limits.navMs);
+      return navigationPendingSnapshot(pending, this.limits.navMs, null);
     }
+    // The blank page the engine left a page for, or the browser's own: never a state of the app, nor a dead end.
+    if (!isAppPage(page.url())) {
+      this.snapshots.dropRefs("the session is not on a page of the app");
+      this.snapshotUrl = "";
+      const left = this.leftForBlank?.page === page ? this.leftForBlank.left : null;
+      return notAppPageSnapshot(page.url(), left);
+    }
+    this.leftForBlank = null;
 
     this.traceStep(page.url(), "snapshot: collect");
     // A read released: the page the refs and the last snapshot's address name is gone (a state already read is kept).
     const movedOn = (leavingFor: string): string => {
       this.snapshots.dropRefs(`the page moved itself on to ${leavingFor}`);
       this.snapshotUrl = "";
-      return navigationPendingSnapshot(leavingFor, this.limits.navMs);
+      const left = this.leftForBlank?.page === page ? this.leftForBlank.left : null;
+      return navigationPendingSnapshot(leavingFor, this.limits.navMs, left);
     };
     const collected = await this.readHeld(page, this.snapshots.collect(), this.limits.navMs);
     if (collected.stalled) return movedOn(collected.leavingFor);
@@ -3354,6 +3375,7 @@ export class BrowserEngine {
     const appUrl = this.lastAppUrls.get(page);
     const exit = errorPageExit(method, appUrl);
     if (exit === "blank" && appUrl !== undefined) {
+      this.leftForBlank = { page, left: { why: "destructive", from: redactSecrets(appUrl) } };
       await bestEffort(page.goto("about:blank", { timeout: this.limits.backNavMs }));
       return { method, status: null, address: appUrl, destructive: true };
     }
@@ -5625,7 +5647,8 @@ export class BrowserEngine {
     const requestedRoute = normalizePath(requestedUrl);
     const landedRoute = normalizePath(landedUrl);
     const bounced = this.authLoss.isLoginRedirect(requestedRoute, landedUrl, this.baseUrl);
-    if (landedRoute !== requestedRoute) {
+    // Landing on a page that is not the app's covers nothing: the route is left for a later visit to reach.
+    if (landedRoute !== requestedRoute && isAppPage(landedUrl)) {
       const outcome = bounced ? `${AUTH_LOSS_PREFIX}${landedRoute}` : `landed:${landedRoute}`;
       this.memory?.markAttempted(requestedRoute, outcome, this.role);
       this.memory?.recordRoleAccess(this.role, requestedRoute, outcome);
@@ -5954,6 +5977,7 @@ export class BrowserEngine {
     const pending = await this.ownNavigationPending(page, this.limits.crawlNavMs, this.actionStartedAt);
     if (pending !== null) {
       // Stopped, so the page the crawl leaves is not one a later read would hang on.
+      this.leftForBlank = { page, left: { why: "pending", from: redactSecrets(page.url()) } };
       await bestEffort(page.goto("about:blank", { timeout: this.limits.backNavMs }));
       return this.crawlRouteUnloaded(run, path, url, stillNavigating(pending, "nav", this.limits.crawlNavMs), "NAVIGATION PENDING");
     }
@@ -5976,6 +6000,11 @@ export class BrowserEngine {
     this.traceStep(path, "crawl: record");
     const { elements, forms, aliases, main } = collected.value;
     const finalUrl = page.url();
+    // A page that sent itself to about:blank (or the browser to its own page) left the app: nothing of it is a state
+    // of the app, and the route is not covered by having been left.
+    if (!isAppPage(finalUrl)) {
+      return this.crawlRouteUnloaded(run, path, url, notAppLanding(finalUrl), "LOAD FAILED");
+    }
     // A route that sent the page to another site (a single sign-on provider's sign-in, or any other page there) is
     // judged by where it went, as a navigation is when the origin fence takes it back (navigationLanding), but that
     // page is not the app's: it is named by its origin and path, and none of it is kept as a state of the app.
@@ -6405,18 +6434,23 @@ export class BrowserEngine {
       const { elements, forms, aliases } = landed.value;
       const url = page.url();
       const fp = fingerprintState(url, trackedElements(elements));
-      this.memory!.visitState(
-        fp,
-        url,
-        normalizePath(url),
-        trackedElements(elements).map((el) => el.key),
-        inertKeys(elements),
-        this.sessionKey,
-        aliases,
-      );
-      for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded, this.sessionKey);
-      this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");
-      run.lastCapture = { fp, elements, url };
+      // A step that left the session off the app (the origin fence's about:blank) reached no state of it; the element
+      // it acted on is still marked in the state it came from.
+      const onApp = isAppPage(url);
+      if (onApp) {
+        this.memory!.visitState(
+          fp,
+          url,
+          normalizePath(url),
+          trackedElements(elements).map((el) => el.key),
+          inertKeys(elements),
+          this.sessionKey,
+          aliases,
+        );
+        for (const f of forms) this.memory!.recordForm(fp, f.key, f.guarded, this.sessionKey);
+        this.memory!.recordRoleAccess(this.role, normalizePath(url), "reached");
+        run.lastCapture = { fp, elements, url };
+      }
       // …but mark the acted-on element in the state it came FROM, using
       // the pre-action capture. Falls back to the post-action state when
       // the pre-capture failed, which is the old behaviour and still
@@ -6434,7 +6468,7 @@ export class BrowserEngine {
       // state so a target the pre-capture missed (or a failed capture)
       // still records something rather than nothing.
       const preHit = preState ? findIn(preState.elements) : undefined;
-      const postHit = preHit ? undefined : findIn(elements);
+      const postHit = preHit || !onApp ? undefined : findIn(elements);
       const hit = preHit ? { fp: preState!.fp, el: preHit } : postHit ? { fp, el: postHit } : undefined;
       if (hit) {
         this.memory!.markExercised(hit.fp, hit.el.key, `plan:${step.action}`);
@@ -6528,14 +6562,7 @@ export class BrowserEngine {
     this.leaveChoice = true;
     const context = this.context!;
     const violations: FlowReplay["violations"] = [];
-    const here = (): string => {
-      try {
-        const u = new URL(this.page?.url() ?? "");
-        return `${u.pathname}${u.search}`;
-      } catch {
-        return "/";
-      }
-    };
+    const here = (): string => flowPlace(this.page?.url() ?? "");
     /** Responses since the most recent action step: what an expect-request looks through. */
     const sinceAction: { seen: SeenRequest[] } = { seen: [] };
     const onResponse = (res: import("playwright").Response): void => {
@@ -6837,14 +6864,16 @@ export class BrowserEngine {
       this.memory?.designChromeKeys() ?? new Set(),
     );
     const route = normalizePath(page.url());
-    this.memory?.recordDesignElements(route, signatures);
+    // A page that is not the app's (isAppPage) is no route of the design census nor an audited one.
+    const memory = isAppPage(page.url()) ? this.memory : null;
+    memory?.recordDesignElements(route, signatures);
     // Only a page that actually produced a score counts as audited. An empty or
     // unhydrated page (and, since the chrome partition, one that is entirely
     // shell) returns no score — recording it as audited anyway dropped it from
     // the "never design-audited" ledger while it had never been measured.
     if (score) {
-      this.memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: logAddress(page.url(), this.baseUrl) });
-      this.memory?.markRouteFact(route, { audited: true });
+      memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: logAddress(page.url(), this.baseUrl) });
+      memory?.markRouteFact(route, { audited: true });
     }
     this.logAction({
       action: "design-audit",
@@ -7001,6 +7030,8 @@ export class BrowserEngine {
    */
   private async loadPage(page: Page, url: string, options: Parameters<Page["goto"]>[1]): Promise<Response | null> {
     const startedAt = Date.now();
+    // A blank page from here on is not one the engine left this page for before this load.
+    if (this.leftForBlank?.page === page) this.leftForBlank = null;
     try {
       return await page.goto(url, options);
     } catch (err) {
