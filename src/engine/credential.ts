@@ -28,8 +28,11 @@ const SECRET_WORD = new LinearRegex(
 /** "pass" names a secret only when a value is set against it: "pass: hunter2", "pass=…". */
 const PASS_SET = new LinearRegex(`pass([${SPACE}]*[:=])`, { ignoreCase: true, notAfter: WORD, lookahead: true });
 
-/** "Sign in" or "log in", then "with" within a short phrase: what follows is how they sign in ("sign in as bob with hunter2"). */
-const SIGN_IN_WITH = new LinearRegex(String.raw`\b(?:sign|log)[${SPACE}-]?in\b[^.;\n]{0,60}?\bwith\b`, { ignoreCase: true });
+/**
+ * "Sign in" or "log in", then "with" within a short phrase: what follows is how they sign in ("sign in as bob with hunter2").
+ * The phrase ends at a full stop that ends a sentence, not at one inside a name ("sign in as sam.lee with …").
+ */
+const SIGN_IN_WITH = new LinearRegex(String.raw`\b(?:sign|log)[${SPACE}-]?in\b(?:[^.;\n]|\.[^${SPACE}.;\n]){0,60}?\bwith\b`, { ignoreCase: true });
 
 /** A code as a sign-in asks for one: six to eight digits after the word "code" ("use the code 482913"). */
 const DIGIT_CODE = new LinearRegex(`code[${SPACE}]*(?:is[${SPACE}]*|[:=][${SPACE}]*)?[0-9]{6,8}($|[^0-9])`, {

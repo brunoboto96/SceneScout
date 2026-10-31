@@ -115,6 +115,15 @@ const CASES: Record<string, Array<[string, () => unknown]>> = {
     ["a provider prefix, over and over (sk_ rule)", () => redactSecrets(megabyte("sk-aaaaaaaa-"))],
     ["a bearer word inside each token (bearer rules)", () => redactSecrets(megabyte("Bearer a."))],
     ["a bearer token of letters, then a mark (letters-only bearer rule)", () => redactSecrets(megabyte("a", "Bearer ", "!"))],
+    ["a name of many words and no secret's word at its end (name=value rule's words)", () => redactSecrets(megabyte("a_", "", ": x"))],
+    ["a name of many words before a key, then no colon (name=value rule's words)", () => redactSecrets(megabyte("a_", "", "signing_key x"))],
+    ["Basic, then base64 that never ends (Basic credentials rule)", () => redactSecrets(megabyte("A", "Basic ", "-"))],
+    ["Basic credentials, over and over (Basic credentials rule)", () => redactSecrets(megabyte("Basic dXNlcjpwYXNz "))],
+    ["a marked key's tail of underscores and hyphens (sk_ rule)", () => redactSecrets(megabyte("_-", "sk-proj-"))],
+    [
+      "key prefixes with short tails, over and over (provider key rules)",
+      () => redactSecrets(megabyte("SG.aaaaaaaaaaaaaaaa.a hf_a xapp-1-a whsec_a github_pat_a ")),
+    ],
     ["a PIN, then digits (PIN rule)", () => redactSecrets(megabyte("1", "PIN "))],
     ["codes after an error's word, over and over (sign-in code rule)", () => redactSecrets(megabyte("error code 123456 "))],
     // Built from its parts, so the repository holds no private key's marker for the hygiene scan to find.
@@ -214,6 +223,7 @@ const CASES: Record<string, Array<[string, () => unknown]>> = {
     ["pass, over and over (pass and its value)", () => holdsCredential(megabyte("pass "))],
     ["a secret's word, over and over (a secret's word and its value)", () => holdsCredential(megabyte("password "))],
     ["use, then a long word (a value to type when asked)", () => holdsCredential(megabyte("x", "use "))],
+    ["sign in, then dotted names and no with (sign in with)", () => holdsCredential(megabyte("a.b ", "sign in "))],
   ],
 };
 
