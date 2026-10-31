@@ -144,7 +144,12 @@ export function exitWith(code: number): never {
   throw new CommandExit(code);
 }
 
-type Flushable = Pick<NodeJS.WritableStream, "write">;
+type Flushable = Pick<NodeJS.WritableStream, "write" | "on" | "listeners">;
+
+/** A reader that has gone (`| head`) is not the command's failure; any other stream error still throws. */
+function brokenPipeIsNotAFailure(err: NodeJS.ErrnoException): void {
+  if (err.code !== "EPIPE") throw err;
+}
 
 /**
  * Exit with this code once everything already written to the streams has been handed on.
@@ -152,6 +157,8 @@ type Flushable = Pick<NodeJS.WritableStream, "write">;
  */
 export async function exitWhenDrained(code: number, streams: readonly Flushable[] = [process.stdout, process.stderr]): Promise<never> {
   process.exitCode = code;
+  // console.* absorbs its own EPIPE; this write is not console's, so unhandled it would exit 1 with a trace.
+  for (const s of streams) if (!s.listeners("error").includes(brokenPipeIsNotAFailure)) s.on("error", brokenPipeIsNotAFailure);
   // An empty write's callback runs after every write queued before it; a stream that has failed calls it too, with the error.
   await Promise.all(streams.map((s) => new Promise<void>((done) => s.write("", () => done()))));
   process.exit(code);

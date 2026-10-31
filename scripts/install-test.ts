@@ -2430,6 +2430,77 @@ test("a command that ends with an exit code, read through a pipe, arrives whole 
   }
 });
 
+test(
+  "exitWhenDrained keeps its own code when the reader left after the last write (`| head`), on stdout and on stderr (#740)",
+  { skip: process.platform === "win32" },
+  () => {
+    const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-epipe-"));
+    try {
+      const commands = pathToFileURL(path.join(repo, "src", "commands.ts")).href;
+      for (const which of ["stdout", "stderr"] as const) {
+        const child = path.join(dir, `${which}.mjs`);
+        // `head -c 1` has read the byte and gone by the time the drain's own write reaches the pipe.
+        fs.writeFileSync(
+          child,
+          `import { exitWhenDrained } from ${JSON.stringify(commands)};\n` +
+            `process.${which}.write("x");\nawait new Promise((r) => setTimeout(r, 500));\nawait exitWhenDrained(3);\n`,
+        );
+        const other = path.join(dir, "other.txt");
+        const redirect = which === "stdout" ? '2>"$OTHER"' : '2>&1 >"$OTHER"';
+        const script = `( "$1" --import tsx "$2" ${redirect}; echo $? >"$STATUS" ) | head -c 1 >/dev/null`;
+        const status = path.join(dir, "status.txt");
+        const run = spawnSync("sh", ["-c", script, "sh", process.execPath, child], { cwd: repo, env: { ...process.env, OTHER: other, STATUS: status } });
+        assert.equal(run.status, 0, String(run.stderr));
+        assert.equal(fs.readFileSync(other, "utf8"), "", which);
+        assert.equal(fs.readFileSync(status, "utf8").trim(), "3", which);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+/** Runs the CLI with `which` piped into `head -c 10`, which closes its end after the first bytes; the other stream goes to a file. */
+function throughHead(argv: string[], which: "stdout" | "stderr", dir: string, env: NodeJS.ProcessEnv): { code: number; other: string } {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const other = path.join(dir, "other.txt");
+  const status = path.join(dir, "status.txt");
+  const redirect = which === "stdout" ? '2>"$OTHER"' : '2>&1 >"$OTHER"';
+  const script = `node="$1"; shift; ( "$node" --import tsx "$@" ${redirect}; echo $? >"$STATUS" ) | head -c 10 >/dev/null`;
+  const run = spawnSync("sh", ["-c", script, "sh", process.execPath, path.join(repo, "src", "cli.ts"), ...argv], {
+    cwd: repo,
+    env: { ...env, OTHER: other, STATUS: status },
+  });
+  assert.equal(run.status, 0, String(run.stderr));
+  return { code: Number(fs.readFileSync(status, "utf8").trim()), other: fs.readFileSync(other, "utf8") };
+}
+
+test("a command whose reader has gone (`| head`) exits with its own code and prints no EPIPE trace (#740)", { skip: process.platform === "win32" }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-epipe-"));
+  try {
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: dir, USERPROFILE: dir };
+    delete env.SCENESCOUT_CONFIG;
+    const long = `https://app.example/api/things?q=${"a".repeat(300_000)}`;
+    const policy = throughHead(["policy", "explain", "POST", long], "stdout", dir, env);
+    assert.equal(policy.code, 0, policy.other.slice(0, 500));
+    assert.equal(policy.other, "");
+    // The usage path sets the exit code and returns (#736): its 0 and its 1 survive a gone reader too.
+    const help = throughHead(["--help"], "stdout", dir, env);
+    assert.equal(help.code, 0, help.other.slice(0, 500));
+    assert.equal(help.other, "");
+    const bare = throughHead([], "stdout", dir, env);
+    assert.equal(bare.code, 1, bare.other.slice(0, 500));
+    assert.equal(bare.other, "");
+    // A long refusal goes to stderr: with stderr's reader gone it still exits with the refusal's 1, and stdout stays empty.
+    const refused = throughHead(["scan", `--${"x".repeat(300_000)}`], "stderr", dir, env);
+    assert.equal(refused.code, 1);
+    assert.equal(refused.other, "");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("src/ ends a process only through exitWhenDrained, apart from the MCP server's shutdown, which prints nothing (#740)", () => {
   const src = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
   const found: string[] = [];
