@@ -581,7 +581,7 @@ export class RouteGuard {
     // Auth/session flows must work in every mode — but never a destructive
     // one, and in observe only the requests a login itself needs.
     if (verdict.kind === "auth") {
-      this.routedWrites.note(rule, sent, url, bodyDigest(req.postDataBuffer()));
+      this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
       return route.fallback();
     }
     if (verdict.kind === "listed-write") {
@@ -590,7 +590,7 @@ export class RouteGuard {
         target: `${method} ${pathname} (allowed by the list: ${allowList?.entry?.entry ?? "listed"})`,
         url: this.host.pageUrl() ?? "",
       });
-      this.routedWrites.note(rule, sent, url, bodyDigest(req.postDataBuffer()));
+      this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
       if (method === "POST") this.host.clearRefusedPost(url);
       return route.fallback();
     }
@@ -600,7 +600,7 @@ export class RouteGuard {
         target: `${method} ${pathname} (named as a read: ${readPost.entry})`,
         url: this.host.pageUrl() ?? "",
       });
-      this.routedWrites.note(rule, sent, url, bodyDigest(req.postDataBuffer()));
+      this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
       this.host.clearRefusedPost(url);
       return route.fallback();
     }
@@ -639,7 +639,7 @@ export class RouteGuard {
           .finally(() => this.pendingCreations.delete(task));
         this.pendingCreations.add(task);
       }
-      this.routedWrites.note(rule, sent, url, bodyDigest(req.postDataBuffer()));
+      this.routedWrites.note(rule, method, url, bodyDigest(req.postDataBuffer()));
       if (method === "POST") this.host.clearRefusedPost(url);
       return route.fallback();
     }
@@ -718,7 +718,8 @@ export class RouteGuard {
         this.host.notePolicyBlock();
         return;
       }
-      if (this.routedWrites.claim(rule, sent, url, bodyDigest(bytes))) return await answer(true);
+      // Keyed on the method judged, so an unrouted copy carrying an override is not excused by the plain write let through.
+      if (this.routedWrites.claim(rule, method, url, bodyDigest(bytes))) return await answer(true);
       let verdict: UnseenWriteVerdict;
       let pathname = url;
       try {
