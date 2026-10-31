@@ -16,6 +16,7 @@ import { INTAKE_FORM_MESSAGE, introQuestions } from "../dist/intake.js";
 import { shellQuote, writeProfile } from "../dist/engine/profiles.js";
 import { siteFolderName } from "../dist/engine/project-folder.js";
 import { MCP_APP_MIME, STATUS_PANE_URI, STATUS_POLL_TOOL, STATUS_TOOL } from "../dist/engine/status-pane.js";
+import { CommandExit, exitWhenDrained, exitWith } from "../dist/commands.js";
 import { asLf } from "./checkout.ts";
 import { listedParams, OWN_TABLE_TOOLS, shownCalls, toolParams, toolParamsMarkdown, toolParamsSection } from "./tool-params.ts";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
@@ -78,7 +79,7 @@ const LIVE_LINE = /Live view: (http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{16,}\/)/
 
 function fail(message: string): never {
   console.error(`MCP CHECK FAILED — ${message}`);
-  process.exit(1);
+  exitWith(1);
 }
 
 /** A cleanup close that is refused leaves browsers running; fail rather than leak them. */
@@ -1863,6 +1864,43 @@ async function configCheck(): Promise<void> {
       if (!scan.isError || !/is outside the config's projectsRoot/.test(scan.text)) fail(`scout_scan outside projectsRoot was not refused:\n${scan.text}`);
       const inside = await attach({ mode: "observe", session: "inside", projectPath: path.join(root, "app") });
       if (inside.isError) fail(`an attach whose projectPath is inside projectsRoot was refused:\n${inside.text}`);
+      // An earlier run's record is read only from inside it too; one inside it gets as far as being read.
+      const lanes = (fromRun: string) => call("scout_lane_brief", { session: "inside", lanes: 2, routes: ["/a", "/b"], fromRun });
+      const away = await lanes(path.join(dir, "ci.json"));
+      if (!away.isError || !/the earlier run's record .* is outside the config's projectsRoot/.test(away.text))
+        fail(`scout_lane_brief read an earlier run's record outside projectsRoot:\n${away.text}`);
+      const near = await lanes("missing-ci.json");
+      if (/projectsRoot/.test(near.text)) fail(`scout_lane_brief refused a record inside projectsRoot:\n${near.text}`);
+    });
+    // hosts: an attach and a sign-in window off the operator's list are refused before anything starts, naming only the host.
+    const fixtureHost = new URL(fixture.baseUrl).host;
+    await withServer({ SCENESCOUT_HOSTS: "app.example.com" }, async (attach, call) => {
+      const off = await attach({ mode: "observe", session: "off-host" });
+      if (!off.isError || !off.text.includes(`the attach URL is on ${fixtureHost}, and the hosts list (SCENESCOUT_HOSTS)`))
+        fail(`an attach off the hosts list was not refused, naming its host:\n${off.text}`);
+      const login = await call("scout_login", { url: `${fixture.baseUrl}/login`, role: "member", projectPath: projectDir });
+      if (!login.isError || !login.text.includes(`the sign-in URL is on ${fixtureHost}`))
+        fail(`scout_login off the hosts list was not refused:\n${login.text}`);
+    });
+    await withServer({ SCENESCOUT_HOSTS: new URL(fixture.baseUrl).hostname }, async (attach) => {
+      const on = await attach({ mode: "observe", session: "on-host" });
+      if (on.isError) fail(`an attach on a listed host was refused:\n${on.text}`);
+    });
+    // The guided offer reads the site's own project file, which may cap it lower than the server's config.
+    const sites = path.join(dir, "sites");
+    const siteDir = path.join(sites, siteFolderName(fixture.baseUrl));
+    fs.mkdirSync(path.join(siteDir, ".scenescout"), { recursive: true });
+    fs.writeFileSync(path.join(siteDir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "observe" }));
+    await withServer({ SCENESCOUT_PROJECTS_DIR: sites }, async (_attach, call, client) => {
+      const above = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms"], care: "may-submit-forms" } });
+      if (!above.isError || !/maxMode|Look only/.test(above.text)) fail(`scout_guided_plan built a plan above the project file's maxMode:\n${above.text}`);
+      const look = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms"], care: "look-only" } });
+      if (look.isError) fail(`scout_guided_plan refused Look only under the project file's maxMode observe:\n${look.text}`);
+      const capped = promptTextOf(await client.getPrompt({ name: "check-my-site", arguments: { url: fixture.baseUrl } }));
+      if (!capped.includes('allows no care level above "Look only"'))
+        fail(`the Check my site prompt for the site ignored its project file's maxMode:\n${capped}`);
+      const other = promptTextOf(await client.getPrompt({ name: "check-my-site", arguments: { url: "https://other.example.com" } }));
+      if (other.includes('allows no care level above "Look only"')) fail(`another site's prompt was capped by this site's project file:\n${other}`);
     });
     // requireGuidedPlan alone: the gate holds from the start, before any plan is built.
     await withServer({ SCENESCOUT_CONFIG: configFile("guided.json", { requireGuidedPlan: true }) }, async (attach) => {
@@ -1940,7 +1978,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; redactPageText \"pii\" masks a page's email, phone and card in scout_snapshot and scout_request, and \"off\" does not, and a masking project masks a call naming another project's session; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach, a scan and a lane brief's earlier run outside it; hosts refuses an attach and a sign-in window off the list; a site's project file caps the guided plan and prompt; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; redactPageText \"pii\" masks a page's email, phone and card in scout_snapshot and scout_request, and \"off\" does not, and a masking project masks a call naming another project's session; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();
@@ -1959,7 +1997,7 @@ async function main(): Promise<void> {
   const missing = EXPECTED_TOOLS.filter((t) => !names.includes(t));
   if (missing.length > 0) {
     console.error(`MCP CHECK FAILED — missing tools: ${missing.join(", ")}\nGot: ${names.join(", ")}`);
-    process.exit(1);
+    exitWith(1);
   }
   console.log(`✓ server exposes ${names.length} tools`);
 
@@ -1998,18 +2036,18 @@ async function main(): Promise<void> {
   const instructions = client.getInstructions() ?? "";
   if (!instructions.includes("scout_playbook")) {
     console.error(`MCP CHECK FAILED — the server instructions do not point at scout_playbook. Got: ${JSON.stringify(instructions.slice(0, 200))}`);
-    process.exit(1);
+    exitWith(1);
   }
   // Called with no `arguments` field at all: "takes no input" invites exactly that call.
   const played = (await client.callTool({ name: "scout_playbook" })) as { content: Array<{ type: string; text?: string }>; isError?: boolean };
   const playbook = played.content.find((c) => c.type === "text")?.text ?? "";
   if (played.isError || !playbook.includes("## Setup (in order)") || !playbook.startsWith("# SceneScout")) {
     console.error(`MCP CHECK FAILED — scout_playbook did not return the method (without front matter). Got: ${JSON.stringify(playbook.slice(0, 200))}`);
-    process.exit(1);
+    exitWith(1);
   }
   if (!skillBody.endsWith(playbook)) {
     console.error("MCP CHECK FAILED — scout_playbook returned text that is not the skill file's body; the two must be one text.");
-    process.exit(1);
+    exitWith(1);
   }
   const { prompts } = await client.listPrompts();
   const prompt = await client.getPrompt({ name: "explore", arguments: { url: "http://localhost:3000", level: "minimal" } });
@@ -2020,14 +2058,14 @@ async function main(): Promise<void> {
     !/Target: http:\/\/localhost:3000\nLevel: minimal$/.test(promptText)
   ) {
     console.error(`MCP CHECK FAILED — the explore prompt is missing, or lacks the method or what was asked. Got: ${JSON.stringify(promptText.slice(-200))}`);
-    process.exit(1);
+    exitWith(1);
   }
   // A client sends no `arguments` object when the person typed none; every argument is optional.
   const bare = await client.getPrompt({ name: "explore" });
   const bareText = bare.messages.map((m) => (m.content.type === "text" ? m.content.text : "")).join("\n");
   if (!bareText.endsWith(introQuestions())) {
     console.error(`MCP CHECK FAILED — the explore prompt without arguments did not ask the plain questions. Got: ${JSON.stringify(bareText.slice(-200))}`);
-    process.exit(1);
+    exitWith(1);
   }
   // A level the method does not know is refused, and the server survives refusing it.
   const refused = await client.getPrompt({ name: "explore", arguments: { level: "deep" } }).then(
@@ -2036,7 +2074,7 @@ async function main(): Promise<void> {
   );
   if (!/minimal, medium, extensive/.test(refused)) {
     console.error(`MCP CHECK FAILED — an unknown level was not refused with the choices. Got: ${JSON.stringify(refused)}`);
-    process.exit(1);
+    exitWith(1);
   }
   const liveListed = prompts.find((p) => p.name === "live");
   const loginListed = prompts.find((p) => p.name === "login");
@@ -2075,7 +2113,7 @@ async function main(): Promise<void> {
         `live: ${JSON.stringify(liveText.slice(0, 200))}\nlogin: ${JSON.stringify(loginText.slice(0, 200))}\n` +
         `no role: ${JSON.stringify(loginBare)}\npassword arg: ${JSON.stringify(loginSecret)}`,
     );
-    process.exit(1);
+    exitWith(1);
   }
   console.log("✓ the method reaches a client through instructions, scout_playbook and the explore prompt");
   console.log("✓ live and login prompts are listed, name no password, and tell the model what to return or call");
@@ -2115,7 +2153,7 @@ async function main(): Promise<void> {
         `titles: ${JSON.stringify(titles)}\ncheck-my-site: ${JSON.stringify(checkGot.slice(0, 300))}\n` +
         `credential url: ${JSON.stringify(checkSecret)}\nfile-tickets to: ${JSON.stringify(ticketsTo)}`,
     );
-    process.exit(1);
+    exitWith(1);
   }
   console.log("✓ the guided prompts are listed with the panel's titles, check-my-site starts scout_intake with its address, and refusals repeat nothing");
 
@@ -2137,7 +2175,7 @@ async function main(): Promise<void> {
       `MCP CHECK FAILED — the skill never mentions: ${undocumented.join(", ")}\n` +
         `Every registered tool must appear in skills/scenescout/SKILL.md, or the agent will never use it.`,
     );
-    process.exit(1);
+    exitWith(1);
   }
   console.log(`✓ skill documents all ${forTheModel.length} tools the model sees`);
 
@@ -2148,7 +2186,7 @@ async function main(): Promise<void> {
   const unknown = [...mentioned].filter((n) => !names.includes(n));
   if (unknown.length > 0) {
     console.error(`MCP CHECK FAILED — the skill refers to tools the server does not register: ${unknown.join(", ")}`);
-    process.exit(1);
+    exitWith(1);
   }
   console.log(`✓ skill names no tool the server lacks`);
 
@@ -2176,7 +2214,7 @@ async function main(): Promise<void> {
         `A parameter the skill doesn't name is a parameter the agent will never pass. Document it in\n` +
         `skills/scenescout/SKILL.md, or add it to PARAM_EXEMPT in this script if it is genuinely internal.`,
     );
-    process.exit(1);
+    exitWith(1);
   }
   console.log(`✓ skill documents every non-exempt tool parameter`);
 
@@ -2293,7 +2331,7 @@ async function main(): Promise<void> {
   }
   if (guideGaps.length > 0) {
     console.error(`MCP CHECK FAILED — the guide disagrees with the server's tools:\n  ${guideGaps.join("\n  ")}`);
-    process.exit(1);
+    exitWith(1);
   }
   console.log(
     "✓ the guide names only tools and parameters the server has, lists every scout_attach option, which options of every tool are required, and the same prompts the server lists",
@@ -2303,7 +2341,7 @@ async function main(): Promise<void> {
   const text = (result.content as Array<{ type: string; text?: string }>).map((c) => c.text ?? "").join("");
   if (!text.includes("Project:")) {
     console.error(`MCP CHECK FAILED — scout_scan returned unexpected output:\n${text}`);
-    process.exit(1);
+    exitWith(1);
   }
   console.log("✓ scout_scan round-trip works");
 
@@ -2334,7 +2372,7 @@ async function main(): Promise<void> {
   console.log("\nMCP CHECK PASSED");
 }
 
-main().catch((err) => {
-  console.error("MCP CHECK CRASHED:", err);
-  process.exit(1);
+main().catch(async (err: unknown) => {
+  if (!(err instanceof CommandExit)) console.error("MCP CHECK CRASHED:", err);
+  await exitWhenDrained(err instanceof CommandExit ? err.code : 1);
 });

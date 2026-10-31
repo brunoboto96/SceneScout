@@ -372,6 +372,17 @@ test("the same contradiction on the same endpoint carries the same evidence acro
   assert.equal(a[0].evidence, b[0].evidence, "the host is not part of the signature");
 });
 
+test("a contradiction names another site's refused request by its origin and path, never its query", () => {
+  const elsewhere = req({ method: "POST", url: "https://forms.example.net/submit?state=st-91c2", status: 403, elsewhere: "https://forms.example.net/submit" });
+  const found = findContradictions([elsewhere], page({ texts: ["Saved"] }));
+  assert.equal(found.length, 1);
+  assert.equal(found[0].evidence, "false-success POST https://forms.example.net/submit 403");
+  assert.doesNotMatch(found[0].detail, /st-91c2/);
+  // The app's own request keeps its path and query, and no host.
+  const own = findContradictions([req({ method: "POST", url: "https://app.example.com/api/things?draft=1", status: 403 })], page({ texts: ["Saved"] }));
+  assert.equal(own[0].evidence, "false-success POST /api/things?draft=1 403");
+});
+
 // ── pairing a success claim with the write it would be lying about ──────────
 // Each pair below differs in the one fact that flips the verdict.
 

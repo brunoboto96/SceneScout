@@ -216,6 +216,22 @@ export function logAddress(url: string, baseUrl: string): string {
 }
 
 /**
+ * A WebSocket's address as a notice names it, by logAddress's rule: one to another site by its origin and path, one to
+ * the app's own host (ws for http, wss for https) as it is. A socket's query often carries its session token.
+ */
+export function socketAddress(url: string, baseUrl: string): string {
+  try {
+    const u = new URL(url);
+    const page = u.protocol === "wss:" ? "https:" : u.protocol === "ws:" ? "http:" : null;
+    if (!page) return logAddress(url, baseUrl);
+    if (new URL(baseUrl).origin === new URL(`${page}//${u.host}`).origin) return url;
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Did an action take the page off a sign-in page, to a page of the app that is not one? That is how a person signs in
  * through the app's own form (or comes back from a provider's), so a sign-out the session made (AuthLossTracker.signOut)
  * ends there. A move between two sign-in pages, or to another site, does not; nor does a back, which the caller leaves

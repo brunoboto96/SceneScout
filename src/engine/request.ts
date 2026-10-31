@@ -448,8 +448,9 @@ export const PAGE_REQUESTS_SHOWN_MAX = 200;
 const SECRET_PARAM_RE = /token|secret|sig(nature)?$|^sig|password|passwd|api[-_]?key|^key$|auth|credential|session|^code$|otp/i;
 
 /**
- * A request's address as the listing prints it: the path on the page's
- * origin, the whole URL elsewhere. A query parameter named like a
+ * A request's address as the listing prints it: the path and query on the
+ * page's origin, another site's origin and path only (its query can carry a
+ * sign-in request's state, which no name rule knows). A query parameter named like a
  * credential has its value replaced before anything else, then the rest
  * passes the same redaction as an oracle's violation; it is cut only after.
  */
@@ -465,7 +466,7 @@ export function shownUrl(url: string, origin: string): string {
       }
     }
     const search = hidden > 0 ? u.search.replace(/=redacted\b/g, "=[redacted]") : u.search;
-    shown = (u.origin === origin ? "" : u.origin) + u.pathname + search;
+    shown = u.origin === origin ? u.pathname + search : u.origin + u.pathname;
   } catch {
     // Not a URL we can shorten; shown whole, and redacted below.
   }

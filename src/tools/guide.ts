@@ -10,7 +10,6 @@ import { ErrorCode, GetPromptRequestSchema, ListPromptsRequestSchema, McpError, 
 import { z } from "zod";
 import { formElicitationSupported, INTAKE_FORM_MESSAGE, INTAKE_TOOL, intakeFormSchema, intakeFromForm, intakeReplyText, type FormOutcome } from "../intake.js";
 import {
-  buildGuidedPlan,
   buildRecheckPlan,
   checkAddress,
   recheckCandidates,
@@ -67,6 +66,8 @@ import {
 
 import { PACKAGE_ROOT, server, engines, errorText, guidedPlans, guidedRuns, guidedSessions, operatorPolicy, projectEngine } from "../server-context.js";
 import { projectFolderFor } from "./sessions.js";
+import { fsPolicyReader, withProjectPolicy } from "../engine/project-config.js";
+import type { WriteMode } from "../engine/policy.js";
 
 // The guided start as one form, where the client can show one (MCP
 // elicitation, form mode); otherwise, or when the person declines or closes it,
@@ -236,6 +237,17 @@ export async function projectDirFor(address: string | undefined, planId?: string
   return path.resolve(folder.dir);
 }
 
+/**
+ * The maxMode a guided plan is held to: the operator's config joined with the
+ * project's own file, which may only tighten it, so a care level the attach
+ * would refuse is not offered.
+ */
+function projectMaxMode(projectDir: string): WriteMode | undefined {
+  const joined = withProjectPolicy(operatorPolicy, projectDir, fsPolicyReader);
+  if (!joined.ok) throw new Error(`the project's SceneScout config is not valid: ${joined.error}`);
+  return joined.loaded.policy.maxMode;
+}
+
 /** The findings kept in a project: an open session's memory, else its memory.json read as it is, never written. */
 function findingsIn(projectDir: string): Finding[] {
   const dir = path.join(projectDir, MEMORY_DIRNAME);
@@ -321,7 +333,9 @@ export function registerGuideTools(): void {
         const reply = intakeFromForm(outcome as FormOutcome, maxMode);
         if (reply.kind !== "choices") return { content: [{ type: "text" as const, text: intakeReplyText(reply) }] };
         const signInHealth = await signInHealthFor(reply.choices);
-        const plan = guidedPlans.add(buildGuidedPlan(reply.choices, undefined, { maxMode, ...(signInHealth ? { signInHealth } : {}) }));
+        const built = guidedPlan(reply.choices, undefined, { maxMode: projectMaxMode(await projectDirFor(reply.choices.address)), health: () => signInHealth });
+        if (!built.ok) throw new Error(built.error);
+        const plan = guidedPlans.add(built.plan);
         guidedRuns.focus(plan.planId);
         // A care level that needs the person's confirmation asks for it now, in a second form, so the person answers both in one go.
         const confirmed = plan.confirm ? await confirmWithPerson(plan.planId, extra) : null;
@@ -393,7 +407,8 @@ export function registerGuideTools(): void {
           const maxMode = operatorPolicy.policy.maxMode;
           const checked = checkGuidedChoices(choices, { maxMode });
           const health = checked.ok ? await signInHealthFor(checked.choices) : undefined;
-          const built = guidedPlan(choices, undefined, { maxMode, health: () => health });
+          const projectMax = checked.ok ? projectMaxMode(await projectDirFor(checked.choices.address)) : maxMode;
+          const built = guidedPlan(choices, undefined, { maxMode: projectMax, health: () => health });
           if (!built.ok) throw new Error(built.error);
           plan = guidedPlans.add(built.plan);
           guidedRuns.focus(plan.planId);
@@ -469,7 +484,7 @@ export function registerGuideTools(): void {
       try {
         const dir = await projectDirFor(address);
         const { candidates, missing } = recheckCandidates(findingsIn(dir), ids, address);
-        const maxMode = operatorPolicy.policy.maxMode;
+        const maxMode = projectMaxMode(dir);
         const spec = recheckSpec(candidates, {
           maxMode,
           ...(signIn ? { signIn: signIn as GuidedChoices["signIn"] } : {}),
@@ -544,7 +559,7 @@ export function registerGuideTools(): void {
         }
         const read = readSavedCheck(dir, name);
         if (!read.ok) throw new Error(read.error);
-        const maxMode = operatorPolicy.policy.maxMode;
+        const maxMode = projectMaxMode(dir);
         const health = await signInHealthFor(read.saved.choices);
         const built = guidedPlan(read.saved.choices, undefined, { maxMode, health: () => health });
         if (!built.ok) throw new Error(`the saved check "${read.saved.name}" cannot run here: ${built.error}`);
@@ -602,7 +617,7 @@ export function registerGuideTools(): void {
     ],
   }));
 
-  server.server.setRequestHandler(GetPromptRequestSchema, (request) => {
+  server.server.setRequestHandler(GetPromptRequestSchema, async (request) => {
     const name = request.params.name;
     let message: string;
     try {
@@ -610,9 +625,13 @@ export function registerGuideTools(): void {
       else if (name === LIVE_PROMPT) message = livePrompt(request.params.arguments);
       else if (name === LOGIN_PROMPT) message = loginPrompt(request.params.arguments);
       // The operator's config caps the care levels a prompt offers, as it caps the intake form's.
-      else if (GUIDED_PROMPTS.some((p) => p.name === name))
-        message = guidedPromptText(name, request.params.arguments, guidedPromptOptions(operatorPolicy.policy.maxMode));
-      else throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${name}`);
+      else if (GUIDED_PROMPTS.some((p) => p.name === name)) {
+        // With the site's address, its project's own file may cap the offer lower still.
+        const url = request.params.arguments?.url;
+        const site = typeof url === "string" && checkAddress(url).ok ? url : undefined;
+        const maxMode = site ? projectMaxMode(await projectDirFor(site)) : operatorPolicy.policy.maxMode;
+        message = guidedPromptText(name, request.params.arguments, guidedPromptOptions(maxMode));
+      } else throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${name}`);
     } catch (err) {
       if (err instanceof McpError) throw err;
       throw new McpError(ErrorCode.InvalidParams, err instanceof Error ? err.message : String(err));

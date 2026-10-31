@@ -61,7 +61,7 @@ import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
-import { configureCommand, fsPolicyReader, readCommandPolicy, type CommandOptions, type SessionWriteRules } from "./engine/project-config.js";
+import { configureCommand, fsPolicyReader, loginHostRefusal, readCommandPolicy, type CommandOptions, type SessionWriteRules } from "./engine/project-config.js";
 import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
 import { runConfigCommand } from "./engine/config-explain.js";
 import { MAX_EXPLAIN_BODY, runPolicyCommand } from "./engine/policy-explain.js";
@@ -113,7 +113,7 @@ import {
   type StatusFile,
 } from "./engine/live.js";
 import { formatScan, scanProject } from "./scan.js";
-import { dispatch } from "./commands.js";
+import { CommandExit, dispatch, exitWhenDrained, exitWith } from "./commands.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, "..");
@@ -663,7 +663,7 @@ async function doctor(flags: string[]): Promise<void> {
     console.log(`${c.ok ? "✓" : "✗"} ${c.name} — ${c.detail}`);
     if (!c.ok && c.fix) console.log(`    fix: ${c.fix}`);
   }
-  if (checks.some((c) => !c.ok)) process.exit(1);
+  if (checks.some((c) => !c.ok)) exitWith(1);
   console.log(`\n${doctorAllGood({ engineOnly: flags.includes("--engine"), desktopOnly: checks.some((c) => c.name === CLAUDE_CODE_NOT_NEEDED) })}`);
 }
 
@@ -681,7 +681,7 @@ function commandConfig(
 ): { mode: WriteMode; dedup?: DedupMode; writeRules?: SessionWriteRules } {
   const stop = (error: string): never => {
     console.error(`scenescout${command ? ` ${command}` : ""}: ${error}`);
-    process.exit(exitCode);
+    exitWith(exitCode);
   };
   const applied = configureCommand(process.env, process.cwd(), options.projectDir, args, options, fsPolicyReader);
   if (!applied.ok) return stop(applied.error);
@@ -696,7 +696,7 @@ async function check(args: string[]): Promise<never> {
   const parsed = parseCheckArgs(args, process.cwd());
   if (!parsed.ok) {
     console.error(`scenescout check: ${parsed.error}`);
-    process.exit(EXIT.error);
+    exitWith(EXIT.error);
   }
   const capped = commandConfig(args, parsed.options, "check", EXIT.error);
   let options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode, writeRules: capped.writeRules };
@@ -716,7 +716,7 @@ async function check(args: string[]): Promise<never> {
     inputs = readCheckInputs(options);
   } catch (err) {
     console.error(`scenescout check: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(EXIT.error);
+    exitWith(EXIT.error);
   }
   let result;
   try {
@@ -724,24 +724,24 @@ async function check(args: string[]): Promise<never> {
     result = await runCheck(options, (line) => console.log(line), inputs);
   } catch (err) {
     console.error(`scenescout check: could not run: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(EXIT.error);
+    exitWith(EXIT.error);
   }
   // Before unmeasuredReason: a challenge page with few controls would otherwise read as an app that had not finished drawing.
   const notTheApp = startPageRefusal(result.routes, !options.paths);
   if (notTheApp) {
     console.error(`scenescout check: could not run: ${notTheApp}`);
-    process.exit(EXIT.error);
+    exitWith(EXIT.error);
   }
   const unmeasured = unmeasuredReason(result.routes, !options.paths, result.unvisited);
   if (unmeasured) {
     console.error(`scenescout check: could not measure ${options.url}: ${unmeasured}`);
-    process.exit(EXIT.error);
+    exitWith(EXIT.error);
   }
   const refused = refusedFlowReason(result);
   // --on-refused-step stop: no verdict is written at all.
   if (refused && options.onRefusedStep === "stop") {
     console.error(`scenescout check: could not run a saved flow: ${refused}`);
-    process.exit(EXIT.error);
+    exitWith(EXIT.error);
   }
   // Recorded in check.json, so the next check removes exactly this file and the action finds it.
   if (template && result.replay) result = { ...result, testReport: reportFileOf(template) };
@@ -781,7 +781,7 @@ async function check(args: string[]): Promise<never> {
   } catch (err) {
     // A verdict nobody can read is not a pass or a fail: exit as "could not run", never as the gate's 1.
     console.error(`scenescout check: could not write the results to ${outDir}: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(EXIT.error);
+    exitWith(EXIT.error);
   }
   console.log("\n" + markdown);
   console.log(`Wrote report.md, check.sarif and check.json to ${outDir}`);
@@ -796,19 +796,19 @@ async function check(args: string[]): Promise<never> {
   if (written > 0) console.log(`Wrote ${written} baseline(s) to ${baselinesDirOf(options)}`);
   // --on-refused-step report: everything else has its verdict in the files, and the exit code still says the run was incomplete.
   if (refused) console.error(`scenescout check: could not run a saved flow: ${refused}`);
-  process.exit(exitCodeOf(result));
+  exitWith(exitCodeOf(result));
 }
 
 /** `scenescout <url>`: a first look. Exit 0 once it has looked, whatever it found; 2 when it could not look or could not write its report. */
 async function firstRun(args: string[]): Promise<never> {
   const fail = (message: string): never => {
     console.error(`scenescout: ${message}`);
-    process.exit(EXIT_FIRST_RUN.couldNotRun);
+    exitWith(EXIT_FIRST_RUN.couldNotRun);
   };
   const parsed = parseFirstRunArgs(args, process.cwd());
   if (!parsed.ok) return fail(parsed.error);
   // The config in the folder this runs in caps its --mode too; a first look's own project is an empty temporary one.
-  const capped = commandConfig(args, { mode: parsed.options.mode, projectDir: process.cwd() }, "", EXIT_FIRST_RUN.couldNotRun);
+  const capped = commandConfig(args, { mode: parsed.options.mode, url: parsed.options.url, projectDir: process.cwd() }, "", EXIT_FIRST_RUN.couldNotRun);
   const options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode };
   // Found out now, not after the look; and nothing is created until the look has something to write.
   const folderProblem = reportFolderProblem(options.outDir ?? path.join(process.cwd(), FIRST_RUN_DIRNAME), options.outDir !== undefined);
@@ -879,7 +879,7 @@ async function firstRun(args: string[]): Promise<never> {
   console.log("");
   for (const line of firstRunSummary(facts, where)) console.log(line);
   if (!written) return fail(`could not write the report: ${notWritten}`);
-  process.exit(EXIT_FIRST_RUN.ran);
+  exitWith(EXIT_FIRST_RUN.ran);
 }
 
 /** `scenescout ci`: exit 0 when the run ran, 2 when it could not. Findings never change the exit code. */
@@ -888,7 +888,7 @@ async function ci(args: string[]): Promise<never> {
   const say = (line: string): void => console.log(redactKeys(line, secrets));
   const fail = (message: string): never => {
     console.error(redactKeys(`scenescout ci: ${message}`, secrets));
-    process.exit(EXIT_CI.couldNotRun);
+    exitWith(EXIT_CI.couldNotRun);
   };
   const parsed = parseCiArgs(args, process.cwd(), process.env);
   if (!parsed.ok) return fail(parsed.error);
@@ -927,7 +927,7 @@ async function ci(args: string[]): Promise<never> {
         : "the report could not be written";
     fail(`could not run: ${why}`);
   }
-  process.exit(exitCode);
+  exitWith(exitCode);
 }
 
 /** `scenescout login`: exit 0 saved, 1 nothing saved. */
@@ -935,15 +935,20 @@ async function login(args: string[]): Promise<never> {
   const parsed = parseLoginArgs(args, process.cwd());
   if (!parsed.ok) {
     console.error(`scenescout login: ${parsed.error}`);
-    process.exit(1);
+    exitWith(1);
   }
   const options = parsed.options;
+  const offHost = loginHostRefusal(process.env, process.cwd(), options.projectDir, options.url, fsPolicyReader);
+  if (offHost) {
+    console.error(`scenescout login: ${offHost}`);
+    process.exit(1);
+  }
   if (options.script) {
     // Everything is checked before a browser launches; each problem names a variable, never a value.
     const read = readScriptedLogin(options.script, process.env);
     if (!read.ok) {
       for (const e of read.errors) console.error(`scenescout login: ${e}`);
-      process.exit(1);
+      exitWith(1);
     }
     const redactor = credentialRedactor(read.config, process.env[LOGIN_ENV.totpSecret]);
     try {
@@ -952,18 +957,18 @@ async function login(args: string[]): Promise<never> {
     } catch (err) {
       // Redacted again here: an error thrown by the browser itself has not been through the run's redaction.
       console.error(redactor.redact(`scenescout login: ${err instanceof Error ? err.message : String(err)}`));
-      process.exit(1);
+      exitWith(1);
     }
-    process.exit(0);
+    exitWith(0);
   }
   try {
     const saved = await runLogin(options, (line) => console.log(line));
     console.log(savedLine(options, saved));
   } catch (err) {
     console.error(`scenescout login: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
+    exitWith(1);
   }
-  process.exit(0);
+  exitWith(0);
 }
 
 /** `scenescout export`: exits as EXIT_EXPORT says. */
@@ -972,13 +977,13 @@ async function exportFindings(args: string[]): Promise<never> {
   if (!parsed.ok) {
     // A refusal can quote the value it refused, and a credential pasted into an option is still a credential.
     console.error(redactKeys(`scenescout export: ${parsed.error}`, credentialSecrets(process.env)));
-    process.exit(EXIT_EXPORT.couldNotExport);
+    exitWith(EXIT_EXPORT.couldNotExport);
   }
   // The operator's config, joined with the project's own: its egress may refuse every call to the tracker.
   const config = readCommandPolicy(process.env, process.cwd(), parsed.options.projectDir, fsPolicyReader);
   if (!config.ok) {
     console.error(redactKeys(`scenescout export: ${config.error}`, credentialSecrets(process.env)));
-    process.exit(EXIT_EXPORT.couldNotExport);
+    exitWith(EXIT_EXPORT.couldNotExport);
   }
   const outcome = await runExport(parsed.options, {
     env: process.env,
@@ -986,7 +991,7 @@ async function exportFindings(args: string[]): Promise<never> {
     log: (line) => console.log(line),
     error: (line) => console.error(line),
   });
-  process.exit(outcome.exitCode);
+  exitWith(outcome.exitCode);
 }
 
 /** `scenescout policy explain`: the write policy's verdict on one request, in each mode, with the rule that decided. Sends nothing. */
@@ -1002,7 +1007,7 @@ function policy(args: string[]): void {
     err: (line) => console.error(line),
     config: { launchDir: process.cwd(), reader: fsPolicyReader },
   });
-  process.exit(code);
+  exitWith(code);
 }
 
 /** `scenescout config explain`: the config as a run would resolve it, and where each value came from. Starts nothing. */
@@ -1014,7 +1019,7 @@ function config(args: string[]): void {
     out: (line) => console.log(line),
     err: (line) => console.error(line),
   });
-  process.exit(code);
+  exitWith(code);
 }
 
 /** `scenescout preflight`: exits as EXIT_PREFLIGHT says. */
@@ -1031,7 +1036,7 @@ async function preflight(args: string[]): Promise<never> {
     cwd: process.cwd(),
     config: fsPolicyReader,
   });
-  process.exit(code);
+  exitWith(code);
 }
 
 const [, , command, ...args] = process.argv;
@@ -1050,7 +1055,7 @@ try {
     refuse: (message) => {
       console.error(`scenescout ${command}: ${message}`);
       console.error("Run `scenescout --help` for the options.");
-      process.exit(1);
+      exitWith(1);
     },
     commands: {
       scan: (a) => {
@@ -1078,11 +1083,13 @@ try {
     // Anything unforeseen is still "could not run" (2), not the exit 1 the other commands share below.
     firstRun: (a) =>
       firstRun(a).catch((err: unknown) => {
+        if (err instanceof CommandExit) throw err;
         console.error(`scenescout: could not run: ${err instanceof Error ? err.message : String(err)}`);
-        process.exit(EXIT_FIRST_RUN.couldNotRun);
+        exitWith(EXIT_FIRST_RUN.couldNotRun);
       }),
   });
 } catch (err) {
+  if (err instanceof CommandExit) await exitWhenDrained(err.code);
   console.error(`scenescout ${command ?? ""}: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
+  await exitWhenDrained(1);
 }
