@@ -832,7 +832,7 @@ test("link, image and HTML syntax in evidence, an embed's origin or a re-test no
   assert.ok(!/(^|[^\\])!\[[^\]]*\]\(/.test(md), md);
   assert.ok(!/(^|[^\\])\[[^\]]*\]\(/.test(md), md);
   assert.ok(!md.includes("<img"), md);
-  assert.ok(md.includes("\\!\\[p\\]\\(https://t.example/p.png\\)"), "the evidence still reads as it came");
+  assert.ok(md.includes("\\!\\[p\\]\\(https\\://t.example/p.png\\)"), "the evidence still reads as it came, its address kept from autolinking");
 });
 
 test("a pipe in evidence cannot break the report's markdown", () => {

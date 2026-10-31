@@ -33,7 +33,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/things/new
+1. Go to http\://app.test/things/new
 2. Type "A thing" into the "Name" field and press Enter
 3. Click the "Save" button
 
@@ -60,7 +60,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/login
+1. Go to http\://app.test/login
 2. Double-click the "Sign in" button
 3. Choose "Narnia" in the "Country" list
 
@@ -104,7 +104,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/orders?page=2
+1. Go to http\://app.test/orders?page=2
 2. Scroll down
 
 **What was expected:** The action completes, or the page says clearly why it could not.
@@ -181,7 +181,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/things/new
+1. Go to http\://app.test/things/new
 2. Type "A thing" into the "Name" field and press Enter
 3. Click the "Save" button
 
@@ -207,7 +207,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/login
+1. Go to http\://app.test/login
 2. Double-click the "Sign in" button
 3. Choose "Narnia" in the "Country" list
 
@@ -249,7 +249,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://app.test/orders?page=2
+1. Go to http\://app.test/orders?page=2
 2. Scroll down
 
 **What was expected:** The action completes, or the page says clearly why it could not.

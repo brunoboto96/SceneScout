@@ -576,7 +576,7 @@ test("a ticket's id, title, note and criteria are written into the report as tex
   const input = { ...reportInput, tickets, verdicts: [] };
   for (const lines of [formatTicketsPlain(input), formatTicketsTechnical(input)]) {
     const md = lines.join("\n");
-    assert.ok(md.includes("\\!\\[p\\]\\(https://t.example/p.png\\)"), md);
+    assert.ok(md.includes("\\!\\[p\\]\\(https\\://t.example/p.png\\)"), md);
     assert.ok(!/(^|[^\\])!\[[^\]]*\]\(http/.test(md), md);
   }
 });

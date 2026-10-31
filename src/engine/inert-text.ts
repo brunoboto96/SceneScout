@@ -50,11 +50,20 @@ const MD_PUNCTUATION = /([\\`*_{}[\]()#+!|~])/g;
  * else: `&`, `<` and `>` as entities, a backslash before every punctuation
  * mark Markdown acts on (so no link, image, heading, list, emphasis, table
  * cell or code span can start), and a zero-width space before each `$`,
- * since a backslash does not stop GitHub rendering `$…$` as maths. Line
+ * since a backslash does not stop GitHub rendering `$…$` as maths, and a
+ * backslash before the `:` of `://` and the `.` of `www.`, so no address
+ * autolinks. Line
  * breaks are left to the caller: they end a heading, a list item or a cell.
  * decodeMarkdownText reads it back.
  */
 export function escapeMarkdownText(text: string): string {
+  // GitHub autolinks a bare address and shows the backslashes inside it, so the address is kept from starting one.
+  return escapePunctuation(text)
+    .replace(/:\/\//g, "\\://")
+    .replace(/www\./gi, (m) => `${m.slice(0, 3)}\\.`);
+}
+
+function escapePunctuation(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(MD_PUNCTUATION, "\\$1").replace(/\$/g, "\u200b$");
 }
 
@@ -62,21 +71,30 @@ export function escapeMarkdownText(text: string): string {
 export function decodeMarkdownText(text: string): string {
   return text
     .replace(/\u200b\$/g, "$")
-    .replace(/\\([\\`*_{}[\]()#+!|~=.-])/g, "$1")
+    .replace(/\\([\\`*_{}[\]()#+!|~=.:-])/g, "$1")
     .replace(/&(lt|gt|quot|#39|amp);/g, (_, e: string) => ({ lt: "<", gt: ">", quot: '"', "#39": "'", amp: "&" })[e] as string);
 }
 
 /**
- * Text for a GitHub Markdown body: one line, escapeMarkdownText, and every
- * trigger broken. This is the escaping of the `/scenescout qa` reply
+ * Text for a GitHub Markdown body: one line, escapeMarkdownText's punctuation
+ * escaping, and every trigger broken. This is the escaping of the `/scenescout qa` reply
  * (action/qa-action.mjs `inert`) character for character, which export-test
  * holds it to, plus the marker break.
  */
 export function inertMarkdown(text: unknown, max = 160): string {
-  return breakTriggers(escapeMarkdownText(oneLine(text, max)));
+  return breakTriggers(escapePunctuation(oneLine(text, max)));
 }
 
 /** Text a tracker shows as it is (an issue title, a Jira text node): one line, every trigger broken, nothing escaped. */
 export function inertPlain(text: unknown, max = 160): string {
   return breakTriggers(oneLine(text, max));
+}
+
+/** A code span that the text cannot close or end early: on one line, its fence one backtick longer than any run of backticks inside it. */
+export function codeSpan(text: string): string {
+  const flat = text.replace(/\r\n|\r|\n/g, " ");
+  const longest = Math.max(0, ...(flat.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longest + 1);
+  const pad = longest > 0 ? " " : "";
+  return `${fence}${pad}${flat}${pad}${fence}`;
 }

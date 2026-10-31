@@ -38,6 +38,8 @@ import {
   withAudience,
 } from "../src/engine/report.ts";
 import {
+  codeSpan,
+  escapeFoldText,
   formatPlainSection,
   IMPACT,
   isSafeRelativePath,
@@ -71,7 +73,7 @@ import {
   taskBlocks,
 } from "../src/engine/replay.ts";
 import { cspHash, cspMeta, savedPageCsp } from "../src/engine/csp.ts";
-import { decodeMarkdownText } from "../src/engine/inert-text.ts";
+import { decodeMarkdownText, escapeMarkdownText } from "../src/engine/inert-text.ts";
 import { assertSavedPagePolicy, pagePolicy } from "./saved-page-csp.ts";
 import type { ActivityLine } from "../src/engine/live.ts";
 
@@ -1793,6 +1795,46 @@ test("link and image syntax from the app renders as text in report.md, in the pl
       `${report}: nothing from the app is an image or a link on the page`,
     );
   }
+});
+
+test("a web address in escaped app text is written so GitHub shows it as text, not an autolink whose href and text keep the backslashes", () => {
+  const text = "GET https://api.test/v1/user_profile#x (see www.api.test/a_b) failed";
+  // GitHub autolinks a bare address and keeps every backslash inside it, so no escaped address may start one.
+  const autolink = /(^|[\s*_~(])(https?:\/\/|www\.)/i;
+  for (const escaped of [escapeMarkdownText(text), escapeTableCell(text), escapeFoldText(text), escapeFoldText(`${text}\n${text}`, true)]) {
+    assert.ok(!autolink.test(escaped), escaped);
+    for (const line of escaped.split("\n")) assert.equal(decodeMarkdownText(line), text);
+  }
+  assert.equal(decodeMarkdownText(escapeMarkdownText("a\\://b www\\.c")), "a\\://b www\\.c", "a backslash the app wrote there round-trips");
+  const html = renderMarkdown(`Detail ${escapeMarkdownText(text)}`);
+  assert.ok(html.includes("GET https://api.test/v1/user_profile#x (see www.api.test/a_b) failed"), html);
+});
+
+test("a repro step's line break cannot close the test skeleton's code fence and render what follows", () => {
+  const store = freshStore();
+  store.addFinding({ severity: "high", category: "http-error", title: "T", detail: "d", url: "http://app.test/a", state: "/a#1" });
+  store.findings[0].repro = ['type "a\n```\n![p](https://t.example/p.png)\n```" into textbox "Notes"', "click\r```\r![q](https://t.example/q.png)"];
+  for (const report of ["both", "dev"] as const) {
+    const md = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 0, report }, { write: false }).markdown;
+    const fence = md.indexOf("```ts");
+    const skeleton = md.slice(fence, md.indexOf("\n```\n", fence + 5));
+    assert.ok(
+      skeleton.includes("![p](https://t.example/p.png)") && skeleton.includes("![q](https://t.example/q.png)"),
+      `${report}: both steps stay in the fence:\n${skeleton}`,
+    );
+    assert.ok(
+      !skeleton
+        .split(/\r\n|\r|\n/)
+        .slice(1)
+        .some((l) => /^ {0,3}(`{3,}|~{3,})/.test(l)),
+      `${report}: no line inside it opens or closes a fence`,
+    );
+  }
+});
+
+test("a code span holds a lone carriage return too: two of them cannot end its paragraph and leave what follows to render", () => {
+  const span = codeSpan("a\r\r![p](https://t.example/p.png)");
+  assert.ok(!/[\r\n]/.test(span), JSON.stringify(span));
 });
 
 test("a finding's detail keeps its line breaks but starts no heading, list or code block from them", () => {

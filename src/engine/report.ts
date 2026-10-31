@@ -41,6 +41,8 @@ import { COLLECTOR_CAP } from "./collector.js";
 import { buildRunRecord, fromRunLine, type RunRecord } from "./from-run.js";
 import { writeDocumentSync } from "./owner-file.js";
 
+const LINE_BREAK = /\r\n|\r|\n/g;
+
 function playwrightSkeleton(f: Finding): string {
   const routeClass = f.state.split("#")[0].split("?")[0];
   let gotoPath = routeClass;
@@ -55,9 +57,10 @@ function playwrightSkeleton(f: Finding): string {
   // tell the test author to create/pick a concrete instance.
   if (routeClass.includes(":id")) {
     gotoPath = routeClass.split("/:id")[0] || "/";
-    routeComment = `\n  // route class ${routeClass} — navigate to a concrete instance from here (the recorded id was session-specific)`;
+    routeComment = `\n  // route class ${routeClass.replace(LINE_BREAK, " ")} — navigate to a concrete instance from here (the recorded id was session-specific)`;
   }
-  const steps = f.repro.map((s) => `  // ${s}`).join("\n");
+  // A line break in a step would end its comment and could close the Markdown fence around this skeleton.
+  const steps = f.repro.map((s) => `  // ${s.replace(LINE_BREAK, " ")}`).join("\n");
   return `test(${JSON.stringify(`regression: ${f.title}`)}, async ({ page }) => {
   await page.goto(${JSON.stringify(gotoPath)});${routeComment}
 ${steps}

@@ -3541,9 +3541,9 @@ test("summary: a backslash and a pipe in a cell cannot break the table's columns
     // A lone carriage return is a line break too.
     ["x\ry", "x y"],
     // Link, image and HTML syntax from the page is shown as text where the summary is rendered.
-    ["![p](https://t.example/p.png)", "\\!\\[p\\]\\(https://t.example/p.png\\)"],
-    ["[go](https://t.example/)", "\\[go\\]\\(https://t.example/\\)"],
-    ['<img src="https://t.example/p.png">', '&lt;img src="https://t.example/p.png"&gt;'],
+    ["![p](https://t.example/p.png)", "\\!\\[p\\]\\(https\\://t.example/p.png\\)"],
+    ["[go](https://t.example/)", "\\[go\\]\\(https\\://t.example/\\)"],
+    ['<img src="https://t.example/p.png">', '&lt;img src="https\\://t.example/p.png"&gt;'],
   ];
   for (const [title, expected] of rows) {
     const md = ciSummaryMarkdown(RESULT({ findings: [finding({ title })] }));

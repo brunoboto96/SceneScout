@@ -14,7 +14,7 @@ import { isWorthALook, knownFeedback, seenOnOf, type Finding, type FindingCatego
 import type { OracleKind, OracleViolation } from "./oracles.js";
 import type { WriteMode } from "./policy.js";
 import { MODE_CARE_LABEL } from "./guided-words.js";
-import { escapeMarkdownText } from "./inert-text.js";
+import { codeSpan, escapeMarkdownText } from "./inert-text.js";
 import { fromJs } from "./js-regex.js";
 
 /** Which parts a report carries: the plain view and the technical one ("both"), or one of them. */
@@ -292,9 +292,11 @@ export function escapeTableCell(text: string): string {
 /**
  * App text as a code span in a table cell: codeSpan, with each pipe as `\|`,
  * which GitHub-flavoured Markdown reads as a pipe even inside a code span.
+ * Backslashes are not doubled: GitHub takes a pipe after any backslash as
+ * escaped and removes just that one backslash, so `a\|b` shows as written.
  */
 export function tableCodeSpan(text: string): string {
-  return codeSpan(text).replace(/\|/g, "\\|");
+  return codeSpan(text).split("|").join("\\|");
 }
 
 /**
@@ -342,19 +344,7 @@ export function foldUrl(url: string): string {
     .replace(/\r?\n|\r/g, " ");
 }
 
-/**
- * App text as a Markdown code span. Its fence is one backtick longer than the
- * longest run of backticks inside, so a backtick in the text cannot end the
- * span early and leave a `</details>` after it as markup. Text with no
- * backtick gets the usual single one.
- */
-export function codeSpan(text: string): string {
-  const flat = text.replace(/\r?\n/g, " ");
-  const longest = Math.max(0, ...(flat.match(/`+/g) ?? []).map((run) => run.length));
-  const fence = "`".repeat(longest + 1);
-  const pad = longest > 0 ? " " : "";
-  return `${fence}${pad}${flat}${pad}${fence}`;
-}
+export { codeSpan } from "./inert-text.js";
 
 /** How long a run took, in words: "under a minute", "4 minutes", "1 hour 5 minutes". */
 export function plainDuration(ms: number): string {

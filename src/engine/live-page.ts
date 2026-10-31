@@ -538,7 +538,7 @@ export const LIVE_PAGE = `<!doctype html>
   function decodeMd(text) {
     return text
       .replace(/\\u200b\\$/g, '$')
-      .replace(/\\\\([\\\\\`*_{}[\\]()#+!|~=.-])/g, '$1')
+      .replace(/\\\\([\\\\\`*_{}[\\]()#+!|~=.:-])/g, '$1')
       .replace(/&(lt|gt|quot|#39|amp);/g, function (_, e) {
         return { lt: '<', gt: '>', quot: '"', '#39': "'", amp: '&' }[e];
       });

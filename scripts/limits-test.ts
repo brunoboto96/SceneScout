@@ -289,6 +289,15 @@ test("with SCENESCOUT_RETRY_NETWORK=on, a page load that failed on the network i
   assert.match(entry, /retried after NS_ERROR_UNKNOWN_HOST \(the host name did not resolve: the network's/);
 });
 
+test("a retried load's address is one code span even when its query holds backticks, so nothing in it renders", () => {
+  // The URL parser leaves a backtick in a query as it is.
+  const url = new URL("http://a.test/x?q=`![p](https://t.example/p.png)`").href;
+  const [entry] = formatLoadRetries([{ at: "t", url, session: "s", cause: "ERR_NO_BUFFER_SPACE", sockets: "n" }]).filter((l) => l.startsWith("- "));
+  const fence = entry.match(/^- (`+)/)?.[1] ?? "";
+  assert.ok(fence.length > 1, entry);
+  assert.ok(entry.startsWith(`- ${fence} ${url} ${fence} (session s)`), entry);
+});
+
 test("a retried load is said in the action's result and in the report", () => {
   const note = loadRetryNote("http://127.0.0.1:8080/things", "ERR_NO_BUFFER_SPACE");
   assert.match(note, /retried after ERR_NO_BUFFER_SPACE/);

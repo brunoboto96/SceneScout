@@ -993,7 +993,12 @@ test("the report panel hides an Evidence item's finding comment and shows a fold
 });
 
 test("the report panel reads report.md's escaping back as the engine's decoder does: in a heading, a list, a table cell and around a code span", () => {
-  const texts = ["![p](https://t.example/p.png) [a](b) <i> & `tick` \\| *x* _y_ #1 $5 ~z~", "a \\ b | c"];
+  const texts = [
+    "![p](https://t.example/p.png) [a](b) <i> & `tick` \\| *x* _y_ #1 $5 ~z~",
+    "a \\ b | c",
+    "GET https://api.test/user_list www.api.test a\\://b",
+    "an entity as text: &lt;b&gt; &amp;amp; \\&quot;",
+  ];
   for (const text of texts) {
     const e = escapeMarkdownText(text);
     assert.equal(decodeMarkdownText(e), text, "the engine's decoder round-trips");
