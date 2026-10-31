@@ -30,7 +30,7 @@ import {
 import { elementKey, keyAliasSteps, normalizePath, ordinalKeys, routeBase, type InteractableInfo } from "./fingerprint.js";
 import { FORMS_INVENTORY_SCRIPT, formIdentity, formStatus, isNavigationTeardown, type FormFacts } from "./forms.js";
 import { NAME_RULE, type KeyAliasSteps } from "./memory.js";
-import { destructiveLabelOf } from "./policy.js";
+import { destructiveLabelOf, type ControlFacts } from "./policy.js";
 import { recheckBusy, recheckWait } from "./settle.js";
 
 /**
@@ -255,6 +255,7 @@ export class SnapshotCollector {
       /** Read for the label policy only (page-sources.ts POLICY_TEXT_SRC); not kept on the listed element. */
       ownText?: string;
       centre?: string[];
+      facts?: ControlFacts;
       interactive?: boolean;
       ariaHidden?: boolean;
       liveOnly?: boolean;
@@ -331,7 +332,7 @@ export class SnapshotCollector {
     const aliases = keyAliasSteps(bases);
     const built = all.map(({ raw: el, frame, tag }, i) => {
       const key = keys[i];
-      const { ownText: _ownText, centre: _centre, cut: _cut, priorNames: _priorNames, ...listed } = el;
+      const { ownText: _ownText, centre: _centre, facts: _facts, cut: _cut, priorNames: _priorNames, ...listed } = el;
       const full: SnapshotElement = {
         ...listed,
         ...(tag ? { frame: tag } : {}),

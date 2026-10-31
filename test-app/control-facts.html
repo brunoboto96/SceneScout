@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Control facts</title>
+  </head>
+  <body>
+    <main>
+      <h1>Control facts</h1>
+      <!-- Pairs that share a label and differ only in what the markup says a click sends. -->
+      <!-- A mild label on a form posting to a command address (/things/9/cancel); the read-only wire lets a plain POST out. -->
+      <form method="post" action="/things/9/cancel">
+        <label>Note <input name="note" data-testid="facts-command-note" /></label>
+        <button data-testid="facts-command-confirm">Confirm</button>
+      </form>
+      <!-- The same label on a form posting to an ordinary address. -->
+      <form method="post" action="/form-landing">
+        <input type="hidden" name="title" value="facts" />
+        <button data-testid="facts-plain-confirm">Confirm</button>
+      </form>
+      <!-- A scary label on a form that only GETs an address the markup names. -->
+      <form method="get" action="/page2.html">
+        <button data-testid="facts-get-delete">Delete</button>
+      </form>
+      <!-- The same label on a form that names no action: a script's form, judged by its label. -->
+      <form>
+        <button data-testid="facts-script-delete">Delete</button>
+      </form>
+      <!-- A scary label on a link that loads a page, and a mild label on a link to a command address. -->
+      <a href="/page2.html" data-testid="facts-help-link">Delete account</a>
+      <a href="/things/3/delete" data-testid="facts-command-link">Open record</a>
+      <!-- A mild label on a button a script library is told to send a DELETE from, and the same button without it. -->
+      <button type="button" hx-delete="/things/3" data-testid="facts-hx-delete">Open</button>
+      <button type="button" data-testid="facts-hx-plain">Open</button>
+      <!-- A reset button clears its form in the page; the same label on a plain button is judged by its text. -->
+      <form>
+        <label>Name <input name="name" data-testid="facts-reset-name" /></label>
+        <button type="reset" data-testid="facts-reset">Reset all data</button>
+        <button type="button" data-testid="facts-reset-scripted">Reset all data</button>
+      </form>
+    </main>
+  </body>
+</html>

@@ -81,6 +81,9 @@ import {
   BlockNotices,
   blockSignature,
   destructiveLabelOf,
+  controlFactVerdict,
+  submitRefusalLabel,
+  type ControlFacts,
   dialogNote,
   dialogResponse,
   ESCAPE_REFUSAL,
@@ -2145,6 +2148,95 @@ test("an element that is not a control is not judged by the record text it shows
   // A filter chip's remove button against a member's.
   assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Remove Status: Open filter", testid: null }), null);
   assert.equal(destructiveLabelOf({ tag: "button", role: "button", name: "Remove member", testid: null }), "Remove member");
+});
+
+test("a control's facts decide before its label: the same label flips with what the markup says a click sends", () => {
+  const button = (name: string, facts: ControlFacts | null) => destructiveLabelOf({ tag: "button", role: "button", name, testid: null, facts });
+  const link = (name: string, facts: ControlFacts | null) => destructiveLabelOf({ tag: "a", role: "link", name, testid: null, facts });
+  const post = (action: string, extra: Partial<NonNullable<ControlFacts["submit"]>> = {}): ControlFacts => ({
+    submit: { method: "post", action, declared: true, ...extra },
+  });
+  const get = (action: string, extra: Partial<NonNullable<ControlFacts["submit"]>> = {}): ControlFacts => ({
+    submit: { method: "get", action, declared: true, ...extra },
+  });
+
+  // A mild label whose form posts to a delete endpoint is refused; the same label posting elsewhere is judged by its text.
+  assert.equal(button("Confirm", post("https://app.test/things/5/delete")), "form sending POST to /things/5/delete");
+  assert.equal(button("Confirm", post("https://app.test/things/5")), null);
+  // ...and so is one whose form names DELETE in a `_method` field, which the server acts on in place of POST.
+  assert.equal(button("Save", post("https://app.test/things/5", { override: "delete" })), "form sending DELETE to /things/5");
+  assert.equal(button("Save", post("https://app.test/things/5", { override: "patch" })), null);
+  // A command the address states in its query is a command too, and its value is not printed.
+  assert.equal(button("Continue", get("https://app.test/things?action=delete&token=abc")), "form sending GET to /things?…");
+
+  // A scary label whose form only GETs an address the markup names is let through; the same label is refused when:
+  assert.equal(button("Delete", get("https://app.test/search")), null, "a GET to a named search action only loads a page");
+  assert.equal(
+    button("Delete", { submit: { method: "get", action: "https://app.test/things/5", declared: false } }),
+    "Delete",
+    "no action named: a script's form",
+  );
+  assert.equal(button("Delete", get("https://app.test/search", { handler: true })), "Delete", "a submit handler can send anything");
+  assert.equal(button("Delete", { ...get("https://app.test/search"), handler: true }), "Delete", "so can a click handler");
+  assert.equal(button("Delete", post("https://app.test/things/5")), "Delete", "a POST elsewhere is judged by its label");
+  assert.equal(
+    button("Delete", { submit: { method: "dialog", action: "https://app.test/things/5", declared: true } }),
+    "Delete",
+    "a dialog form's script acts on the answer",
+  );
+  // The page's own address counts only where the browser would really send to it: a POST, not an unnamed GET.
+  assert.equal(
+    button("Search", { submit: { method: "post", action: "https://app.test/things/5/delete", declared: false } }),
+    "form sending POST to /things/5/delete",
+  );
+  assert.equal(button("Search", { submit: { method: "get", action: "https://app.test/things/5/delete", declared: false } }), null);
+
+  // A link: a plain page load is let through whatever it says; one to a command address is refused whatever it says.
+  assert.equal(link("Delete account", { href: "https://app.test/help/deleting-your-account" }), null);
+  assert.equal(link("Delete account", null), "Delete account", "no facts read: judged by its text");
+  assert.equal(link("Delete account", { href: "https://app.test/help/deleting-your-account", handler: true }), "Delete account", "a click handler");
+  assert.equal(link("Open", { href: "https://app.test/things/3/delete" }), "link to /things/3/delete");
+  assert.equal(link("Open", { href: "https://app.test/things/3" }), null);
+  assert.equal(link("Unsubscribe me", { href: "https://app.test/unsubscribe?token=abc" }), "link to /unsubscribe?…");
+  // ...and one a script library sends as a DELETE is refused, whatever its address and label.
+  assert.equal(link("Open", { href: "https://app.test/things/3", linkMethod: "delete" }), "link sending DELETE to /things/3");
+  assert.equal(link("Delete", { href: "https://app.test/things/3", linkMethod: "post" }), "Delete", "a POST link is judged by its text");
+  assert.equal(link("Open", { href: "https://app.test/things/3", linkMethod: "post" }), null);
+
+  // A reset button clears its form in the page: the label "Reset all data" sends nothing, unless a handler can.
+  assert.equal(button("Reset all data", { reset: true }), null);
+  assert.equal(button("Reset all data", { reset: true, handler: true }), "Reset all data");
+  assert.equal(button("Reset all data", {}), "Reset all data");
+
+  // A write a script library is told to send on a click (hx-delete, hx-post) is judged as that write, on any element.
+  const div = (name: string, facts: ControlFacts) =>
+    destructiveLabelOf({ tag: "div", role: "generic", name, testid: null, ownText: name, interactive: true, facts });
+  assert.equal(div("Open", { sends: { method: "DELETE", url: "https://app.test/things/3" } }), "control sending DELETE to /things/3");
+  assert.equal(div("Open", { sends: { method: "POST", url: "https://app.test/things/3/archive" } }), "control sending POST to /things/3/archive");
+  assert.equal(div("Open", { sends: { method: "POST", url: "https://app.test/things/3/views" } }), null);
+  assert.equal(div("Delete", { sends: { method: "POST", url: "https://app.test/things/3/views" } }), "Delete", "a POST elsewhere is judged by its text");
+  assert.equal(
+    link("Delete", { href: "https://app.test/things/3", sends: { method: "POST", url: "https://app.test/things/3" } }),
+    "Delete",
+    "a link that also sends a write is not cleared as a page load",
+  );
+
+  // Facts first for every kind of element, a container's test id included.
+  assert.equal(destructiveLabelOf({ tag: "a", role: "link", name: "Help", testid: "delete-link", facts: { href: "https://app.test/help" } }), null);
+  assert.deepEqual(controlFactVerdict(null), null);
+  assert.deepEqual(controlFactVerdict({}), null);
+});
+
+test("an Enter that submits a form is judged by the submission's facts, then by its submit button's label", () => {
+  assert.equal(submitRefusalLabel(null), null, "outside a form");
+  assert.equal(
+    submitRefusalLabel({ label: "Go", facts: { submit: { method: "post", action: "https://app.test/things/5/delete", declared: true } } }),
+    "form sending POST to /things/5/delete",
+  );
+  assert.equal(submitRefusalLabel({ label: "Go", facts: { submit: { method: "post", action: "https://app.test/things/5", declared: true } } }), null);
+  assert.equal(submitRefusalLabel({ label: "Delete", facts: { submit: { method: "get", action: "https://app.test/search", declared: true } } }), null);
+  assert.equal(submitRefusalLabel({ label: "Delete", facts: { submit: { method: "get", action: "https://app.test/", declared: false } } }), "Delete");
+  assert.equal(submitRefusalLabel({ label: "Delete" }), "Delete", "no facts read");
 });
 
 test("observe lets out only the POST endpoints the user named as reads", () => {

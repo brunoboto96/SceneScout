@@ -60,6 +60,8 @@ import {
   COLLECTOR_CAP,
   NAME_SRC,
   POLICY_TEXT_SRC,
+  CONTROL_FACTS_SRC,
+  ENTER_SUBMIT_SRC,
   VISIBLE_SRC,
   XPATH_OF_SRC,
   affordanceFlags,
@@ -260,6 +262,11 @@ import {
   AUTH_FLOW_RE,
   destructiveRefusal,
   destructiveLabelOf,
+  DESTRUCTIVE_GET_REFUSAL,
+  judgedByFacts,
+  submitRefusalLabel,
+  type ControlFacts,
+  type EnterSubmit,
   pickIsDestructive,
   isDestructive,
   isDestructiveRequest,
@@ -570,8 +577,11 @@ function submitControlIn(elements: readonly SnapshotElement[], probe: FormProbe)
   return el && sameControl(el, probe) ? el : null;
 }
 
+/** What the label policy re-reads of an element before an action (page-sources.ts POLICY_TEXT_SRC). */
+type PolicyRead = { ownText?: string; centre?: string[]; facts?: ControlFacts };
+
 /** What an action re-reads of its element before acting: test id, label, accessible name, and the policy's text. */
-type LiveFacts = { testid: string | null; label: string; name: string; ownText?: string; centre?: string[] };
+type LiveFacts = { testid: string | null; label: string; name: string; ownText?: string; centre?: string[]; facts?: ControlFacts };
 
 /** Page-side, built from constants only: an element's LiveFacts. */
 const LIVE_FACTS_BODY =
@@ -587,6 +597,27 @@ const uniqueByTestid = new Function(
     `if (all.length !== 1) return null; const node = all[0]; ` +
     `return { xpath: (${XPATH_OF_SRC})(node), live: (function (node) { ${LIVE_FACTS_BODY} })(node) };`,
 ) as (testid: string) => { xpath: string; live: LiveFacts } | null;
+
+/**
+ * Page-side: the address of the history entry before the current one, from the Navigation API, or null when the page
+ * cannot say (no such API, the first entry, or an entry of another origin, whose address the API withholds).
+ */
+const PREVIOUS_ENTRY_SCRIPT =
+  `(() => { if (typeof navigation === "undefined" || !navigation.currentEntry) return null; ` +
+  `const i = navigation.currentEntry.index; const e = i > 0 ? navigation.entries()[i - 1] : null; ` +
+  `return e && e.url ? e.url : null; })()`;
+
+/** Page-side: what an Enter in this field submits (page-sources.ts ENTER_SUBMIT_SRC). */
+const enterSubmitOf = new Function("node", `return (${ENTER_SUBMIT_SRC})(node);`) as (node: Element) => EnterSubmit | null;
+
+/** Page-side: the focused element's label and facts, and what an Enter in it submits when it is a field of a form. */
+const focusedActivationOf = new Function(
+  "enter",
+  `const el = document.activeElement; if (!el) return null; ` +
+    `const label = (el.getAttribute("aria-label") || el.getAttribute("data-testid") || el.innerText || el.textContent || "").trim().slice(0, 120); ` +
+    `const field = el.tagName === "INPUT" && !["button", "submit", "reset", "image"].includes((el.type || "").toLowerCase()); ` +
+    `return { label, facts: (${CONTROL_FACTS_SRC})(el), submit: enter && field ? (${ENTER_SUBMIT_SRC})(el) : null };`,
+) as (enter: boolean) => { label: string; facts: ControlFacts; submit: EnterSubmit | null } | null;
 
 /** Page-side: the form an element belongs to, and what its fields hold now (forms.ts). */
 const probeFormOf = new Function("node", FORM_PROBE_BODY) as (node: Element) => FormProbe | null;
@@ -694,7 +725,16 @@ interface TargetFacts {
   label: string;
   testid: string | null;
   isSelect: boolean;
+  /** What its markup says a click sends (policy.ts controlFactVerdict). */
+  facts: ControlFacts;
 }
+
+/** Page-side: what readTargetFacts reads of a target. */
+const targetFactsOf = new Function(
+  "n",
+  `return { aria: n.getAttribute("aria-label"), testid: n.getAttribute("data-testid"), text: n.textContent, ` +
+    `isSelect: n.tagName.toLowerCase() === "select", facts: (${CONTROL_FACTS_SRC})(n) };`,
+) as (n: Element) => { aria: string | null; testid: string | null; text: string | null; isSelect: boolean; facts: ControlFacts };
 
 /**
  * A target's name, test id and kind, read in one call once the target has been
@@ -703,17 +743,8 @@ interface TargetFacts {
  * acted on unnamed, past the read-only check on its label.
  */
 async function readTargetFacts(loc: Locator, ms: number): Promise<TargetFacts> {
-  const facts = await loc.evaluate(
-    (n) => ({
-      aria: n.getAttribute("aria-label"),
-      testid: n.getAttribute("data-testid"),
-      text: n.textContent,
-      isSelect: n.tagName.toLowerCase() === "select",
-    }),
-    undefined,
-    { timeout: ms },
-  );
-  return { label: (facts.aria ?? facts.text ?? facts.testid ?? "").trim(), testid: facts.testid, isSelect: facts.isSelect };
+  const read = await loc.evaluate(targetFactsOf, undefined, { timeout: ms });
+  return { label: (read.aria ?? read.text ?? read.testid ?? "").trim(), testid: read.testid, isSelect: read.isSelect, facts: read.facts };
 }
 
 /**
@@ -3122,7 +3153,7 @@ export class BrowserEngine {
    * an element with a test id that is unique on the page is found again by it,
    * checked by name, and the ref is re-bound to it; the action's result says so (rebindNote).
    */
-  private async resolveForAction(ref: string): Promise<{ el: SnapshotElement; liveLabel: string; live: { ownText?: string; centre?: string[] } }> {
+  private async resolveForAction(ref: string): Promise<{ el: SnapshotElement; liveLabel: string; live: PolicyRead }> {
     this.actionStartedAt = Date.now();
     this.rebindNote = "";
     const page = this.requirePage();
@@ -3184,7 +3215,7 @@ export class BrowserEngine {
       this.snapshots.dropRefs(`the element under ${ref} changed`);
       throw new Error(`Element under ${ref} changed after the URL did (expected "${el.name}", found "${live.name}") — take a new scout_snapshot.`);
     }
-    return { el, liveLabel: live.label, live: { ownText: live.ownText, centre: live.centre } };
+    return { el, liveLabel: live.label, live: { ownText: live.ownText, centre: live.centre, facts: live.facts } };
   }
 
   /** Set when the action's ref had to be found again by its test id (resolveForAction); afterAction reports it once. */
@@ -3244,12 +3275,10 @@ export class BrowserEngine {
     if (endpoint && this.memory) this.memory.clearObserveRefusedPosts((e) => e === endpoint);
   }
 
-  private actionPolicyCheck(el: SnapshotElement, liveLabel: string, live: { ownText?: string; centre?: string[] } = {}): string | null {
+  private actionPolicyCheck(el: SnapshotElement, liveLabel: string, live: PolicyRead = {}): string | null {
     if (!this.readOnly) return null;
-    // Same-origin navigation links are exempt: navigation is non-destructive
-    // under the origin fence, and blocking "Reset filters"-style nav links
-    // would make whole read-only sections unexplorable.
-    if (el.role === "link" && el.href && !/^javascript:/i.test(el.href)) return null;
+    // A link that only loads a page is let through by its facts, whatever its
+    // label says; one whose address is a command is not (policy.ts controlFactVerdict).
     // Typing into a text field is never itself destructive (labels like
     // "Type DELETE to confirm" would false-positive) — the destructive risk
     // is submission, which the pressEnter/submit path vets separately. The
@@ -3264,6 +3293,7 @@ export class BrowserEngine {
       ownText: live.ownText,
       centre: live.centre,
       interactive: el.interactive,
+      facts: live.facts,
     });
     if (el.destructive || now !== null) {
       return destructiveRefusal(now ?? (liveLabel || el.name || el.testid || el.ref), this.mode);
@@ -4125,18 +4155,12 @@ export class BrowserEngine {
       // Enter inside a form submits it — check the form's submit target, or
       // pressEnter becomes a read-only bypass for destructive submits.
       if (this.readOnly) {
-        const submitLabel = (await bestEffort(
-          this.snapshots
-            .scopeOf(el)
-            .evaluate(
-              `(() => { const node = ${xpathLookup(el.xpath)}; if (!node) return ''; ` +
-                `const f = node.form || node.closest('form'); if (!f) return ''; ` +
-                `const s = f.querySelector('[type="submit"], button:not([type="button"]):not([type="reset"])'); ` +
-                `return s ? (s.getAttribute('aria-label') || s.innerText || s.getAttribute('data-testid') || '').trim().slice(0, 120) : ''; })()`,
-            ),
-          "",
-        )) as string;
-        if (isDestructive(submitLabel)) {
+        const submit = (await bestEffort(
+          this.snapshots.scopeOf(el).evaluate(`(() => { const node = ${xpathLookup(el.xpath)}; return node ? (${ENTER_SUBMIT_SRC})(node) : null; })()`),
+          null,
+        )) as EnterSubmit | null;
+        const submitLabel = submitRefusalLabel(submit);
+        if (submitLabel !== null) {
           this.logAction({ action: "type:enter-refused", target: submitLabel, url: page.url() });
           return `Filled ${el.role} "${el.name}" but did NOT press Enter. ` + destructiveRefusal(submitLabel, this.mode);
         }
@@ -4577,14 +4601,10 @@ export class BrowserEngine {
     const page = this.requirePage();
     // Focus inside a frame reads, from the page, as the <iframe> itself: follow it down.
     const focused = await this.focusedFrame(page);
-    const focusedLabel = await bestEffort(
-      focused.evaluate(
-        `(() => { const el = document.activeElement; if (!el) return ""; ` +
-          `return (el.getAttribute("aria-label") || el.getAttribute("data-testid") || el.innerText || el.textContent || "").trim().slice(0, 120); })()`,
-      ),
-      "",
-    );
-    if (typeof focusedLabel === "string" && isDestructive(focusedLabel)) {
+    const read = await bestEffort(focused.evaluate(focusedActivationOf, /Enter$/i.test(key)), null);
+    // Its own facts first, then its label; an Enter in a form's field is also the form's submit.
+    const focusedLabel = read ? (judgedByFacts(read.facts, () => (isDestructive(read.label) ? read.label : null)) ?? submitRefusalLabel(read.submit)) : null;
+    if (focusedLabel !== null) {
       this.logAction({ action: "press:refused", target: focusedLabel, url: page.url() });
       return destructiveRefusal(focusedLabel, this.mode);
     }
@@ -5625,6 +5645,19 @@ export class BrowserEngine {
   private async goBackUnwatched(leave?: boolean): Promise<string> {
     this.actionStartedAt = Date.now();
     const page = this.requirePage();
+    // A load the history serves from the back-forward cache sends no request for the route handler to judge, so the
+    // destructive page-load rule is asked here, of the entry going back reaches, before anything is loaded.
+    if (this.refuseDestructiveGets) {
+      const entry = await bestEffort(page.evaluate(PREVIOUS_ENTRY_SCRIPT), null);
+      if (typeof entry === "string" && refusedPageLoad(this.writeRule.at(), true, entry)) {
+        const address = logAddress(entry, this.baseUrl);
+        this.logAction({ action: "back:refused", target: address, url: page.url() });
+        return (
+          `NOT MOVED BACK: the page going back reaches is ${address}, ${DESTRUCTIVE_GET_REFUSAL}, and this session refuses ` +
+          `those loads; nothing was loaded and the page is still ${page.url()}. Navigate to a page of the app to go on.`
+        );
+      }
+    }
     this.leaveChoice = leave;
     // The method noted for this page is the current page's, not the entry going back reaches: that entry can be the
     // error page of a refused write, and the one behind it a page a POST loaded. A page the back loads over the network is
@@ -6212,7 +6245,7 @@ export class BrowserEngine {
         await loc.waitFor({ state: "attached", timeout: this.limits.actionMs });
         // Named as found, before the capture below gives the page time to redraw it: the read-only check and the
         // coverage record need its name, and a target gone for a moment is waited for rather than named "".
-        const { label: name, testid, isSelect: selectTarget } = await readTargetFacts(loc, this.limits.actionMs);
+        const { label: name, testid, isSelect: selectTarget, facts } = await readTargetFacts(loc, this.limits.actionMs);
         const label = name.slice(0, 120);
         preTestid = testid;
         preLabel = label;
@@ -6239,12 +6272,17 @@ export class BrowserEngine {
           transcript.push(`${desc} → FAILED: ${pick.refused}`);
           return "stop";
         }
-        if (
-          this.readOnly &&
-          (step.action === "click" || step.action === "select" || step.action === "upload") &&
-          (isSelect ? pickIsDestructive(step.value, preTestid, pick ? pick.label : null) : isDestructive(label, step.value))
-        ) {
-          transcript.push(`${desc} → ${destructiveRefusal(label || step.target, this.mode)}`);
+        const named = label || step.target;
+        const refusedAs =
+          !this.readOnly || !(step.action === "click" || step.action === "select" || step.action === "upload")
+            ? null
+            : isSelect
+              ? pickIsDestructive(step.value, preTestid, pick ? pick.label : null)
+                ? named
+                : null
+              : judgedByFacts(facts, () => (isDestructive(label, step.value) ? named : null));
+        if (refusedAs !== null) {
+          transcript.push(`${desc} → ${destructiveRefusal(refusedAs, this.mode)}`);
           return "stop";
         }
         if (step.action === "click") {
@@ -6268,10 +6306,9 @@ export class BrowserEngine {
           note = (await this.fillOrAppend(loc, step.value ?? "", step.replace ?? false, label)).note;
           if (step.pressEnter) {
             if (this.readOnly) {
-              const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
-              const submitLabel = (await bestEffort(submit.textContent({ timeout: TARGET_READ_MS }), "")) ?? "";
-              if (isDestructive(submitLabel)) {
-                transcript.push(`${desc} → filled, Enter withheld: ${destructiveRefusal(submitLabel.trim(), this.mode)}`);
+              const submitLabel = submitRefusalLabel(await bestEffort(loc.evaluate(enterSubmitOf, undefined, { timeout: TARGET_READ_MS }), null));
+              if (submitLabel !== null) {
+                transcript.push(`${desc} → filled, Enter withheld: ${destructiveRefusal(submitLabel, this.mode)}`);
                 return "stop";
               }
             }
@@ -6708,16 +6745,18 @@ export class BrowserEngine {
         } else {
           // Named in one read that waits rather than coming back empty (readTargetFacts). A dropdown is named by all its
           // options; a select step is judged by the option it picks (destructiveLabelOf).
-          const { label, testid, isSelect: selectTarget } = await readTargetFacts(loc, actionMs);
+          const { label, testid, isSelect: selectTarget, facts } = await readTargetFacts(loc, actionMs);
           const isSelect = step.action === "select" && selectTarget;
-          if (
-            this.readOnly &&
-            step.action !== "type" &&
-            (isSelect
-              ? pickIsDestructive(step.value, testid, await BrowserEngine.chosenOptionLabel(loc, step.value))
-              : isDestructive(label, step.action === "select" ? step.value : undefined))
-          ) {
-            refusal = destructiveRefusal(label || step.target, this.mode);
+          const refusedAs =
+            !this.readOnly || step.action === "type"
+              ? null
+              : isSelect
+                ? pickIsDestructive(step.value, testid, await BrowserEngine.chosenOptionLabel(loc, step.value))
+                  ? label || step.target
+                  : null
+                : judgedByFacts(facts, () => (isDestructive(label, step.action === "select" ? step.value : undefined) ? label || step.target : null));
+          if (refusedAs !== null) {
+            refusal = destructiveRefusal(refusedAs, this.mode);
           } else if (step.action === "click") {
             await loc.click({ timeout: actionMs });
           } else if (step.action === "select") {
@@ -6726,9 +6765,10 @@ export class BrowserEngine {
             await this.noteProbe(step.value, step.target);
             await this.fillOrAppend(loc, step.value, step.replace ?? false);
             if (step.pressEnter) {
-              const submit = loc.locator("xpath=ancestor::form[1]").locator('[type="submit"], button:not([type="button"]):not([type="reset"])').first();
-              const submitLabel = ((await bestEffort(submit.textContent({ timeout: TARGET_READ_MS }), "")) ?? "").trim();
-              if (this.readOnly && isDestructive(submitLabel)) refusal = destructiveRefusal(submitLabel, this.mode);
+              const submitLabel = this.readOnly
+                ? submitRefusalLabel(await bestEffort(loc.evaluate(enterSubmitOf, undefined, { timeout: TARGET_READ_MS }), null))
+                : null;
+              if (submitLabel !== null) refusal = destructiveRefusal(submitLabel, this.mode);
               else await loc.press("Enter", { timeout: actionMs });
             }
           }

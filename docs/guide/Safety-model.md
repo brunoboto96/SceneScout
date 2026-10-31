@@ -92,7 +92,15 @@ The server never sees a refused request, but the page's own `fetch` or XHR is an
 
 ## How a control's label is judged
 
-In `observe` and `read-only` a click is also refused before it happens when the control's own label is destructive (delete, revoke, archive and the like). Only the control's own name counts:
+In `observe` and `read-only` a click is also refused before it happens when the control is destructive. What the page's markup says the click sends is read first, and the label only when that says nothing, as a secret field is recognised by its `type` and `autocomplete` before its name:
+
+- A link whose address is a command (`/items/3/delete`, `/unsubscribe?…`, `?action=delete`, the addresses [destructive page loads](#stricter-judgement-of-destructive-writes) are judged by), or that the page's script library is told to send as a `DELETE` (`data-method="delete"`, `data-turbo-method`), is refused whatever it says. A link that only loads another page, with no click handler a script can see, is allowed whatever it says: "Delete account" leading to a help page is followed.
+- A submit button whose form posts to a command address, or names `DELETE` in a `_method` field, is refused however mild its label ("Confirm", "Continue"). The button's `formaction` and `formmethod` count over the form's own. A form that only `GET`s an address its markup names, with no submit handler, is allowed whatever its button says. A form that posts elsewhere, a `method="dialog"` form (a confirm dialog whose script acts on the answer) and a form with no `action` (one a script sends) are judged by the label.
+- A reset button (`type="reset"`) clears its form in the page and sends nothing, so it is allowed whatever it says, unless it has a click handler.
+- Any element the page's script library is told to send a `DELETE` from, or a write to a command address (`hx-delete`, `hx-post="/items/3/archive"`), is refused whatever it says. One told to send another write is judged by its label, and the write itself on the network.
+- An Enter typed or pressed in a form's field is judged as that form's submit: its submit button's facts, or the form's own, then the button's label.
+
+A script can still act on a click its markup does not show (a handler added with `addEventListener`), and whatever it sends is judged on the network. When the markup decides nothing, only the control's own name counts:
 
 - A button, link, menu item, tab or option is judged by its whole name, however long.
 - A dropdown is not judged by its options: a filter offering "All, Create, Delete" can be set to "Create", and choosing "Delete" is refused.
