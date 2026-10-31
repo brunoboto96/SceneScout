@@ -16,7 +16,7 @@ import test, { afterEach } from "node:test";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import ts from "typescript";
+import ts from "typescript-api";
 import "../src/engine/brief.ts";
 import "../src/engine/calibration.ts";
 import "../src/engine/check.ts";
