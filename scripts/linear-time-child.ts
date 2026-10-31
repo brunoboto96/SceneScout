@@ -192,7 +192,7 @@ const CASES: Record<string, Array<[string, () => unknown]>> = {
     ["a message key path of open brackets (postMessage's last key)", () => tokenShapeOf(megabyte("["), "abcdefghij0123456789abc")],
     ["an identifier of capitals (strict writes' words)", () => identifierIsDestructive(megabyte("A"))],
     ["a form body of capitals (strict writes)", () => strictBodyIsDestructive(megabyte("A", "action=", "0"))],
-    ["a page url of hash marks (check's own response)", () => withoutOwnResponse(failedRoute(megabyte("#", "", "\n#")))],
+    ["a page url of hash marks (check's own response)", () => withoutOwnResponse(failedRoute(megabyte("#", "", "\n#")), "https://app.test")],
     ["a table cell of tabs (check's markdown cell)", () => markdownCell(megabyte("\t", "", "x"))],
     ["a request path of slashes (flow's request path)", () => requestPathMatches("/a", megabyte("/", "", "a"))],
     ["a button of 'try' over and over (scripted login's away words)", () => chooseSubmit([button(megabyte("A-TRY\u0000"))])],

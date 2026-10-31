@@ -90,7 +90,7 @@ import {
   describeCover,
   type CoverFacts,
 } from "./collector.js";
-import { OracleMonitor, formatViolations, httpErrorDetail, planStopsAt, requestKey, withoutFragment, type PlanViolationRule } from "./oracles.js";
+import { OracleMonitor, formatViolations, planStopsAt, requestKey, withoutFragment, type PlanViolationRule } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, journeyTime, measureJourney } from "./journey.js";
 import {
@@ -294,7 +294,7 @@ import {
 import { scanProject } from "../scan.js";
 import { refuseDestructiveGetsSetting, writeClassifierSetting, type WriteClassifier } from "./strict-writes.js";
 import { writeRulesSettings, type SessionWriteRules } from "./project-config.js";
-import type { RouteHealth } from "./check.js";
+import { ownResponseDetail, type RouteHealth } from "./check.js";
 import { botChallenge, challengeBodyMatters, startPageWarning } from "./challenge.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
@@ -6669,7 +6669,7 @@ export class BrowserEngine {
         const resp = await this.gotoSettlingFailure(current, url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs }).catch((err: unknown) => {
           // A missing file or feed the browser refused to show is the step's failure by its status, as a page's is.
           if (err instanceof AnsweredNavigationError && err.answer.status >= 400) {
-            collect(redactSecrets(httpErrorDetail("GET", withoutFragment(err.answer.url), err.answer.status)));
+            collect(redactSecrets(ownResponseDetail(err.answer.url, err.answer.status, this.baseUrl)));
           }
           return Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs));
         });
@@ -6680,7 +6680,7 @@ export class BrowserEngine {
           failure = answeredStatus({ status, contentType: mediaTypeOf(resp?.headers()["content-type"]) });
           // The page's own status is this step's failure; the oracle's record of the same response is not a second issue.
           // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
-          collect(redactSecrets(httpErrorDetail("GET", withoutFragment(current.url()), status)));
+          collect(redactSecrets(ownResponseDetail(current.url(), status, this.baseUrl)));
         }
       } else if (step.action === "upload") {
         const loc = step.target ? BrowserEngine.locatorFor(current, parseTarget(step.target)!).first() : null;
