@@ -3664,9 +3664,30 @@ test("build: dist is emptied before tsc, so a file deleted from src is not packe
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { scripts: Record<string, string> };
   assert.match(
     pkg.scripts.build,
-    /rmSync\(['"]dist['"], *\{[^}]*recursive: *true[^}]*\}\).*&& tsc && node scripts\/bin-executable\.mjs$/,
+    /rmSync\(['"]dist['"], *\{[^}]*recursive: *true[^}]*\}\).*&& node node_modules\/typescript\/bin\/tsc && node scripts\/bin-executable\.mjs$/,
     "clear dist, then compile",
   );
+});
+
+test("build: the compiler is typescript's own tsc by path, since the typescript-api alias declares a tsc bin too", () => {
+  // node_modules/.bin/tsc points at one of the two, and an install that updates only the alias repoints it to 5.x.
+  const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+    devDependencies: Record<string, string>;
+  };
+  const manifest = (dir: string) =>
+    JSON.parse(fs.readFileSync(path.join(repoRoot, "node_modules", dir, "package.json"), "utf8")) as { version: string; bin?: Record<string, string> };
+  assert.ok(manifest("typescript-api").bin?.tsc, "the alias still declares tsc; if it stops, the scripts may call tsc again");
+  const major = (range: string) => /\d+/.exec(range.replace(/^npm:typescript@/, ""))?.[0];
+  assert.equal(manifest("typescript").version.split(".")[0], major(pkg.devDependencies.typescript), "node_modules/typescript is the declared compiler");
+  assert.equal(manifest("typescript-api").version.split(".")[0], major(pkg.devDependencies["typescript-api"]), "the alias is the declared API");
+  for (const [name, script] of Object.entries(pkg.scripts)) {
+    for (const word of script.split(/\s+/)) {
+      assert.notEqual(word, "tsc", `${name} runs the bare tsc, which may be the alias's`);
+      assert.notEqual(word, "tsserver", `${name} runs the bare tsserver, which is the alias's`);
+    }
+  }
+  for (const name of ["build", "typecheck:scripts"]) assert.ok(pkg.scripts[name].includes("node node_modules/typescript/bin/tsc"), name);
 });
 
 test("ci action: the model key is blanked for every step except the one that runs the exploration", () => {
