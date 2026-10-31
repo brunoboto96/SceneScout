@@ -1,5 +1,21 @@
 # scenescout
 
+## 3.33.0
+
+### Minor Changes
+
+- 8b0509a: Requires Node 22 or later (22.19 or newer); Node 20 reached end of life on 2026-04-30. Node 22, 24 and 26 are supported. `scenescout doctor` and the GitHub Actions check for 22.19 and install Node when the runner has an older one. Requests SceneScout makes through a proxy (`HTTPS_PROXY`, `HTTP_PROXY` or `SCENESCOUT_PROXY`) now go through undici 8 and still reach a plain-http address through a CONNECT tunnel, so an address the proxy cannot reach is still reported as a network failure.
+
+### Patch Changes
+
+- f95fd44: An action (click, type, hover, select, press, scroll, or a step of a plan or a recorded check) on a page that started a navigation of its own before it no longer waits without limit in Chromium: the lookup of its target, or the read of the page before it, ends at the page-load limit and the action says a navigation is on its way, and where to.
+- 83c823f: `scenescout --help` and the other usage text read through a pipe now arrive whole. On macOS the output was cut at about 8 KB because the usage exited before standard output had drained.
+- cabe4a1: A page that a refused write leads to after the settle wait is no longer judged for a false success when it is on another origin than the app's, and the origin fence now takes the session back from it: before, the action reported the page it started on while the session stayed on the other site.
+- abee4f3: A field named for a security answer ("Security question answer", "Memorable information", "Maiden name"), a recovery or master key, or a bank or state identifier ("Account number", "Routing number", "Sort code", "IBAN", "SSN") is now taken for a secret field, so what is typed into it is masked; its near misses ("Security question", "Account name", "Sort order", "Your most memorable date") are not. The generated redaction corpus gains secret shapes that are not drawn from the detector's word lists, and the Safety model guide's published rates now show the field detector's remaining misses (a secret named only by the question it answers).
+- 19967f9: A scan of the page that was skipped because the page started a navigation of its own no longer adds findings, or takes the next action's refused requests, once the page has landed: what it would have found stays with the action that reads that page.
+- 834e634: The team report's Markdown tables now escape a backslash in a cell's text, so a backslash followed by a pipe keeps its backslash instead of being read as an escaped pipe. A carriage return on its own in a cell no longer splits the row in two.
+- 39cb7ee: Build tooling only: the project is compiled with TypeScript 7. The emitted JavaScript is unchanged, and the package ships no type declarations.
+
 ## 3.32.0
 
 ### Minor Changes
