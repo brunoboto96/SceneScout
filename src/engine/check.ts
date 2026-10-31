@@ -25,6 +25,7 @@ import {
   type BaselineRun,
 } from "./baseline.js";
 import { readFlagValue } from "./args.js";
+import { logAddress } from "./authloss.js";
 import { isNonPageResource } from "./crawl.js";
 import type { DesignDefect } from "./design.js";
 import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
@@ -662,15 +663,23 @@ export function unauditedRoutes(routes: readonly RouteHealth[]): RouteHealth[] {
 }
 
 /**
+ * The http_error detail the oracle records for a page's own load, read from the page's address: without its #fragment,
+ * which a request never carries, and another site's by origin and path, as the oracle names it (logAddress).
+ */
+export function ownResponseDetail(pageUrl: string, status: number, appUrl: string): string {
+  const url = withoutFragment(pageUrl);
+  return httpErrorDetail("GET", logAddress(url, appUrl) || url, status);
+}
+
+/**
  * The document's own error status is already the route's issue, so the
  * oracle's record of that same response is not a second one. Run on the raw
  * measurements, before redaction: the oracle truncated the raw URL, and
- * redacting first would make the two stop matching. The #fragment is dropped
- * because the page URL keeps it and a request never carries one.
+ * redacting first would make the two stop matching.
  */
-export function withoutOwnResponse(r: RouteHealth): RouteHealth {
+export function withoutOwnResponse(r: RouteHealth, appUrl: string): RouteHealth {
   if (r.status === null || r.status < 400) return r;
-  const own = httpErrorDetail("GET", withoutFragment(r.url), r.status);
+  const own = ownResponseDetail(r.url, r.status, appUrl);
   return { ...r, violations: r.violations.filter((v) => !(v.kind === "http_error" && v.detail === own)) };
 }
 
