@@ -45,9 +45,14 @@ import {
   resolveSettings,
   tightenPolicy,
   withProjectPolicy,
+  hostRefusal,
+  loginHostRefusal,
+  hostsNote,
+  hostsSetting,
   type LoadedPolicy,
   type Policy,
 } from "../src/engine/project-config.ts";
+import { HOSTS_ENV, hostEntries, hostKey, hostsFromEnv, matchHost, MAX_HOSTS } from "../src/engine/hosts.ts";
 import {
   allowsWrite,
   answersWithRefusal,
@@ -5819,4 +5824,196 @@ test("config explain: allowedWrites shows the list, whether the config or the en
   // An address in an entry loses its user name and password.
   const cred = explainConfig({ loaded: loadedOf({ allowedWrites: ["POST https://user:pw@api.example.com/v1/x"] }), env: {} });
   assert.ok(!rowOf(cred, "allowedWrites").value.includes("pw"), rowOf(cred, "allowedWrites").value);
+});
+
+// ---- hosts: the hosts an attach, a sign-in window and a command may start the browser on (issue #546) ----
+
+test("hosts: an entry is a host, a host and port, or *. before a name of two labels; anything else is refused", () => {
+  const { hosts, rejected } = hostEntries([
+    "App.Example.com",
+    "localhost:3000",
+    "*.preview.example.com",
+    "[::1]:8080",
+    "127.0.0.1",
+    "app.example.com.",
+    "*.com",
+    "*",
+    "https://app.example.com",
+    "app.example.com/path",
+    "user@app.example.com",
+    "app.example.com:0",
+    "app.example.com:70000",
+    "app.example.com:",
+    "app.*.example.com",
+    "",
+  ]);
+  assert.deepEqual(
+    hosts.map((h) => h.entry),
+    ["app.example.com", "localhost:3000", "*.preview.example.com", "[::1]:8080", "127.0.0.1", "app.example.com"],
+  );
+  assert.deepEqual(rejected, [
+    "*.com",
+    "*",
+    "https://app.example.com",
+    "app.example.com/path",
+    "user@app.example.com",
+    "app.example.com:0",
+    "app.example.com:70000",
+    "app.example.com:",
+    "app.*.example.com",
+    "",
+  ]);
+  assert.equal(hostKey(" LOCALHOST:3000 "), "localhost:3000");
+  assert.deepEqual(hostsFromEnv("a.example.com, b.example.com\nc.example.com"), ["a.example.com", "b.example.com", "c.example.com"]);
+});
+
+test("hosts: a URL is allowed only on a named host, its own subdomain rule and port", () => {
+  const list = hostEntries(["app.example.com", "*.preview.example.com", "localhost:3000", "secure.example.com:443"]).hosts;
+  const cases: Array<[string, boolean]> = [
+    ["https://app.example.com/orders", true],
+    ["http://app.example.com:8080/", true],
+    ["https://APP.example.com./", true],
+    ["https://evil.example.org/", false],
+    // The named host as a prefix, a suffix or a user name of another host is not the host.
+    ["https://app.example.com.evil.example.net/", false],
+    ["https://xapp.example.com/", false],
+    ["https://app.example.com@evil.example.net/", false],
+    ["https://pr-12.preview.example.com/", true],
+    ["https://a.b.preview.example.com/", true],
+    // *. stands for subdomains, not the name itself.
+    ["https://preview.example.com/", false],
+    ["https://evilpreview.example.com/", false],
+    ["http://localhost:3000/", true],
+    ["http://localhost:3001/", false],
+    ["http://localhost/", false],
+    ["https://secure.example.com/", true],
+    ["http://secure.example.com/", false],
+    ["file:///etc/passwd", false],
+    // Only http and https, even on a listed host and port.
+    ["ws://secure.example.com:443/", false],
+    ["not a url", false],
+  ];
+  for (const [url, allowed] of cases) assert.equal(matchHost(list, url) !== null, allowed, url);
+});
+
+test("hosts: the config key is parsed into one spelling, a bad entry or too long a list stops the file", () => {
+  const ok = parsePolicy(JSON.stringify({ hosts: ["App.Example.com", " localhost:3000 "] }), "/c.json");
+  assert.ok(ok.ok);
+  assert.deepEqual(ok.policy.hosts, ["app.example.com", "localhost:3000"]);
+  const bad = parsePolicy(JSON.stringify({ hosts: ["https://app.example.com"] }), "/c.json");
+  assert.ok(!bad.ok && bad.error.includes('"hosts"') && bad.error.includes("https://app.example.com"), JSON.stringify(bad));
+  const long = parsePolicy(JSON.stringify({ hosts: Array.from({ length: MAX_HOSTS + 1 }, (_, i) => `h${i}.example.com`) }), "/c.json");
+  assert.ok(!long.ok && long.error.includes(`at most ${MAX_HOSTS}`));
+  assert.ok((CONFIG_KEYS as readonly string[]).includes("hosts"));
+  // No preset sets it: a preset cannot know which app a team tests.
+  assert.ok(!("hosts" in PRESET_POLICY.strict));
+  const strict = parsePolicy(JSON.stringify({ preset: "strict" }), "/c.json");
+  assert.ok(strict.ok && strict.policy.hosts === undefined);
+});
+
+test("hosts: a project's own file only narrows the operator's list, and may set one where the operator has none", () => {
+  assert.deepEqual(tightenPolicy({ hosts: ["a.example.com", "b.example.com"] }, { hosts: ["B.example.com", "c.example.com"] }).hosts, ["B.example.com"]);
+  assert.deepEqual(tightenPolicy({ hosts: ["a.example.com"] }, {}).hosts, ["a.example.com"]);
+  assert.deepEqual(tightenPolicy({}, { hosts: ["c.example.com"] }).hosts, ["c.example.com"]);
+  assert.equal(tightenPolicy({}, {}).hosts, undefined);
+});
+
+test("hosts: the environment narrows the file's list and sets one alone; an entry that is not a host is an error", () => {
+  assert.deepEqual(hostsSetting({}, {}), { ok: true, setting: null });
+  assert.deepEqual(hostsSetting({ hosts: ["a.example.com", "b.example.com"] }, {}), {
+    ok: true,
+    setting: { entries: ["a.example.com", "b.example.com"], from: "the SceneScout config", notes: [] },
+  });
+  const narrowed = hostsSetting({ hosts: ["a.example.com", "b.example.com"] }, { [HOSTS_ENV]: "b.example.com,c.example.com" });
+  assert.ok(narrowed.ok && narrowed.setting);
+  assert.deepEqual(narrowed.setting.entries, ["b.example.com"]);
+  assert.equal(narrowed.setting.from, `the SceneScout config, narrowed by ${HOSTS_ENV}`);
+  assert.ok(narrowed.setting.notes[0].includes('"c.example.com"'), narrowed.setting.notes[0]);
+  const alone = hostsSetting({}, { [HOSTS_ENV]: "C.example.com" });
+  assert.ok(alone.ok && alone.setting);
+  assert.deepEqual(alone.setting, { entries: ["c.example.com"], from: HOSTS_ENV, notes: [] });
+  const bad = hostsSetting({ hosts: ["a.example.com"] }, { [HOSTS_ENV]: "https://a.example.com" });
+  assert.ok(!bad.ok && bad.error.includes(HOSTS_ENV));
+  // A pasted address with a password is refused without repeating the password, from the environment and from a file.
+  const pasted = hostsSetting({}, { [HOSTS_ENV]: "https://user:hunter2pw@app.example.com" });
+  assert.ok(!pasted.ok && pasted.error.includes("https://app.example.com") && !pasted.error.includes("hunter2pw"), JSON.stringify(pasted));
+  const inFile = parsePolicy(JSON.stringify({ hosts: ["https://user:hunter2pw@app.example.com/x"] }), "/c.json");
+  assert.ok(!inFile.ok && inFile.error.includes("https://app.example.com/x") && !inFile.error.includes("hunter2pw"), JSON.stringify(inFile));
+  assert.deepEqual(hostsNote(null), []);
+  assert.deepEqual(hostsNote({ entries: [], from: "x", notes: [] }), ["hosts: no host may be attached to"]);
+});
+
+test("hosts: an attach URL off the list is refused with the reason and the host only, one on it is not", () => {
+  const loaded = loadedOf({ hosts: ["app.example.com", "localhost:3000"] });
+  assert.equal(hostRefusal(loaded, {}, "https://app.example.com/start", "the attach URL"), null);
+  assert.equal(hostRefusal(loaded, {}, "http://localhost:3000/", "the attach URL"), null);
+  const off = hostRefusal(loaded, {}, "https://other.example.org/x?token=abc123secret", "the attach URL");
+  assert.ok(off && off.startsWith("refused by the SceneScout config (/srv/.scenescout/config.json)"), off ?? "");
+  assert.ok(off.includes("other.example.org") && off.includes('"app.example.com"'), off);
+  assert.ok(!off.includes("abc123secret"), off);
+  // The environment narrows the file's list: a host the file lists but the environment leaves out is refused.
+  assert.ok(hostRefusal(loaded, { [HOSTS_ENV]: "localhost:3000" }, "https://app.example.com/", "the attach URL"));
+  // No list anywhere: every host, as without a config.
+  assert.equal(hostRefusal(NO_POLICY, {}, "https://other.example.org/", "the attach URL"), null);
+  // The environment alone: the refusal names the variable, not a file.
+  const env = hostRefusal(NO_POLICY, { [HOSTS_ENV]: "app.example.com" }, "https://other.example.org/", "the attach URL");
+  assert.ok(env && env.startsWith(`refused by ${HOSTS_ENV}:`), env ?? "");
+  assert.ok(hostRefusal(loadedOf({ hosts: [] }), {}, "https://app.example.com/", "the attach URL")?.includes("names no host"));
+});
+
+test("hosts: a command's address and --compare-url are held to the list, with and without a file", () => {
+  const loaded = loadedOf({ hosts: ["app.example.com"] });
+  const ok = applyToCommand(loaded, {}, ["https://app.example.com"], { mode: "read-only", url: "https://app.example.com/" });
+  assert.ok(ok.ok && ok.note.includes('hosts: the browser starts only on "app.example.com"'), JSON.stringify(ok));
+  const off = applyToCommand(loaded, {}, ["https://other.example.org"], { mode: "read-only", url: "https://other.example.org/" });
+  assert.ok(!off.ok && off.error.includes("the address is on other.example.org"), JSON.stringify(off));
+  assert.ok(!off.ok && !off.error.includes("Do not retry"), "a command is run by a person");
+  const compare = applyToCommand(loaded, {}, [], { mode: "read-only", url: "https://app.example.com/", compareUrl: "https://prod.example.org/" });
+  assert.ok(!compare.ok && compare.error.includes("--compare-url is on prod.example.org"), JSON.stringify(compare));
+  const envOnly = applyToCommand(NO_POLICY, { [HOSTS_ENV]: "app.example.com" }, [], { mode: "read-only", url: "https://other.example.org/" });
+  assert.ok(!envOnly.ok && envOnly.error.startsWith(`refused by ${HOSTS_ENV}`), JSON.stringify(envOnly));
+  const envOk = applyToCommand(NO_POLICY, { [HOSTS_ENV]: "app.example.com" }, [], { mode: "read-only", url: "https://app.example.com/" });
+  assert.ok(envOk.ok && envOk.note.includes("hosts:"), JSON.stringify(envOk));
+  const badEnv = applyToCommand(NO_POLICY, { [HOSTS_ENV]: "/not-a-host" }, [], { mode: "read-only", url: "https://app.example.com/" });
+  assert.ok(!badEnv.ok && badEnv.error.includes(HOSTS_ENV));
+  // Unchanged without a list or an address.
+  assert.deepEqual(applyToCommand(NO_POLICY, {}, [], { mode: "read-only", url: "https://other.example.org/" }), {
+    ok: true,
+    mode: "read-only",
+    dedup: undefined,
+    note: "",
+  });
+});
+
+test("hosts: config explain shows the list and where it came from", () => {
+  assert.equal(rowOf(explainConfig({ loaded: NO_POLICY, env: {} }), "hosts").value, "any host");
+  const operator: ConfigLayer = { label: "operator file", file: "/op/config.json", policy: { hosts: ["app.example.com", "b.example.com"] }, named: ["hosts"] };
+  const loaded = { policy: operator.policy, sources: ["/op/config.json"] };
+  const row = rowOf(explainConfig({ operator, loaded, env: {} }), "hosts");
+  assert.deepEqual(row, { key: "hosts", value: "app.example.com, b.example.com", source: "operator file" });
+  const narrowed = explainConfig({ operator, loaded, env: { [HOSTS_ENV]: "b.example.com,c.example.com" } });
+  assert.deepEqual(rowOf(narrowed, "hosts"), { key: "hosts", value: "b.example.com", source: `operator file, narrowed by ${HOSTS_ENV}` });
+  assert.ok(narrowed.notes.some((n) => n.includes('"c.example.com"')));
+  assert.deepEqual(rowOf(explainConfig({ loaded: NO_POLICY, env: { [HOSTS_ENV]: "a.example.com" } }), "hosts"), {
+    key: "hosts",
+    value: "a.example.com",
+    source: `environment ${HOSTS_ENV}`,
+  });
+  assert.throws(() => explainConfig({ loaded: NO_POLICY, env: { [HOSTS_ENV]: "https://a.example.com" } }), new RegExp(HOSTS_ENV));
+});
+
+test("hosts: scenescout login reads the launch file joined with the project's own, and opens no window off the list", () => {
+  const files = new Map([
+    ["/srv/.scenescout/config.json", JSON.stringify({ hosts: ["app.example.com", "idp.example.com"] })],
+    ["/p/.scenescout/config.json", JSON.stringify({ hosts: ["app.example.com"] })],
+  ]);
+  const disk = { exists: (f: string) => files.has(f), read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+  assert.equal(loginHostRefusal({}, "/srv", "/elsewhere", "https://idp.example.com/login", disk), null);
+  // The project's own file narrowed the list, so the host the operator also allows is refused in that project.
+  const narrowed = loginHostRefusal({}, "/srv", "/p", "https://idp.example.com/login", disk);
+  assert.ok(narrowed !== null && narrowed.includes("the sign-in URL is on idp.example.com"), narrowed ?? "");
+  assert.ok(!narrowed.includes("Do not retry"), "a command is run by a person");
+  assert.equal(loginHostRefusal({}, "/none", "/none", "https://anything.example.org/", disk), null, "no file: any host");
+  files.set("/bad/.scenescout/config.json", JSON.stringify({ hosts: ["https://x"] }));
+  assert.ok(loginHostRefusal({}, "/bad", "/none", "https://x.example.com/", disk)?.includes('"hosts"'));
 });

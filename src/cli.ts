@@ -61,7 +61,7 @@ import { runLogin, runScriptedLogin, savedLine } from "./login-run.js";
 import { credentialRedactor, LOGIN_ENV, readScriptedLogin } from "./engine/scripted-login.js";
 import { parseLoginArgs } from "./engine/profiles.js";
 import { detectProvider, EXIT_CI, judgeEffort, KEY_ENV, parseCiArgs, redactKeys, secretValues, type DedupMode } from "./engine/ci.js";
-import { configureCommand, fsPolicyReader, readCommandPolicy, type CommandOptions, type SessionWriteRules } from "./engine/project-config.js";
+import { configureCommand, fsPolicyReader, loginHostRefusal, readCommandPolicy, type CommandOptions, type SessionWriteRules } from "./engine/project-config.js";
 import { READ_POSTS_ENV, type WriteMode } from "./engine/policy.js";
 import { runConfigCommand } from "./engine/config-explain.js";
 import { MAX_EXPLAIN_BODY, runPolicyCommand } from "./engine/policy-explain.js";
@@ -808,7 +808,7 @@ async function firstRun(args: string[]): Promise<never> {
   const parsed = parseFirstRunArgs(args, process.cwd());
   if (!parsed.ok) return fail(parsed.error);
   // The config in the folder this runs in caps its --mode too; a first look's own project is an empty temporary one.
-  const capped = commandConfig(args, { mode: parsed.options.mode, projectDir: process.cwd() }, "", EXIT_FIRST_RUN.couldNotRun);
+  const capped = commandConfig(args, { mode: parsed.options.mode, url: parsed.options.url, projectDir: process.cwd() }, "", EXIT_FIRST_RUN.couldNotRun);
   const options = { ...parsed.options, mode: capped.mode as typeof parsed.options.mode };
   // Found out now, not after the look; and nothing is created until the look has something to write.
   const folderProblem = reportFolderProblem(options.outDir ?? path.join(process.cwd(), FIRST_RUN_DIRNAME), options.outDir !== undefined);
@@ -938,6 +938,11 @@ async function login(args: string[]): Promise<never> {
     process.exit(1);
   }
   const options = parsed.options;
+  const offHost = loginHostRefusal(process.env, process.cwd(), options.projectDir, options.url, fsPolicyReader);
+  if (offHost) {
+    console.error(`scenescout login: ${offHost}`);
+    process.exit(1);
+  }
   if (options.script) {
     // Everything is checked before a browser launches; each problem names a variable, never a value.
     const read = readScriptedLogin(options.script, process.env);

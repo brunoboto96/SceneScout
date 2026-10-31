@@ -57,7 +57,13 @@ import {
   shotsToPush,
   shotUrl,
   teamMembership,
+  hostAllowed,
+  hostEntry,
+  hostsOf,
+  hostsReply,
+  MAX_HOSTS as QA_MAX_HOSTS,
 } from "../action/qa-action.mjs";
+import { hostEntries, matchHost, MAX_HOSTS } from "../src/engine/hosts.ts";
 import { bufferReader, MAX_CENTRAL_DIRECTORY_BYTES, readZipEntry, zipEntries } from "../action/zip.mjs";
 import zlib from "node:zlib";
 import {
@@ -2608,4 +2614,110 @@ test("egress: the unreadable reply names the gate's job and workflow file only w
   assert.match(unknown!.reply, /add `contents: read` under `permissions:` of the job that runs the gate in this workflow's file/);
   // Contrast: a config that says none is not a permission problem, and its reply says nothing about permissions.
   assert.doesNotMatch(egressReply({ ok: true, egress: "none" }, { workflow: ".github/workflows/x.yml", job: "gate" })!.reply, /contents: read/);
+});
+
+// ── hosts: the config's list caps the preview and base URL a comment can point a run at (issue #546) ──
+
+const HOST_ENTRIES = [
+  "app.example.com",
+  "App.Example.com.",
+  "localhost:3000",
+  "*.preview.example.com",
+  "[::1]:8080",
+  "127.0.0.1",
+  "bücher.example.com",
+  "127.1:8443",
+  "*.com",
+  "*",
+  "https://app.example.com",
+  "app.example.com/path",
+  "user@app.example.com",
+  "app.example.com:0",
+  "app.example.com:",
+  "app.*.example.com",
+  "",
+];
+const HOST_URLS = [
+  "https://app.example.com/x",
+  "https://app.example.com.evil.example.net/",
+  "https://app.example.com@evil.example.net/",
+  "https://pr-7.preview.example.com/",
+  "https://preview.example.com/",
+  "https://evilpreview.example.com/",
+  "http://localhost:3000/",
+  "http://localhost:3001/",
+  "http://[::1]:8080/",
+  "https://127.0.0.1/",
+  "https://127.0.0.1:443/",
+  "https://xn--bcher-kva.example.com/",
+  "https://127.0.0.1:8443/",
+  "ws://app.example.com:443/",
+  "not a url",
+];
+
+test("hosts: the gate reads and matches entries exactly as the engine does", () => {
+  assert.equal(QA_MAX_HOSTS, MAX_HOSTS);
+  for (const raw of HOST_ENTRIES) assert.deepEqual(hostEntry(raw), hostEntries([raw]).hosts[0] ?? null, raw);
+  const engine = hostEntries(HOST_ENTRIES).hosts;
+  const gate = HOST_ENTRIES.map(hostEntry).filter((h) => h !== null);
+  for (const url of HOST_URLS) assert.equal(hostAllowed(gate, url), matchHost(engine, url) !== null, url);
+});
+
+test("hosts: a config's hosts is read as a list of hosts; none is any host, and a bad one is an error", () => {
+  assert.deepEqual(hostsOf(`{"egress": "all"}`), { ok: true, hosts: null });
+  const listed = hostsOf(`{"hosts": ["*.preview.example.com"]}`);
+  assert.ok(listed.ok && listed.hosts?.[0].entry === "*.preview.example.com");
+  assert.equal(hostsOf(`{"hosts": ["https://x.example.com"]}`).ok, false);
+  assert.equal(hostsOf(`{"hosts": "x.example.com"}`).ok, false);
+  assert.equal(hostsOf(JSON.stringify({ hosts: Array.from({ length: MAX_HOSTS + 1 }, (_, i) => `h${i}.example.com`) })).ok, false);
+  assert.equal(hostsReply({ ok: true, hosts: null }, "https://anything.example.org/", "preview URL", "comment"), null);
+});
+
+test("gate: a preview or base URL on a host the config's hosts does not name starts no run, and the reply names the host", () => {
+  const allowed = allowlist("", "owner");
+  const decide = (over: Record<string, unknown>) =>
+    gateDecision({ command: { url: "", focus: "" }, login: "owner", association: "OWNER", allowed, pr: SAME, allowForks: false, preview: PREVIEW, ...over });
+  const previews = hostsOf(`{"hosts": ["*.preview.example.com"]}`);
+  assert.equal(decide({ hosts: previews }).run, true);
+  const off = decide({ hosts: previews, preview: { source: "comment", url: "https://attacker.example.org/?token=s3cret" } });
+  assert.equal(off.run, false);
+  assert.equal(off.reaction, "confused");
+  assert.match(off.reply!, /the preview URL \(from the comment\) is on `attacker\.example\.org`, and `hosts` in .*names only `\*\.preview\.example\.com`/);
+  assert.doesNotMatch(off.reply!, /s3cret/);
+  const bad = decide({ hosts: { ok: false, error: 'its "hosts" has an entry that is not a host' } });
+  assert.equal(bad.run, false);
+  const compare = { url: "", focus: "", capture: { kind: "compare", what: "the Save button" } };
+  const onList = hostsOf(`{"hosts": ["*.preview.example.com", "www.example.com"]}`);
+  assert.equal(decide({ command: compare, hosts: onList, base: { source: "variable", url: "https://www.example.com" } }).run, true);
+  const offBase = decide({ command: compare, hosts: previews, base: { source: "variable", url: "https://www.example.com" } });
+  assert.equal(offBase.run, false);
+  assert.match(offBase.reply!, /the base URL \(from the variable\) is on `www\.example\.com`/);
+});
+
+test("gate stage: the default branch's hosts decides; a comment URL off the list posts only the refusal", async () => {
+  const dir = tempDir();
+  const config = (text: string) => ({ type: "file", encoding: "base64", content: Buffer.from(text).toString("base64") });
+  const run = async (text: string, comment: string) => {
+    let out: Record<string, string | undefined> = {};
+    let seen: Call[] = [];
+    await withGitHub(
+      (method, url) => {
+        if (url === "/repos/owner/app/pulls/7") return SAME;
+        if (url === CONFIG_ROUTE) return config(text);
+        if (method === "POST") return {};
+        return undefined;
+      },
+      async (api, calls) => {
+        out = await runGate({ env: gateEnv(dir, api, "owner", comment), inputs: { "github-token": "test-token" }, log: quiet });
+        seen = calls;
+      },
+    );
+    return { out, calls: seen };
+  };
+  const listed = `{"hosts": ["*.preview.example.com"]}`;
+  assert.equal((await run(listed, "/scenescout qa https://pr-7.preview.example.com")).out.run, "true");
+  const held = await run(listed, "/scenescout qa https://elsewhere.example.org");
+  assert.equal(held.out.run, "false");
+  assert.match(held.calls.at(-1)!.body.body, /is on `elsewhere\.example\.org`/);
+  assert.equal((await run(`{"egress": "all"}`, "/scenescout qa https://elsewhere.example.org")).out.run, "true", "no hosts: any host, as before");
 });

@@ -59,6 +59,7 @@ import { REFUSE_DESTRUCTIVE_GETS_ENV, refuseDestructiveGetsSetting, STRICT_WRITE
 import { DEDUP_ENV, DEDUP_MODES, type DedupMode } from "./ci.js";
 import { flagName } from "./args.js";
 import { CONFIG_FILE_NAME, MEMORY_DIRNAME } from "./memory-dir.js";
+import { HOSTS_ENV, hostEntries, hostKey, hostsFromEnv, matchHost, MAX_HOSTS, shownHostEntry } from "./hosts.js";
 
 /** The environment variable naming the operator's config file, read before the launch directory's. */
 export const CONFIG_ENV = "SCENESCOUT_CONFIG";
@@ -90,6 +91,7 @@ export const CONFIG_KEYS = [
   "authPosts",
   "allowedWrites",
   "redactPageText",
+  "hosts",
 ] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 
@@ -236,6 +238,12 @@ export interface Policy extends WriteRulesPolicy {
    * only, since the project's own file is inside what it limits.
    */
   projectsRoot?: string;
+  /**
+   * The only hosts an attach, a sign-in window or a command may start the
+   * browser on (hosts.ts). SCENESCOUT_HOSTS may narrow it. Unset: any host, as
+   * without a file.
+   */
+  hosts?: string[];
 }
 
 /** A policy with where it came from, for every message that names it. */
@@ -254,12 +262,20 @@ export const NO_POLICY: LoadedPolicy = { policy: {}, sources: [] };
  * export or a `ci` run that worked before; and writeClassifier and authPosts,
  * which no preset sets because the strict classifier refuses writes the
  * standard one lets out and a sign-in list names one app's endpoints; and
- * redactPageText, which changes what the agent reads rather than what it may do; and allowedWrites, which names one app's endpoints.
+ * redactPageText, which changes what the agent reads rather than what it may do; and allowedWrites and hosts, which name one app's endpoints and addresses.
  */
 export type PresetPolicy = Required<
   Omit<
     Policy,
-    "projectsRoot" | "egress" | "writeClassifier" | "authPosts" | "authPostsNarrowOnly" | "allowedWrites" | "allowedWritesNarrowOnly" | "redactPageText"
+    | "projectsRoot"
+    | "egress"
+    | "writeClassifier"
+    | "authPosts"
+    | "authPostsNarrowOnly"
+    | "allowedWrites"
+    | "allowedWritesNarrowOnly"
+    | "redactPageText"
+    | "hosts"
   >
 >;
 
@@ -389,6 +405,8 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
   if (!readPosts.ok) return readPosts;
   const trustedEmbeds = list("trustedEmbeds", MAX_TRUSTED_EMBEDS, (entries) => trustedEmbedOrigins(entries).rejected);
   if (!trustedEmbeds.ok) return trustedEmbeds;
+  const hosts = list("hosts", MAX_HOSTS, (entries) => hostEntries(entries).rejected.map(shownHostEntry));
+  if (!hosts.ok) return hosts;
 
   const base: Policy = preset.value ? structuredClone(PRESET_POLICY[preset.value]) : {};
   const set: Policy = {
@@ -406,6 +424,7 @@ export function parsePolicy(text: string, source: string): { ok: true; policy: P
     authPosts: authPosts.value,
     allowedWrites: allowedWrites.value,
     redactPageText: redactPageText.value,
+    hosts: hosts.value?.map(hostKey),
   };
   for (const [k, v] of Object.entries(set)) if (v !== undefined) (base as Record<string, unknown>)[k] = v;
   return { ok: true, policy: base };
@@ -461,6 +480,7 @@ export function tightenPolicy(a: Policy, b: Policy): Policy {
     out.allowedWrites =
       a.allowedWrites && b.allowedWrites ? intersect(b.allowedWrites, a.allowedWrites, allowedWriteKey) : (a.allowedWrites ?? b.allowedWrites);
   if (a.allowedWrites ? a.allowedWritesNarrowOnly === true : b.allowedWrites !== undefined) out.allowedWritesNarrowOnly = true;
+  if (a.hosts || b.hosts) out.hosts = a.hosts && b.hosts ? intersect(b.hosts, a.hosts, hostKey) : (a.hosts ?? b.hosts);
   // The operator's only: withProjectPolicy refuses a project's file that sets it.
   if (a.projectsRoot) out.projectsRoot = a.projectsRoot;
   return out;
@@ -629,6 +649,70 @@ export function uploadRefusal(loaded: LoadedPolicy, filePath: string | undefined
       why: `uploads "fixtures" allows only generated files, so "${filePath}" is not sent: upload a fixture kind (pdf, png, txt, csv, json) instead`,
     },
   ]);
+}
+
+/** The hosts list a run is held to, and what set it: the config, the config narrowed by SCENESCOUT_HOSTS, or SCENESCOUT_HOSTS alone. */
+export interface HostsSetting {
+  entries: string[];
+  from: string;
+  notes: string[];
+}
+
+/**
+ * The hosts a run may start the browser on: the file's list, narrowed to the
+ * entries SCENESCOUT_HOSTS also names when it is set; with no file list, the
+ * environment's; null when neither sets one (any host). An environment entry
+ * that is not a host is an error naming the variable, so a misspelt lock never
+ * reads as none.
+ */
+export function hostsSetting(
+  policy: Policy,
+  env: Record<string, string | undefined>,
+): { ok: true; setting: HostsSetting | null } | { ok: false; error: string } {
+  const fromEnv = hostsFromEnv(env[HOSTS_ENV]);
+  const bad = hostEntries(fromEnv).rejected.map(shownHostEntry);
+  if (bad.length > 0) return { ok: false, error: `${HOSTS_ENV} has entries that are not hosts: ${quoted(bad)}` };
+  if (fromEnv.length > MAX_HOSTS) return { ok: false, error: `${HOSTS_ENV} may name at most ${MAX_HOSTS} hosts` };
+  if (policy.hosts) {
+    if (fromEnv.length === 0) return { ok: true, setting: { entries: [...policy.hosts], from: BY_CONFIG, notes: [] } };
+    const entries = intersect(fromEnv.map(hostKey), policy.hosts, hostKey);
+    const dropped = fromEnv.filter((e) => !entries.includes(hostKey(e)));
+    const notes = dropped.length > 0 ? [`${HOSTS_ENV} entries the config does not list were left out: ${quoted(dropped)}`] : [];
+    return { ok: true, setting: { entries, from: `${BY_CONFIG}, narrowed by ${HOSTS_ENV}`, notes } };
+  }
+  if (fromEnv.length > 0) return { ok: true, setting: { entries: fromEnv.map(hostKey), from: HOSTS_ENV, notes: [] } };
+  return { ok: true, setting: null };
+}
+
+/**
+ * Why the hosts list refuses to start the browser on `url`, or null. `what`
+ * names the address for the reader (`the attach URL`, `--compare-url`). Only
+ * the host is quoted, never the whole address, which may carry a token.
+ */
+export function hostRefusal(loaded: LoadedPolicy, env: Record<string, string | undefined>, url: string, what: string): string | null {
+  const resolved = hostsSetting(loaded.policy, env);
+  if (!resolved.ok) return resolved.error;
+  const setting = resolved.setting;
+  if (setting === null || matchHost(hostEntries(setting.entries).hosts, url)) return null;
+  let host: string;
+  try {
+    host = new URL(url).host;
+  } catch {
+    host = "an address that is not a URL";
+  }
+  const allowed = setting.entries.length === 0 ? "names no host" : `names only ${quoted(setting.entries)}`;
+  const why = `${what} is on ${host}, and the hosts list (${setting.from}) ${allowed}: point it at a listed host`;
+  // With no file, the list is the environment's alone, and the refusal names that rather than a file.
+  if (loaded.sources.length === 0)
+    return `refused by ${HOSTS_ENV}: ${why}. Whoever runs SceneScout set it; only they can change it. Do not retry with a looser setting.`;
+  return refusalText(loaded, [{ key: "url", why }]);
+}
+
+/** The attach's and a command's "Config:" line for hosts: the list and its notes, empty when there is none. */
+export function hostsNote(setting: HostsSetting | null): string[] {
+  if (setting === null) return [];
+  const which = setting.entries.length === 0 ? "no host may be attached to" : `the browser starts only on ${quoted(setting.entries)}`;
+  return [`hosts: ${which}`, ...setting.notes];
 }
 
 /**
@@ -824,7 +908,7 @@ export interface EffectiveSettings {
 
 /** One argument the config refused, and why. */
 export interface Refusal {
-  key: keyof AskedSettings | "projectPath" | "filePath" | "egress";
+  key: keyof AskedSettings | "projectPath" | "filePath" | "egress" | "url";
   why: string;
 }
 
@@ -977,7 +1061,18 @@ export function applyToCommand(
 ): { ok: true; mode: WriteMode; dedup?: DedupMode; readPosts?: string[]; writeRules?: SessionWriteRules; note: string } | { ok: false; error: string } {
   const egress = options.sends ? egressRefusal(loaded, options.sends.via, options.sends.what) : null;
   if (egress) return { ok: false, error: forCommand(egress) };
-  if (loaded.sources.length === 0) return { ok: true, mode: options.mode, dedup: options.dedup, note: "" };
+  // Before the no-file return: SCENESCOUT_HOSTS holds a command without a file too.
+  const hosts = hostsSetting(loaded.policy, env);
+  if (!hosts.ok) return { ok: false, error: hosts.error };
+  for (const [url, what] of [
+    [options.url, "the address"],
+    [options.compareUrl, "--compare-url"],
+  ] as const) {
+    const off = url === undefined ? null : hostRefusal(loaded, env, url, what);
+    if (off) return { ok: false, error: forCommand(off) };
+  }
+  if (loaded.sources.length === 0)
+    return { ok: true, mode: options.mode, dedup: options.dedup, note: hosts.setting ? `Config: ${hostsNote(hosts.setting).join("; ")}.` : "" };
   const asked: AskedSettings = { mode: flagGiven(args, "mode") ? options.mode : undefined };
   if (options.dedup !== undefined && flagGiven(args, "dedup")) asked.dedup = options.dedup;
   // An agent-driven command (`ci`) has no person to accept a guided plan, so requireGuidedPlan holds it to observe, as the
@@ -1000,7 +1095,7 @@ export function applyToCommand(
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
   const dedup = options.dedup === undefined ? undefined : (r.settings.dedup ?? options.dedup);
-  const notes = [...gateNotes, ...r.notes, ...writeRulesNote(loaded.policy, writeRules), ...redactPageTextNote(loaded.policy)];
+  const notes = [...gateNotes, ...r.notes, ...writeRulesNote(loaded.policy, writeRules), ...redactPageTextNote(loaded.policy), ...hostsNote(hosts.setting)];
   // Said once: resolveSettings already said so when the environment asked for the judge.
   if (options.dedup !== undefined && dedup !== options.dedup && !notes.some((n) => n.startsWith("dedup ")))
     notes.push(`dedup "${dedup}": the default "${options.dedup}" is above the config's dedup`);
@@ -1015,9 +1110,13 @@ export function applyToCommand(
   };
 }
 
-/** What a command asks of the config: its mode and dedup, the path it sends data by, and whether a model drives it (`ci`). */
+/** What a command asks of the config: its mode and dedup, the addresses it starts the browser on, the path it sends data by, and whether a model drives it (`ci`). */
 export interface CommandOptions {
   mode: WriteMode;
+  /** The app's address, held to the hosts list. */
+  url?: string;
+  /** `ci --compare-url`: the other deployment, held to the same list. */
+  compareUrl?: string;
   dedup?: DedupMode;
   sends?: { via: EgressPath; what: string };
   agentDriven?: boolean;
@@ -1062,4 +1161,25 @@ export function configureCommand(
   if (!applied.ok) return applied;
   const { readPosts, ...rest } = applied;
   return readPosts === undefined ? rest : { ...rest, readPostsEnv: readPosts.join("\n") };
+}
+
+/**
+ * Why `scenescout login` may not open its window on `url`, or null: the
+ * config's hosts list, read as the other commands read the config (the launch
+ * file joined with the project's own). The projectsRoot fence is not applied
+ * here; a config that is not valid is the error.
+ */
+export function loginHostRefusal(
+  env: Record<string, string | undefined>,
+  launchDir: string,
+  projectDir: string,
+  url: string,
+  fsx: PolicyReader,
+): string | null {
+  const launch = readLaunchPolicy(env, launchDir, fsx);
+  if (!launch.ok) return launch.error;
+  const joined = withProjectPolicy(launch.loaded, projectDir, fsx);
+  if (!joined.ok) return joined.error;
+  const off = hostRefusal(joined.loaded, env, url, "the sign-in URL");
+  return off === null ? null : forCommand(off);
 }
