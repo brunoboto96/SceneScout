@@ -34,7 +34,15 @@ import {
   type ReadPost,
   type WriteMode,
 } from "./policy.js";
-import { applyToCommand, readLaunchPolicy, withProjectPolicy, type PolicyReader, type SessionWriteRules, type WriteRulesSources } from "./project-config.js";
+import {
+  applyToCommand,
+  readLaunchPolicy,
+  withProjectPolicy,
+  writeRulesSettings,
+  type PolicyReader,
+  type SessionWriteRules,
+  type WriteRulesSources,
+} from "./project-config.js";
 import { redactRoute } from "./redact.js";
 import { ALLOWED_WRITES_ENV, allowedWriteEntries, allowedWritesFromEnv, writeAllowListFor, type AllowedWrite } from "./write-allowlist.js";
 import { pathnameOf, routedWriteVerdict } from "./route-guard.js";
@@ -47,6 +55,7 @@ import {
   type WriteClassifier,
 } from "./strict-writes.js";
 import { isReadMethod } from "./unload.js";
+import { BROWSER_HOST_REFUSAL, BROWSER_HOSTS_ENV, browserHostList, refusedBrowserHost } from "./browser-hosts.js";
 
 /** The options `scenescout policy explain` takes. */
 export const POLICY_EXPLAIN_OPTION_NAMES = ["mode", "body", "header", "app"] as const;
@@ -181,6 +190,8 @@ export interface PolicySettings {
   allowedWrites?: { entries: readonly AllowedWrite[]; andModeRules: boolean } | null;
   /** What turned each write-judgement setting on, when the operator's config was read (project-config.ts writeRulesSettings). Absent: the environment. */
   from?: WriteRulesSources;
+  /** The hosts a page may reach besides the app's (the config's browserHosts or SCENESCOUT_BROWSER_HOSTS), or null/absent when any host may be reached. */
+  browserHosts?: readonly string[] | null;
 }
 
 /**
@@ -195,6 +206,8 @@ export function policySettingsFrom(env: Record<string, string | undefined>, rule
       readPosts: readPostEntries(readPostsSetting(undefined, env[READ_POSTS_ENV])).entries,
       authPosts: authPostsSetting(env[AUTH_POSTS_ENV])?.entries ?? null,
       allowedWrites: allowedWritesFromEnv(env[ALLOWED_WRITES_ENV]).length > 0 ? listedWrites(allowedWritesFromEnv(env[ALLOWED_WRITES_ENV]), false) : null,
+      // The server's own reading of the variable, which throws on an entry that is not a host as the attach does.
+      browserHosts: writeRulesSettings({}, env, false).browserHosts,
     };
   return {
     classifier: rules.writeClassifier,
@@ -204,6 +217,7 @@ export function policySettingsFrom(env: Record<string, string | undefined>, rule
     authPostsNarrowOnly: rules.authPosts?.andSignInPath === true,
     allowedWrites: rules.allowedWrites ? listedWrites(rules.allowedWrites.entries, rules.allowedWrites.andModeRules) : null,
     from: rules.from,
+    browserHosts: rules.browserHosts,
   };
 }
 
@@ -248,7 +262,16 @@ function verdictFor(
   input: { method: string; url: string; body: string | null; headers: Record<string, string>; appUrl: string },
   settings: PolicySettings,
 ): ModeVerdict {
-  // destructive: the route handler is not installed at all (browser.ts routeRequests).
+  // The browserHosts list, before the write policy and in every mode (route-guard.ts RouteGuard.handleHosts).
+  const offHost = settings.browserHosts ? refusedBrowserHost(browserHostList(input.appUrl, settings.browserHosts), input.url) : null;
+  if (offHost !== null)
+    return {
+      mode,
+      outcome: "refused",
+      rule: `${offHost} is ${BROWSER_HOST_REFUSAL} (${settings.from?.browserHosts ?? BROWSER_HOSTS_ENV}), so no request to it leaves the browser`,
+      source: "browser-hosts.ts refusedBrowserHost",
+    };
+  // destructive: the write policy's route handler is not installed at all (browser.ts routeRequests).
   if (mode === "destructive") return { mode, outcome: "allowed", rule: "destructive mode judges no request", source: "browser.ts routeRequests" };
   const judged = writeMethod({ method: input.method, url: input.url, headers: input.headers, body: input.body });
   const method = judged.method;
@@ -382,7 +405,13 @@ export function formatExplanation(url: string, e: PolicyExplanation, settings: P
         : `${ALLOWED_WRITES_ENV} (${settings.allowedWrites.entries.length})`
       : "",
   ].filter(Boolean);
-  const anyConfig = [from.writeClassifier, from.refuseDestructiveGets, from.authPosts, from.allowedWrites].some(byConfig);
+  if (settings.browserHosts)
+    on.push(
+      byConfig(from.browserHosts)
+        ? `browserHosts (${settings.browserHosts.length}, ${from.browserHosts})`
+        : `${BROWSER_HOSTS_ENV} (${settings.browserHosts.length})`,
+    );
+  const anyConfig = [from.writeClassifier, from.refuseDestructiveGets, from.authPosts, from.allowedWrites, from.browserHosts].some(byConfig);
   lines.push(`Settings read from this environment${anyConfig ? " and the config" : ""}: ${on.length > 0 ? on.join(", ") : "none (the defaults)"}.`);
   lines.push(
     `Assumed: the app is ${e.appUrl} (--app to change it), and its own top page sent the request. ` +

@@ -4,7 +4,7 @@
 >
 > **What you will be able to do:** name every path by which SceneScout sends data off the machine, say what each one carries and to whom, and turn each one off.
 
-SceneScout has no telemetry and no update check. The browser it drives talks to the app under test, as any browser does; that traffic is the test itself and is governed by the [write mode](Safety-model.md), not by this page. Everything else that leaves the machine is listed below.
+SceneScout has no telemetry and no update check. The browser it drives talks to the app under test, as any browser does; that traffic is the test itself and is governed by the [write mode](Safety-model.md), and by default a page may also reach every other host it loads from (a CDN, an analytics script, a sign-in provider). The config's `browserHosts` limits that to the app's host and a list ([below](#the-hosts-the-browser-may-reach)). Everything else that leaves the machine is listed below.
 
 ## Every path
 
@@ -41,7 +41,7 @@ A team sets what SceneScout itself may send off the machine with `egress` in the
 | `model-only` | Everything but the model: `scenescout export`, `scout_ticket_preview`, `scout_ticket_file` and `scout_ticket_status`'s reads, and `/scenescout qa`. `scenescout ci` and the dedup judge still run |
 | `none` | All of those, and `scenescout ci`, which stops before it reads a key. Over MCP the dedup judge is off and no picture of the app is returned into the conversation: a finding's picture is kept to a file, as if `dedup` were `rule` and `evidence` were `file`, and `scout_screenshot` and `scout_cards` with `pictures: "inline"` are refused |
 
-Each refusal names the file and the setting, and says what was not run. `ci` and `export` exit 2. Like every key in the file, an argument or the environment can only ask for less: there is no variable or option that loosens `egress`, and a project's own file can only lower it. No preset sets it, so `"preset": "strict"` alone changes no path on this page.
+Each refusal names the file and the setting, and says what was not run. `ci` and `export` exit 2. Like every key in the file, an argument or the environment can only ask for less: there is no variable or option that loosens `egress`, and a project's own file can only lower it. No preset sets it, so `"preset": "strict"` alone changes no path on this page; it does limit the browser's own requests (below).
 
 `/scenescout qa` reads the setting from `.scenescout/config.json` on the repository's default branch, never from the pull request, which could loosen it. Its gate job needs `contents: read` to read the file (the [template](../../examples/workflows/scenescout-qa.yml) asks for it). With `egress` `none` or `model-only`, or a file the gate cannot read, the gate starts nothing and its only reply is one line saying why. GitHub answers a token that may not read a private repository's files as if the file were not there, so when the config is missing the gate also reads the repository's top folder; if it cannot, or GitHub refuses the token for a missing permission, it starts nothing and its reply names the job and the workflow file that need `contents: read` under `permissions:`. A workflow written before this needs that line added. The gate reads the file's `hosts` list there too: a preview URL, or a `compare` run's base URL, on a host the list does not name starts no run, and the reply names that host ([Configuration reference](Configuration-reference.md#the-config-file)).
 
@@ -103,3 +103,17 @@ What it does not do:
 - **It masks only these three kinds.** Names, postal addresses, dates of birth, account numbers and other identifiers pass as written, and a phone number with no word for a phone before it is not recognised (a bare `+44 20 7946 0958` reads the same as an amount or an id).
 - **A value the agent copies back is the marker.** An address in a link, or an option whose value is an address, cannot be followed or chosen by its text once masked, and a run plan's `text=` target or a saved flow's expected text written from masked text matches nothing on the page. The agent acts by element refs, which are not masked.
 - **Reserved example addresses stay** (`@example.com`, `.test`, `.invalid`, `localhost`), as they do in reports.
+
+## The hosts the browser may reach
+
+The page SceneScout drives sends what any page sends: its own requests to the app, and requests to every other host it loads from. Those reach the third party as they would from a person's browser, with the page's address as the referrer. `browserHosts` in the [config file](Configuration-reference.md#the-config-file) names the only hosts the browser may reach besides the app's own:
+
+```json
+{ "browserHosts": ["cdn.example.net"] }
+```
+
+With a list set, a request to any other host is refused before it leaves the machine, in every write mode: a page load and the later hops of its redirects, a script, style, image, frame or download, fetch and XHR, and a WebSocket. `[]` is the app's host alone, and `"preset": "strict"` sets that. Shared workers, WebRTC peer connections and WebTransport, whose traffic no route handler sees, are taken from the page. A refused page load leaves the page where it was, and an attach whose start address redirects off the list is not attached. Each refusal is reported in a `BROWSER-HOSTS blocked` notice naming the host and path, never the query, so a tester notes what it stopped as untested rather than filing it as a bug. `SCENESCOUT_BROWSER_HOSTS` sets a list without a file, or narrows the file's; `scenescout policy explain` and `scenescout config explain` show it.
+
+Firefox and WebKit route no redirect's later hop, so there SceneScout sends each page and frame load, and a worker's script, itself to judge where it leads, and gives each document and worker a Content-Security-Policy naming the list, joined to the app's own so it only narrows: the browser then refuses any other request's redirect off the list. A page there sees those refusals as policy violations in its console, and an IPv6 host on the list is refused, since a Content-Security-Policy cannot name one. The page reports each refusal to SceneScout for the notice, so a page could add made-up entries to it; a refusal inside a worker is not reported, though it is still refused.
+
+What it does not cover: WebTransport is taken from the page but not from a worker the page starts. A sign-in window (`scout_login`, `scenescout login`) is not held by it, since signing in often passes through another host. A host's name may still be looked up, and a connection opened to it, when a page asks the browser to connect early (`<link rel="preconnect">`); no request is sent on it.

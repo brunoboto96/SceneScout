@@ -74,6 +74,7 @@ import {
   unloadWriteInterception,
   allowedUnloadWritesMayBeLost,
   writeRedirectHopsJudged,
+  hostRedirectHops,
   frameUnloadWritesMayGoUnissued,
   closeWaitsForLeavingWrites,
   awaitsDroppedNavigationErrorPage,
@@ -1718,6 +1719,19 @@ test("shared workers are taken from the page in every mode that blocks anything"
   assert.equal(sharedWorkersAllowed("read-only"), false);
   assert.equal(sharedWorkersAllowed("safe-write"), false);
   assert.equal(sharedWorkersAllowed("destructive"), true);
+  // A browserHosts list holds in every mode, and a shared worker's requests would reach any host unseen.
+  for (const mode of ["observe", "read-only", "safe-write", "destructive"] as const) assert.equal(sharedWorkersAllowed(mode, true), false, mode);
+});
+
+test("a browserHosts list meets a redirect's later hops at the browser level in Chromium, and by sending a page load itself elsewhere", () => {
+  assert.deepEqual(
+    (["chromium", "firefox", "webkit"] as const).map((e) => [e, hostRedirectHops(e)]),
+    [
+      ["chromium", "browser-level"],
+      ["firefox", "page-loads"],
+      ["webkit", "page-loads"],
+    ],
+  );
 });
 
 test("installing only a browser the default attach does not launch says so", () => {

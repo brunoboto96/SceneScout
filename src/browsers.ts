@@ -340,6 +340,21 @@ export function writeRedirectHopsJudged(engine: BrowserEngineName): boolean {
 }
 
 /**
+ * How the operator's browserHosts list (browser-hosts.ts) reaches a redirect's
+ * later hops, which no engine routes. Chromium's browser-level interception
+ * sees every hop of every request ("browser-level"). Firefox and WebKit do
+ * not: there a page or frame load and a worker's script are sent by
+ * SceneScout itself, without following a redirect, and a redirect is refused
+ * or answered with a page that loads the next address as a new, routed page
+ * load ("page-loads"); each document and worker is handed a
+ * Content-Security-Policy naming the list, so the browser refuses any other
+ * request's redirect off it (ADR 35).
+ */
+export function hostRedirectHops(engine: BrowserEngineName): "browser-level" | "page-loads" {
+  return engine === "chromium" ? "browser-level" : "page-loads";
+}
+
+/**
  * Whether a route handler can hand the browser a redirect (route.fulfill with
  * a 3xx), which the browser then follows itself. WebKit refuses one. The
  * allowlist header (app-header.ts) needs it, so that a redirect away from the
@@ -369,7 +384,7 @@ export function appHeaderPermissions(engine: BrowserEngineName): string[] {
  * A request issued by a shared worker cannot be intercepted in any browser, so
  * a write sent from one passes the policy unseen and unlogged. Removing the
  * constructor makes feature detection fail, and an app then does that work on
- * the page, where the policy sees it. Not applied in `destructive` mode, where
+ * the page, where the policy sees it. Not applied in `destructive` mode (unless a browserHosts list is set), where
  * the policy blocks nothing and the person has opted in to everything.
  */
 export const REMOVE_SHARED_WORKER_SCRIPT = `(() => {
@@ -380,9 +395,30 @@ export const REMOVE_SHARED_WORKER_SCRIPT = `(() => {
   }
 })()`;
 
-/** Whether pages may use shared workers in this write mode. */
-export function sharedWorkersAllowed(mode: "observe" | "read-only" | "safe-write" | "destructive"): boolean {
-  return mode === "destructive";
+/**
+ * Run in every page before its own scripts while a browserHosts list is set:
+ * takes away the ways a page connects to another host that no route handler
+ * sees. A WebRTC peer connection reaches STUN and TURN servers, and its peers,
+ * over UDP, and WebTransport runs over HTTP/3; neither is a request the
+ * browser hands to SceneScout. Removing the constructors makes feature
+ * detection fail, as with shared workers.
+ */
+export const REMOVE_UNROUTED_CONNECTIONS_SCRIPT = `(() => {
+  for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection", "WebTransport"]) {
+    try { delete globalThis[name]; } catch {}
+    if (name in globalThis) {
+      try { Object.defineProperty(globalThis, name, { value: undefined, configurable: true, writable: true }); } catch {}
+    }
+  }
+})()`;
+
+/**
+ * Whether pages may use shared workers in this write mode. Never while a
+ * browserHosts list is set, in any mode: a shared worker's requests reach
+ * any host unseen.
+ */
+export function sharedWorkersAllowed(mode: "observe" | "read-only" | "safe-write" | "destructive", browserHostsSet = false): boolean {
+  return mode === "destructive" && !browserHostsSet;
 }
 
 /**
