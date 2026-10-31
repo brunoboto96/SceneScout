@@ -29,6 +29,7 @@ import { logAddress } from "./authloss.js";
 import { isNonPageResource } from "./crawl.js";
 import type { DesignDefect } from "./design.js";
 import { flowStepEvidence, type FlowRun, type SkippedFlowFile } from "./flow.js";
+import { escapeMarkdownText } from "./inert-text.js";
 import { fromJs } from "./js-regex.js";
 import { formatLoadRetries, NETWORK_RETRY_ENV, parseLimitFlag, type LoadRetry } from "./limits.js";
 import { browserNetworkCause, CAUSE_WORDS, type NetworkCause } from "./network-failure.js";
@@ -1303,12 +1304,12 @@ export function toSarif(result: CheckResult, toolVersion: string, files: SarifFi
 const LINE_BREAK_RE = fromJs(String.raw`\s*[\r\n]\s*`);
 
 /**
- * Markdown cells: a pipe or a newline in evidence would break the table it
- * sits in. Backslashes are escaped first, or evidence ending in `\` would
- * turn the pipe's escape into a literal backslash and the pipe back into a column.
+ * App text in the report's Markdown, in a table cell or a list item: one line,
+ * and escaped by escapeMarkdownText, so a pipe cannot end its cell and no link,
+ * image or markup in evidence renders where the report is posted.
  */
 function cell(text: string): string {
-  return LINE_BREAK_RE.replace(text.replaceAll("\\", "\\\\").replaceAll("|", "\\|"), " ");
+  return escapeMarkdownText(LINE_BREAK_RE.replace(text, " "));
 }
 /** The same escaping, for other markdown tables: the CI run's summary. */
 export const markdownCell = cell;
@@ -1405,7 +1406,7 @@ function formatBaselines(run: BaselineRun): string[] {
 
 /** One markdown list item for an issue: its title, rule, evidence and routes. */
 export function issueLine(i: CheckIssue): string {
-  return `**${CHECK_RULES[i.rule].title}** \`${i.rule}\`: ${cell(i.evidence)}${i.embed ? ` _(in an embed of ${i.embed}: its behaviour, not the app's)_` : ""} — ${routeList(i.routes)}`;
+  return `**${CHECK_RULES[i.rule].title}** \`${i.rule}\`: ${cell(i.evidence)}${i.embed ? ` _(in an embed of ${cell(i.embed)}: its behaviour, not the app's)_` : ""} — ${routeList(i.routes)}`;
 }
 
 /** The issues, one section per severity, worst first. Shared by the check's report and the first run's. */
@@ -1603,7 +1604,7 @@ export function formatCheck(result: CheckResult): string {
     const gating = new Set(retestGateFailures(result));
     for (const r of results) {
       lines.push(
-        `- [${r.severity}] ${cell(r.title)} (${r.id}) on ${code(r.path)}: ${says[r.verdict]}${r.note ? ` (${r.note})` : ""}${gating.has(r) ? " — **fails the gate**" : ""} — ${r.signatures.map(code).join(", ")}`,
+        `- [${r.severity}] ${cell(r.title)} (${r.id}) on ${code(r.path)}: ${says[r.verdict]}${r.note ? ` (${cell(r.note)})` : ""}${gating.has(r) ? " — **fails the gate**" : ""} — ${r.signatures.map(code).join(", ")}`,
       );
     }
     if (result.retest.extraPages) {

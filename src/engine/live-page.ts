@@ -519,20 +519,32 @@ export const LIVE_PAGE = `<!doctype html>
   // The report is Markdown whose text comes from the app under test (finding
   // titles, element names, URLs). It is turned into elements here, node by
   // node with textContent, so none of it is ever parsed as markup.
-  function inline(node, text) {
+  // A line's text: code spans as they came (in a table, \\| there is a pipe),
+  // **bold** as strong, and the rest decoded once from report.md's escaping,
+  // as report.html does (inert-text.ts decodeMarkdownText).
+  function inline(node, text, table) {
     var re = new RegExp(CODE_SPAN + '|' + /\\*\\*([^*]+)\\*\\*/.source, 'g');
     var last = 0;
     var m;
     while ((m = re.exec(text))) {
-      if (m.index > last) node.appendChild(document.createTextNode(text.slice(last, m.index)));
+      if (m.index > last) node.appendChild(document.createTextNode(decodeMd(text.slice(last, m.index))));
       var tok = m[0];
-      node.appendChild(m[1] ? el('code', '', codeText(m[2])) : el('strong', '', m[3]));
+      var code = m[1] ? codeText(m[2]) : '';
+      node.appendChild(m[1] ? el('code', '', table ? code.replace(/\\\\\\|/g, '|') : code) : el('strong', '', decodeMd(m[3])));
       last = m.index + tok.length;
     }
-    if (last < text.length) node.appendChild(document.createTextNode(text.slice(last)));
+    if (last < text.length) node.appendChild(document.createTextNode(decodeMd(text.slice(last))));
   }
-  // A code span's fence is as long as report.md made it (longer when the text holds a backtick).
-  var CODE_SPAN = /(\`+)(?!\`)([\\s\\S]*?[^\`])\\1(?!\`)/.source;
+  function decodeMd(text) {
+    return text
+      .replace(/\\u200b\\$/g, '$')
+      .replace(/\\\\([\\\\\`*_{}[\\]()#+!|~=.:-])/g, '$1')
+      .replace(/&(lt|gt|quot|#39|amp);/g, function (_, e) {
+        return { lt: '<', gt: '>', quot: '"', '#39': "'", amp: '&' }[e];
+      });
+  }
+  // A code span's fence is as long as report.md made it (longer when the text holds a backtick); an escaped backtick opens none.
+  var CODE_SPAN = /(?<!(?:^|[^\\\\])(?:\\\\\\\\)*\\\\)(\`+)(?!\`)([\\s\\S]*?[^\`])\\1(?!\`)/.source;
   function codeText(c) {
     return /^ [\\s\\S]* $/.test(c) && c.trim() !== '' ? c.slice(1, -1) : c;
   }
@@ -598,29 +610,16 @@ export const LIVE_PAGE = `<!doctype html>
       return { lt: '<', gt: '>', quot: '"', '#39': "'", amp: '&' }[e];
     });
   }
-  // A line inside a fold, decoded once outside its code spans: report.md
-  // writes a code span as it came, since GitHub shows one verbatim.
-  function decodeFoldLine(text) {
-    var re = new RegExp(CODE_SPAN, 'g');
-    var out = '';
-    var last = 0;
-    var m;
-    while ((m = re.exec(text))) {
-      out += decodeEntities(text.slice(last, m.index)) + m[0];
-      last = m.index + m[0].length;
-    }
-    return out + decodeEntities(text.slice(last));
-  }
-  // A table row's cells: \\| is a pipe in the text and \\\\ a backslash, as the
-  // report escapes them, so a title holding a pipe stays in its own cell.
+  // A table row's cells, split at each pipe no backslash escapes; a cell keeps
+  // its escapes for inline to decode, so a title holding a pipe stays in its own cell.
   function tableCells(row) {
     var inner = row.trim().replace(/^\\|/, '').replace(/\\|$/, '');
     var cells = [];
     var cell = '';
     for (var k = 0; k < inner.length; k++) {
       var c = inner[k];
-      if (c === '\\\\' && (inner[k + 1] === '|' || inner[k + 1] === '\\\\')) {
-        cell += inner[k + 1];
+      if (c === '\\\\' && inner[k + 1] === '|') {
+        cell += c + inner[k + 1];
         k += 1;
       } else if (c === '|') {
         cells.push(cell.trim());
@@ -642,7 +641,7 @@ export const LIVE_PAGE = `<!doctype html>
       if (!para.length) return;
       var p = el('p');
       var paraText = para.join(' ');
-      inline(p, folds.length ? decodeFoldLine(paraText) : paraText);
+      inline(p, paraText);
       container.appendChild(p);
       para = [];
     }
@@ -652,7 +651,7 @@ export const LIVE_PAGE = `<!doctype html>
       var m;
       while (i < lines.length && (m = re.exec(lines[i]))) {
         var li = el('li');
-        inline(li, folds.length ? decodeFoldLine(m[1]) : m[1]);
+        inline(li, m[1]);
         box.appendChild(li);
         // A finding names its id on its first bullet; the frames recorded
         // around it hang under that list, so the proof sits with the claim.
@@ -681,9 +680,9 @@ export const LIVE_PAGE = `<!doctype html>
       } else if ((m = /^(#{1,6}) (.*)$/.exec(line))) {
         flush();
         var h = el('h' + Math.min(6, m[1].length + 1));
-        // Inside a fold report.md writes a finding's title with &lt; &gt; &amp;, so a
-        // </details> in it cannot close the fold; the panel sets text, so it decodes them.
-        inline(h, folds.length ? decodeFoldLine(m[2]) : m[2]);
+        // report.md writes a finding's title escaped, so a </details> in it cannot
+        // close a fold; the panel sets text, so inline decodes it.
+        inline(h, m[2]);
         container.appendChild(h);
         i += 1;
       } else if ((m = /^!\\[([^\\]]*)\\]\\((recordings\\/[A-Za-z0-9._\\/-]+)\\)$/.exec(line)) && m[2].indexOf('..') < 0) {
@@ -694,7 +693,7 @@ export const LIVE_PAGE = `<!doctype html>
         var pic = el('img');
         pic.loading = 'lazy';
         pic.src = reportFramePrefix + m[2];
-        pic.alt = m[1];
+        pic.alt = decodeMd(m[1]);
         fig.appendChild(pic);
         container.appendChild(fig);
         i += 1;
@@ -727,7 +726,7 @@ export const LIVE_PAGE = `<!doctype html>
           var tr = el('tr');
           tableCells(row).forEach(function (cell) {
             var td = el(rowIndex === 0 ? 'th' : 'td');
-            inline(td, cell);
+            inline(td, cell, true);
             tr.appendChild(td);
           });
           table.appendChild(tr);

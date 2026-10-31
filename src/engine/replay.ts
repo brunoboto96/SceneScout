@@ -24,6 +24,7 @@ import path from "node:path";
 import type { ActivityLine } from "./live.js";
 import { cspMeta, savedPageCsp } from "./csp.js";
 import { EVIDENCE_HEADING, IMPACT, isSafeRelativePath, SUMMARY_HEADING, TECHNICAL_HEADING, type CardImpact } from "./plain.js";
+import { decodeMarkdownText } from "./inert-text.js";
 import { scriptLiteral } from "./script-literal.js";
 
 /** One session's trail, as the document shows it. */
@@ -337,9 +338,10 @@ function impactChip(word: string): string {
 }
 
 /**
- * A Markdown table row's cells. `\|` is a pipe in the text and `\\` a
- * backslash (escapeTableCell writes both), so a title holding a pipe stays in
- * its own cell rather than forging another column.
+ * A Markdown table row's cells, split at each pipe not right after a backslash (as GitHub reads one). A
+ * cell keeps its escapes (escapeTableCell writes them), which inlineHtml
+ * decodes once, so a title holding a pipe stays in its own cell rather than
+ * forging another column.
  */
 export function tableCells(row: string): string[] {
   const inner = row.trim().replace(/^\|/, "").replace(/\|$/, "");
@@ -347,8 +349,8 @@ export function tableCells(row: string): string[] {
   let cell = "";
   for (let k = 0; k < inner.length; k++) {
     const c = inner[k];
-    if (c === "\\" && (inner[k + 1] === "|" || inner[k + 1] === "\\")) {
-      cell += inner[k + 1];
+    if (c === "\\" && inner[k + 1] === "|") {
+      cell += c + inner[k + 1];
       k += 1;
     } else if (c === "|") {
       cells.push(cell.trim());
@@ -364,8 +366,8 @@ function decodeEntities(text: string): string {
   return text.replace(/&(lt|gt|quot|#39|amp);/g, (_, e: string) => ({ lt: "<", gt: ">", quot: '"', "#39": "'", amp: "&" })[e] as string);
 }
 
-/** A Markdown code span: a run of backticks, the text, and a run of the same length (report.md lengthens it when the text holds a backtick). */
-const CODE_SPAN = /(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g;
+/** A Markdown code span: a run of backticks, the text, and a run of the same length (report.md lengthens it when the text holds a backtick). An escaped backtick opens none. */
+const CODE_SPAN = /(?<!(?:^|[^\\])(?:\\\\)*\\)(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g;
 
 /** A code span's text: one space each side is padding when both are there. */
 function codeText(text: string): string {
@@ -373,18 +375,31 @@ function codeText(text: string): string {
 }
 
 /**
- * A line inside a fold back to its characters, once. report.md escapes app
- * text there, except inside a code span, which GitHub shows verbatim and so
- * is written as it came: a code span is left as it is.
+ * A line's text as HTML: its code spans as code, shown as they came (in a
+ * table, `\|` there is a pipe), its `**bold**` as strong, and the rest
+ * decoded once from report.md's escaping (escapeMarkdownText) before it is
+ * escaped for HTML.
  */
-function decodeFoldLine(text: string): string {
+function inlineHtml(text: string, opts: { table?: boolean } = {}): string {
+  const plain = (t: string): string => escapeHtml(decodeMarkdownText(t));
+  const prose = (t: string): string => {
+    let out = "";
+    let last = 0;
+    for (const m of t.matchAll(/\*\*([^*]+)\*\*/g)) {
+      const word = plain(m[1]);
+      out += plain(t.slice(last, m.index)) + (impactClass(word) ? impactChip(word) : `<strong>${word}</strong>`);
+      last = m.index + m[0].length;
+    }
+    return out + plain(t.slice(last));
+  };
   let out = "";
   let last = 0;
   for (const m of text.matchAll(CODE_SPAN)) {
-    out += decodeEntities(text.slice(last, m.index)) + m[0];
+    const code = codeText(m[2]);
+    out += prose(text.slice(last, m.index)) + `<code>${escapeHtml(opts.table ? code.replace(/\\\|/g, "|") : code)}</code>`;
     last = m.index + m[0].length;
   }
-  return out + decodeEntities(text.slice(last));
+  return out + prose(text.slice(last));
 }
 
 /**
@@ -411,15 +426,11 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
   let item: "" | "head" | "media" = "";
   let itemId = "";
   const shown = new Set<string>();
-  const inline = (text: string): string =>
-    escapeHtml(text)
-      .replace(CODE_SPAN, (_, _fence: string, code: string) => `<code>${codeText(code)}</code>`)
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/<strong>([^<]+)<\/strong>/g, (whole, w: string) => (impactClass(w) ? impactChip(w) : whole));
+  const inline = (text: string): string => inlineHtml(text);
   const flush = (): void => {
     if (!para.length) return;
     const text = para.join(" ");
-    out.push(`<p>${inline(open.length > 0 ? decodeFoldLine(text) : text)}</p>`);
+    out.push(`<p>${inline(text)}</p>`);
     para = [];
   };
   const closeItem = (): void => {
@@ -456,7 +467,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
         const id = anchor ?? "";
         out.push(
           `<details class="part"${id ? ` id="${id}"` : ""} data-testid="report-${id || "part"}-section"><summary data-testid="${FOLDED_TESTID[id] ?? "report-part-toggle"}">` +
-            `<h2>${inline(m[2])}</h2><span class="hint">${inline(decodeEntities(hint))}</span></summary>`,
+            `<h2>${inline(m[2])}</h2><span class="hint">${escapeHtml(decodeEntities(hint))}</span></summary>`,
         );
         open.push("part");
         i = next + 1;
@@ -467,7 +478,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
         out.push(`<article class="ev" data-testid="report-evidence-item"><div class="ev-head">`);
         item = "head";
       }
-      out.push(`<h${h}${anchor && !open.includes("part") ? ` id="${anchor}"` : ""}>${inline(open.includes("part") ? decodeFoldLine(m[2]) : m[2])}</h${h}>`);
+      out.push(`<h${h}${anchor && !open.includes("part") ? ` id="${anchor}"` : ""}>${inline(m[2])}</h${h}>`);
       i += 1;
     } else if ((m = /^!\[([^\]]*)\]\(([^)\s]+)\)$/.exec(line))) {
       // A finding's picture. The path is the report's own, relative to the run's
@@ -480,7 +491,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
       if (isSafeRelativePath(m[2])) {
         const src = (m[2].startsWith("recordings/") ? framePrefix : "") + m[2];
         out.push(
-          `<figure class="picture"><a href="${escapeHtml(src)}" target="_blank" rel="noreferrer" data-testid="report-picture-open"><img loading="lazy" ${GONE} src="${escapeHtml(src)}" alt="${escapeHtml(m[1])}"></a>` +
+          `<figure class="picture"><a href="${escapeHtml(src)}" target="_blank" rel="noreferrer" data-testid="report-picture-open"><img loading="lazy" ${GONE} src="${escapeHtml(src)}" alt="${escapeHtml(decodeMarkdownText(m[1]))}"></a>` +
             `<p class="gone-note">This picture is not beside this file. It lives in the run's folder, which travels with it.</p>` +
             (savedAt ? `<span class="onDisk">${escapeHtml(savedAt + "/" + m[2])}</span>` : "") +
             `</figure>`,
@@ -497,7 +508,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
       const text = decodeEntities(m[1]);
       const problem = section === SUMMARY_HEADING && /^\d+\. /.test(text);
       const testid = problem ? "report-problem-toggle" : "report-details-toggle";
-      out.push(`<details${problem ? ` class="problem"` : ""}><summary data-testid="${testid}">${inline(text)}</summary><div class="fold">`);
+      out.push(`<details${problem ? ` class="problem"` : ""}><summary data-testid="${testid}">${escapeHtml(text)}</summary><div class="fold">`);
       open.push("plain");
       i += 1;
     } else if (/^<\/details>$/.test(line)) {
@@ -522,12 +533,15 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
         const cells = tableCells(row);
         if (head.length === 0) {
           head = cells;
-          rows.push(`<thead><tr>${cells.map((c) => `<th scope="col">${inline(c)}</th>`).join("")}</tr></thead><tbody>`);
+          rows.push(`<thead><tr>${cells.map((c) => `<th scope="col">${inlineHtml(c, { table: true })}</th>`).join("")}</tr></thead><tbody>`);
           continue;
         }
         rows.push(
           `<tr>${cells
-            .map((c, k) => `<td data-label="${escapeHtml(head[k] ?? "")}">${impactClass(c) && head[k] === "Impact" ? impactChip(c) : inline(c)}</td>`)
+            .map(
+              (c, k) =>
+                `<td data-label="${escapeHtml(head[k] ?? "")}">${impactClass(c) && head[k] === "Impact" ? impactChip(c) : inlineHtml(c, { table: true })}</td>`,
+            )
             .join("")}</tr>`,
         );
       }
@@ -545,7 +559,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
       while (i < lines.length && (m = /^\s*[-*] (.*)$/.exec(lines[i]))) {
         const id = /\*\*Id:\*\* `([0-9a-f]+)`/.exec(m[1])?.[1];
         if (id && !shown.has(id)) found = evidence.find((e) => e.id === id);
-        items.push(`<li>${inline(open.length > 0 ? decodeFoldLine(m[1]) : m[1])}</li>`);
+        items.push(`<li>${inline(m[1])}</li>`);
         i += 1;
       }
       out.push(`<ul>${items.join("")}</ul>`);
@@ -557,7 +571,7 @@ export function renderMarkdown(md: string, evidence: readonly FindingEvidence[] 
       flush();
       const items: string[] = [];
       while (i < lines.length && (m = /^\d+\. (.*)$/.exec(lines[i]))) {
-        items.push(`<li>${inline(open.length > 0 ? decodeFoldLine(m[1]) : m[1])}</li>`);
+        items.push(`<li>${inline(m[1])}</li>`);
         i += 1;
       }
       out.push(`<ol>${items.join("")}</ol>`);

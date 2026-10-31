@@ -9,6 +9,7 @@
  *
  *   npm run guided-test
  */
+import { decodeMarkdownText } from "../src/engine/inert-text.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -905,7 +906,8 @@ test("card: the report's plain entry says exactly what the card says", () => {
     pictureShot: { width: 400, height: 120, frame: "viewport", at: "" },
   });
   const card = plainCard(f);
-  const entry = plainFinding(f, 1, { audience: "both" }).join("\n");
+  // The entry is Markdown with the app's text escaped; read back, it says what the plain-text card says.
+  const entry = decodeMarkdownText(plainFinding(f, 1, { audience: "both" }).join("\n"));
   for (const part of [
     card.title,
     card.impact,

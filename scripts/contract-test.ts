@@ -48,6 +48,8 @@ import {
   withAudience,
 } from "../src/engine/report.ts";
 import {
+  codeSpan,
+  escapeFoldText,
   formatPlainSection,
   IMPACT,
   isSafeRelativePath,
@@ -60,6 +62,7 @@ import {
   plainSteps,
   plainWording,
   type PlainInput,
+  tableCodeSpan,
 } from "../src/engine/plain.ts";
 import type { Finding } from "../src/engine/memory.ts";
 import { FINDING_CATEGORIES } from "../src/engine/memory.ts";
@@ -80,6 +83,7 @@ import {
   taskBlocks,
 } from "../src/engine/replay.ts";
 import { cspHash, cspMeta, savedPageCsp } from "../src/engine/csp.ts";
+import { decodeMarkdownText, escapeMarkdownText } from "../src/engine/inert-text.ts";
 import { assertSavedPagePolicy, pagePolicy } from "./saved-page-csp.ts";
 import type { ActivityLine } from "../src/engine/live.ts";
 
@@ -1525,9 +1529,16 @@ test("the Evidence section: there with a picture or a recorded frame, absent wit
 
 test("a Markdown table row splits on its live pipes only", () => {
   assert.deepEqual(tableCells("| a | b |"), ["a", "b"]);
-  assert.deepEqual(tableCells(`| ${escapeTableCell("x | y")} | z |`), ["x | y", "z"]);
-  assert.deepEqual(tableCells(`| ${escapeTableCell("ends in \\")} | z |`), ["ends in \\", "z"], "an escaped backslash before a live pipe is a backslash");
-  assert.deepEqual(tableCells(`| ${escapeTableCell("\\|")} |`), ["\\|"]);
+  // A cell keeps its escapes for the page to decode once: decoded, it is the text as it came.
+  const cells = (text: string, more = ""): string[] => tableCells(`| ${escapeTableCell(text)} |${more}`).map(decodeMarkdownText);
+  assert.deepEqual(cells("x | y", " z |"), ["x | y", "z"]);
+  assert.deepEqual(cells("ends in \\", " z |"), ["ends in \\", "z"], "an escaped backslash before a live pipe is a backslash");
+  assert.deepEqual(cells("\\|"), ["\\|"]);
+  assert.deepEqual(cells("![p](https://t.example/p.png) [a](b)"), ["![p](https://t.example/p.png) [a](b)"]);
+  // A code span holding a backslash then a pipe stays one cell, as GitHub reads a pipe right after a backslash.
+  const row = `| ${tableCodeSpan("a\\|b")} | z |`;
+  assert.equal(tableCells(row).length, 2, row);
+  assert.ok(renderMarkdown(`| A | B |\n|---|---|\n${row}`).includes("<code>a\\|b</code>"), "shown as GitHub shows it");
 });
 
 test("report.html: a heading named like an object's own key gets no anchor, and a close with nothing open writes nothing", () => {
@@ -1553,7 +1564,7 @@ test("a problem's title in its fold is escaped once for Markdown and once for th
     md.includes('<details><summary>1. A &lt;b&gt;bold&lt;/b&gt; &lt;/summary&gt; &amp; "quoted" | piped</summary>'),
     "the raw <summary> cannot be closed early",
   );
-  assert.ok(md.includes('| A <b>bold</b> </summary> & "quoted" \\| piped |'), "the table cell's pipe is escaped");
+  assert.ok(md.includes('| A &lt;b&gt;bold&lt;/b&gt; &lt;/summary&gt; &amp; "quoted" \\| piped |'), "the table cell's pipe is escaped");
   const table = renderMarkdown(md.slice(md.indexOf("| #")));
   assert.equal((table.match(/<tr><td /g) ?? []).length, 1);
   assert.equal(table.split("</tr>")[1].match(/<td /g)?.length, 6, "the escaped pipe stays inside the Problem cell: six cells, no forged column");
@@ -1687,9 +1698,12 @@ test("a finding's title with a closing fold tag is text in the folded technical 
   const html = buildReplayHtml({ project: "p", at: "2026-01-01T00:00:00.000Z", version: "", sessions: [], markdown: both, evidence: [] });
   assert.ok(html.includes("<h4>🔴 [HIGH] Save &lt;/details&gt; closes early</h4>"), "report.html shows the title once-escaped");
   assert.ok(!html.includes("&amp;lt;"), "and never double-escaped");
-  // Unfolded (dev), nothing is escaped: the document has no fold to close.
+  // Unfolded (dev), the titles are escaped the same way: the document may be pasted where link or image syntax would render.
   const dev = generateReport(store, [], { ...extras, report: "dev" }, { write: false }).markdown;
-  assert.ok(dev.includes(trap) && dev.includes(`### ${look}`));
+  assert.ok(
+    !dev.replace(/```[\s\S]*?```/g, "").includes(trap) && dev.includes("### Spacing &lt;/details&gt; off the grid"),
+    "outside its test skeleton's code",
+  );
 });
 
 /** Folds a document opens and closes, counting a raw fold tag anywhere in a line. */
@@ -1732,31 +1746,125 @@ test("app text inside the folds (details, merged titles, repro steps, plan steps
   assert.equal(clean.opens, clean.closes, "every fold opens and closes once");
   assert.ok(!/[^\n]<\/details>/.test(prose) && !/<\/details>[^\n]/.test(prose), "a closing fold tag only ever stands on a line of its own");
   assert.ok(
-    both.includes("first a &lt;/details&gt; b &lt;summary&gt;c&lt;/summary&gt; &amp;lt;i&amp;gt; tick\nsecond &lt;/details&gt; line"),
+    both.includes("first a &lt;/details&gt; b &lt;summary&gt;c&lt;/summary&gt; &amp;lt;i&amp;gt; \\`tick\\`\nsecond &lt;/details&gt; line"),
     "a detail line is escaped wherever the tag sits",
   );
   assert.ok(both.includes("Merged &lt;/details&gt; title"), "a merged title is escaped");
   assert.ok(both.includes('1. click button "Go &lt;/details&gt;"'), "a repro step is escaped");
   assert.ok(both.includes("### T-1 &lt;/details&gt;: Ticket &lt;/details&gt; title"), "a ticket heading is escaped");
   assert.ok(both.includes("Read from pasted &lt;/details&gt; text.") && both.includes("Found &lt;/details&gt; only"));
-  // The contrast: plain text is written as it came, backticks aside, and its merge line is the same shape.
-  assert.ok(both.includes("A plain detail with code &amp; more"));
+  // The contrast: plain text is written as it came, its backticks escaped, and its merge line is the same shape.
+  assert.ok(both.includes("A plain detail with \\`code\\` &amp; more"));
   assert.ok(both.includes("Merged plain title"));
 
   // report.html: shown once-decoded as text, never as markup, never double-escaped.
   const html = buildReplayHtml({ project: "p", at: "2026-01-01T00:00:00.000Z", version: "", sessions: [], markdown: both, evidence: [] });
   assert.ok(
-    html.includes("first a &lt;/details&gt; b &lt;summary&gt;c&lt;/summary&gt; &amp;lt;i&amp;gt; tick second &lt;/details&gt; line"),
+    html.includes("first a &lt;/details&gt; b &lt;summary&gt;c&lt;/summary&gt; &amp;lt;i&amp;gt; `tick` second &lt;/details&gt; line"),
     "the detail reads as written, once",
   );
   assert.ok(html.includes("Merged &lt;/details&gt; title") && html.includes("Go &lt;/details&gt;"));
   assert.ok(!html.includes("&amp;lt;/details"), "never escaped twice");
-  assert.ok(html.includes("A plain detail with code &amp; more"));
+  assert.ok(html.includes("A plain detail with `code` &amp; more"));
   assert.equal((html.match(/<details/g) ?? []).length, (html.match(/<\/details>/g) ?? []).length, "the page's folds balance");
 
-  // Unfolded (dev): no fold surrounds the entry, so the text is as the app wrote it.
+  // Unfolded (dev): escaped the same way, since no code span or markup from the app may render there either.
   const dev = generateReport(store, [], { ...extras, report: "dev" }, { write: false }).markdown;
-  assert.ok(dev.includes("A plain detail with `code` & more"));
+  assert.ok(dev.includes("A plain detail with \\`code\\` &amp; more"));
+});
+
+test("link and image syntax from the app renders as text in report.md, in the plain part and the technical one, and report.html reads it back once", () => {
+  const image = "![p](https://t.example/p.png)";
+  const link = "[go](https://t.example/login)";
+  const store = freshStore();
+  store.addFinding({
+    severity: "high",
+    category: "http-error",
+    title: `Title ${image}\n# Injected`,
+    detail: `Detail ${link}`,
+    url: "http://app.test/a?q=[x](https://t.example/)",
+    state: "/a#1",
+    evidence: `GET ${image}`,
+  });
+  store.findings[0].repro = [`click button "${image}" @ http://app.test/a`];
+  const extras = { routesVisited: 1, routesTotal: 1, designAudits: 0 };
+  for (const report of ["both", "dev"] as const) {
+    const md = generateReport(store, [], { ...extras, report }, { write: false }).markdown;
+    // A fold's <summary> line is an HTML block, where Markdown does not render; its entities are held elsewhere.
+    const prose = md
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/(`+)[^`]*?\1/g, "")
+      .replace(/^<details><summary>.*$/gm, "");
+    assert.ok(!/(^|[^\\])!?\[[^\]]*\]\(/.test(prose), `${report}: no live link or image outside code:\n${prose}`);
+    assert.ok(!prose.split("\n").some((l) => /^#+ Injected/.test(l)), `${report}: a newline in a title starts no heading`);
+    const html = buildReplayHtml({ project: "p", at: "2026-01-01T00:00:00.000Z", version: "", sessions: [], markdown: md, evidence: [] });
+    assert.ok(html.includes("Title ![p](https://t.example/p.png) # Injected"), `${report}: the page shows the title as the app wrote it`);
+    assert.ok(html.includes("Detail [go](https://t.example/login)") && !html.includes("\\["), `${report}: decoded once, no backslash left`);
+    assert.ok(
+      !/<img[^>]+t\.example/.test(html) && !/href="https:\/\/t\.example/.test(html),
+      `${report}: nothing from the app is an image or a link on the page`,
+    );
+  }
+});
+
+test("a web address in escaped app text is written so GitHub shows it as text, not an autolink whose href and text keep the backslashes", () => {
+  const text = "GET https://api.test/v1/user_profile#x (see www.api.test/a_b) failed";
+  // GitHub autolinks a bare address and keeps every backslash inside it, so no escaped address may start one.
+  const autolink = /(^|[\s*_~(])(https?:\/\/|www\.)/i;
+  for (const escaped of [escapeMarkdownText(text), escapeTableCell(text), escapeFoldText(text), escapeFoldText(`${text}\n${text}`, true)]) {
+    assert.ok(!autolink.test(escaped), escaped);
+    for (const line of escaped.split("\n")) assert.equal(decodeMarkdownText(line), text);
+  }
+  assert.equal(decodeMarkdownText(escapeMarkdownText("a\\://b www\\.c")), "a\\://b www\\.c", "a backslash the app wrote there round-trips");
+  const html = renderMarkdown(`Detail ${escapeMarkdownText(text)}`);
+  assert.ok(html.includes("GET https://api.test/v1/user_profile#x (see www.api.test/a_b) failed"), html);
+});
+
+test("a repro step's line break cannot close the test skeleton's code fence and render what follows", () => {
+  const store = freshStore();
+  store.addFinding({ severity: "high", category: "http-error", title: "T", detail: "d", url: "http://app.test/a", state: "/a#1" });
+  store.findings[0].repro = ['type "a\n```\n![p](https://t.example/p.png)\n```" into textbox "Notes"', "click\r```\r![q](https://t.example/q.png)"];
+  for (const report of ["both", "dev"] as const) {
+    const md = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 0, report }, { write: false }).markdown;
+    const fence = md.indexOf("```ts");
+    const skeleton = md.slice(fence, md.indexOf("\n```\n", fence + 5));
+    assert.ok(
+      skeleton.includes("![p](https://t.example/p.png)") && skeleton.includes("![q](https://t.example/q.png)"),
+      `${report}: both steps stay in the fence:\n${skeleton}`,
+    );
+    assert.ok(
+      !skeleton
+        .split(/\r\n|\r|\n/)
+        .slice(1)
+        .some((l) => /^ {0,3}(`{3,}|~{3,})/.test(l)),
+      `${report}: no line inside it opens or closes a fence`,
+    );
+  }
+});
+
+test("a code span holds a lone carriage return too: two of them cannot end its paragraph and leave what follows to render", () => {
+  const span = codeSpan("a\r\r![p](https://t.example/p.png)");
+  assert.ok(!/[\r\n]/.test(span), JSON.stringify(span));
+});
+
+test("a finding's detail keeps its line breaks but starts no heading, list or code block from them", () => {
+  const store = freshStore();
+  store.addFinding({
+    severity: "high",
+    category: "http-error",
+    title: "T",
+    detail: "Error\n---\nSaved\n===\n- item\n1. step\n    indented",
+    url: "http://app.test/a",
+    state: "/a#1",
+  });
+  for (const report of ["both", "dev"] as const) {
+    const md = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 0, report }, { write: false }).markdown;
+    const at = md.indexOf("Error\n");
+    const detail = md.slice(at, md.indexOf("\n\n", at)).split("\n");
+    assert.deepEqual(detail, ["Error", "\\---", "Saved", "\\===", "\\- item", "1\\. step", "indented"], report);
+    const html = buildReplayHtml({ project: "p", at: "2026-01-01T00:00:00.000Z", version: "", sessions: [], markdown: md, evidence: [] });
+    assert.ok(html.includes("Error --- Saved === - item 1. step indented"), `${report}: the page reads the lines back as written`);
+  }
 });
 
 test("a Summary problem's fold escapes the page, the steps and what happened, and a plain one is written as it came", () => {
@@ -1785,7 +1893,7 @@ test("a Summary problem's fold escapes the page, the steps and what happened, an
       md.includes("on http://app.test/a?q=%3C/details%3E"),
   );
   // An address keeps its &, which GitHub would show as "&amp;" in a link it made from an escaped one.
-  assert.ok(md.includes("on http://app.test/b?x=1&y=2") && !md.includes("y=2&amp;") && !md.includes("x=1&amp;y"));
+  assert.ok(md.includes("on http://app.test/b?x=1&y=2") && !md.includes("on http://app.test/b?x=1&amp;"));
   assert.ok(md.includes('Click the "Go" button') && md.includes("It says nothing odd"), "the plain problem is unchanged");
   const html = renderMarkdown(`## Summary\n\n${md.slice(md.indexOf("<details>"))}`);
   assert.ok(html.includes("Click the &quot;Go &lt;/details&gt;&quot; button") && html.includes("It says &lt;/details&gt; &amp; more"));
@@ -2457,5 +2565,6 @@ test("a route holding a pipe stays in its own cell of the score table", () => {
   store.setPageScore(route, { overall: 97, a11y: 100, craft: 100, consistency: 94, clarity: 100, deductions: [], at, url: `http://app.test${route}` });
   const md = generateReport(store, [], { routesVisited: 1, routesTotal: 1, designAudits: 1 }, { write: false }).markdown;
   const row = md.split("\n").find((l) => l.includes("/files/a")) ?? "";
-  assert.deepEqual(tableCells(row).slice(0, 2), ["`/files/a|b`", "**97**"], row);
+  assert.deepEqual(tableCells(row).slice(0, 2), ["`/files/a\\|b`", "**97**"], row);
+  assert.ok(renderMarkdown(`| Route | Overall |\n|---|---|\n${row}`).includes("<code>/files/a|b</code>"), "the page shows the pipe inside the code span");
 });

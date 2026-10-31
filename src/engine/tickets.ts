@@ -20,7 +20,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Finding } from "./memory.js";
-import { escapeFoldText } from "./plain.js";
+import { escapeFoldText, escapeTableCell } from "./plain.js";
 import { fromJs } from "./js-regex.js";
 import { type LinearMatch, LinearRegex } from "./linear-regex.js";
 
@@ -835,7 +835,7 @@ export interface TicketReportInput {
 }
 
 /** A table cell: the HTML renderer splits rows on every "|", so none may be inside one. */
-const cell = (text: string): string => LINE_BREAK.replace(text.replaceAll("|", "/"), " ");
+const cell = escapeTableCell;
 
 function findingWords(id: string, input: TicketReportInput): string {
   const f = input.findings.find((x) => x.id === id);
@@ -873,9 +873,9 @@ export function formatTicketsPlain(input: TicketReportInput): string[] {
   ];
   for (const t of input.tickets) {
     const answers = answerTicket(t, input.verdicts);
-    lines.push(`#### ${t.id === t.title ? t.id : `${t.id}: ${t.title}`}`, ``);
+    lines.push(`#### ${t.id === t.title ? escapeFoldText(t.id) : `${escapeFoldText(t.id)}: ${escapeFoldText(t.title)}`}`, ``);
     if (answers.length === 0) {
-      lines.push(`${t.note ?? "No acceptance criteria were recognised."} Nothing was checked against this ticket.`, ``);
+      lines.push(`${escapeFoldText(t.note ?? "No acceptance criteria were recognised.")} Nothing was checked against this ticket.`, ``);
       continue;
     }
     // With one ticket the line above already gave its totals.
@@ -889,7 +889,12 @@ export function formatTicketsPlain(input: TicketReportInput): string[] {
         const f = input.findings.find((x) => x.id === id);
         const picture = f && input.pictureOf?.(f);
         if (picture)
-          lines.push(`What the page showed when ${a.criterion.id} failed:`, ``, `![${a.criterion.id} failed: ${BRACKET.replace(f.title, "")}](${picture})`, ``);
+          lines.push(
+            `What the page showed when ${a.criterion.id} failed:`,
+            ``,
+            `![${escapeFoldText(a.criterion.id)} failed: ${escapeFoldText(BRACKET.replace(f.title, ""))}](${picture})`,
+            ``,
+          );
       }
     }
   }
@@ -901,8 +906,8 @@ export function formatTicketsPlain(input: TicketReportInput): string[] {
  * with its confidence, the finding ids, the reason as recorded and the
  * sessions that judged it. Empty when no ticket was read.
  */
-export function formatTicketsTechnical(input: TicketReportInput, folded = false): string[] {
-  const text = (t: string): string => (folded ? escapeFoldText(t) : t);
+export function formatTicketsTechnical(input: TicketReportInput): string[] {
+  const text = escapeFoldText;
   if (input.tickets.length === 0) return [];
   const lines: string[] = [
     `## Acceptance criteria`,

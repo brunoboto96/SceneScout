@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { cspMeta, savedPageCsp } from "./csp.js";
+import { inertMarkdown } from "./inert-text.js";
 import { AREA_LABEL, MODE_CARE_LABEL, notCheckedCount, pagesChecked, TEAM_REPORT_WORDS as W, teamReportFooter, THOROUGHNESS_LABEL } from "./guided-words.js";
 import type { CheckArea, Thoroughness } from "./guided.js";
 import { MEMORY_DIRNAME } from "./memory-dir.js";
@@ -214,6 +215,15 @@ function mdCell(text: string): string {
     .replace(/\|/g, "\\|");
 }
 
+/**
+ * Text from the app outside a table: one line, Markdown and HTML escaped, and
+ * a tracker's triggers broken, by the export's issue-body rule. Not shortened:
+ * the page shows the same text whole.
+ */
+function mdText(text: string): string {
+  return inertMarkdown(text, Infinity);
+}
+
 /** A UTC time as the report shows it. */
 export function stamp(iso: string): string {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(iso) ? `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC` : iso;
@@ -235,6 +245,11 @@ function whereOf(card: PlainCard): string {
   return `${W.on} ${card.page}${card.alsoOn.length > 0 ? `, ${W.alsoOn} ${card.alsoOn.join(", ")}` : ""}`;
 }
 
+/** whereOf with each page escaped for Markdown. */
+function mdWhereOf(card: PlainCard): string {
+  return whereOf({ ...card, page: mdText(card.page), alsoOn: card.alsoOn.map(mdText) });
+}
+
 /**
  * The report as Markdown, kept in the evidence folder: the same content as the
  * page, so it reads in a ticket or a chat. Its pictures are linked relative to
@@ -246,25 +261,25 @@ export function teamReportMarkdown(data: TeamReportData, present: ReadonlySet<st
   lines.push(``, `## ${W.summary}`, ``, ...data.summary, ``, `## ${W.problems}`, ``);
   if (data.cards.length === 0) lines.push(W.noProblems, ``);
   data.cards.forEach((c, i) => {
-    lines.push(`### ${i + 1}. ${c.title}`, ``, `**${c.impact}** · ${c.problem} · ${whereOf(c)}`, ``);
-    if (c.picture && present.has(c.picture.file)) lines.push(`![${c.picture.what}](${c.picture.file})`, ``);
+    lines.push(`### ${i + 1}. ${mdText(c.title)}`, ``, `**${c.impact}** · ${c.problem} · ${mdWhereOf(c)}`, ``);
+    if (c.picture && present.has(c.picture.file)) lines.push(`![${mdText(c.picture.what)}](${c.picture.file})`, ``);
     else if (c.picture) lines.push(`_${W.pictureMissing}_`, ``);
     if (c.steps.length > 0) {
       lines.push(`**${W.whatWasDone}:**`, ``);
-      c.steps.forEach((s, n) => lines.push(`${n + 1}. ${s}`));
+      c.steps.forEach((s, n) => lines.push(`${n + 1}. ${mdText(s)}`));
       lines.push(``);
     }
-    lines.push(`**${W.expected}:** ${c.expected}`, ``, `**${W.happened}:** ${c.happened}`, ``);
-    lines.push(`${W.technical}: id \`${c.id}\` · ${c.technical.category} · ${c.severity} · \`${c.technical.route}\``, ``);
+    lines.push(`**${W.expected}:** ${mdText(c.expected)}`, ``, `**${W.happened}:** ${mdText(c.happened)}`, ``);
+    lines.push(`${W.technical}: id ${mdText(c.id)} · ${mdText(c.technical.category)} · ${c.severity} · ${mdText(c.technical.route)}`, ``);
   });
   if (data.notABug.length > 0) {
     lines.push(`## ${W.notABug}`, ``, W.notABugNote, ``);
-    for (const c of data.notABug) lines.push(`- ${c.title} (${c.page})${c.feedback?.reason ? `: "${c.feedback.reason}"` : ""}`);
+    for (const c of data.notABug) lines.push(`- ${mdText(c.title)} (${mdText(c.page)})${c.feedback?.reason ? `: "${mdText(c.feedback.reason)}"` : ""}`);
     lines.push(``);
   }
   lines.push(`## ${W.notChecked}`, ``);
   if (data.notChecked.length === 0) lines.push(W.nothingLeft, ``);
-  else lines.push(W.notCheckedNote, ``, ...data.notChecked.map((g) => `- ${g}`), ``);
+  else lines.push(W.notCheckedNote, ``, ...data.notChecked.map((g) => `- ${mdText(g)}`), ``);
   lines.push(`## ${W.signoff}`, ``, W.signoffNote, ``, `| ${W.role} | ${W.name} | ${W.signature} | ${W.signedDate} |`, `|---|---|---|---|`);
   for (const r of W.signRoles) lines.push(`| ${r} | | | |`);
   lines.push(``, teamReportFooter(data.version), ``);
