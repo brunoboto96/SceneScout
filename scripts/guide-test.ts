@@ -26,7 +26,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { listedParams, shownCalls, toolParams, toolParamsMarkdown, toolParamsSection } from "./tool-params.ts";
+import { listedParams, shownCalls, toolParams, toolParamsMarkdown, toolParamsSection, unknownParams } from "./tool-params.ts";
 import { CHECK_OPTION_NAMES, CHECK_RULES, parseCheckArgs, WORTH_A_LOOK_RULES } from "../src/engine/check.ts";
 import { CI_OPTION_NAMES, CLOUD_ADDRESS_ENV, DEDUP_MODES, KEY_ENV, parseCiArgs } from "../src/engine/ci.ts";
 import { CONFIG_KEYS, PRESET_POLICY, PRESETS, UPLOAD_MODES } from "../src/engine/project-config.ts";
@@ -1232,4 +1232,64 @@ test("shown calls: nested keys are read as paths, shorthand and quoted keys coun
     ),
     [],
   );
+});
+
+test("shown calls: a map parameter's keys are the caller's own, and a misnamed map is still caught", () => {
+  const schema = {
+    type: "object",
+    properties: { url: { type: "string" }, headers: { type: "object", propertyNames: { type: "string" }, additionalProperties: { type: "string" } } },
+    required: ["url"],
+  };
+  assert.deepEqual(toolParams(schema), [
+    { name: "url", required: true },
+    { name: "headers", required: false, map: true },
+  ]);
+  const [shown] = shownCalls('scout_request {url, headers: {Accept: "text/plain"}}');
+  assert.deepEqual(unknownParams(shown.params, schema), []);
+  const [misnamed] = shownCalls('scout_request {url, header: {Accept: "text/plain"}}');
+  assert.deepEqual(unknownParams(misnamed.params, schema), ["header", "header.Accept"]);
+  const [renamedStep] = shownCalls('scout_run_plan {steps: [{action: "click", target: "testid=save"}]}');
+  assert.deepEqual(
+    unknownParams(renamedStep.params, {
+      type: "object",
+      properties: { steps: { type: "array", items: { type: "object", properties: { action: {}, selector: {} } } } },
+    }),
+    ["steps[].target"],
+  );
+});
+
+test("tool parameters: allOf merges its parts, and a nested shape the walk cannot read fails rather than listing nothing", () => {
+  assert.deepEqual(
+    toolParams({
+      type: "object",
+      properties: {
+        x: {
+          allOf: [
+            { type: "object", properties: { a: {} }, required: ["a"] },
+            { type: "object", properties: { b: {} } },
+          ],
+        },
+      },
+    }),
+    [
+      { name: "x", required: false },
+      { name: "x.a", required: true },
+      { name: "x.b", required: false },
+    ],
+  );
+  // A field the node names itself and a part requires is required.
+  assert.deepEqual(toolParams({ type: "object", properties: { a: {} }, allOf: [{ type: "object", properties: { a: {} }, required: ["a"] }] }), [
+    { name: "a", required: true },
+  ]);
+  const unreadable = [
+    { type: "object", properties: { x: { $ref: "#/$defs/thing" } } },
+    { type: "object", properties: { x: { type: "object", additionalProperties: { type: "object", properties: { a: {} } } } } },
+    { type: "object", properties: { x: { type: "array", prefixItems: [{ type: "object", properties: { a: {} } }] } } },
+    { type: "object", properties: { x: { type: "object", patternProperties: { "^a": { type: "string" } } } } },
+  ];
+  for (const schema of unreadable) assert.throws(() => toolParams(schema), /x: .*cannot be read/, JSON.stringify(schema));
+  // A map of plain values is read (as a map), not refused.
+  assert.deepEqual(toolParams({ type: "object", properties: { x: { type: "object", additionalProperties: { type: "string" } } } }), [
+    { name: "x", required: false, map: true },
+  ]);
 });

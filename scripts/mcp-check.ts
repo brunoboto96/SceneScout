@@ -18,7 +18,7 @@ import { siteFolderName } from "../dist/engine/project-folder.js";
 import { MCP_APP_MIME, STATUS_PANE_URI, STATUS_POLL_TOOL, STATUS_TOOL } from "../dist/engine/status-pane.js";
 import { CommandExit, exitWhenDrained, exitWith } from "../dist/commands.js";
 import { asLf } from "./checkout.ts";
-import { listedParams, OWN_TABLE_TOOLS, shownCalls, toolParams, toolParamsMarkdown, toolParamsSection } from "./tool-params.ts";
+import { listedParams, OWN_TABLE_TOOLS, shownCalls, toolParams, toolParamsMarkdown, toolParamsSection, unknownParams } from "./tool-params.ts";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -2225,8 +2225,7 @@ async function main(): Promise<void> {
     for (const call of shownCalls(text)) {
       const tool = against.find((t) => t.name === call.tool);
       if (!tool) continue;
-      const params = toolParams(tool.inputSchema).map((p) => p.name);
-      for (const key of call.params) if (!params.includes(key)) gaps.push(`${call.tool} has no parameter ${key}`);
+      for (const key of unknownParams(call.params, tool.inputSchema)) gaps.push(`${call.tool} has no parameter ${key}`);
     }
     return gaps;
   };
