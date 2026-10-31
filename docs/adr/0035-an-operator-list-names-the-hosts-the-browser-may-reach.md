@@ -48,8 +48,15 @@ was that the `strict` preset limits the browser to the app plus a named list.
 - Turning on `strict` refuses a page's third-party requests until the operator
   lists the hosts it needs; a page may look broken where a script did not load,
   and the notice tells the tester that is the setting, not the app.
-- In Firefox and WebKit a redirect of a script's request or a frame's load is
-  not judged; only top-level page loads are probed there.
+- Firefox and WebKit route no redirect's later hop, so there SceneScout sends
+  page and frame loads and a dedicated worker's script itself to judge their
+  redirects, and gives each document and worker a Content-Security-Policy
+  naming the list (joined to the app's own, so it only narrows). The browser
+  then refuses any other request's redirect off the list, and Firefox's
+  `<object>` load, which is not routed at all. A page sees those refusals as
+  CSP violations, and an IPv6 host on the list, which CSP cannot name, is
+  refused there. Those refusals reach the notice through the page, which could
+  therefore add made-up entries; one inside a worker is refused unreported.
 - A sign-in window (`scout_login`, `scenescout login`) is not held by the list,
   since signing in often passes through another host.
 - `scenescout policy explain` and `scenescout config explain` show the list,

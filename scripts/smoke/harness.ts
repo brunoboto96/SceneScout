@@ -1197,6 +1197,13 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
     }
     // browser-hosts.html and browser-hosts-own.html: a script, a page a redirect lands on and the redirect, each counted
     // by the host it was asked of, so a suite can prove a request to another host never arrived.
+    if (urlPath === "/browser-hosts-worker.js") {
+      // A worker's script, whose own request goes through the app's redirect to the host named by ?to=.
+      const to = loopbackOrigin(new URL(req.url ?? "/", "http://x").searchParams.get("to"));
+      res.writeHead(200, { "content-type": "text/javascript", "cache-control": "no-store" });
+      res.end(`fetch(${JSON.stringify(`/browser-hosts-redirect?to=${encodeURIComponent(to)}&worker=1`)}).catch(() => {});`);
+      return;
+    }
     if (urlPath === "/browser-hosts.js" || urlPath === "/browser-hosts-landed" || urlPath === "/browser-hosts-redirect") {
       const key = `GET ${req.headers.host ?? ""}${urlPath}`;
       stats.loads[key] = (stats.loads[key] ?? 0) + 1;

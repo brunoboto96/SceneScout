@@ -343,11 +343,12 @@ export function writeRedirectHopsJudged(engine: BrowserEngineName): boolean {
  * How the operator's browserHosts list (browser-hosts.ts) reaches a redirect's
  * later hops, which no engine routes. Chromium's browser-level interception
  * sees every hop of every request ("browser-level"). Firefox and WebKit do
- * not: there a top-level page load is sent by SceneScout itself, without
- * following a redirect, and a redirect is refused or answered with a page that
- * loads the next address as a new, routed page load ("page-loads"). A
- * redirect of a script's request or a frame's load there is not judged, a
- * known limit (ADR 35).
+ * not: there a page or frame load and a worker's script are sent by
+ * SceneScout itself, without following a redirect, and a redirect is refused
+ * or answered with a page that loads the next address as a new, routed page
+ * load ("page-loads"); each document and worker is handed a
+ * Content-Security-Policy naming the list, so the browser refuses any other
+ * request's redirect off it (ADR 35).
  */
 export function hostRedirectHops(engine: BrowserEngineName): "browser-level" | "page-loads" {
   return engine === "chromium" ? "browser-level" : "page-loads";

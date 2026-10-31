@@ -4,8 +4,10 @@
  * same script, WebSocket and redirect, reached on another host (the fixture
  * server's other port) or on the page's own.
  *
- * - With the list set to the app's host alone, the other host's script and
- *   socket are refused before they leave, and a page load that redirects there
+ * - With the list set to the app's host alone, the other host's script,
+ *   object and socket, and an image and a worker's request the app's own
+ *   address redirects there,
+ *   are refused before they leave, and a page load that redirects there
  *   (an attach's start address included) is stopped, reported, and never
  *   arrives. The own-host page loads in full, and its redirect is sent once.
  * - With no list, and with the other host listed, the same page reaches it.
@@ -33,7 +35,7 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     const done = await eventually(
       async () => {
         snap = await engine.snapshot(true);
-        return !lineOf(snap, "script-state").includes("pending") && !lineOf(snap, "socket-state").includes("pending");
+        return ["script-state", "socket-state", "hop-state"].every((id) => !lineOf(snap, id).includes("pending"));
       },
       WAIT_MS,
       100,
@@ -41,7 +43,8 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     if (!done) throw new Error(`browser-hosts fixture never settled:\n${snap}`);
     return { out, snap };
   };
-  const offPage = `/browser-hosts.html?other=${encodeURIComponent(foreignBaseUrl)}`;
+  if (new URL(foreignBaseUrl).hostname !== "127.0.0.1") throw new Error(`browser-hosts.html reaches only 127.0.0.1, not ${foreignBaseUrl}`);
+  const offPage = `/browser-hosts.html?otherPort=${new URL(foreignBaseUrl).port}`;
 
   console.log("browserHosts set to the app's host alone: another host is refused, the app's own is not");
   {
@@ -50,15 +53,28 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
       const attached = await out;
       check("the attach names the list", attached.includes("Browser hosts (the SceneScout config): the page may reach only the app's own host;"), attached);
       const scriptsBefore = loads(otherHost, "/browser-hosts.js");
+      const hopsBefore = loads(otherHost, "/browser-hosts-landed");
       const off = await settled(engine, offPage);
+      // The worker's request is not on the page: given time to arrive, if it were going to.
+      await new Promise((r) => setTimeout(r, 300));
       check("another host's script is refused", lineOf(off.snap, "script-state").includes("script: failed"), off.snap);
-      check("...and never arrives", loads(otherHost, "/browser-hosts.js") === scriptsBefore, JSON.stringify(stats.loads));
+      check("...and never arrives, nor does an object's load of it", loads(otherHost, "/browser-hosts.js") === scriptsBefore, JSON.stringify(stats.loads));
+      check(
+        "an image or a worker's request the app's own address redirects to another host never reaches it",
+        loads(otherHost, "/browser-hosts-landed") === hopsBefore,
+        JSON.stringify(stats.loads),
+      );
       check("another host's WebSocket is closed before it connects", lineOf(off.snap, "socket-state").includes("closed 1008"), off.snap);
       check("a page cannot open a peer connection, which no route handler sees", lineOf(off.snap, "peer-state").includes("unavailable"), off.snap);
       const notice = off.out + (await engine.navigate(offPage));
       check(
         "the refusals are reported as the operator's setting, by host and path",
-        notice.includes("BROWSER-HOSTS blocked") && notice.includes(`${foreignBaseUrl}/browser-hosts.js`) && notice.includes("NOT an app bug"),
+        notice.includes("BROWSER-HOSTS blocked") &&
+          notice.includes(`${foreignBaseUrl}/browser-hosts.js`) &&
+          notice.includes("NOT an app bug") &&
+          // Chromium names the hop; Firefox and WebKit, whose own policy refused it, name the app's address it started at.
+          (notice.includes(`${foreignBaseUrl}/browser-hosts-landed (a redirect)`) ||
+            notice.includes("/browser-hosts-redirect (redirected to a host off the list)")),
         notice.slice(0, 1500),
       );
 
@@ -132,7 +148,13 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     const { engine, out } = attach(list ? [...list] : undefined);
     try {
       await out;
+      const hopsBefore = loads(otherHost, "/browser-hosts-landed");
       const off = await settled(engine, offPage);
+      check(
+        `${label}: an image the app redirects to the other host reaches it`,
+        await eventually(async () => loads(otherHost, "/browser-hosts-landed") > hopsBefore, WAIT_MS, 100),
+        JSON.stringify(stats.loads),
+      );
       check(`${label}: the other host's script loads`, lineOf(off.snap, "script-state").includes("script: loaded"), off.snap);
       check(`${label}: its WebSocket is not refused`, !lineOf(off.snap, "socket-state").includes("1008"), off.snap);
       if (!list) check(`${label}: peer connections are left alone`, lineOf(off.snap, "peer-state").includes("peer connections: available"), off.snap);

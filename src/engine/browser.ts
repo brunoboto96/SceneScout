@@ -309,7 +309,17 @@ import {
 import { scanProject } from "../scan.js";
 import { refuseDestructiveGetsSetting, writeClassifierSetting, type WriteClassifier } from "./strict-writes.js";
 import { writeRulesSettings, type SessionWriteRules } from "./project-config.js";
-import { browserHostList, browserHostsNotice, HostBlockNotices, hostRedirectPlan, type BrowserHostList } from "./browser-hosts.js";
+import {
+  BROWSER_HOSTS_VIOLATION_BINDING,
+  browserHostList,
+  browserHostsNotice,
+  browserHostsPolicy,
+  browserHostsViolationScript,
+  HostBlockNotices,
+  hostRedirectPlan,
+  withBrowserHostsPolicy,
+  type BrowserHostList,
+} from "./browser-hosts.js";
 import { ownResponseDetail, type RouteHealth } from "./check.js";
 import { botChallenge, challengeBodyMatters, startPageWarning } from "./challenge.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
@@ -930,6 +940,8 @@ export class BrowserEngine {
   private browserHosts: BrowserHostList | null = null;
   private browserHostsNotice = "";
   private hostNotices = new HostBlockNotices();
+  /** The list's Content-Security-Policy, on an engine that routes no redirect hop (browser-hosts.ts browserHostsPolicy). Null: none. */
+  private browserHostsCsp: string | null = null;
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
   /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
@@ -1402,6 +1414,8 @@ export class BrowserEngine {
     authPostsNarrowOnly: () => this.authPostsNarrowOnly,
     allowedWrites: () => this.allowedWrites,
     browserHosts: () => this.browserHosts,
+    browserHostsPolicy: () => this.browserHostsCsp,
+    sentCookieLine: (req) => this.sentCookieLine(req),
   });
   /**
    * Every request answered since the last action, with its status. The HTTP
@@ -1953,6 +1967,12 @@ export class BrowserEngine {
       if (restoreSession) await this.context.addInitScript(restoreSession);
       if (!sharedWorkersAllowed(this.mode, this.browserHosts !== null)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
       if (this.browserHosts) await this.context.addInitScript(REMOVE_UNROUTED_CONNECTIONS_SCRIPT);
+      this.browserHostsCsp = this.browserHosts && hostRedirectHops(this.engineName) === "page-loads" ? browserHostsPolicy(this.browserHosts) : null;
+      if (this.browserHostsCsp) {
+        // What the list's policy refuses never reaches a route handler: the page reports it, to be named as those are.
+        await this.context.exposeBinding(BROWSER_HOSTS_VIOLATION_BINDING, (_source, report: unknown) => this.guard.notePolicyViolation(report));
+        await this.context.addInitScript(browserHostsViolationScript());
+      }
       // The postMessage-token oracle: every frame's postMessage is wrapped, and a "*" call hands its longer strings here.
       await this.context.exposeBinding(POSTMESSAGE_BINDING, (source, entries: unknown) => this.noteTokenPosts(source.frame, entries));
       await this.context.addInitScript(postMessageCaptureScript());
@@ -5157,6 +5177,7 @@ export class BrowserEngine {
     // its body is read (loadWithAppHeader).
     if (req.resourceType() === "document" && req.method() === "GET") return this.loadWithAppHeader(route, header, timeout);
     let response: APIResponse;
+    let at = req.url();
     try {
       // The cookies as the browser sends them: Playwright's send would otherwise add every cookie the jar holds, a
       // SameSite one the browser withholds from another site's request included (an empty line stops that).
@@ -5164,7 +5185,6 @@ export class BrowserEngine {
       const own = Object.keys(sent).some((name) => name.toLowerCase() === "cookie") ? sent : { ...sent, cookie: await this.sentCookieLine(req) };
       response = await route.fetch({ headers: withAppHeader(own, header), maxRedirects: 0, timeout });
       // A redirect within the app: the browser would follow it unrouted, without the header (appRedirectPlan).
-      let at = req.url();
       for (let hop = 0; hop < APP_HEADER_MAX_HOPS; hop++) {
         const plan = appRedirectPlan({
           status: response.status(),
@@ -5187,8 +5207,19 @@ export class BrowserEngine {
       await route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
       return;
     }
+    // A redirect away from the app is handed to the browser, which follows it unrouted outside Chromium: the browserHosts list is asked first.
+    const offList = this.browserHosts
+      ? hostRedirectPlan({ status: response.status(), location: response.headers()["location"], requestUrl: at, list: this.browserHosts })
+      : null;
+    if (offList?.kind === "refuse") {
+      this.guard.noteRefusedRedirect(req, offList.url, at);
+      await route.abort("blockedbyclient").catch(() => {});
+      return;
+    }
     this.appHeaderAnswers.set(req, { lines: BrowserEngine.fetchedSetCookies(response), handedBack: false });
-    await route.fulfill({ response }).catch(() => {
+    // A document, or a worker's script, whose policy is its answer's, gets the list's (browser-hosts.ts browserHostsPolicy).
+    const ownPolicy = this.browserHostsCsp !== null && (req.resourceType() === "document" || req.headers()["sec-fetch-dest"] === "worker");
+    await route.fulfill(ownPolicy ? { response, headers: this.withHostsPolicy(response.headers()) } : { response }).catch(() => {
       /* the page went away before its answer */
     });
   }
@@ -5233,7 +5264,7 @@ export class BrowserEngine {
       this.keptAppAnswers.delete(withoutFragment(req.url()));
       if (kept.until > Date.now()) {
         this.appHeaderAnswers.set(req, { lines: kept.setCookies, handedBack: false });
-        await route.fulfill({ status: kept.status, headers: kept.headers, body: kept.body }).catch(() => {});
+        await route.fulfill({ status: kept.status, headers: this.withHostsPolicy(kept.headers), body: kept.body }).catch(() => {});
         return;
       }
     }
@@ -5336,9 +5367,19 @@ export class BrowserEngine {
       await route.fulfill({ status: 200, contentType: "text/html", body: redirectStandIn(at) }).catch(() => {});
       return;
     }
-    await route.fulfill({ status: answer.status, headers, body }).catch(() => {
+    await route.fulfill({ status: answer.status, headers: this.withHostsPolicy(headers), body }).catch(() => {
       /* the page went away before its answer */
     });
+  }
+
+  /** A page load's headers with the browserHosts list's Content-Security-Policy added, when one is in force (browser-hosts.ts browserHostsPolicy). */
+  private withHostsPolicy(headers: Record<string, string>): Record<string, string> {
+    if (this.browserHostsCsp === null) return headers;
+    const name = Object.keys(headers).find((n) => n.toLowerCase() === "content-security-policy");
+    const out = { ...headers };
+    if (name !== undefined) delete out[name];
+    out["content-security-policy"] = withBrowserHostsPolicy(name !== undefined ? headers[name] : undefined, this.browserHostsCsp);
+    return out;
   }
 
   /**

@@ -103,6 +103,94 @@ export function hostRedirectPlan(input: {
   return host === null ? { kind: "stand-in", url: next } : { kind: "refuse", host, url: next };
 }
 
+/**
+ * The Content-Security-Policy a document gets while a list is set, on an
+ * engine that routes no redirect hop (browsers.ts hostRedirectHops
+ * "page-loads"): the browser itself then refuses a subresource, or a redirect
+ * of one, to a host the list refuses, and a form sent there, which is the one
+ * thing those engines would otherwise let out unseen (and Firefox does not
+ * route an <object>'s load at all). Joined to the document's own policy, so
+ * it only narrows (withBrowserHostsPolicy). A host CSP cannot spell
+ * (an IPv6 address) is left out, so a listed one is refused; the app's own is
+ * still 'self'.
+ */
+export function browserHostsPolicy(list: BrowserHostList): string {
+  const hosts: string[] = [];
+  const sockets: string[] = [];
+  for (const p of [...appHostPatterns(list.appUrl), ...list.hosts]) {
+    if (p.hostname.startsWith("[")) continue;
+    const at = `${p.subdomains ? "*." : ""}${p.hostname}:${p.port === null ? "*" : p.port}`;
+    hosts.push(`http://${at}`, `https://${at}`);
+    sockets.push(`ws://${at}`, `wss://${at}`);
+  }
+  const own = ["'self'", ...new Set(hosts)].join(" ");
+  // Each socket host by name: WebKit lets a bare ws: or wss: source match an http or https address too.
+  return [
+    `default-src ${own} data: blob: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'`,
+    `connect-src ${own} ${[...new Set(sockets)].join(" ")} data: blob:`,
+    `form-action ${own}`,
+  ].join("; ");
+}
+
+/** A response's Content-Security-Policy with the list's added: a second policy joined with a comma is enforced alongside the first. */
+export function withBrowserHostsPolicy(existing: string | undefined, policy: string): string {
+  return existing && existing.trim() ? `${existing}, ${policy}` : policy;
+}
+
+/** The binding a page reports a refusal of the list's policy through (browserHostsViolationScript). */
+export const BROWSER_HOSTS_VIOLATION_BINDING = "__scenescoutBrowserHosts";
+
+/**
+ * Run in every page before its own scripts while the list's policy is in
+ * force: a request the policy refused never reaches a route handler, so each
+ * refusal of a host is handed to SceneScout here, to be reported as the route
+ * handler's are. Only the list's own refusals (by its form-action, or a
+ * blocked address the list refuses): the app's own policy's are the app's.
+ */
+export function browserHostsViolationScript(binding = BROWSER_HOSTS_VIOLATION_BINDING): string {
+  return `(() => {
+  const send = globalThis[${JSON.stringify(binding)}];
+  if (typeof send !== "function") return;
+  // A send that throws means the page is going away: nothing is left to report it to.
+  addEventListener("securitypolicyviolation", (e) => {
+    try { send({ url: String(e.blockedURI || ""), directive: String(e.effectiveDirective || e.violatedDirective || ""), policy: String(e.originalPolicy || "") }); } catch {}
+  }, true);
+})()`;
+}
+
+/**
+ * What a reported policy refusal is to the list: the address refused, or null
+ * when it is not the list's (another policy's, or an address the list allows,
+ * which a browser names for a redirect it refused, since it reports the
+ * address the request started at). `policy` is the list's, as sent.
+ */
+export function browserHostsViolation(
+  list: BrowserHostList | null,
+  policy: string | null,
+  report: unknown,
+): { url: string; redirect: boolean; form: boolean } | null {
+  if (list === null || policy === null || typeof report !== "object" || report === null) return null;
+  const { url, directive, policy: original } = report as Record<string, unknown>;
+  if (typeof url !== "string" || typeof directive !== "string" || typeof original !== "string") return null;
+  // A browser serializes the policy as it parsed it: compared by its directives, each in one spelling.
+  const spelled = (text: string) =>
+    text
+      .split(";")
+      .map((d) => d.trim().split(" ").filter(Boolean).join(" "))
+      .filter(Boolean)
+      .join("; ");
+  if (spelled(original) !== spelled(policy)) return null;
+  let href: string;
+  try {
+    href = new URL(url).href;
+  } catch {
+    return null;
+  }
+  const form = directive === "form-action";
+  if (refusedBrowserHost(list, href) !== null) return { url: href, redirect: false, form };
+  return { url: href, redirect: true, form };
+}
+
 /** The most redirects of one page load followed through stand-in pages before the load is refused, as a browser stops a loop. */
 export const BROWSER_HOST_MAX_HOPS = 20;
 
@@ -113,7 +201,7 @@ export function browserHostsNotice(list: BrowserHostList | null, from: string, r
   const hops =
     redirectHops === "browser-level"
       ? "a redirect to one included"
-      : "a page load's redirect to one included (in this browser a redirect of a script's request or a frame's load is not judged)";
+      : "a redirect to one included (in this browser a page's or frame's load and a worker's script are sent by SceneScout to judge their redirects, and every other request's redirect is refused by a Content-Security-Policy the page is given)";
   return ` Browser hosts (${from}): the page may reach only the app's own host${named.length > 0 ? ` and ${named.join(", ")}` : ""}; a request to any other host, ${hops}, is refused before it leaves the machine.`;
 }
 

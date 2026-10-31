@@ -12,7 +12,15 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Browser, CDPSession, Page, Request, Response, Route, WebSocketRoute } from "playwright";
-import { BROWSER_HOST_MAX_HOPS, BROWSER_HOST_REFUSAL, hostRedirectPlan, refusedBrowserHost, type BrowserHostList } from "./browser-hosts.js";
+import {
+  BROWSER_HOST_MAX_HOPS,
+  BROWSER_HOST_REFUSAL,
+  browserHostsViolation,
+  hostRedirectPlan,
+  refusedBrowserHost,
+  withBrowserHostsPolicy,
+  type BrowserHostList,
+} from "./browser-hosts.js";
 import { abortCodeFor, redirectStandIn } from "./app-header.js";
 import { logAddress, socketAddress } from "./authloss.js";
 import { settleWithin } from "./best-effort.js";
@@ -156,6 +164,10 @@ export interface RouteGuardHost {
   allowedWrites?(): { entries: readonly AllowedWrite[]; andModeRules: boolean } | null;
   /** The hosts a page may reach (the config's browserHosts or SCENESCOUT_BROWSER_HOSTS), or null when any host may be reached (browser-hosts.ts). */
   browserHosts?(): BrowserHostList | null;
+  /** The Content-Security-Policy a document gets for that list, on an engine that routes no redirect hop, or null (browser-hosts.ts browserHostsPolicy). */
+  browserHostsPolicy?(): string | null;
+  /** The Cookie line the browser sends with this request, for a send SceneScout makes in its place ("" for none). */
+  sentCookieLine?(req: Request): Promise<string>;
 }
 
 /** What the route handler does with a write it sees, short of the ownership rule. */
@@ -378,9 +390,37 @@ export class RouteGuard {
     return last !== null && last.at >= since ? last.sig : null;
   }
 
-  /** A page load's redirect to a host the browserHosts list refuses, found by a handler that sent the load itself: reported as any host refusal. */
+  /** A redirect to a host the browserHosts list refuses, found by a handler that sent the request itself: reported as any host refusal. */
   noteRefusedRedirect(req: Request, to: string, from: string): void {
-    this.noteHostRefusal(`${this.hostSig("GET", to, true)} (a redirect from ${this.place(from)})`, "document", req, RouteGuard.topLevelLoad(req));
+    const document = req.resourceType() === "document";
+    const what = document ? "" : req.headers()["sec-fetch-dest"] === "worker" ? "a worker's script, " : "";
+    this.noteHostRefusal(
+      `${this.hostSig("GET", to, document)} (${what}a redirect from ${this.place(from)})`,
+      req.resourceType(),
+      req,
+      RouteGuard.topLevelLoad(req),
+    );
+  }
+
+  /**
+   * A refusal by the list's Content-Security-Policy, as the page reported it (browser-hosts.ts
+   * browserHostsViolationScript): reported as the route handler's refusals are. Anything else is ignored.
+   */
+  notePolicyViolation(report: unknown): void {
+    const seen = browserHostsViolation(this.host.browserHosts?.() ?? null, this.host.browserHostsPolicy?.() ?? null, report);
+    if (seen === null) return;
+    // A browser names a refused redirect by the address it started at, which is allowed: named without its query, which may carry a token.
+    const u = new URL(seen.url);
+    const at = seen.redirect ? `${u.origin}${u.pathname}` : seen.url;
+    const sig = `${seen.form ? "form to" : "GET"} ${this.place(at)}${seen.redirect ? " (redirected to a host off the list)" : ""}`;
+    this.noteHostRefusal(sig, seen.form ? "document" : "other", null);
+  }
+
+  /** A document's headers with the list's Content-Security-Policy added, when one is in force. */
+  private withHostsPolicy(headers: Record<string, string>): Record<string, string> {
+    const policy = this.host.browserHostsPolicy?.() ?? null;
+    if (policy === null) return headers;
+    return { ...headers, "content-security-policy": withBrowserHostsPolicy(headers["content-security-policy"], policy) };
   }
 
   /** Whether a request is a page's own load (its top frame's navigation), not a frame's or a worker's. */
@@ -397,29 +437,35 @@ export class RouteGuard {
 
   /**
    * Firefox and WebKit route no redirect's later hops (browsers.ts hostRedirectHops "page-loads"). Registered so it runs
-   * after every other handler let the load out: a top-level page load is sent by SceneScout without following a
+   * after every other handler let the load out: a page or frame load is sent by SceneScout without following a
    * redirect (one send, as the browser's own would be), and a redirect to a host the list refuses is refused and
    * reported, while one to an allowed host is answered with a page that loads it itself, a new page load that comes back
-   * through every handler. Anything else is handed on. A send that fails aborts with the network's code.
+   * through every handler. A document that is not a redirect gets the list's Content-Security-Policy, so the browser
+   * refuses its subresources' redirects off the list; so does a worker's script, whose own policy is its answer's
+   * (probeWorker). Anything else is handed on. A send that fails aborts with the network's code.
    */
   async probeRedirect(route: Route, timeoutMs: number): Promise<void> {
     const req = route.request();
     const list = this.host.browserHosts?.() ?? null;
-    if (list === null || !RouteGuard.topLevelLoad(req) || req.method() !== "GET" || req.resourceType() !== "document") return route.fallback().catch(() => {});
+    if (list !== null && req.method() === "GET" && req.resourceType() !== "document" && req.headers()["sec-fetch-dest"] === "worker")
+      return this.probeWorker(route, list, timeoutMs);
+    if (list === null || req.resourceType() !== "document") return route.fallback().catch(() => {});
     const hops = this.standInHops.get(req.url()) ?? 0;
     this.standInHops.delete(req.url());
     let res: Awaited<ReturnType<Route["fetch"]>>;
     try {
-      res = await route.fetch({ maxRedirects: 0, timeout: timeoutMs });
+      res = await route.fetch({ maxRedirects: 0, timeout: timeoutMs, headers: await this.sentHeaders(req) });
     } catch (err) {
       return route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
     }
     const plan = hostRedirectPlan({ status: res.status(), location: res.headers()["location"], requestUrl: req.url(), list });
-    if (plan === null) return route.fulfill({ response: res }).catch(() => {});
+    if (plan === null) return route.fulfill({ response: res, headers: this.withHostsPolicy(res.headers()) }).catch(() => {});
     if (plan.kind === "refuse") {
       this.noteRefusedRedirect(req, plan.url, req.url());
       return route.abort("blockedbyclient").catch(() => {});
     }
+    // A form's 307 or 308 is sent on with its body, which a stand-in page cannot do: followed here, each hop judged first.
+    if (req.method() !== "GET" && (res.status() === 307 || res.status() === 308)) return this.followHops(route, list, res, timeoutMs, false);
     if (hops + 1 > BROWSER_HOST_MAX_HOPS) {
       console.error(`[scenescout] browserHosts: a page load redirected more than ${BROWSER_HOST_MAX_HOPS} times, stopped`);
       return route.abort("failed").catch(() => {});
@@ -431,6 +477,60 @@ export class RouteGuard {
     const setCookie = res.headers()["set-cookie"];
     if (setCookie) headers["set-cookie"] = setCookie;
     return route.fulfill({ status: 200, headers, body: redirectStandIn(plan.url) }).catch(() => {});
+  }
+
+  /**
+   * A request's headers with the Cookie line the browser would send, for a send SceneScout makes in its place:
+   * Playwright's own send would otherwise add every cookie the jar holds, a SameSite one the browser withholds from
+   * another site's request included. Undefined: the request's own headers, which already carry the line.
+   */
+  private async sentHeaders(req: Request): Promise<Record<string, string> | undefined> {
+    const sent = req.headers();
+    if (Object.keys(sent).some((name) => name.toLowerCase() === "cookie") || !this.host.sentCookieLine) return undefined;
+    return { ...sent, cookie: await this.host.sentCookieLine(req) };
+  }
+
+  /**
+   * A dedicated worker's script, on an engine that routes no redirect hop: a worker's policy is its script's answer's,
+   * not the page's, so the script is sent by SceneScout and handed over with the list's policy.
+   */
+  private async probeWorker(route: Route, list: BrowserHostList, timeoutMs: number): Promise<void> {
+    const req = route.request();
+    let res: Awaited<ReturnType<Route["fetch"]>>;
+    try {
+      res = await route.fetch({ maxRedirects: 0, timeout: timeoutMs, headers: await this.sentHeaders(req) });
+    } catch (err) {
+      return route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
+    }
+    return this.followHops(route, list, res, timeoutMs, true);
+  }
+
+  /**
+   * A redirect followed here a hop at a time, where the browser cannot be handed a stand-in page, each hop's host
+   * judged before it is sent; the answer it ends on is handed over with the list's policy. A worker's script stays on
+   * its origin, as a browser refuses a worker's redirect to another.
+   */
+  private async followHops(route: Route, list: BrowserHostList, first: Awaited<ReturnType<Route["fetch"]>>, timeoutMs: number, worker: boolean): Promise<void> {
+    const req = route.request();
+    let res = first;
+    let at = req.url();
+    try {
+      const headers = await this.sentHeaders(req);
+      for (let hop = 0; ; hop++) {
+        const plan = hostRedirectPlan({ status: res.status(), location: res.headers()["location"], requestUrl: at, list });
+        if (plan === null) return await route.fulfill({ response: res, headers: this.withHostsPolicy(res.headers()) }).catch(() => {});
+        if (plan.kind === "refuse") {
+          this.noteRefusedRedirect(req, plan.url, at);
+          return await route.abort("blockedbyclient").catch(() => {});
+        }
+        if (hop + 1 >= BROWSER_HOST_MAX_HOPS || (worker && new URL(plan.url).origin !== new URL(req.url()).origin))
+          return await route.abort("failed").catch(() => {});
+        at = plan.url;
+        res = await route.fetch({ url: at, maxRedirects: 0, timeout: timeoutMs, headers });
+      }
+    } catch (err) {
+      return route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
+    }
   }
 
   /** Whether the write policy stopped this request, at the route handler or at the browser level. */
@@ -635,7 +735,7 @@ export class RouteGuard {
           return;
         }
         headers["content-security-policy"] = withForeignFrameSandbox(headers["content-security-policy"]);
-        await route.fulfill({ response: res, headers });
+        await route.fulfill({ response: res, headers: this.withHostsPolicy(headers) });
         return;
       } catch {
         // Fail closed: a frame that cannot be sandboxed is not loaded. A request already cancelled rejects the abort: nothing is left to refuse.

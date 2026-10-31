@@ -60,6 +60,9 @@ import {
   BROWSER_HOSTS_ENV,
   browserHostList,
   browserHostsNotice,
+  browserHostsPolicy,
+  browserHostsViolation,
+  withBrowserHostsPolicy,
   HostBlockNotices,
   hostRedirectPlan,
   refusedBrowserHost,
@@ -2471,6 +2474,10 @@ function guardRig(
     escape?: boolean;
     /** The operator's browserHosts list (browser-hosts.ts); absent: any host. */
     browserHosts?: string[];
+    /** The list's Content-Security-Policy, as an engine that routes no redirect hop gives a document; absent: none. */
+    hostsPolicy?: string;
+    /** The Cookie line the browser would send with a request (BrowserEngine sentCookieLine); absent: none is built. */
+    cookieLine?: string;
   } = {},
 ) {
   const calls: GuardCall[] = [];
@@ -2512,6 +2519,8 @@ function guardRig(
     allowedWrites: () =>
       opts.allowedWrites ? { entries: allowedWriteEntries(opts.allowedWrites).entries, andModeRules: opts.allowedAndModeRules === true } : null,
     browserHosts: () => (opts.browserHosts ? browserHostList("https://app.example.com", opts.browserHosts) : null),
+    browserHostsPolicy: () => opts.hostsPolicy ?? null,
+    ...(opts.cookieLine !== undefined ? { sentCookieLine: async () => opts.cookieLine! } : {}),
   };
   const guard = new RouteGuard(host, opts.leftPageRuleCapMs);
   const send = (
@@ -6339,7 +6348,10 @@ test("browserHosts: the file's list, narrowed by SCENESCOUT_BROWSER_HOSTS, or th
     browserHostsNotice(noticeList, "the SceneScout config", "browser-level"),
     /only the app's own host and cdn\.example\.net; .*a redirect to one included, is refused/,
   );
-  assert.match(browserHostsNotice(noticeList, "the SceneScout config", "page-loads"), /a redirect of a script's request or a frame's load is not judged/);
+  assert.match(
+    browserHostsNotice(noticeList, "the SceneScout config", "page-loads"),
+    /a worker's script are sent by SceneScout .*a Content-Security-Policy the page is given/,
+  );
 });
 
 test("RouteGuard: browserHosts refuses another host's request before it leaves and reports it apart from the write policy; the app's own goes on", async () => {
@@ -6379,14 +6391,21 @@ test("RouteGuard: a WebSocket browserHosts refuses is closed with a policy code 
 });
 
 /** A top-level page load as probeRedirect sees it, answered by `answer` when SceneScout sends it. */
-function probeRoute(url: string, answer: { status: number; headers: Record<string, string> } | Error, opts: { method?: string; topLevel?: boolean } = {}) {
+function probeRoute(
+  url: string,
+  answer: { status: number; headers: Record<string, string> } | Error | Array<{ status: number; headers: Record<string, string> }>,
+  opts: { method?: string; topLevel?: boolean; headers?: Record<string, string>; type?: string } = {},
+) {
   let outcome = "unanswered";
   let body = "";
+  let headers: Record<string, string> | undefined;
   let fetched = 0;
+  const sends: Array<{ url: string; headers: Record<string, string> | undefined }> = [];
   const request = {
     url: () => url,
     method: () => opts.method ?? "GET",
-    resourceType: () => "document",
+    resourceType: () => opts.type ?? "document",
+    headers: () => opts.headers ?? {},
     isNavigationRequest: () => true,
     frame: () => ({ parentFrame: () => (opts.topLevel === false ? {} : null) }),
   };
@@ -6397,14 +6416,25 @@ function probeRoute(url: string, answer: { status: number; headers: Record<strin
     fulfill: async (r: { status?: number; body?: string; response?: unknown; headers?: Record<string, string> }) => {
       outcome = r.response ? "fulfill response" : `fulfill ${r.status}`;
       body = r.body ?? "";
+      headers = r.headers;
     },
-    fetch: async () => {
+    fetch: async (o: { url?: string; headers?: Record<string, string> }) => {
       fetched += 1;
+      sends.push({ url: o.url ?? url, headers: o.headers });
       if (answer instanceof Error) throw answer;
-      return { status: () => answer.status, headers: () => answer.headers };
+      const a = Array.isArray(answer) ? answer[fetched - 1] : answer;
+      return { status: () => a.status, headers: () => a.headers };
     },
   };
-  return { route: route as unknown as Route, request: request as unknown as Request, outcome: () => outcome, body: () => body, fetched: () => fetched };
+  return {
+    route: route as unknown as Route,
+    request: request as unknown as Request,
+    outcome: () => outcome,
+    body: () => body,
+    headers: () => headers,
+    fetched: () => fetched,
+    sends,
+  };
 }
 
 test("RouteGuard: browserHosts on an engine that routes no redirect hop: a page load's redirect off the list is refused, one on it is a stand-in, sent once", async () => {
@@ -6431,15 +6461,34 @@ test("RouteGuard: browserHosts on an engine that routes no redirect hop: a page 
   await guard.probeRedirect(page.route, 1000);
   assert.equal(page.outcome(), "fulfill response");
   assert.equal(page.fetched(), 1);
-  // A frame's load, a POST, and a session with no list are handed on unsent.
-  for (const r of [
-    probeRoute("https://app.example.com/frame", { status: 302, headers: { location: "https://elsewhere.example/" } }, { topLevel: false }),
-    probeRoute("https://app.example.com/form", { status: 303, headers: { location: "https://elsewhere.example/" } }, { method: "POST" }),
-  ]) {
-    await guard.probeRedirect(r.route, 1000);
-    assert.equal(r.outcome(), "fallback");
-    assert.equal(r.fetched(), 0);
-  }
+  // A frame's load is judged as the page's is, but explains no navigation of the page.
+  const frame = probeRoute("https://app.example.com/frame", { status: 302, headers: { location: "https://elsewhere.example/" } }, { topLevel: false });
+  await guard.probeRedirect(frame.route, 1000);
+  assert.equal(frame.outcome(), "abort blockedbyclient");
+  assert.equal(blocked[1].sig, "navigation to https://elsewhere.example/ (a redirect from https://app.example.com/frame)");
+  // A form's POST is sent once too: its redirect off the list refused, one on it a stand-in, as a 303 is followed with a GET.
+  const posted = probeRoute("https://app.example.com/form", { status: 303, headers: { location: "https://elsewhere.example/" } }, { method: "POST" });
+  await guard.probeRedirect(posted.route, 1000);
+  assert.equal(posted.outcome(), "abort blockedbyclient");
+  assert.equal(posted.fetched(), 1);
+  const signedIn = probeRoute("https://app.example.com/form", { status: 303, headers: { location: "/home" } }, { method: "POST" });
+  await guard.probeRedirect(signedIn.route, 1000);
+  assert.equal(signedIn.outcome(), "fulfill 200");
+  // A 307 keeps the POST: followed here, each hop judged before it is sent.
+  const kept = probeRoute(
+    "https://app.example.com/form",
+    [
+      { status: 307, headers: { location: "https://sso.example.net/post" } },
+      { status: 307, headers: { location: "https://elsewhere.example/post" } },
+    ],
+    { method: "POST" },
+  );
+  await guard.probeRedirect(kept.route, 1000);
+  assert.deepEqual(
+    kept.sends.map((h) => h.url),
+    ["https://app.example.com/form", "https://sso.example.net/post"],
+  );
+  assert.equal(kept.outcome(), "abort blockedbyclient");
   const free = guardRig("observe");
   const unlisted = probeRoute("https://app.example.com/start", { status: 302, headers: { location: "https://elsewhere.example/" } });
   await free.guard.probeRedirect(unlisted.route, 1000);
@@ -6461,6 +6510,131 @@ test("RouteGuard: browserHosts stops a redirect loop through stand-in pages as a
     if (i < BROWSER_HOST_MAX_HOPS) assert.equal(last, "fulfill 200", `hop ${i}`);
   }
   assert.equal(last, "abort failed");
+});
+
+test("RouteGuard: a page load SceneScout sends in the browser's place carries the Cookie line the browser would, not the whole jar", async () => {
+  const { guard } = guardRig("observe", { browserHosts: [], cookieLine: "lax=1" });
+  const bare = probeRoute("https://app.example.com/home", { status: 200, headers: {} }, { headers: { accept: "text/html" } });
+  await guard.probeRedirect(bare.route, 1000);
+  assert.deepEqual(bare.sends[0].headers, { accept: "text/html", cookie: "lax=1" });
+  // A browser that put its line on the request already: sent as it is.
+  const own = probeRoute("https://app.example.com/home", { status: 200, headers: {} }, { headers: { cookie: "a=b" } });
+  await guard.probeRedirect(own.route, 1000);
+  assert.equal(own.sends[0].headers, undefined);
+});
+
+test("RouteGuard: on an engine that routes no redirect hop, a worker's script is sent by SceneScout, its redirects judged a hop at a time, and handed over with the list's policy", async () => {
+  const policy = "default-src 'self'";
+  const worker = { type: "script", topLevel: false, headers: { "sec-fetch-dest": "worker" } };
+  const { blocked, guard } = guardRig("destructive", { browserHosts: ["cdn.example.net"], hostsPolicy: policy });
+  const direct = probeRoute("https://app.example.com/w.js", { status: 200, headers: { "content-type": "text/javascript" } }, worker);
+  await guard.probeRedirect(direct.route, 1000);
+  assert.equal(direct.outcome(), "fulfill response");
+  assert.equal(direct.headers()?.["content-security-policy"], policy, "a worker's policy is its script's answer's, so it is given the list's");
+  const hops = probeRoute(
+    "https://app.example.com/w.js",
+    [
+      { status: 302, headers: { location: "/w.abc.js" } },
+      { status: 302, headers: { location: "https://elsewhere.example/w.js" } },
+    ],
+    worker,
+  );
+  await guard.probeRedirect(hops.route, 1000);
+  assert.deepEqual(
+    hops.sends.map((h) => h.url),
+    ["https://app.example.com/w.js", "https://app.example.com/w.abc.js"],
+    "the hop on the app is sent, the one off the list never is",
+  );
+  assert.equal(hops.outcome(), "abort blockedbyclient");
+  assert.equal(blocked.at(-1)?.sig, "GET https://elsewhere.example/w.js (a worker's script, a redirect from https://app.example.com/w.abc.js)");
+  // A worker's script stays on its origin, as a browser refuses its redirect to another, a listed one included.
+  const away = probeRoute("https://app.example.com/w.js", { status: 302, headers: { location: "https://cdn.example.net/w.js" } }, worker);
+  await guard.probeRedirect(away.route, 1000);
+  assert.equal(away.outcome(), "abort failed");
+  assert.equal(away.fetched(), 1);
+  // The contrastive case: the same script loaded by a page is not a worker's, and is handed on unsent.
+  const script = probeRoute("https://app.example.com/w.js", { status: 200, headers: {} }, { ...worker, headers: { "sec-fetch-dest": "script" } });
+  await guard.probeRedirect(script.route, 1000);
+  assert.equal(script.outcome(), "fallback");
+  assert.equal(script.fetched(), 0);
+});
+
+test("browserHostsPolicy: the list as a Content-Security-Policy that names the app's host and the listed ones, each socket host by name", () => {
+  const list = browserHostList("http://app.example.com", ["cdn.example.net", "*.assets.example.org:8443", "[::1]:9000"]);
+  const policy = browserHostsPolicy(list);
+  const directives = new Map(policy.split("; ").map((d) => [d.split(" ")[0], d.split(" ").slice(1)] as const));
+  assert.deepEqual([...directives.keys()], ["default-src", "connect-src", "form-action"]);
+  const fetchFrom = directives.get("default-src")!;
+  for (const source of [
+    "'self'",
+    "http://app.example.com:80",
+    "https://app.example.com:80",
+    "http://app.example.com:443",
+    "https://cdn.example.net:*",
+    "https://*.assets.example.org:8443",
+  ])
+    assert.ok(fetchFrom.includes(source), source);
+  assert.ok(!fetchFrom.some((s) => s.includes("[")), "an IPv6 host CSP cannot spell is left out, and refused");
+  assert.ok(!fetchFrom.includes("*") && !fetchFrom.includes("http:") && !fetchFrom.includes("https:"), "no source stands for every host");
+  const connect = directives.get("connect-src")!;
+  assert.ok(connect.includes("wss://cdn.example.net:*") && connect.includes("ws://app.example.com:80"));
+  // WebKit lets a bare ws: or wss: source match an http or https address: one would let a fetch's redirect out.
+  assert.ok(!connect.includes("ws:") && !connect.includes("wss:"));
+  assert.ok(!directives.get("form-action")!.includes("'unsafe-inline'"));
+  // Joined to the document's own policy, so it only narrows.
+  assert.equal(withBrowserHostsPolicy(undefined, policy), policy);
+  assert.equal(withBrowserHostsPolicy("script-src 'self'", policy), `script-src 'self', ${policy}`);
+});
+
+test("browserHostsViolation: only the list's own policy's refusals are the list's; a refused redirect is named by where it started", () => {
+  const list = browserHostList("https://app.example.com", []);
+  const policy = browserHostsPolicy(list);
+  const report = (url: string, directive = "img-src", original = policy) => ({ url, directive, policy: original });
+  assert.deepEqual(browserHostsViolation(list, policy, report("https://elsewhere.example/pixel.gif")), {
+    url: "https://elsewhere.example/pixel.gif",
+    redirect: false,
+    form: false,
+  });
+  // A browser names a redirect it refused by the address the request started at, which the list allows.
+  assert.deepEqual(browserHostsViolation(list, policy, report("https://app.example.com/out?to=x")), {
+    url: "https://app.example.com/out?to=x",
+    redirect: true,
+    form: false,
+  });
+  assert.equal(browserHostsViolation(list, policy, report("https://elsewhere.example/post", "form-action"))?.form, true);
+  // The same report against the app's own policy is the app's, not the list's.
+  assert.equal(browserHostsViolation(list, policy, report("https://elsewhere.example/pixel.gif", "img-src", "img-src 'self'")), null);
+  assert.equal(browserHostsViolation(list, policy, report("https://elsewhere.example/pixel.gif", "img-src", policy.split("; ").join(";  "))) !== null, true);
+  for (const bad of [null, "x", {}, { url: 1, directive: "img-src", policy }, report("not a url")])
+    assert.equal(browserHostsViolation(list, policy, bad), null);
+  assert.equal(browserHostsViolation(null, policy, report("https://elsewhere.example/")), null, "no list: nothing is the list's");
+});
+
+test("RouteGuard: with the list's policy in force, a document that is not a redirect gets it beside its own; without one, its headers are its own", async () => {
+  const withPolicy = guardRig("observe", { browserHosts: [], hostsPolicy: "default-src 'self'" });
+  const page = probeRoute("https://app.example.com/home", {
+    status: 200,
+    headers: { "content-type": "text/html", "content-security-policy": "frame-ancestors 'none'" },
+  });
+  await withPolicy.guard.probeRedirect(page.route, 1000);
+  assert.equal(page.headers()?.["content-security-policy"], "frame-ancestors 'none', default-src 'self'");
+  const without = guardRig("observe", { browserHosts: [] });
+  const plain = probeRoute("https://app.example.com/home", { status: 200, headers: { "content-type": "text/html" } });
+  await without.guard.probeRedirect(plain.route, 1000);
+  assert.equal(plain.headers()?.["content-security-policy"], undefined);
+  // A refusal the page reports is named as the route handler's are, without the query of the address it started at.
+  const reported = guardRig("observe", { browserHosts: [], hostsPolicy: browserHostsPolicy(browserHostList("https://app.example.com", [])) });
+  const policy = browserHostsPolicy(browserHostList("https://app.example.com", []));
+  reported.guard.notePolicyViolation({ url: "https://app.example.com/out?token=t", directive: "img-src", policy });
+  reported.guard.notePolicyViolation({ url: "https://elsewhere.example/a.js", directive: "script-src", policy });
+  reported.guard.notePolicyViolation({ url: "https://elsewhere.example/a.js", directive: "script-src", policy: "script-src 'self'" });
+  assert.deepEqual(
+    reported.blocked.map((b) => [b.sig, b.offHost]),
+    [
+      ["GET https://app.example.com/out (redirected to a host off the list)", true],
+      ["GET https://elsewhere.example/a.js", true],
+    ],
+  );
 });
 
 test("RouteGuard: at the browser level, browserHosts refuses a redirect's hop to another host in every mode, and lets the app's own go on", async () => {
