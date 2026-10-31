@@ -2056,6 +2056,10 @@ test("snapshot: a page that is not the app's records nothing and says how to com
   // A data: address is named by its scheme only: what it carries is not repeated.
   assert.equal(notAppLanding("data:text/html,<p>secret</p>"), "the page went to a data address, which is not a page of the app");
   assert.equal(notAppLanding("about:blank"), "the page went to about:blank, which is not a page of the app");
+  // A browser's error page carries the failed address in its query, which is not repeated either.
+  const neterror = "about:neterror?e=dnsNotFound&u=http%3A//127.0.0.1/things%3Fkey%3Dabc";
+  assert.equal(notAppLanding(neterror), "the page went to about:neterror, which is not a page of the app");
+  assert.doesNotMatch(notAppPageSnapshot(neterror, null), /127\.0\.0\.1|key/);
   for (const said of [notAppPageSnapshot("about:blank", null), notAppLanding("about:blank")]) assert.doesNotMatch(said, /DEAD END/);
 });
 

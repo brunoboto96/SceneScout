@@ -1353,7 +1353,7 @@ export class BrowserEngine {
       // Only a COMPLETED journey is a measurement of task ease. An abandoned
       // one proves the task is blocked — a high-severity finding — and must
       // not also close the gap that says ease was never measured.
-      this.memory?.markRouteFact(normalizePath(j.startUrl), { journeys: 1, journeysCompleted: completed ? 1 : 0 });
+      if (isAppPage(j.startUrl)) this.memory?.markRouteFact(normalizePath(j.startUrl), { journeys: 1, journeysCompleted: completed ? 1 : 0 });
     } catch {
       /* fact recording is best-effort */
     }
@@ -2082,7 +2082,7 @@ export class BrowserEngine {
       )
         return;
       const pageUrl = this.page?.url();
-      if (pageUrl && this.memory) {
+      if (pageUrl && isAppPage(pageUrl) && this.memory) {
         try {
           this.memory.markRouteFact(normalizePath(pageUrl), { mutated: true });
         } catch {
@@ -6846,14 +6846,16 @@ export class BrowserEngine {
       this.memory?.designChromeKeys() ?? new Set(),
     );
     const route = normalizePath(page.url());
-    this.memory?.recordDesignElements(route, signatures);
+    // A page that is not the app's (isAppPage) is no route of the design census nor an audited one.
+    const memory = isAppPage(page.url()) ? this.memory : null;
+    memory?.recordDesignElements(route, signatures);
     // Only a page that actually produced a score counts as audited. An empty or
     // unhydrated page (and, since the chrome partition, one that is entirely
     // shell) returns no score — recording it as audited anyway dropped it from
     // the "never design-audited" ledger while it had never been measured.
     if (score) {
-      this.memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: logAddress(page.url(), this.baseUrl) });
-      this.memory?.markRouteFact(route, { audited: true });
+      memory?.setPageScore(route, { ...score, at: new Date().toISOString(), url: logAddress(page.url(), this.baseUrl) });
+      memory?.markRouteFact(route, { audited: true });
     }
     this.logAction({
       action: "design-audit",

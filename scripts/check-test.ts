@@ -2337,6 +2337,8 @@ test("flows: a flow's result names a page of the app by its path and query, and 
   assert.equal(flowPlace("http://127.0.0.1:3000/things/42?tab=open#top"), "/things/42?tab=open");
   // new URL("about:blank").pathname is "blank", which read as a route of the app.
   assert.equal(flowPlace("about:blank"), "about:blank");
+  // A browser's error page names the failed address in its own query: never repeated.
+  assert.equal(flowPlace("about:neterror?e=dnsNotFound&u=http%3A//127.0.0.1/things%3Fkey%3Dabc"), "about:neterror");
   assert.equal(flowPlace("chrome-error://chromewebdata/"), "a page that is not the app's");
   assert.equal(flowPlace(""), "a page that is not the app's");
 });

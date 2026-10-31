@@ -362,6 +362,10 @@ async function pageThatLeavesForBlank(baseUrl: string): Promise<void> {
       /^NOT A PAGE OF THE APP: the session is on about:blank, not a page of the app/.test(left) && !/DEAD END|^State: /m.test(left),
       left.slice(0, 400),
     );
+    // A design audit, a journey and a write on the blank page are facts of no route of the app either.
+    await bounded(engine, "design audit", engine.designAudit());
+    engine.startJourney("a task begun on the blank page");
+    engine.endJourney(false);
     await engine.close();
     const kept = keptStateUrls(projectDir);
     check(

@@ -507,11 +507,14 @@ export function navigationPendingSnapshot(url: string, navMs: number, left: Left
   return `${pending}\nThe page was left for about:blank to end that navigation, and nothing of it was recorded: ${comeBack(left)}.`;
 }
 
-/** A page's address as a sentence names it when it is not the app's: about: as it is, any other by its scheme alone. */
-function notAppAddress(url: string): string {
+/**
+ * A page's address as a sentence names it when it is not the app's: about: by its name alone (a browser's error page
+ * carries the failed address, query included, in its own), any other by its scheme alone.
+ */
+export function notAppAddress(url: string): string {
   try {
-    const { protocol } = new URL(url);
-    return protocol === "about:" ? url : `a ${protocol.slice(0, -1)} address`;
+    const { protocol, pathname } = new URL(url);
+    return protocol === "about:" ? `about:${pathname}` : `a ${protocol.slice(0, -1)} address`;
   } catch {
     return "an address that cannot be read";
   }
