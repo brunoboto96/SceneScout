@@ -1454,9 +1454,11 @@ export class BrowserEngine {
     } catch {
       /* a worker's request: no frame, so not the page's navigation */
     }
+    const elsewhere = offOriginPlace(req.url(), this.baseUrl);
     this.watchedResponses.push({
       method: req.method(),
       url: req.url(),
+      ...(elsewhere ? { elsewhere } : {}),
       status,
       resourceType: req.resourceType(),
       blockedByPolicy: this.guard.refused(req),
