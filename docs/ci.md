@@ -595,6 +595,8 @@ The key is read from the environment and nowhere else: there is no option or act
 - **Other hosts.** Any other endpoint that speaks the Anthropic Messages or OpenAI Responses format works through `--base-url`, such as an LLM proxy like LiteLLM in front of a cloud, with the key the gateway expects in `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` and `--model` set to the name the gateway gives the model. The `--base-url` rules above apply to it.
 - A call that is throttled or meets a server error is retried up to three times, with a growing, jittered wait that honours `retry-after`; one the API refuses (a bad key, a bad request) is not retried and ends the run with exit 2.
 
+What the provider may keep or train on is set by your agreement with it, not by SceneScout: [The model provider's data terms](guide/What-leaves-the-machine.md#the-model-providers-data-terms) links each supported provider's terms, says what `store: false` does and does not cover, and notes that zero data retention is arranged with the provider on the account.
+
 Keys never reach the output. The browser and the MCP server run in a child process started without them, and every line the run prints or writes is passed through a redaction of the key values and of anything shaped like a provider key.
 
 ### Caps
