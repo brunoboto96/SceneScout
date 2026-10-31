@@ -25,6 +25,7 @@ import { execFileSync } from "node:child_process";
 import { check, eventually, failureCount, recordCrash, startFixtureServer, type SmokeContext } from "./smoke/harness.ts";
 import { descendants, extraHandles, socketsLeft, type Leftover } from "./smoke/leaks.ts";
 import { readMachineSockets } from "../src/engine/tcp-table.ts";
+import { exitWhenDrained } from "../src/commands.ts";
 import { declaredTitle, parseShard, pickShard, shardProblems, shardSeconds, TOGETHER, withoutShard } from "./smoke/shards.ts";
 import { shards, suites as allSuites, timings } from "./smoke/suites.ts";
 
@@ -152,16 +153,16 @@ async function main(): Promise<void> {
   if (ran === 0) {
     // A filter that matches nothing must not read as a pass.
     console.error(`\nNo suite matched "${only}". Suites: ${allSuites.map((s) => s.title).join(" | ")}`);
-    process.exit(1);
+    return exitWhenDrained(1);
   }
   if (failureCount() > 0) {
     console.error(`\nSMOKE FAILED: ${failureCount()} check(s) failed`);
-    process.exit(1);
+    return exitWhenDrained(1);
   }
   console.log("\nSMOKE PASSED");
 }
 
-main().catch((err) => {
+main().catch(async (err: unknown) => {
   console.error("SMOKE CRASHED:", err);
-  process.exit(1);
+  await exitWhenDrained(1);
 });

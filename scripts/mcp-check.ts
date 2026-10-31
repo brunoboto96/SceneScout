@@ -16,6 +16,7 @@ import { INTAKE_FORM_MESSAGE, introQuestions } from "../dist/intake.js";
 import { shellQuote, writeProfile } from "../dist/engine/profiles.js";
 import { siteFolderName } from "../dist/engine/project-folder.js";
 import { MCP_APP_MIME, STATUS_PANE_URI, STATUS_POLL_TOOL, STATUS_TOOL } from "../dist/engine/status-pane.js";
+import { CommandExit, exitWhenDrained, exitWith } from "../dist/commands.js";
 import { asLf } from "./checkout.ts";
 import { OWN_TABLE_TOOLS, toolParamsMarkdown, toolParamsSection } from "./tool-params.ts";
 import { revokeFixtureTokens, settle, SIGN_IN_COOKIE, startFixtureServer, TOKEN_COOKIE, WAIT_MS } from "./smoke/harness.ts";
@@ -78,7 +79,7 @@ const LIVE_LINE = /Live view: (http:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9_-]{16,}\/)/
 
 function fail(message: string): never {
   console.error(`MCP CHECK FAILED — ${message}`);
-  process.exit(1);
+  exitWith(1);
 }
 
 /** A cleanup close that is refused leaves browsers running; fail rather than leak them. */
@@ -1996,7 +1997,7 @@ async function main(): Promise<void> {
   const missing = EXPECTED_TOOLS.filter((t) => !names.includes(t));
   if (missing.length > 0) {
     console.error(`MCP CHECK FAILED — missing tools: ${missing.join(", ")}\nGot: ${names.join(", ")}`);
-    process.exit(1);
+    exitWith(1);
   }
   console.log(`✓ server exposes ${names.length} tools`);
 
@@ -2035,18 +2036,18 @@ async function main(): Promise<void> {
   const instructions = client.getInstructions() ?? "";
   if (!instructions.includes("scout_playbook")) {
     console.error(`MCP CHECK FAILED — the server instructions do not point at scout_playbook. Got: ${JSON.stringify(instructions.slice(0, 200))}`);
-    process.exit(1);
+    exitWith(1);
   }
   // Called with no `arguments` field at all: "takes no input" invites exactly that call.
   const played = (await client.callTool({ name: "scout_playbook" })) as { content: Array<{ type: string; text?: string }>; isError?: boolean };
   const playbook = played.content.find((c) => c.type === "text")?.text ?? "";
   if (played.isError || !playbook.includes("## Setup (in order)") || !playbook.startsWith("# SceneScout")) {
     console.error(`MCP CHECK FAILED — scout_playbook did not return the method (without front matter). Got: ${JSON.stringify(playbook.slice(0, 200))}`);
-    process.exit(1);
+    exitWith(1);
   }
   if (!skillBody.endsWith(playbook)) {
     console.error("MCP CHECK FAILED — scout_playbook returned text that is not the skill file's body; the two must be one text.");
-    process.exit(1);
+    exitWith(1);
   }
   const { prompts } = await client.listPrompts();
   const prompt = await client.getPrompt({ name: "explore", arguments: { url: "http://localhost:3000", level: "minimal" } });
@@ -2057,14 +2058,14 @@ async function main(): Promise<void> {
     !/Target: http:\/\/localhost:3000\nLevel: minimal$/.test(promptText)
   ) {
     console.error(`MCP CHECK FAILED — the explore prompt is missing, or lacks the method or what was asked. Got: ${JSON.stringify(promptText.slice(-200))}`);
-    process.exit(1);
+    exitWith(1);
   }
   // A client sends no `arguments` object when the person typed none; every argument is optional.
   const bare = await client.getPrompt({ name: "explore" });
   const bareText = bare.messages.map((m) => (m.content.type === "text" ? m.content.text : "")).join("\n");
   if (!bareText.endsWith(introQuestions())) {
     console.error(`MCP CHECK FAILED — the explore prompt without arguments did not ask the plain questions. Got: ${JSON.stringify(bareText.slice(-200))}`);
-    process.exit(1);
+    exitWith(1);
   }
   // A level the method does not know is refused, and the server survives refusing it.
   const refused = await client.getPrompt({ name: "explore", arguments: { level: "deep" } }).then(
@@ -2073,7 +2074,7 @@ async function main(): Promise<void> {
   );
   if (!/minimal, medium, extensive/.test(refused)) {
     console.error(`MCP CHECK FAILED — an unknown level was not refused with the choices. Got: ${JSON.stringify(refused)}`);
-    process.exit(1);
+    exitWith(1);
   }
   const liveListed = prompts.find((p) => p.name === "live");
   const loginListed = prompts.find((p) => p.name === "login");
@@ -2112,7 +2113,7 @@ async function main(): Promise<void> {
         `live: ${JSON.stringify(liveText.slice(0, 200))}\nlogin: ${JSON.stringify(loginText.slice(0, 200))}\n` +
         `no role: ${JSON.stringify(loginBare)}\npassword arg: ${JSON.stringify(loginSecret)}`,
     );
-    process.exit(1);
+    exitWith(1);
   }
   console.log("✓ the method reaches a client through instructions, scout_playbook and the explore prompt");
   console.log("✓ live and login prompts are listed, name no password, and tell the model what to return or call");
@@ -2152,7 +2153,7 @@ async function main(): Promise<void> {
         `titles: ${JSON.stringify(titles)}\ncheck-my-site: ${JSON.stringify(checkGot.slice(0, 300))}\n` +
         `credential url: ${JSON.stringify(checkSecret)}\nfile-tickets to: ${JSON.stringify(ticketsTo)}`,
     );
-    process.exit(1);
+    exitWith(1);
   }
   console.log("✓ the guided prompts are listed with the panel's titles, check-my-site starts scout_intake with its address, and refusals repeat nothing");
 
@@ -2174,7 +2175,7 @@ async function main(): Promise<void> {
       `MCP CHECK FAILED — the skill never mentions: ${undocumented.join(", ")}\n` +
         `Every registered tool must appear in skills/scenescout/SKILL.md, or the agent will never use it.`,
     );
-    process.exit(1);
+    exitWith(1);
   }
   console.log(`✓ skill documents all ${forTheModel.length} tools the model sees`);
 
@@ -2185,7 +2186,7 @@ async function main(): Promise<void> {
   const unknown = [...mentioned].filter((n) => !names.includes(n));
   if (unknown.length > 0) {
     console.error(`MCP CHECK FAILED — the skill refers to tools the server does not register: ${unknown.join(", ")}`);
-    process.exit(1);
+    exitWith(1);
   }
   console.log(`✓ skill names no tool the server lacks`);
 
@@ -2212,7 +2213,7 @@ async function main(): Promise<void> {
         `A parameter the skill doesn't name is a parameter the agent will never pass. Document it in\n` +
         `skills/scenescout/SKILL.md, or add it to PARAM_EXEMPT in this script if it is genuinely internal.`,
     );
-    process.exit(1);
+    exitWith(1);
   }
   console.log(`✓ skill documents every non-exempt tool parameter`);
 
@@ -2323,7 +2324,7 @@ async function main(): Promise<void> {
   }
   if (guideGaps.length > 0) {
     console.error(`MCP CHECK FAILED — the guide disagrees with the server's tools:\n  ${guideGaps.join("\n  ")}`);
-    process.exit(1);
+    exitWith(1);
   }
   console.log(
     "✓ the guide names only tools and parameters the server has, lists every scout_attach option, which options of every tool are required, and the same prompts the server lists",
@@ -2333,7 +2334,7 @@ async function main(): Promise<void> {
   const text = (result.content as Array<{ type: string; text?: string }>).map((c) => c.text ?? "").join("");
   if (!text.includes("Project:")) {
     console.error(`MCP CHECK FAILED — scout_scan returned unexpected output:\n${text}`);
-    process.exit(1);
+    exitWith(1);
   }
   console.log("✓ scout_scan round-trip works");
 
@@ -2364,7 +2365,7 @@ async function main(): Promise<void> {
   console.log("\nMCP CHECK PASSED");
 }
 
-main().catch((err) => {
-  console.error("MCP CHECK CRASHED:", err);
-  process.exit(1);
+main().catch(async (err: unknown) => {
+  if (!(err instanceof CommandExit)) console.error("MCP CHECK CRASHED:", err);
+  await exitWhenDrained(err instanceof CommandExit ? err.code : 1);
 });

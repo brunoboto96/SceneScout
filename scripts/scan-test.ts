@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { readRouteElements, readRouteObjects, resolveRoutes } from "../src/code-routes.ts";
 import { scanProject, describeAuthAge } from "../src/scan.ts";
+import { exitWhenDrained } from "../src/commands.ts";
 import { normalizePath, fingerprintState, refsSurviveUrlChange, routeBase } from "../src/engine/fingerprint.ts";
 import {
   COLLECT_INTERACTABLES_SCRIPT,
@@ -730,7 +731,7 @@ console.log("which earlier element each element is (matchPrevious)");
 
 if (failures > 0) {
   console.error(`\nSCAN TESTS FAILED: ${failures}`);
-  process.exit(1);
+  await exitWhenDrained(1);
 }
 console.log("\nSCAN TESTS PASSED");
 

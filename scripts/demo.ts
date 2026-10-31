@@ -21,6 +21,7 @@ import { BrowserEngine } from "../dist/engine/browser.js";
 import { computeGaps, generateReport } from "../dist/engine/report.js";
 import { judgeCriterion, parseTickets, type CriterionInput } from "../dist/engine/tickets.js";
 import { createDemoServer } from "../demo-app/server.mjs";
+import { exitWhenDrained } from "../dist/commands.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const outDir = path.join(here, "..", "examples");
@@ -378,7 +379,7 @@ function stabilise(markdown: string, projectDir: string): string {
     .replace(/\| \d{4}-\d{2}-\d{2} \|/g, "| (run date) |");
 }
 
-main().catch((err) => {
+main().catch(async (err: unknown) => {
   console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
+  await exitWhenDrained(1);
 });
