@@ -755,7 +755,7 @@ Copy [examples/workflows/scenescout-qa.yml](../examples/workflows/scenescout-qa.
 
 | Job | Holds the key | Permissions | What it does |
 |---|---|---|---|
-| `gate` | no | `pull-requests: write`, `deployments: read`, `contents: read` | Reads the comment and the pull request, checks the commenter and where the pull request comes from, reads the `egress` setting in `.scenescout/config.json` on the default branch (anything but `all` starts no run), finds the preview's URL, and reacts to the comment. The only job that may receive the optional team token (below). |
+| `gate` | no | `pull-requests: write`, `deployments: read`, `contents: read` | Reads the comment and the pull request, checks the commenter and where the pull request comes from, reads the `egress` and `hosts` settings in `.scenescout/config.json` on the default branch (an `egress` other than `all` starts no run), finds the preview's URL (one on a host `hosts` does not name starts no run, nor does such a base URL for `compare`), and reacts to the comment. The only job that may receive the optional team token (below). |
 | `qa` | yes | `contents: read` | Runs only when the gate says so. Runs `brunoboto96/SceneScout/ci` at an exact release against the preview's URL, with the caps below, and keeps the results as an artifact. |
 | `shots` | no | `contents: write` | Only after a `show` or `compare` run succeeded. Puts its pictures on the `scenescout-shots` branch so the reply can show them. |
 | `report` | no | `pull-requests: write`, `actions: read` | Posts the results on the pull request, with a link to the artifact, or says the run could not run. |
