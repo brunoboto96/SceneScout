@@ -3250,6 +3250,27 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
   }
 });
 
+test("while AGENTS.md records the Playwright hold, Dependabot ignores the whole next minor and nothing after it", () => {
+  const cfg = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "dependabot.yml"), "utf8")) as {
+    updates: Array<{ "package-ecosystem": string; ignore?: Array<{ "dependency-name": string; versions?: string[] }> }>;
+  };
+  const ignored = (cfg.updates.find((u) => u["package-ecosystem"] === "npm")?.ignore ?? [])
+    .filter((i) => i["dependency-name"] === "playwright")
+    .flatMap((i) => i.versions ?? []);
+  const agents = fs.readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8");
+  const held = agents.split("\n").some((line) => line.startsWith(`- **playwright stays on ${HELD_PLAYWRIGHT_MINOR}.**`));
+  if (!held) {
+    assert.deepEqual(ignored, [], "AGENTS.md no longer records the Playwright hold, so drop its Dependabot ignore too");
+    return;
+  }
+  const [major, minor] = HELD_PLAYWRIGHT_MINOR.split(".").map(Number);
+  const isIgnored = (v: string) => ignored.some((r) => rangeAdmits(r, v));
+  for (const v of [`${major}.${minor + 1}.0`, `${major}.${minor + 1}.1`, `${major}.${minor + 1}.99`]) {
+    assert.ok(isIgnored(v), `AGENTS.md says Dependabot ignores ${major}.${minor + 1}.x, but it would propose ${v}`);
+  }
+  assert.equal(isIgnored(`${major}.${minor + 2}.0`), false, `the release expected to fix #487 (${major}.${minor + 2}.0) must still be proposed`);
+});
+
 /** engines.node read as a lower bound `>=x[.y[.z]]`, or null when it is written another way. */
 function nodeFloor(range: string): string | null {
   const m = /^>=\s*(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(range.trim());

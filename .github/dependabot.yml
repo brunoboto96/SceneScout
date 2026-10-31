@@ -32,7 +32,8 @@ updates:
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
       # Playwright 1.64 hangs a click whose navigation is answered with 204 No
-      # Content (#487). Remove this once a release fixes it.
+      # Content (#487), 1.64.1 included; the upstream fix is expected in 1.65.
+      # Remove this once a release fixes it.
       - dependency-name: "playwright"
         versions: [">=1.64.0 <1.65.0"]
 
