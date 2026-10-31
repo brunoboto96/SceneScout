@@ -39,9 +39,9 @@ This run was given 1 ticket with 5 acceptance criteria: 1 passed, 3 failed and 1
 
 | | Acceptance criterion | Result |
 |---|---|---|
-| AC1 | Given I am on the orders page, when I choose Archived in the status filter, then the archived orders are listed | Failed: "Filtering orders by Archived fails, and the page shows an empty table instead of an error" (problem 1 below) |
-| AC2 | Export CSV on the reports page downloads the report as a file | Failed: "Export CSV throws and nothing is downloaded" (problem 2 below) |
-| AC3 | A clerk cannot approve an order | Failed: "A clerk can approve an order by calling the endpoint the page hides from them" (problem 5 below) |
+| AC1 | Given I am on the orders page, when I choose Archived in the status filter, then the archived orders are listed | Failed: "Filtering orders by Archived fails, and the page shows an empty table instead of an error" \(problem 1 below\) |
+| AC2 | Export CSV on the reports page downloads the report as a file | Failed: "Export CSV throws and nothing is downloaded" \(problem 2 below\) |
+| AC3 | A clerk cannot approve an order | Failed: "A clerk can approve an order by calling the endpoint the page hides from them" \(problem 5 below\) |
 | AC4 | A manager can approve an order from the approvals queue | Not tested: the account the run used could not reach this part of the site |
 | AC5 | The order page shows each order's notes | Passed |
 
@@ -55,7 +55,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/orders.html
+1. Go to http\://127.0.0.1:4173/orders.html
 2. Choose "archived" in the "Status" list
 
 **What was expected:** The action completes, or the page says clearly why it could not.
@@ -79,7 +79,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/reports.html
+1. Go to http\://127.0.0.1:4173/reports.html
 2. Click the "Export CSV" button
 
 **What was expected:** The page keeps working while it is used.
@@ -103,7 +103,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/
+1. Go to http\://127.0.0.1:4173/
 2. Click the "New order" link
 3. Click the "Create order" button
 4. Type "Alder &amp; Pine Outfitters" into the "Customer" field
@@ -130,7 +130,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/order.html?id=1042
+1. Go to http\://127.0.0.1:4173/order.html?id=1042
 
 **What was expected:** Everything is visible, readable and in its place.
 
@@ -153,7 +153,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/approvals.html
+1. Go to http\://127.0.0.1:4173/approvals.html
 
 **What was expected:** Each person sees and does only what their role allows.
 
@@ -176,7 +176,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/
+1. Go to http\://127.0.0.1:4173/
 
 **What was expected:** Everything is visible, readable and in its place.
 
@@ -199,7 +199,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/reports-scheduled.html
+1. Go to http\://127.0.0.1:4173/reports-scheduled.html
 
 **What was expected:** Every link and button leads somewhere useful, with a way back.
 
@@ -222,7 +222,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/
+1. Go to http\://127.0.0.1:4173/
 2. Click the "New order" link
 3. Click the "Create order" button
 
@@ -247,12 +247,12 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/inventory.html
+1. Go to http\://127.0.0.1:4173/inventory.html
 2. Click the "Quantity" button
 
 **What was expected:** The same information agrees everywhere it is shown.
 
-**What happened:** Quantity is compared as text, so the column orders by first digit. Pallet wrap (3 on hand) and Shipping labels (9) land at the bottom of an ascending sort, which is exactly where someone scanning for low stock does not look.
+**What happened:** Quantity is compared as text, so the column orders by first digit. Pallet wrap \(3 on hand\) and Shipping labels \(9\) land at the bottom of an ascending sort, which is exactly where someone scanning for low stock does not look.
 
 <details><summary>Details for developers</summary>
 
@@ -271,7 +271,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/
+1. Go to http\://127.0.0.1:4173/
 
 **What was expected:** The page loads what it needs, or says what is missing.
 
@@ -294,7 +294,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/orders-new.html
+1. Go to http\://127.0.0.1:4173/orders-new.html
 
 **What was expected:** Everything is visible, readable and in its place.
 
@@ -317,7 +317,7 @@ Open a problem for the steps to see it, what was expected and what happened.
 
 **What was done:**
 
-1. Go to http://127.0.0.1:4173/orders-new.html
+1. Go to http\://127.0.0.1:4173/orders-new.html
 
 **What was expected:** The page looks finished and consistent.
 
@@ -376,9 +376,9 @@ Read from HAR-12.md.
 
 ## Gap ledger — what was NOT tested
 
-- ⚠ 3 of 12 known route(s) visited this run but NOTHING exercised (looked at, never touched): /approvals.html, /settings.html, /signin.html
-- ⚠ 9 of 12 known route(s) visited this run and never design-audited: /orders.html, /approvals.html, /inventory.html, /customers.html, /reports.html, /audit.html, /settings.html, /signin.html …
-- ⚠ single-role run (anonymous) — permission boundaries and role capability gaps are untested
+- ⚠ 3 of 12 known route\(s\) visited this run but NOTHING exercised \(looked at, never touched\): /approvals.html, /settings.html, /signin.html
+- ⚠ 9 of 12 known route\(s\) visited this run and never design-audited: /orders.html, /approvals.html, /inventory.html, /customers.html, /reports.html, /audit.html, /settings.html, /signin.html …
+- ⚠ single-role run \(anonymous\) — permission boundaries and role capability gaps are untested
 
 ## Findings — seen this session (12)
 
@@ -393,11 +393,11 @@ Choosing Status → Archived makes the orders request fail with a 500. The table
 
 **Repro trace (last actions before finding):**
 
-1. crawl /reports-scheduled.html @ http://127.0.0.1:4173/reports-scheduled.html
-2. navigate http://127.0.0.1:4173/orders.html @ http://127.0.0.1:4173/orders.html
-3. snapshot @ http://127.0.0.1:4173/orders.html
-4. select combobox "Status" = archived @ http://127.0.0.1:4173/orders.html
-5. screenshot @ http://127.0.0.1:4173/orders.html
+1. crawl /reports-scheduled.html @ http\://127.0.0.1:4173/reports-scheduled.html
+2. navigate http\://127.0.0.1:4173/orders.html @ http\://127.0.0.1:4173/orders.html
+3. snapshot @ http\://127.0.0.1:4173/orders.html
+4. select combobox "Status" = archived @ http\://127.0.0.1:4173/orders.html
+5. screenshot @ http\://127.0.0.1:4173/orders.html
 
 ```ts
 test("regression: Filtering orders by Archived fails, and the page shows an empty table instead of an error", async ({ page }) => {
@@ -423,10 +423,10 @@ Clicking Export CSV raises an uncaught exception. No file is produced and the pa
 
 **Repro trace (last actions before finding):**
 
-1. screenshot @ http://127.0.0.1:4173/orders.html
-2. navigate http://127.0.0.1:4173/reports.html @ http://127.0.0.1:4173/reports.html
-3. snapshot @ http://127.0.0.1:4173/reports.html
-4. click button "Export CSV" @ http://127.0.0.1:4173/reports.html
+1. screenshot @ http\://127.0.0.1:4173/orders.html
+2. navigate http\://127.0.0.1:4173/reports.html @ http\://127.0.0.1:4173/reports.html
+3. snapshot @ http\://127.0.0.1:4173/reports.html
+4. click button "Export CSV" @ http\://127.0.0.1:4173/reports.html
 
 ```ts
 test("regression: Export CSV throws and nothing is downloaded", async ({ page }) => {
@@ -451,15 +451,15 @@ The submit button stays enabled while the request is in flight, and the endpoint
 
 **Repro trace (last actions before finding):**
 
-1. journey:start create an order for a new customer @ http://127.0.0.1:4173/
-2. click link "New order" @ http://127.0.0.1:4173/orders-new.html
-3. snapshot @ http://127.0.0.1:4173/orders-new.html
-4. click button "Create order" @ http://127.0.0.1:4173/orders-new.html
-5. snapshot @ http://127.0.0.1:4173/orders-new.html
-6. type textbox "Customer" ← "Alder &amp; Pine Outfitters" @ http://127.0.0.1:4173/orders-new.html
-7. snapshot @ http://127.0.0.1:4173/orders-new.html
-8. click×2 button "Create order" @ http://127.0.0.1:4173/orders-new.html
-9. screenshot @ http://127.0.0.1:4173/orders-new.html
+1. journey:start create an order for a new customer @ http\://127.0.0.1:4173/
+2. click link "New order" @ http\://127.0.0.1:4173/orders-new.html
+3. snapshot @ http\://127.0.0.1:4173/orders-new.html
+4. click button "Create order" @ http\://127.0.0.1:4173/orders-new.html
+5. snapshot @ http\://127.0.0.1:4173/orders-new.html
+6. type textbox "Customer" ← "Alder &amp; Pine Outfitters" @ http\://127.0.0.1:4173/orders-new.html
+7. snapshot @ http\://127.0.0.1:4173/orders-new.html
+8. click×2 button "Create order" @ http\://127.0.0.1:4173/orders-new.html
+9. screenshot @ http\://127.0.0.1:4173/orders-new.html
 
 ```ts
 test("regression: A double-click on Create order creates two orders", async ({ page }) => {
@@ -489,10 +489,10 @@ The save row is sticky at the bottom of the viewport, and a fixed bar added late
 
 **Repro trace (last actions before finding):**
 
-1. design-audit @ http://127.0.0.1:4173/orders-new.html
-2. navigate http://127.0.0.1:4173/order.html?id=1042 @ http://127.0.0.1:4173/order.html?id=1042
-3. snapshot @ http://127.0.0.1:4173/order.html?id=1042
-4. screenshot @ http://127.0.0.1:4173/order.html?id=1042
+1. design-audit @ http\://127.0.0.1:4173/orders-new.html
+2. navigate http\://127.0.0.1:4173/order.html?id=1042 @ http\://127.0.0.1:4173/order.html?id=1042
+3. snapshot @ http\://127.0.0.1:4173/order.html?id=1042
+4. screenshot @ http\://127.0.0.1:4173/order.html?id=1042
 
 ```ts
 test("regression: The Save notes button is covered by the bar at the bottom of the order page", async ({ page }) => {
@@ -517,9 +517,9 @@ The Approvals page shows Approve and Reject only to a manager. Reject is also re
 
 **Repro trace (last actions before finding):**
 
-1. click:refused Delete workspace @ http://127.0.0.1:4173/settings.html
-2. navigate http://127.0.0.1:4173/approvals.html @ http://127.0.0.1:4173/approvals.html
-3. snapshot @ http://127.0.0.1:4173/approvals.html
+1. click:refused Delete workspace @ http\://127.0.0.1:4173/settings.html
+2. navigate http\://127.0.0.1:4173/approvals.html @ http\://127.0.0.1:4173/approvals.html
+3. snapshot @ http\://127.0.0.1:4173/approvals.html
 
 ```ts
 test("regression: A clerk can approve an order by calling the endpoint the page hides from them", async ({ page }) => {
@@ -543,9 +543,9 @@ On the dashboard the badge overlaps most of the All orders button, hiding its la
 
 **Repro trace (last actions before finding):**
 
-1. attach @ http://127.0.0.1:4173/
-2. snapshot @ http://127.0.0.1:4173/
-3. screenshot @ http://127.0.0.1:4173/
+1. attach @ http\://127.0.0.1:4173/
+2. snapshot @ http\://127.0.0.1:4173/
+3. screenshot @ http\://127.0.0.1:4173/
 
 ```ts
 test("regression: The \"New: bulk import\" badge sits on top of the All orders button", async ({ page }) => {
@@ -569,9 +569,9 @@ The page reached from Reports → Scheduled reports has no header, no links and 
 
 **Repro trace (last actions before finding):**
 
-1. click button "Export CSV" @ http://127.0.0.1:4173/reports.html
-2. navigate http://127.0.0.1:4173/reports-scheduled.html @ http://127.0.0.1:4173/reports-scheduled.html
-3. snapshot @ http://127.0.0.1:4173/reports-scheduled.html
+1. click button "Export CSV" @ http\://127.0.0.1:4173/reports.html
+2. navigate http\://127.0.0.1:4173/reports-scheduled.html @ http\://127.0.0.1:4173/reports-scheduled.html
+3. snapshot @ http\://127.0.0.1:4173/reports-scheduled.html
 
 ```ts
 test("regression: Scheduled reports is a dead end: no navigation and no way back", async ({ page }) => {
@@ -595,10 +595,10 @@ With Customer empty, Create order sends no request, shows no validation message 
 
 **Repro trace (last actions before finding):**
 
-1. journey:start create an order for a new customer @ http://127.0.0.1:4173/
-2. click link "New order" @ http://127.0.0.1:4173/orders-new.html
-3. snapshot @ http://127.0.0.1:4173/orders-new.html
-4. click button "Create order" @ http://127.0.0.1:4173/orders-new.html
+1. journey:start create an order for a new customer @ http\://127.0.0.1:4173/
+2. click link "New order" @ http\://127.0.0.1:4173/orders-new.html
+3. snapshot @ http\://127.0.0.1:4173/orders-new.html
+4. click button "Create order" @ http\://127.0.0.1:4173/orders-new.html
 
 ```ts
 test("regression: Submitting the new-order form without a customer does nothing and says nothing", async ({ page }) => {
@@ -619,14 +619,14 @@ test("regression: Submitting the new-order form without a customer does nothing 
 - **Where:** `/inventory.html#dce38639` (http://127.0.0.1:4173/inventory.html)
 - **Seen in runs:** 1
 
-Quantity is compared as text, so the column orders by first digit. Pallet wrap (3 on hand) and Shipping labels (9) land at the bottom of an ascending sort, which is exactly where someone scanning for low stock does not look.
+Quantity is compared as text, so the column orders by first digit. Pallet wrap \(3 on hand\) and Shipping labels \(9\) land at the bottom of an ascending sort, which is exactly where someone scanning for low stock does not look.
 
 **Repro trace (last actions before finding):**
 
-1. snapshot @ http://127.0.0.1:4173/approvals.html
-2. navigate http://127.0.0.1:4173/inventory.html @ http://127.0.0.1:4173/inventory.html
-3. snapshot @ http://127.0.0.1:4173/inventory.html
-4. click button "Quantity" @ http://127.0.0.1:4173/inventory.html
+1. snapshot @ http\://127.0.0.1:4173/approvals.html
+2. navigate http\://127.0.0.1:4173/inventory.html @ http\://127.0.0.1:4173/inventory.html
+3. snapshot @ http\://127.0.0.1:4173/inventory.html
+4. click button "Quantity" @ http\://127.0.0.1:4173/inventory.html
 
 ```ts
 test("regression: Sorting inventory by quantity puts 10 before 9", async ({ page }) => {
@@ -651,9 +651,9 @@ The "This week" chart never loads. The page still works, but the largest element
 
 **Repro trace (last actions before finding):**
 
-1. attach @ http://127.0.0.1:4173/
-2. snapshot @ http://127.0.0.1:4173/
-3. screenshot @ http://127.0.0.1:4173/
+1. attach @ http\://127.0.0.1:4173/
+2. snapshot @ http\://127.0.0.1:4173/
+3. screenshot @ http\://127.0.0.1:4173/
 
 ```ts
 test("regression: The dashboard chart image is missing", async ({ page }) => {
@@ -677,18 +677,18 @@ The hint below the Customer field fails WCAG contrast by a wide margin. The same
 
 **Repro trace (last actions before finding):**
 
-1. journey:start create an order for a new customer @ http://127.0.0.1:4173/
-2. click link "New order" @ http://127.0.0.1:4173/orders-new.html
-3. snapshot @ http://127.0.0.1:4173/orders-new.html
-4. click button "Create order" @ http://127.0.0.1:4173/orders-new.html
-5. snapshot @ http://127.0.0.1:4173/orders-new.html
-6. type textbox "Customer" ← "Alder &amp; Pine Outfitters" @ http://127.0.0.1:4173/orders-new.html
-7. snapshot @ http://127.0.0.1:4173/orders-new.html
-8. click×2 button "Create order" @ http://127.0.0.1:4173/orders-new.html
-9. screenshot @ http://127.0.0.1:4173/orders-new.html
-10. journey:end create an order for a new customer @ http://127.0.0.1:4173/orders-new.html
-11. navigate http://127.0.0.1:4173/orders-new.html @ http://127.0.0.1:4173/orders-new.html
-12. design-audit @ http://127.0.0.1:4173/orders-new.html
+1. journey:start create an order for a new customer @ http\://127.0.0.1:4173/
+2. click link "New order" @ http\://127.0.0.1:4173/orders-new.html
+3. snapshot @ http\://127.0.0.1:4173/orders-new.html
+4. click button "Create order" @ http\://127.0.0.1:4173/orders-new.html
+5. snapshot @ http\://127.0.0.1:4173/orders-new.html
+6. type textbox "Customer" ← "Alder &amp; Pine Outfitters" @ http\://127.0.0.1:4173/orders-new.html
+7. snapshot @ http\://127.0.0.1:4173/orders-new.html
+8. click×2 button "Create order" @ http\://127.0.0.1:4173/orders-new.html
+9. screenshot @ http\://127.0.0.1:4173/orders-new.html
+10. journey:end create an order for a new customer @ http\://127.0.0.1:4173/orders-new.html
+11. navigate http\://127.0.0.1:4173/orders-new.html @ http\://127.0.0.1:4173/orders-new.html
+12. design-audit @ http\://127.0.0.1:4173/orders-new.html
 
 ```ts
 test("regression: Helper text under Customer is too faint to read", async ({ page }) => {
@@ -721,18 +721,18 @@ The field is announced to assistive technology without a name, and the placehold
 
 **Repro trace (last actions before finding):**
 
-1. journey:start create an order for a new customer @ http://127.0.0.1:4173/
-2. click link "New order" @ http://127.0.0.1:4173/orders-new.html
-3. snapshot @ http://127.0.0.1:4173/orders-new.html
-4. click button "Create order" @ http://127.0.0.1:4173/orders-new.html
-5. snapshot @ http://127.0.0.1:4173/orders-new.html
-6. type textbox "Customer" ← "Alder &amp; Pine Outfitters" @ http://127.0.0.1:4173/orders-new.html
-7. snapshot @ http://127.0.0.1:4173/orders-new.html
-8. click×2 button "Create order" @ http://127.0.0.1:4173/orders-new.html
-9. screenshot @ http://127.0.0.1:4173/orders-new.html
-10. journey:end create an order for a new customer @ http://127.0.0.1:4173/orders-new.html
-11. navigate http://127.0.0.1:4173/orders-new.html @ http://127.0.0.1:4173/orders-new.html
-12. design-audit @ http://127.0.0.1:4173/orders-new.html
+1. journey:start create an order for a new customer @ http\://127.0.0.1:4173/
+2. click link "New order" @ http\://127.0.0.1:4173/orders-new.html
+3. snapshot @ http\://127.0.0.1:4173/orders-new.html
+4. click button "Create order" @ http\://127.0.0.1:4173/orders-new.html
+5. snapshot @ http\://127.0.0.1:4173/orders-new.html
+6. type textbox "Customer" ← "Alder &amp; Pine Outfitters" @ http\://127.0.0.1:4173/orders-new.html
+7. snapshot @ http\://127.0.0.1:4173/orders-new.html
+8. click×2 button "Create order" @ http\://127.0.0.1:4173/orders-new.html
+9. screenshot @ http\://127.0.0.1:4173/orders-new.html
+10. journey:end create an order for a new customer @ http\://127.0.0.1:4173/orders-new.html
+11. navigate http\://127.0.0.1:4173/orders-new.html @ http\://127.0.0.1:4173/orders-new.html
+12. design-audit @ http\://127.0.0.1:4173/orders-new.html
 
 ```ts
 test("regression: The confirmation email field has no label, only a placeholder", async ({ page }) => {
