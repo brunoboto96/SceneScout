@@ -1811,7 +1811,7 @@ test("action: the repository's own lockfile pins the release this ref runs, with
     "node_modules/@modelcontextprotocol/sdk",
   ])
     assert.ok(names.includes(runtime), runtime);
-  for (const tool of ["node_modules/typescript", "node_modules/prettier", "node_modules/tsx", "node_modules/@changesets/cli"])
+  for (const tool of ["node_modules/typescript", "node_modules/typescript-api", "node_modules/prettier", "node_modules/tsx", "node_modules/@changesets/cli"])
     assert.ok(!names.includes(tool), tool);
   for (const [name, entry] of Object.entries(tree.lockfile.packages) as [string, { integrity?: string }][]) {
     if (name && name !== "node_modules/scenescout") assert.ok(entry.integrity, `${name} has an integrity hash`);

@@ -1,7 +1,7 @@
 # Version updates. Security updates are enabled separately in the repository
 # settings. The major-version ignores below may also hold back a security
 # fix that only exists in that next major, so watch Dependabot ALERTS for
-# typescript rather than relying on a pull request appearing.
+# typescript-api rather than relying on a pull request appearing.
 #
 # Cooldown (ADR 34): a release is not proposed until it is a week old, or a
 # month for a major, so a broken or compromised release is usually pulled
@@ -22,9 +22,10 @@ updates:
       minor-and-patch:
         update-types: [minor, patch]
     ignore:
-      # Pinned on purpose — see "Pinned dependencies" in AGENTS.md.
-      # TypeScript 7 has no stable JavaScript compiler API, which two test suites use.
-      - dependency-name: typescript
+      # The alias of typescript 5.x that hygiene-test and memory-test read the
+      # compiler API through; 7.x has no stable JavaScript API. See "Pinned
+      # dependencies" in AGENTS.md.
+      - dependency-name: typescript-api
         update-types: ["version-update:semver-major"]
       # Types must describe the OLDEST supported Node (engines: >=22.19.0), or
       # the compiler stops flagging APIs that do not exist there. Move this
