@@ -312,6 +312,17 @@ test("the listing redacts a query parameter named like a credential, whatever it
   assert.ok(long.length <= 301);
 });
 
+test("the listing names another site's request by origin and path, never its query", () => {
+  const origin = "http://localhost:3000";
+  assert.equal(
+    shownUrl("https://sso.example.net/authorize?state=st-91c2&RelayState=rs-77ab&code_challenge=cc-5d1e", origin),
+    "https://sso.example.net/authorize",
+    "a sign-in request's state is not a name redaction knows",
+  );
+  assert.equal(shownUrl("http://localhost:3001/api/things?page=2", origin), "http://localhost:3001/api/things", "another port is another site");
+  assert.equal(shownUrl("http://localhost:3000/api/things?page=2", origin), "/api/things?page=2", "the app's own keeps its query");
+});
+
 test("the credential replayed is the one the app last sent to its own origin, on a read as much as a write", () => {
   const remember = (url: string, headers: Record<string, string>, replay = false) => authToRemember({ url, baseUrl: BASE, headers, replay });
   // A read counts: an app that rotates its token and then only reads must not leave the replay on the old one.

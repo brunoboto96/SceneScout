@@ -20,7 +20,8 @@
  * membership with the separate team token when a project allows teams), and,
  * for the shots and the report, read the run's artifact. The gate also reads
  * the `egress` the repository's SceneScout config sets on its default branch,
- * and starts no run unless it is `all` (issue #537).
+ * and starts no run unless it is `all` (issue #537), and its `hosts`, and
+ * starts none on a preview or base URL whose host that list does not name.
  * The pure rules are exported and table-tested by qa-test.
  */
 import { randomUUID } from "node:crypto";
@@ -305,6 +306,7 @@ export function gateDecision({
   base = { source: "none", url: "" },
   checkWorkflow = "",
   egress = { ok: true, egress: "all" },
+  hosts = { ok: true, hosts: null },
   gateJob = { workflow: "", job: "" },
 }) {
   if (!command) return { run: false, reason: "not the command", reaction: null, reply: null };
@@ -343,6 +345,8 @@ export function gateDecision({
   const checked = checkPreviewUrl(preview.url);
   if (!checked.ok)
     return { run: false, reason: checked.reason, reaction: "confused", reply: `No QA run was started: ${checked.reason} (from the ${preview.source}).` };
+  const offPreview = hostsReply(hosts, checked.url, "preview URL", preview.source);
+  if (offPreview) return { run: false, reason: offPreview.reason, reaction: "confused", reply: offPreview.reply };
   const capture = command.capture;
   if (capture && !capture.what)
     return {
@@ -367,6 +371,8 @@ export function gateDecision({
     const checkedBase = checkPreviewUrl(base.url, "base URL");
     if (!checkedBase.ok)
       return { run: false, reason: checkedBase.reason, reaction: "confused", reply: `No QA run was started: ${checkedBase.reason} (from the ${base.source}).` };
+    const offBase = hostsReply(hosts, checkedBase.url, "base URL", base.source);
+    if (offBase) return { run: false, reason: offBase.reason, reaction: "confused", reply: offBase.reply };
     return { run: true, reason: "ok", reaction: "eyes", reply: null, url: checked.url, show: capture.what, base: checkedBase.url };
   }
   return { run: true, reason: "ok", reaction: "eyes", reply: null, url: checked.url, show: capture?.what ?? "", base: "" };
@@ -400,6 +406,102 @@ export function egressOf(text) {
   if (typeof raw.egress !== "string" || !EGRESS_MODES.includes(raw.egress))
     return { ok: false, error: `its "egress" must be one of ${EGRESS_MODES.map((m) => `"${m}"`).join(", ")}` };
   return { ok: true, egress: raw.egress };
+}
+
+/** The most hosts a config's `hosts` may name, as src/engine/hosts.ts takes it. */
+export const MAX_HOSTS = 50;
+
+/**
+ * A `hosts` entry parsed as src/engine/hosts.ts parses it (qa-test holds the
+ * two equal): a host, optionally with a port, or `*.` before a name of two
+ * labels or more for its subdomains. Null when it is not one.
+ * @param {string} raw
+ * @returns {{ entry: string, hostname: string, subdomains: boolean, port: number | null } | null}
+ */
+export function hostEntry(raw) {
+  const text = String(raw).trim().toLowerCase();
+  const subdomains = text.startsWith("*.");
+  let rest = subdomains ? text.slice(2) : text;
+  let port = null;
+  const colon = rest.lastIndexOf(":");
+  if (colon !== -1 && (rest.startsWith("[") ? rest.lastIndexOf("]") < colon : rest.indexOf(":") === colon)) {
+    const digits = rest.slice(colon + 1);
+    if (digits === "" || [...digits].some((c) => c < "0" || c > "9")) return null;
+    port = Number(digits);
+    if (port < 1 || port > 65535) return null;
+    rest = rest.slice(0, colon);
+  }
+  if (rest === "" || [...rest].some((c) => c.trim() === "" || "/?#@\\%".includes(c))) return null;
+  let u;
+  try {
+    u = new URL(`http://${rest}`);
+  } catch {
+    return null;
+  }
+  if (u.port !== "" || u.pathname !== "/") return null;
+  const hostname = u.hostname.endsWith(".") ? u.hostname.slice(0, -1) : u.hostname;
+  if (hostname.includes("*")) return null;
+  if (subdomains && (hostname.startsWith("[") || hostname.split(".").length < 2)) return null;
+  return { entry: `${subdomains ? "*." : ""}${hostname}${port === null ? "" : `:${port}`}`, hostname, subdomains, port };
+}
+
+/**
+ * Whether `url` is on a host the list names, as src/engine/hosts.ts matchHost decides it.
+ * @param {ReturnType<typeof hostEntry>[]} hosts
+ * @param {string} url
+ */
+export function hostAllowed(hosts, url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  const defaults = { "http:": 80, "https:": 443 };
+  if (!(u.protocol in defaults)) return false;
+  const port = u.port === "" ? defaults[u.protocol] : Number(u.port);
+  const name = u.hostname.endsWith(".") ? u.hostname.slice(0, -1) : u.hostname;
+  return hosts.some((h) => h && (h.port === null || h.port === port) && (h.subdomains ? name.endsWith(`.${h.hostname}`) : name === h.hostname));
+}
+
+/**
+ * The `hosts` a config file's text sets: null when it sets none (any host), as
+ * without a file. A list that is not one of strings, too long, or with an
+ * entry that is not a host, is an error, and no run starts on a guess. Only
+ * the file's own `hosts` is read: no preset sets it.
+ * @param {string} text
+ * @returns {{ ok: true, hosts: null | { entry: string, hostname: string, subdomains: boolean, port: number | null }[] } | { ok: false, error: string }}
+ */
+export function hostsOf(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { ok: false, error: "it is not valid JSON" };
+  }
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, error: "it is not a JSON object" };
+  if (raw.hosts === undefined) return { ok: true, hosts: null };
+  if (!Array.isArray(raw.hosts) || raw.hosts.some((e) => typeof e !== "string") || raw.hosts.length > MAX_HOSTS)
+    return { ok: false, error: `its "hosts" must be a list of at most ${MAX_HOSTS} hosts` };
+  const hosts = raw.hosts.map(hostEntry);
+  if (hosts.some((h) => h === null)) return { ok: false, error: `its "hosts" has an entry that is not a host` };
+  return { ok: true, hosts };
+}
+
+/**
+ * Why the config's `hosts` keeps a run off `url`, or null. `name` is the URL's
+ * name in the reply. Only the host is quoted, never the address.
+ * @param {{ ok: true, hosts: null | object[] } | { ok: false, error: string }} hosts
+ */
+export function hostsReply(hosts, url, name, source) {
+  const file = `this repository's SceneScout config (\`${CONFIG_PATH}\` on the default branch)`;
+  if (!hosts.ok) return { reason: "the config's hosts could not be read", reply: `No QA run was started: ${file} could not be read: ${hosts.error}.` };
+  if (hosts.hosts === null || hostAllowed(hosts.hosts, url)) return null;
+  const listed = hosts.hosts.length === 0 ? "names no host" : `names only ${hosts.hosts.map((h) => `\`${h.entry}\``).join(", ")}`;
+  return {
+    reason: `the ${name} is on a host the config's hosts does not name`,
+    reply: `No QA run was started: the ${name} (from the ${source}) is on \`${new URL(url).host}\`, and \`hosts\` in ${file} ${listed}. Whoever looks after the repository can change it.`,
+  };
 }
 
 /**
@@ -478,11 +580,13 @@ async function readEgress(call, repo) {
       if (probe?.status === 404 || permissionGap(probe)) return { ok: false, error: CONTENTS_UNREADABLE, unreadable: true };
       return { ok: false, error: probe instanceof Error ? probe.message : String(probe) };
     }
-    return { ok: true, egress: "all" };
+    return { ok: true, egress: "all", hosts: { ok: true, hosts: null } };
   }
   if (file?.type !== "file" || file?.encoding !== "base64" || typeof file?.content !== "string")
     return { ok: false, error: "GitHub did not return it as a file" };
-  return egressOf(Buffer.from(file.content, "base64").toString("utf8"));
+  const text = Buffer.from(file.content, "base64").toString("utf8");
+  const egress = egressOf(text);
+  return egress.ok ? { ...egress, hosts: hostsOf(text) } : egress;
 }
 
 /**
@@ -939,6 +1043,7 @@ export async function runGate({ env = process.env, inputs = inputsFromEnv(), fet
     base,
     checkWorkflow: inputs["check-workflow"],
     egress,
+    hosts: egress.ok && egress.hosts ? egress.hosts : undefined,
     gateJob: gateJobOf(env),
   });
   log(`${decision.run ? "Starting a QA run" : decision.check ? "Starting the project's check" : "No QA run"}: ${decision.reason}.`);

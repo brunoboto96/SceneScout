@@ -37,6 +37,9 @@ import { describePace, normalizePace } from "../engine/settle.js";
 import { formatScan, scanProject } from "../scan.js";
 import {
   fsPolicyReader,
+  hostRefusal,
+  hostsNote,
+  hostsSetting,
   policyNote,
   projectFolderRefusal,
   refusalText,
@@ -434,6 +437,9 @@ export function registerSessionTools(): void {
           // Before anything starts: the operator's config, which the project's own file may only tighten (engine/project-config.ts).
           const config = withProjectPolicy(operatorPolicy, projectPath, fsPolicyReader);
           if (!config.ok) return errorText(new Error(`scout_attach refused: the project's SceneScout config is not valid: ${config.error}`));
+          const offHost = hostRefusal(config.loaded, process.env, url, "the attach URL");
+          if (offHost) return errorText(new Error(`scout_attach ${offHost}`));
+          const hosts = hostsSetting(config.loaded.policy, process.env);
           const resolved = resolveSettings(
             config.loaded,
             process.env,
@@ -459,6 +465,7 @@ export function registerSessionTools(): void {
             ...resolved.notes,
             ...writeRulesNote(config.loaded.policy, writeRules),
             ...redactPageTextNote(config.loaded.policy),
+            ...hostsNote(hosts.ok ? hosts.setting : null),
           ]);
           readPosts = resolved.settings.readPosts;
           trustedEmbeds = resolved.settings.trustedEmbeds;
@@ -691,6 +698,11 @@ export function registerSessionTools(): void {
         const folder = await projectFolderFor(args.url, args.projectPath);
         if ("refused" in folder) return errorText(new Error(folder.refused));
         const projectDir = path.resolve(folder.dir);
+        // The sign-in window opens on the app, so the hosts list holds its address as it holds an attach's.
+        const config = withProjectPolicy(operatorPolicy, projectDir, fsPolicyReader);
+        if (!config.ok) return errorText(new Error(`scout_login refused: the project's SceneScout config is not valid: ${config.error}`));
+        const offHost = hostRefusal(config.loaded, process.env, args.url, "the sign-in URL");
+        if (offHost) return errorText(new Error(`scout_login ${offHost}`));
         const where = folder.note ? `\n\n${folder.note}` : "";
         const parsed = parseLoginArgs(
           [args.url, "--role", args.role, ...(args.browser ? ["--browser", args.browser] : []), ...(args.successUrl ? ["--success-url", args.successUrl] : [])],

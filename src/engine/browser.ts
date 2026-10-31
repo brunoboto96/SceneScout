@@ -47,6 +47,7 @@ import {
   lateSignInVerdict,
   leftSignIn,
   logAddress,
+  socketAddress,
   offOriginPlace,
   signInPlace,
   UNAUTHENTICATED_STATUSES,
@@ -89,7 +90,7 @@ import {
   describeCover,
   type CoverFacts,
 } from "./collector.js";
-import { OracleMonitor, formatViolations, httpErrorDetail, planStopsAt, requestKey, withoutFragment, type PlanViolationRule } from "./oracles.js";
+import { OracleMonitor, formatViolations, planStopsAt, requestKey, withoutFragment, type PlanViolationRule } from "./oracles.js";
 import { extractCreatedIds, isOwnedResource, normalizeId } from "./ownership.js";
 import { formatJourney, journeyTime, measureJourney } from "./journey.js";
 import {
@@ -250,7 +251,7 @@ import {
 } from "./limits.js";
 import { performScroll, probeFocusIndicators, probeOverlays, scrollContainer } from "./probes.js";
 import { bestEffort, heldActionMessage, heldRead, readWithin, ScanGate, settleWithin, SLOW_READ_MS } from "./best-effort.js";
-import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, type BlockedRequest } from "./route-guard.js";
+import { marksRouteExercised, pathnameOf, refusedPageLoad, RouteGuard, sentWriteSig, type BlockedRequest } from "./route-guard.js";
 import { boundedTeardown } from "./teardown.js";
 import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
 import { readMachineSockets } from "./tcp-table.js";
@@ -294,7 +295,7 @@ import {
 import { scanProject } from "../scan.js";
 import { refuseDestructiveGetsSetting, writeClassifierSetting, type WriteClassifier } from "./strict-writes.js";
 import { writeRulesSettings, type SessionWriteRules } from "./project-config.js";
-import type { RouteHealth } from "./check.js";
+import { ownResponseDetail, type RouteHealth } from "./check.js";
 import { botChallenge, challengeBodyMatters, startPageWarning } from "./challenge.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
 import { acceptMatches, generatedUpload, type FixtureKind } from "./fixtures.js";
@@ -1454,9 +1455,11 @@ export class BrowserEngine {
     } catch {
       /* a worker's request: no frame, so not the page's navigation */
     }
+    const elsewhere = offOriginPlace(req.url(), this.baseUrl);
     this.watchedResponses.push({
       method: req.method(),
       url: req.url(),
+      ...(elsewhere ? { elsewhere } : {}),
       status,
       resourceType: req.resourceType(),
       blockedByPolicy: this.guard.refused(req),
@@ -1953,7 +1956,7 @@ export class BrowserEngine {
     // changed server state are at least REPORTED in read-only runs.
     this.openSockets.clear();
     this.socketsWarned = false;
-    const watchSockets = (p: Page): void => void p.on("websocket", (ws) => this.openSockets.add(ws.url().slice(0, 120)));
+    const watchSockets = (p: Page): void => void p.on("websocket", (ws) => this.openSockets.add(socketAddress(ws.url(), this.baseUrl).slice(0, 120)));
     // A request whose document goes away mid-body gets no finished or failed
     // event, so a frame that commits a navigation, is removed, or closes with
     // its page drops what it left in flight (the rule is in settle.ts).
@@ -2049,7 +2052,7 @@ export class BrowserEngine {
       // tester mutated — reporting them trains the driver to ignore the notice.
       if (BENIGN_MUTATION_RE.test(req.url())) return;
       if (this.mutationRequests.length < 20) {
-        this.mutationRequests.push({ at: Date.now(), sig: `${method} ${req.url().slice(0, 120)}`, req });
+        this.mutationRequests.push({ at: Date.now(), sig: sentWriteSig(method, req.url(), this.baseUrl), req });
       }
       // Gap-ledger fact: this route's forms/actions were actually EXERCISED,
       // not just looked at — the difference between visited and tested.
@@ -6542,7 +6545,7 @@ export class BrowserEngine {
     const appOrigin = new URL(this.baseUrl).origin;
     const refusedBackground: string[] = [];
     const websockets = new Set<string>();
-    const onSocket = (ws: import("playwright").WebSocket): void => void websockets.add(ws.url().slice(0, 120));
+    const onSocket = (ws: import("playwright").WebSocket): void => void websockets.add(socketAddress(ws.url(), this.baseUrl).slice(0, 120));
     page.on("websocket", onSocket);
     /** Refused writes since the last call that a step is charged with; background ones (beacons, pings) are only listed (splitRefusals). */
     const ownRefusals = (): string[] => {
@@ -6684,7 +6687,7 @@ export class BrowserEngine {
         const resp = await this.gotoSettlingFailure(current, url, { waitUntil: "domcontentloaded", timeout: this.limits.crawlNavMs }).catch((err: unknown) => {
           // A missing file or feed the browser refused to show is the step's failure by its status, as a page's is.
           if (err instanceof AnsweredNavigationError && err.answer.status >= 400) {
-            collect(redactSecrets(httpErrorDetail("GET", withoutFragment(err.answer.url), err.answer.status)));
+            collect(redactSecrets(ownResponseDetail(err.answer.url, err.answer.status, this.baseUrl)));
           }
           return Promise.reject(explainTimeout(err, "nav", this.limits.crawlNavMs));
         });
@@ -6695,7 +6698,7 @@ export class BrowserEngine {
           failure = answeredStatus({ status, contentType: mediaTypeOf(resp?.headers()["content-type"]) });
           // The page's own status is this step's failure; the oracle's record of the same response is not a second issue.
           // The oracle stores its details redacted (redactViolation), so the comparison is redacted too.
-          collect(redactSecrets(httpErrorDetail("GET", withoutFragment(current.url()), status)));
+          collect(redactSecrets(ownResponseDetail(current.url(), status, this.baseUrl)));
         }
       } else if (step.action === "upload") {
         const loc = step.target ? BrowserEngine.locatorFor(current, parseTarget(step.target)!).first() : null;
