@@ -166,10 +166,12 @@ import {
   defaultEngine,
   focusAdvanceKey,
   REMOVE_SHARED_WORKER_SCRIPT,
+  REMOVE_UNROUTED_CONNECTIONS_SCRIPT,
   screencastSupport,
   serviceWorkerPolicy,
   sharedWorkersAllowed,
   unloadWriteInterception,
+  hostRedirectHops,
   closeWaitsForLeavingWrites,
   awaitsDroppedNavigationErrorPage,
   droppedNavigationErrorPage,
@@ -294,6 +296,7 @@ import {
 import { scanProject } from "../scan.js";
 import { refuseDestructiveGetsSetting, writeClassifierSetting, type WriteClassifier } from "./strict-writes.js";
 import { writeRulesSettings, type SessionWriteRules } from "./project-config.js";
+import { browserHostList, browserHostsNotice, HostBlockNotices, hostRedirectPlan, type BrowserHostList } from "./browser-hosts.js";
 import { ownResponseDetail, type RouteHealth } from "./check.js";
 import { botChallenge, challengeBodyMatters, startPageWarning } from "./challenge.js";
 import { analyzeDesign, DESIGN_COLLECT_SCRIPT, type DesignDefect, type DesignPayload, type FocusSample } from "./design.js";
@@ -913,6 +916,10 @@ export class BrowserEngine {
   /** The writes the operator listed; any other write is refused (write-allowlist.ts). Null: the mode alone judges writes. */
   private allowedWrites: { entries: AllowedWrite[]; andModeRules: boolean } | null = null;
   private allowedWritesNotice = "";
+  /** The hosts a page may reach besides the app's (browser-hosts.ts); every other host is refused. Null: any host. */
+  private browserHosts: BrowserHostList | null = null;
+  private browserHostsNotice = "";
+  private hostNotices = new HostBlockNotices();
   /** Human label for the auth identity driving this session: the role, the storage-state file's name, or anonymous. Set by attach. */
   role = "anonymous";
   /** How the attached session signed in: a role profile, a storage-state file, or not at all. */
@@ -1384,6 +1391,7 @@ export class BrowserEngine {
     authPosts: () => this.authPosts,
     authPostsNarrowOnly: () => this.authPostsNarrowOnly,
     allowedWrites: () => this.allowedWrites,
+    browserHosts: () => this.browserHosts,
   });
   /**
    * Every request answered since the last action, with its status. The HTTP
@@ -1820,6 +1828,12 @@ export class BrowserEngine {
             (writes.rejected.length > 0 ? ` Not a "METHOD /path" entry with a write method, so not listed: ${writes.rejected.join(", ")}.` : "") +
             (writes.overflow.length > 0 ? ` More than ${MAX_ALLOWED_WRITES} allowed writes; not listed: ${writes.overflow.join(", ")}.` : "")
         : "";
+    this.browserHosts = rules.browserHosts ? browserHostList(opts.url, rules.browserHosts) : null;
+    this.browserHostsNotice = browserHostsNotice(
+      this.browserHosts,
+      rules.from.browserHosts ?? "",
+      hostRedirectHops(opts.browser ?? defaultEngine(process.env)),
+    );
     const reads = readPostEntries(readPostsSetting(opts.readPosts, process.env[READ_POSTS_ENV]));
     this.readPosts = reads.entries;
     this.readPostNotice =
@@ -1843,6 +1857,7 @@ export class BrowserEngine {
     this.headed = opts.headed ?? false;
     this.blockedRequests = [];
     this.blockNotices.reset();
+    this.hostNotices.reset();
     this.dialogsSeen = [];
     this.watchedResponses = [];
     this.contradictionsReported = new Map();
@@ -1926,7 +1941,8 @@ export class BrowserEngine {
       if (permissions.length > 0) await this.context.grantPermissions(permissions, { origin: new URL(opts.url).origin });
       const restoreSession = sessionStorageInitScript(profile?.sessionStorage ?? []);
       if (restoreSession) await this.context.addInitScript(restoreSession);
-      if (!sharedWorkersAllowed(this.mode)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
+      if (!sharedWorkersAllowed(this.mode, this.browserHosts !== null)) await this.context.addInitScript(REMOVE_SHARED_WORKER_SCRIPT);
+      if (this.browserHosts) await this.context.addInitScript(REMOVE_UNROUTED_CONNECTIONS_SCRIPT);
       // The postMessage-token oracle: every frame's postMessage is wrapped, and a "*" call hands its longer strings here.
       await this.context.exposeBinding(POSTMESSAGE_BINDING, (source, entries: unknown) => this.noteTokenPosts(source.frame, entries));
       await this.context.addInitScript(postMessageCaptureScript());
@@ -2089,6 +2105,10 @@ export class BrowserEngine {
     // request out. SceneScout sends it with the header and hands the answer to the browser (sendWithAppHeader).
     const header = this.network.appHeader;
     const app = this.baseUrl;
+    // The browserHosts list, part 1 (browser-hosts.ts): registered first of all, so it runs last, once every handler has
+    // let a page load out. Only where the engine routes no redirect hop, so that a redirect off the list is refused.
+    if (this.browserHosts && hostRedirectHops(this.engineName) === "page-loads")
+      await context.route("**/*", (route) => this.guard.probeRedirect(route, this.limits.navMs));
     if (header)
       await context.route(
         (url) => appHeaderApplies(url.href, app),
@@ -2105,17 +2125,24 @@ export class BrowserEngine {
     }
 
     // Write policy — enforced on the wire, where the truth lives (route-guard.ts).
-    if (this.mode !== "destructive") {
-      await context.route("**/*", (route) => this.guard.handle(route));
-      // Chromium never routes a write a page sends as it is being left; it is judged at the browser level instead.
-      if (unloadWriteInterception(this.engineName) === "browser-fetch" && this.browser) {
-        try {
-          await this.guard.interceptUnseenWrites(this.browser);
-        } catch (err) {
-          // Fail closed: without it, a page being left would write past the policy.
-          await this.close();
-          throw new Error(`Could not start the write policy's browser-level interception: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
-        }
+    if (this.mode !== "destructive") await context.route("**/*", (route) => this.guard.handle(route));
+    // The browserHosts list, part 2, in every mode: registered after the write policy, so it runs before it, and a
+    // WebSocket to a host it refuses is closed before it connects.
+    if (this.browserHosts) {
+      await context.route("**/*", (route) => this.guard.handleHosts(route));
+      await context.routeWebSocket(
+        (url) => this.guard.refusedHost(url.href) !== null,
+        (ws) => this.guard.refuseSocket(ws),
+      );
+    }
+    // Chromium never routes a write a page sends as it is being left, nor a redirect's later hops; both are judged at the browser level instead.
+    if ((this.mode !== "destructive" || this.browserHosts) && unloadWriteInterception(this.engineName) === "browser-fetch" && this.browser) {
+      try {
+        await this.guard.interceptUnseenWrites(this.browser);
+      } catch (err) {
+        // Fail closed: without it, a page being left would write past the policy, and a redirect would leave the hosts list.
+        await this.close();
+        throw new Error(`Could not start the write policy's browser-level interception: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
       }
     }
 
@@ -2175,12 +2202,19 @@ export class BrowserEngine {
   /** Attach, phase 5: the first navigation, to the app's URL. Returns the warning when what answered is not the app (challenge.ts). */
   private async firstNavigation(url: string): Promise<string | null> {
     let warning: string | null;
+    const startedAt = Date.now();
     try {
       const resp = await this.loadPage(this.page!, url, { waitUntil: "domcontentloaded", timeout: this.limits.navMs });
       warning = startPageWarning(url, resp?.status() ?? null, await BrowserEngine.challengeOf(this.page!, resp));
     } catch (err) {
+      const offHost = this.guard.hostRefusedLoadSince(startedAt);
       // Don't leave a half-attached engine (leaked browser, snapshots of about:blank).
       await this.close();
+      if (offHost !== null)
+        throw new Error(
+          `Not attached: the start address leads off the app's host (${offHost}), and the browserHosts setting lets the browser reach only the app's own host and the hosts it lists, so the load was stopped before it left. ` +
+            "Attach at the address the app ends up on, or ask whoever runs SceneScout to list that host.",
+        );
       const explained = explainTimeout(err, "nav", this.limits.navMs);
       // A load that was retried and loaded before the attach failed is said here, not in a later attach's result.
       const first = explained instanceof Error ? explained.message.split("\n")[0] : String(explained);
@@ -2241,7 +2275,7 @@ export class BrowserEngine {
       `Memory: ${this.memory!.dir}.${this.memory!.loadWarning ? ` WARNING: ${this.memory!.loadWarning}` : ""}` +
       (this.memory!.prunedStates > 0 ? ` Trimmed ${this.memory!.prunedStates} old page state(s) from the history; coverage is unchanged.` : "") +
       `${this.memory!.legacyDirNote ? ` ${this.memory!.legacyDirNote}` : ""}` +
-      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice}${this.strictNotice}${this.authPostNotice}${this.allowedWritesNotice} Call scout_snapshot to see the current state.` +
+      `${this.memory!.gitIgnoreNote ? ` ${this.memory!.gitIgnoreNote}` : ""}${this.trustNotice}${this.readPostNotice}${this.strictNotice}${this.authPostNotice}${this.allowedWritesNotice}${this.browserHostsNotice} Call scout_snapshot to see the current state.` +
       profileNote +
       authWarning
     );
@@ -3639,10 +3673,16 @@ export class BrowserEngine {
   private drainBlocked(): string {
     this.lastActionBlocked = this.blockedRequests.length;
     if (this.blockedRequests.length === 0) return "";
-    const blocked = this.blockedRequests.map((e) => ({ sig: e.sig, late: e.at < this.actionStartedAt, answered: e.answered, why: e.why, rule: e.rule }));
+    const entries = this.blockedRequests;
     this.blockedRequests = [];
+    const offHost = entries.filter((e) => e.offHost).map((e) => ({ sig: e.sig, late: e.at < this.actionStartedAt }));
+    const blocked = entries
+      .filter((e) => !e.offHost)
+      .map((e) => ({ sig: e.sig, late: e.at < this.actionStartedAt, answered: e.answered, why: e.why, rule: e.rule }));
     // Named by the rule that refused each, which after a flow hands back can still be the flow's (RouteGuard rule).
-    return this.blockNotices.noticeByRule(this.writeRule.at(), blocked, this.createdResources.length);
+    return (
+      (blocked.length > 0 ? this.blockNotices.noticeByRule(this.writeRule.at(), blocked, this.createdResources.length) : "") + this.hostNotices.notice(offHost)
+    );
   }
 
   /** Once per session, in observe mode only: say that socket frames are outside the policy. */
@@ -4741,7 +4781,8 @@ export class BrowserEngine {
       outcome = await Promise.race([going.then(() => "went" as const), stayed]);
     } catch (err) {
       // The write policy refused the load itself (an address that is a destructive command, when that is turned on).
-      if (this.guard.tookRefusedLoad(url)) outcome = "refused";
+      // So did the browserHosts list, for the load or a redirect it led to.
+      if (this.guard.tookRefusedLoad(url) || this.guard.hostRefusedLoadSince(this.actionStartedAt) !== null) outcome = "refused";
       else if (!this.leaveRefused(dialogsBefore)) throw err;
       else outcome = "stayed";
     } finally {
@@ -5197,6 +5238,17 @@ export class BrowserEngine {
       return fail(err);
     }
     const setCookies = answer.headers.getSetCookie();
+    // A redirect away from the app is handed to the browser, which follows it unrouted outside Chromium: the browserHosts list is asked first.
+    const offList = this.browserHosts
+      ? hostRedirectPlan({ status: answer.status, location: answer.headers.get("location") ?? undefined, requestUrl: at, list: this.browserHosts })
+      : null;
+    if (offList?.kind === "refuse") {
+      await answer.body?.cancel().catch(() => {});
+      await this.storeAppCookies([...hopsSet, { url: at, lines: setCookies }]);
+      this.guard.noteRefusedRedirect(req, offList.url, at);
+      await route.abort("blockedbyclient").catch(() => {});
+      return;
+    }
     if (refusedHop !== null) {
       // Answered with a page that loads that hop itself: a load the route handler sees, and refuses unsent.
       this.appHeaderAnswers.set(req, { lines: [...hopsSet.flatMap((h) => h.lines), ...setCookies], handedBack: false });

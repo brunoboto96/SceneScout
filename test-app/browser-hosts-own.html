@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Browser hosts</title>
+  </head>
+  <body>
+    <!-- A page that reaches out: a script, a WebSocket, a peer connection and a link through a redirect, each from the page's own host. -->
+    <h1>Browser hosts</h1>
+    <p data-testid="script-state">script: pending</p>
+    <p data-testid="socket-state">socket: pending</p>
+    <p data-testid="peer-state">peer connections: pending</p>
+    <a data-testid="redirect-link" id="redirect-link" href="#">Leave through a redirect</a>
+    <script>
+      const other = location.origin;
+      const scriptState = document.querySelector("[data-testid=script-state]");
+      const socketState = document.querySelector("[data-testid=socket-state]");
+      const script = document.createElement("script");
+      script.src = other + "/browser-hosts.js";
+      script.onload = () => (scriptState.textContent = "script: " + (window.browserHostsScript || "ran nothing"));
+      script.onerror = () => (scriptState.textContent = "script: failed");
+      document.head.appendChild(script);
+      try {
+        const socket = new WebSocket(other.replace(/^http/, "ws") + "/browser-hosts-socket");
+        socket.onclose = (e) => (socketState.textContent = "socket: closed " + e.code);
+      } catch (e) {
+        socketState.textContent = "socket: refused to open";
+      }
+      document.querySelector("[data-testid=peer-state]").textContent =
+        "peer connections: " + (typeof RTCPeerConnection === "function" ? "available" : "unavailable");
+      document.getElementById("redirect-link").href = "/browser-hosts-redirect?to=" + encodeURIComponent(other);
+    </script>
+  </body>
+</html>

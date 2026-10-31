@@ -11,8 +11,10 @@
  * browser (policy-test).
  */
 import { randomUUID } from "node:crypto";
-import type { Browser, CDPSession, Page, Request, Response, Route } from "playwright";
-import { logAddress } from "./authloss.js";
+import type { Browser, CDPSession, Page, Request, Response, Route, WebSocketRoute } from "playwright";
+import { BROWSER_HOST_MAX_HOPS, BROWSER_HOST_REFUSAL, hostRedirectPlan, refusedBrowserHost, type BrowserHostList } from "./browser-hosts.js";
+import { abortCodeFor, redirectStandIn } from "./app-header.js";
+import { logAddress, socketAddress } from "./authloss.js";
 import { settleWithin } from "./best-effort.js";
 import { INFRASTRUCTURE_WRITE_RE } from "./claims.js";
 import {
@@ -100,6 +102,8 @@ export interface BlockedRequest {
   type?: string;
   /** The rule that refused it, which a page a flow left may hold after the session's own has loosened (RouteGuard `rule`). */
   rule?: WriteMode;
+  /** True: refused by the browserHosts list rather than the write policy (browser-hosts.ts), and reported in its own notice. */
+  offHost?: boolean;
 }
 
 /** What the guard needs from the engine that drives the session. */
@@ -150,6 +154,8 @@ export interface RouteGuardHost {
   authPostsNarrowOnly?(): boolean;
   /** The writes the operator listed (the config's allowedWrites or SCENESCOUT_ALLOWED_WRITES), or null when no list is set (write-allowlist.ts). */
   allowedWrites?(): { entries: readonly AllowedWrite[]; andModeRules: boolean } | null;
+  /** The hosts a page may reach (the config's browserHosts or SCENESCOUT_BROWSER_HOSTS), or null when any host may be reached (browser-hosts.ts). */
+  browserHosts?(): BrowserHostList | null;
 }
 
 /** What the route handler does with a write it sees, short of the ownership rule. */
@@ -321,6 +327,110 @@ export class RouteGuard {
   /** The operator's list of allowed writes as a request (its sent method, headers and body) meets it, or null when no list is set. */
   allowListFor(request: { method: string; url: string; headers?: Record<string, string>; body?: string | null }): WriteAllowList | null {
     return writeAllowListFor(this.host.allowedWrites?.() ?? null, this.host.appUrl(), request);
+  }
+
+  /** The host the browserHosts list refuses `url` for, or null when it may go (browser-hosts.ts refusedBrowserHost). */
+  refusedHost(url: string): string | null {
+    return refusedBrowserHost(this.host.browserHosts?.() ?? null, url);
+  }
+
+  /** A request the browserHosts list refused, as its notice names it: a page load by where it was going, anything else by its method. */
+  private hostSig(method: string, url: string, document: boolean): string {
+    return `${document ? "navigation to" : method} ${this.place(url)}`;
+  }
+
+  /** Report a request the browserHosts list refused, as every refusal is reported, in its own notice (BlockedRequest offHost). */
+  private noteHostRefusal(sig: string, type: string, req: Request | null, topLevel = false): void {
+    if (req) this.refusedByPolicy.add(req);
+    // Only a page's own load: a frame's refused load must not explain a navigation that failed for another reason.
+    if (topLevel) this.lastHostRefusedLoad = { at: Date.now(), sig };
+    this.host.noteBlocked({ at: Date.now(), sig, answered: false, why: BROWSER_HOST_REFUSAL, type, offHost: true });
+    this.host.logAction({ action: "browser-hosts:blocked", target: `${sig} (${BROWSER_HOST_REFUSAL})`, url: this.host.pageUrl() ?? "" });
+    this.host.notePolicyBlock();
+  }
+
+  /**
+   * The browserHosts route handler, run before the write policy's: a request to a host the list refuses is dropped
+   * before it leaves the machine, whatever the mode; anything else is handed on to the write policy.
+   */
+  handleHosts(route: Route): Promise<void> {
+    return this.judgeTracked(route, async (r) => {
+      const req = r.request();
+      if (this.refusedHost(req.url()) === null) return r.fallback().catch(() => {});
+      this.noteHostRefusal(this.hostSig(req.method(), req.url(), req.resourceType() === "document"), req.resourceType(), req, RouteGuard.topLevelLoad(req));
+      // Caught: a request the page has already cancelled rejects the abort, and an unhandled rejection ends the process.
+      return r.abort("blockedbyclient").catch(() => {});
+    });
+  }
+
+  /** A WebSocket the browserHosts list refuses (its route matches only those): closed before it connects, and reported. */
+  refuseSocket(ws: WebSocketRoute): Promise<void> {
+    this.noteHostRefusal(`WebSocket ${socketAddress(ws.url(), this.host.appUrl()).slice(0, 140)}`, "websocket", null);
+    return ws.close({ code: 1008, reason: "refused by the browserHosts setting" }).catch(() => {});
+  }
+
+  /** The last page load the browserHosts list refused, a redirect's later hop included. */
+  private lastHostRefusedLoad: { at: number; sig: string } | null = null;
+
+  /** What the browserHosts list refused of a page load since `since`, so a navigation that failed for it can say so; null when nothing was. */
+  hostRefusedLoadSince(since: number): string | null {
+    const last = this.lastHostRefusedLoad;
+    return last !== null && last.at >= since ? last.sig : null;
+  }
+
+  /** A page load's redirect to a host the browserHosts list refuses, found by a handler that sent the load itself: reported as any host refusal. */
+  noteRefusedRedirect(req: Request, to: string, from: string): void {
+    this.noteHostRefusal(`${this.hostSig("GET", to, true)} (a redirect from ${this.place(from)})`, "document", req, RouteGuard.topLevelLoad(req));
+  }
+
+  /** Whether a request is a page's own load (its top frame's navigation), not a frame's or a worker's. */
+  private static topLevelLoad(req: Request): boolean {
+    try {
+      return req.isNavigationRequest() && req.frame().parentFrame() === null;
+    } catch {
+      return false; // a service worker's request has no frame
+    }
+  }
+
+  /** Stand-in pages handed out for a redirect, by the address each loads, with how many hops of one page load led to it. */
+  private readonly standInHops = new Map<string, number>();
+
+  /**
+   * Firefox and WebKit route no redirect's later hops (browsers.ts hostRedirectHops "page-loads"). Registered so it runs
+   * after every other handler let the load out: a top-level page load is sent by SceneScout without following a
+   * redirect (one send, as the browser's own would be), and a redirect to a host the list refuses is refused and
+   * reported, while one to an allowed host is answered with a page that loads it itself, a new page load that comes back
+   * through every handler. Anything else is handed on. A send that fails aborts with the network's code.
+   */
+  async probeRedirect(route: Route, timeoutMs: number): Promise<void> {
+    const req = route.request();
+    const list = this.host.browserHosts?.() ?? null;
+    if (list === null || !RouteGuard.topLevelLoad(req) || req.method() !== "GET" || req.resourceType() !== "document") return route.fallback().catch(() => {});
+    const hops = this.standInHops.get(req.url()) ?? 0;
+    this.standInHops.delete(req.url());
+    let res: Awaited<ReturnType<Route["fetch"]>>;
+    try {
+      res = await route.fetch({ maxRedirects: 0, timeout: timeoutMs });
+    } catch (err) {
+      return route.abort(abortCodeFor(err instanceof Error ? err.message : String(err))).catch(() => {});
+    }
+    const plan = hostRedirectPlan({ status: res.status(), location: res.headers()["location"], requestUrl: req.url(), list });
+    if (plan === null) return route.fulfill({ response: res }).catch(() => {});
+    if (plan.kind === "refuse") {
+      this.noteRefusedRedirect(req, plan.url, req.url());
+      return route.abort("blockedbyclient").catch(() => {});
+    }
+    if (hops + 1 > BROWSER_HOST_MAX_HOPS) {
+      console.error(`[scenescout] browserHosts: a page load redirected more than ${BROWSER_HOST_MAX_HOPS} times, stopped`);
+      return route.abort("failed").catch(() => {});
+    }
+    // Bounded: a load reads its own entry at once, so only abandoned ones collect.
+    if (this.standInHops.size >= 50) this.standInHops.clear();
+    this.standInHops.set(plan.url, hops + 1);
+    const headers: Record<string, string> = { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" };
+    const setCookie = res.headers()["set-cookie"];
+    if (setCookie) headers["set-cookie"] = setCookie;
+    return route.fulfill({ status: 200, headers, body: redirectStandIn(plan.url) }).catch(() => {});
   }
 
   /** Whether the write policy stopped this request, at the route handler or at the browser level. */
@@ -668,6 +778,8 @@ export class RouteGuard {
     event: {
       requestId: string;
       resourceType?: string;
+      /** Set when the browser is following a redirect: the request that answered with it. */
+      redirectedRequestId?: string;
       request: { url: string; method: string; headers?: Record<string, string>; postData?: string; postDataEntries?: Array<{ bytes?: string }> };
     },
   ): Promise<void> {
@@ -692,6 +804,21 @@ export class RouteGuard {
       if (marker !== null) {
         if (marker) this.markerHeard(marker);
         return await answer(false);
+      }
+      // The browserHosts list, in every mode: this is where Chromium's redirect hops and anything the route handler never saw meet it.
+      if (this.refusedHost(url) !== null) {
+        this.unseenRefusals.note(sent, url);
+        await answer(false);
+        const type = (event.resourceType ?? "other").toLowerCase();
+        // A hop the browser followed is said to be one; the address that answered with it is not known here.
+        // The browser level cannot tell a page's load from a frame's: any document counts as the page's.
+        this.noteHostRefusal(
+          `${this.hostSig(sent, url, type === "document")}${event.redirectedRequestId ? " (a redirect)" : ""}`,
+          type,
+          null,
+          type === "document",
+        );
+        return;
       }
       // A request paused here may have been sent by a page a flow has left, however long ago: until that page's marker is
       // heard, the flow's rule still holds (rule).

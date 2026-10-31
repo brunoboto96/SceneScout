@@ -247,7 +247,7 @@ The preview commands test a deployed preview, so the pull request's code never r
 | 🟡 `safe-write` | Also `PUT`, `PATCH` and `DELETE`, but only on records this run created |
 | 🔴 `destructive` | Everything. Only when you say the data is disposable: the agent is told never to choose it, and the config file below can rule it out |
 
-A team can commit `.scenescout/config.json` to cap what any agent may choose, for example `{"preset": "strict"}` to keep every run in `observe` ([the config file](docs/guide/Configuration-reference.md#the-config-file)).
+A team can commit `.scenescout/config.json` to cap what any agent may choose, for example `{"preset": "strict"}` to keep every run in `observe` and the browser on the app's own host ([the config file](docs/guide/Configuration-reference.md#the-config-file)).
 
 SceneScout sends no telemetry. Every path by which data leaves the machine (the agent's model, `scenescout ci`, export, `/scenescout qa`, CI artifacts, downloads), what each carries and how to turn it off is in [What leaves the machine](docs/guide/What-leaves-the-machine.md). `{"egress": "none"}` in the config file makes SceneScout refuse every one it sends itself; it cannot stop your coding agent from sending what it reads to its own model. `{"redactPageText": "pii"}` masks email addresses, phone numbers and card numbers in what the tools return to the agent, at the cost of hiding bugs that are about that content.
 

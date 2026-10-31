@@ -55,6 +55,16 @@ import {
 } from "../src/engine/project-config.ts";
 import { HOSTS_ENV, hostEntries, hostKey, hostsFromEnv, matchHost, MAX_HOSTS } from "../src/engine/hosts.ts";
 import {
+  appHostPatterns,
+  BROWSER_HOST_MAX_HOPS,
+  BROWSER_HOSTS_ENV,
+  browserHostList,
+  browserHostsNotice,
+  HostBlockNotices,
+  hostRedirectPlan,
+  refusedBrowserHost,
+} from "../src/engine/browser-hosts.ts";
+import {
   allowsWrite,
   answersWithRefusal,
   AUTH_FLOW_RE,
@@ -2459,6 +2469,8 @@ function guardRig(
     /** The host's foreign-frame answer as a function of the rule it is asked under (a sign-in page lets one out in read-only, never in observe); else `foreign`. */
     foreignUnder?: (rule: (typeof WRITE_MODES)[number]) => string | null;
     escape?: boolean;
+    /** The operator's browserHosts list (browser-hosts.ts); absent: any host. */
+    browserHosts?: string[];
   } = {},
 ) {
   const calls: GuardCall[] = [];
@@ -2499,12 +2511,20 @@ function guardRig(
     authPostsNarrowOnly: () => opts.narrowOnly === true,
     allowedWrites: () =>
       opts.allowedWrites ? { entries: allowedWriteEntries(opts.allowedWrites).entries, andModeRules: opts.allowedAndModeRules === true } : null,
+    browserHosts: () => (opts.browserHosts ? browserHostList("https://app.example.com", opts.browserHosts) : null),
   };
   const guard = new RouteGuard(host, opts.leftPageRuleCapMs);
   const send = (
     method: string,
     path: string,
-    { type = "xhr", body = null as string | null, created = undefined as string | undefined, answerAfterMs = 0, headers = {} as Record<string, string> } = {},
+    {
+      type = "xhr",
+      body = null as string | null,
+      created = undefined as string | undefined,
+      answerAfterMs = 0,
+      headers = {} as Record<string, string>,
+      via = "handle" as "handle" | "hosts",
+    } = {},
   ) => {
     const url = /^https?:/.test(path) ? path : `https://app.example.com${path}`;
     const request = {
@@ -2531,7 +2551,7 @@ function guardRig(
         throw new Error("not fetched in this rig");
       },
     };
-    const done = guard.handle(route as unknown as Route).then(() => outcome);
+    const done = (via === "hosts" ? guard.handleHosts(route as unknown as Route) : guard.handle(route as unknown as Route)).then(() => outcome);
     return { request: request as unknown as Request, done };
   };
   return { calls, logged, guard, send, blocked, sentWrites };
@@ -3653,6 +3673,7 @@ test("config: the strict preset expands to every lock, and a key beside it repla
     evidence: "file",
     uploads: "fixtures",
     refuseDestructiveGets: true,
+    browserHosts: [],
   });
   const loosened = parsed('{"preset": "strict", "maxMode": "read-only", "readPosts": ["POST /api/search"]}');
   assert.equal(loosened.maxMode, "read-only");
@@ -4133,7 +4154,15 @@ test("write rules: the file and the environment each turn the strict classifier 
   const on = { SCENESCOUT_STRICT_WRITES: "1", SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "1" };
   // Nothing set: today's defaults.
   const none = writeRulesSettings({}, {}, false);
-  assert.deepEqual(none, { writeClassifier: "standard", refuseDestructiveGets: false, authPosts: null, allowedWrites: null, notes: [], from: {} });
+  assert.deepEqual(none, {
+    writeClassifier: "standard",
+    refuseDestructiveGets: false,
+    authPosts: null,
+    allowedWrites: null,
+    browserHosts: null,
+    notes: [],
+    from: {},
+  });
   // The file stricter than the environment: on, with the environment unset or off.
   for (const env of [{}, { SCENESCOUT_STRICT_WRITES: "0", SCENESCOUT_REFUSE_DESTRUCTIVE_GETS: "off" }]) {
     const r = writeRulesSettings({ writeClassifier: "strict", refuseDestructiveGets: true }, env, false);
@@ -4152,6 +4181,7 @@ test("write rules: the file and the environment each turn the strict classifier 
     refuseDestructiveGets: true,
     authPosts: null,
     allowedWrites: null,
+    browserHosts: null,
     notes: [],
     from: { writeClassifier: "SCENESCOUT_STRICT_WRITES", refuseDestructiveGets: "SCENESCOUT_REFUSE_DESTRUCTIVE_GETS" },
   });
@@ -6182,4 +6212,349 @@ test("hosts and projectsRoot: the CLI's login, first look and check stop before 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---- browserHosts: the hosts a page may reach (browser-hosts.ts, ADR 35) ----
+
+test("browserHosts: the app's own host and the listed hosts may be reached, every other host is refused, by host and port", () => {
+  const app = browserHostList("https://app.example.com/start", ["cdn.example.net", "*.assets.example.org", "localhost:8080"]);
+  const cases: Array<[string, string | null, string]> = [
+    ["https://app.example.com/api/things?x=1", null, "the app's own host"],
+    ["https://APP.example.com./x", null, "the same host in another spelling"],
+    ["wss://app.example.com/live", null, "a WebSocket to the app's host"],
+    ["https://cdn.example.net/lib.js", null, "a listed host"],
+    ["https://img.assets.example.org/a.png", null, "a subdomain under a listed wildcard"],
+    ["http://localhost:8080/api", null, "a listed host on its listed port"],
+    ["https://assets.example.org/a.png", "assets.example.org", "a wildcard does not stand for the name itself"],
+    ["http://localhost:8081/api", "localhost:8081", "another port of a listed host"],
+    ["https://app.example.com:8443/x", "app.example.com:8443", "another port of the app's own host is another service"],
+    ["http://app.example.com/x", "app.example.com", "the app on https does not reach plain http on its host"],
+    ["https://tracker.example.com/pixel?id=secret-token", "tracker.example.com", "another host is named by host, never with its query"],
+    ["https://api.app.example.com/x", "api.app.example.com", "a subdomain of the app's host is another host"],
+    ["https://app.example.com.evil.example/x", "app.example.com.evil.example", "a name that only begins with the app's"],
+    ["https://app.example.com@evil.example/x", "evil.example", "a user name that spells the app's host"],
+    ["wss://live.example.net/socket", "live.example.net", "a WebSocket to another host"],
+    ["ftp://app.example.com/x", "a ftp: address", "a scheme that is not the web's"],
+    ["not a url", "an address that is not a URL", "an address that does not parse"],
+    ["data:text/plain,hi", null, "data: loads nothing from the network"],
+    ["blob:https://app.example.com/1f2e", null, "nor does blob:"],
+    ["about:blank", null, "nor about:"],
+  ];
+  for (const [url, want, why] of cases) assert.equal(refusedBrowserHost(app, url), want, why);
+  assert.equal(refusedBrowserHost(null, "https://tracker.example.com/pixel"), null, "no list: every host");
+  // An app on plain http's default port reaches its own name on https too, as it commonly moves there; on another port it does not.
+  const plain = browserHostList("http://shop.example.com", []);
+  assert.equal(refusedBrowserHost(plain, "https://shop.example.com/cart"), null);
+  assert.equal(refusedBrowserHost(plain, "ws://shop.example.com/live"), null);
+  assert.equal(refusedBrowserHost(browserHostList("http://127.0.0.1:3000", []), "https://127.0.0.1/x"), "127.0.0.1");
+  assert.deepEqual(
+    appHostPatterns("http://shop.example.com/x").map((p) => `${p.hostname}:${p.port}`),
+    ["shop.example.com:80", "shop.example.com:443"],
+  );
+  assert.deepEqual(
+    appHostPatterns("https://shop.example.com/x").map((p) => `${p.hostname}:${p.port}`),
+    ["shop.example.com:443"],
+  );
+});
+
+test("browserHosts: a probed page load's redirect is refused off the list, answered with a stand-in on it, and anything else is not a redirect", () => {
+  const list = browserHostList("https://app.example.com", ["sso.example.net"]);
+  const from = "https://app.example.com/start";
+  assert.equal(hostRedirectPlan({ status: 200, location: undefined, requestUrl: from, list }), null);
+  assert.equal(hostRedirectPlan({ status: 302, location: undefined, requestUrl: from, list }), null, "a 3xx with no Location goes nowhere");
+  assert.deepEqual(hostRedirectPlan({ status: 302, location: "/home", requestUrl: from, list }), { kind: "stand-in", url: "https://app.example.com/home" });
+  assert.deepEqual(hostRedirectPlan({ status: 303, location: "https://sso.example.net/login", requestUrl: from, list }), {
+    kind: "stand-in",
+    url: "https://sso.example.net/login",
+  });
+  assert.deepEqual(hostRedirectPlan({ status: 301, location: "https://elsewhere.example/landing?t=1", requestUrl: from, list }), {
+    kind: "refuse",
+    host: "elsewhere.example",
+    url: "https://elsewhere.example/landing?t=1",
+  });
+  assert.equal(hostRedirectPlan({ status: 302, location: "http://[bad", requestUrl: from, list })?.kind, "refuse", "a Location that does not parse");
+});
+
+test("browserHosts: the config key is a list of hosts, the strict preset sets the app's host alone, and a project's file only narrows it", () => {
+  const ok = parsePolicy('{"browserHosts":["CDN.example.net","*.assets.example.org","localhost:8080"]}', "/op/config.json");
+  assert.ok(ok.ok);
+  assert.deepEqual(ok.policy.browserHosts, ["cdn.example.net", "*.assets.example.org", "localhost:8080"]);
+  const bad = parsePolicy('{"browserHosts":["https://user:pw@cdn.example.net/x"]}', "/op/config.json");
+  assert.ok(!bad.ok);
+  assert.match(bad.error, /"browserHosts" has entries that are not valid/);
+  assert.doesNotMatch(bad.error, /pw@/, "a pasted address's password is not repeated");
+  assert.ok(!parsePolicy('{"browserHosts":"cdn.example.net"}', "/op/config.json").ok, "a string is not a list");
+  assert.ok(CONFIG_KEYS.includes("browserHosts"));
+  assert.deepEqual(PRESET_POLICY.strict.browserHosts, []);
+  const strict = parsePolicy('{"preset":"strict"}', "/op/config.json");
+  assert.ok(strict.ok);
+  assert.deepEqual(strict.policy.browserHosts, []);
+  const named = parsePolicy('{"preset":"strict","browserHosts":["cdn.example.net"]}', "/op/config.json");
+  assert.ok(named.ok);
+  assert.deepEqual(named.policy.browserHosts, ["cdn.example.net"], "a key beside the preset replaces the preset's value");
+  // The project's file: it may drop an entry, never add one, and with no operator list its own list holds.
+  assert.deepEqual(
+    tightenPolicy({ browserHosts: ["cdn.example.net", "fonts.example.net"] }, { browserHosts: ["fonts.example.net", "evil.example"] }).browserHosts,
+    ["fonts.example.net"],
+  );
+  assert.deepEqual(tightenPolicy({}, { browserHosts: ["fonts.example.net"] }).browserHosts, ["fonts.example.net"]);
+  assert.deepEqual(tightenPolicy({ browserHosts: [] }, {}).browserHosts, []);
+  assert.equal(tightenPolicy({}, {}).browserHosts, undefined);
+});
+
+test("browserHosts: the file's list, narrowed by SCENESCOUT_BROWSER_HOSTS, or the variable's alone; a bad entry stops the start", () => {
+  assert.equal(writeRulesSettings({}, {}, false).browserHosts, null, "neither: any host");
+  const file = { browserHosts: ["cdn.example.net", "fonts.example.net"] };
+  const fromFile = writeRulesSettings(file, {}, false);
+  assert.deepEqual(fromFile.browserHosts, ["cdn.example.net", "fonts.example.net"]);
+  assert.equal(fromFile.from.browserHosts, "the SceneScout config");
+  const narrowed = writeRulesSettings(file, { [BROWSER_HOSTS_ENV]: "fonts.example.net, evil.example" }, false);
+  assert.deepEqual(narrowed.browserHosts, ["fonts.example.net"], "the variable may only narrow the file's list");
+  assert.ok(
+    narrowed.notes.some((n) => n.includes('"evil.example"')),
+    narrowed.notes.join("\n"),
+  );
+  assert.equal(narrowed.from.browserHosts, `the SceneScout config, narrowed by ${BROWSER_HOSTS_ENV}`);
+  const alone = writeRulesSettings({}, { [BROWSER_HOSTS_ENV]: "CDN.example.net" }, false);
+  assert.deepEqual(alone.browserHosts, ["cdn.example.net"]);
+  assert.equal(alone.from.browserHosts, BROWSER_HOSTS_ENV);
+  assert.throws(
+    () => writeRulesSettings({}, { [BROWSER_HOSTS_ENV]: "https://u:secret@cdn.example.net/x" }, false),
+    (err: Error) => {
+      assert.match(err.message, new RegExp(`${BROWSER_HOSTS_ENV} has entries that are not hosts`));
+      assert.doesNotMatch(err.message, /secret/);
+      return true;
+    },
+  );
+  // The Config line names it; with the list empty, it says the app's host alone.
+  assert.ok(
+    writeRulesNote({ browserHosts: [] }, writeRulesSettings({ browserHosts: [] }, {}, false)).includes(
+      "browserHosts: the page may reach only the app's own host; every other host is refused",
+    ),
+  );
+  // The attach's own line.
+  assert.equal(browserHostsNotice(null, "x", "browser-level"), "");
+  const noticeList = browserHostList("https://app.example.com", ["cdn.example.net"]);
+  assert.match(
+    browserHostsNotice(noticeList, "the SceneScout config", "browser-level"),
+    /only the app's own host and cdn\.example\.net; .*a redirect to one included, is refused/,
+  );
+  assert.match(browserHostsNotice(noticeList, "the SceneScout config", "page-loads"), /a redirect of a script's request or a frame's load is not judged/);
+});
+
+test("RouteGuard: browserHosts refuses another host's request before it leaves and reports it apart from the write policy; the app's own goes on", async () => {
+  for (const rule of ["observe", "destructive"] as const) {
+    const { calls, blocked, guard, send } = guardRig(rule, { browserHosts: [] });
+    const script = send("GET", "https://cdn.example.net/lib.js?k=secret-key", { type: "script", via: "hosts" });
+    assert.equal(await script.done, "abort blockedbyclient", `${rule}: refused in every mode`);
+    assert.equal(guard.refused(script.request), true, "the request event's report must know it was refused");
+    assert.equal(blocked[0].sig, "GET https://cdn.example.net/lib.js", "named by host and path, never its query");
+    assert.equal(blocked[0].offHost, true);
+    assert.deepEqual(calls.slice(1), ["log browser-hosts:blocked", "notePolicyBlock"]);
+    const nav = send("GET", "https://elsewhere.example/landing", { type: "document", via: "hosts" });
+    assert.equal(await nav.done, "abort blockedbyclient");
+    assert.equal(blocked[1].sig, "navigation to https://elsewhere.example/landing");
+    assert.equal(guard.hostRefusedLoadSince(0), null, "a load the rig sends from no frame is not the page's own, so it explains no navigation");
+    const own = send("GET", "/app.js", { type: "script", via: "hosts" });
+    assert.equal(await own.done, "fallback", "the app's own request is handed on to the write policy");
+  }
+  // The contrastive case: the same request, no list.
+  const { blocked, send } = guardRig("observe");
+  assert.equal(await send("GET", "https://cdn.example.net/lib.js", { type: "script", via: "hosts" }).done, "fallback");
+  assert.equal(blocked.length, 0);
+});
+
+test("RouteGuard: a WebSocket browserHosts refuses is closed with a policy code and reported", async () => {
+  const { blocked, guard } = guardRig("observe", { browserHosts: [] });
+  const closed: Array<{ code?: number; reason?: string }> = [];
+  await guard.refuseSocket({
+    url: () => "wss://live.example.net/socket?token=t",
+    close: async (o: { code?: number; reason?: string }) => void closed.push(o),
+  } as never);
+  assert.deepEqual(closed, [{ code: 1008, reason: "refused by the browserHosts setting" }]);
+  assert.equal(blocked[0].sig, "WebSocket wss://live.example.net/socket");
+  assert.equal(blocked[0].offHost, true);
+  assert.equal(guard.refusedHost("wss://live.example.net/socket"), "live.example.net");
+  assert.equal(guard.refusedHost("wss://app.example.com/socket"), null);
+});
+
+/** A top-level page load as probeRedirect sees it, answered by `answer` when SceneScout sends it. */
+function probeRoute(url: string, answer: { status: number; headers: Record<string, string> } | Error, opts: { method?: string; topLevel?: boolean } = {}) {
+  let outcome = "unanswered";
+  let body = "";
+  let fetched = 0;
+  const request = {
+    url: () => url,
+    method: () => opts.method ?? "GET",
+    resourceType: () => "document",
+    isNavigationRequest: () => true,
+    frame: () => ({ parentFrame: () => (opts.topLevel === false ? {} : null) }),
+  };
+  const route = {
+    request: () => request,
+    fallback: async () => void (outcome = "fallback"),
+    abort: async (code: string) => void (outcome = `abort ${code}`),
+    fulfill: async (r: { status?: number; body?: string; response?: unknown; headers?: Record<string, string> }) => {
+      outcome = r.response ? "fulfill response" : `fulfill ${r.status}`;
+      body = r.body ?? "";
+    },
+    fetch: async () => {
+      fetched += 1;
+      if (answer instanceof Error) throw answer;
+      return { status: () => answer.status, headers: () => answer.headers };
+    },
+  };
+  return { route: route as unknown as Route, request: request as unknown as Request, outcome: () => outcome, body: () => body, fetched: () => fetched };
+}
+
+test("RouteGuard: browserHosts on an engine that routes no redirect hop: a page load's redirect off the list is refused, one on it is a stand-in, sent once", async () => {
+  const { blocked, guard } = guardRig("observe", { browserHosts: ["sso.example.net"] });
+  const off = probeRoute("https://app.example.com/start", { status: 302, headers: { location: "https://elsewhere.example/landing?t=1" } });
+  await guard.probeRedirect(off.route, 1000);
+  assert.equal(off.outcome(), "abort blockedbyclient");
+  assert.equal(off.fetched(), 1);
+  assert.equal(blocked[0].sig, "navigation to https://elsewhere.example/landing (a redirect from https://app.example.com/start)");
+  assert.equal(guard.refused(off.request), true);
+  assert.equal(
+    guard.hostRefusedLoadSince(0),
+    "navigation to https://elsewhere.example/landing (a redirect from https://app.example.com/start)",
+    "the page's own load explains its navigation",
+  );
+  // The contrastive case: the same redirect to a listed host is answered with a page that loads it itself.
+  const on = probeRoute("https://app.example.com/start", { status: 302, headers: { location: "https://sso.example.net/login", "set-cookie": "s=1" } });
+  await guard.probeRedirect(on.route, 1000);
+  assert.equal(on.outcome(), "fulfill 200");
+  assert.match(on.body(), /location\.replace\("https:\/\/sso\.example\.net\/login"\)/);
+  assert.equal(blocked.length, 1);
+  // Not a redirect: the answer SceneScout got is the one the browser is handed, so the page is asked once.
+  const page = probeRoute("https://app.example.com/home", { status: 200, headers: { "content-type": "text/html" } });
+  await guard.probeRedirect(page.route, 1000);
+  assert.equal(page.outcome(), "fulfill response");
+  assert.equal(page.fetched(), 1);
+  // A frame's load, a POST, and a session with no list are handed on unsent.
+  for (const r of [
+    probeRoute("https://app.example.com/frame", { status: 302, headers: { location: "https://elsewhere.example/" } }, { topLevel: false }),
+    probeRoute("https://app.example.com/form", { status: 303, headers: { location: "https://elsewhere.example/" } }, { method: "POST" }),
+  ]) {
+    await guard.probeRedirect(r.route, 1000);
+    assert.equal(r.outcome(), "fallback");
+    assert.equal(r.fetched(), 0);
+  }
+  const free = guardRig("observe");
+  const unlisted = probeRoute("https://app.example.com/start", { status: 302, headers: { location: "https://elsewhere.example/" } });
+  await free.guard.probeRedirect(unlisted.route, 1000);
+  assert.equal(unlisted.outcome(), "fallback");
+  // A send that fails aborts with the network's code rather than sending the load again.
+  const down = probeRoute("https://app.example.com/start", new Error("connect ECONNREFUSED 127.0.0.1:9"));
+  await guard.probeRedirect(down.route, 1000);
+  assert.equal(down.outcome(), "abort connectionrefused");
+});
+
+test("RouteGuard: browserHosts stops a redirect loop through stand-in pages as a browser stops one", async () => {
+  const { guard } = guardRig("observe", { browserHosts: [] });
+  let last = "";
+  for (let i = 0; i <= BROWSER_HOST_MAX_HOPS; i++) {
+    const at = `https://app.example.com/loop/${i}`;
+    const r = probeRoute(at, { status: 302, headers: { location: `/loop/${i + 1}` } });
+    await guard.probeRedirect(r.route, 1000);
+    last = r.outcome();
+    if (i < BROWSER_HOST_MAX_HOPS) assert.equal(last, "fulfill 200", `hop ${i}`);
+  }
+  assert.equal(last, "abort failed");
+});
+
+test("RouteGuard: at the browser level, browserHosts refuses a redirect's hop to another host in every mode, and lets the app's own go on", async () => {
+  for (const rule of ["read-only", "destructive"] as const) {
+    const { blocked, guard } = guardRig(rule, { browserHosts: [] });
+    const sent: string[] = [];
+    const unseen = (url: string, redirected: boolean) =>
+      (guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+        { send: async (method: string) => void sent.push(method) },
+        { requestId: "1", resourceType: "Document", ...(redirected ? { redirectedRequestId: "0" } : {}), request: { url, method: "GET", headers: {} } },
+      );
+    await unseen("https://elsewhere.example/landing?t=1", true);
+    assert.deepEqual(sent, ["Fetch.failRequest"], rule);
+    assert.equal(blocked[0].sig, "navigation to https://elsewhere.example/landing (a redirect)");
+    assert.equal(blocked[0].offHost, true);
+    assert.equal(guard.hostRefusedLoadSince(0), "navigation to https://elsewhere.example/landing (a redirect)");
+    await unseen("https://app.example.com/home", true);
+    assert.deepEqual(sent, ["Fetch.failRequest", "Fetch.continueRequest"], rule);
+  }
+});
+
+test("browserHosts: the notice says it is the operator's setting, in full once, then briefly, apart from the write policy's", () => {
+  const notices = new HostBlockNotices();
+  const first = notices.notice([
+    { sig: "GET https://cdn.example.net/lib.js", late: false },
+    { sig: "GET https://cdn.example.net/lib.js", late: false },
+  ]);
+  assert.match(first, /^\n🛡 BROWSER-HOSTS blocked: GET https:\/\/cdn\.example\.net\/lib\.js ×2\. /);
+  assert.match(first, /NOT an app bug/);
+  assert.doesNotMatch(first, /WRITE-POLICY/);
+  const again = notices.notice([{ sig: "GET https://cdn.example.net/lib.js", late: true }]);
+  assert.equal(again, "\n🛡 BROWSER-HOSTS blocked: 1 known request refused as before. The operator's browserHosts setting, not an app bug.");
+  const more = notices.notice([{ sig: "WebSocket wss://live.example.net/socket", late: false }]);
+  assert.match(more, /explained earlier in this session/);
+  assert.equal(notices.notice([]), "");
+  notices.reset();
+  assert.match(notices.notice([{ sig: "GET https://cdn.example.net/lib.js", late: false }]), /NOT an app bug/, "a new attach explains again");
+});
+
+test("policy explain: browserHosts refuses another host's request in every mode, as the route handler does, and names the setting", async () => {
+  const rules = writeRulesSettings({ browserHosts: ["cdn.example.net"] }, {}, false);
+  const settings = policySettingsFrom({}, rules);
+  const off = explainRequest({ method: "GET", url: "https://tracker.example.com/pixel", appUrl: "https://app.example.com", settings });
+  assert.deepEqual(
+    off.verdicts.map((v) => v.outcome),
+    WRITE_MODES.map(() => "refused"),
+  );
+  assert.equal(off.verdicts[0].source, "browser-hosts.ts refusedBrowserHost");
+  assert.match(off.verdicts[0].rule, /tracker\.example\.com is not the app's host and not on the browserHosts list \(the SceneScout config\)/);
+  const listed = explainRequest({ method: "GET", url: "https://cdn.example.net/lib.js", appUrl: "https://app.example.com", settings });
+  assert.deepEqual(
+    listed.verdicts.map((v) => v.outcome),
+    WRITE_MODES.map(() => "allowed"),
+  );
+  // Held equal to the route handler's on the same requests.
+  for (const [url, want] of [
+    ["https://tracker.example.com/pixel", "abort blockedbyclient"],
+    ["https://cdn.example.net/lib.js", "fallback"],
+  ] as const) {
+    const { send } = guardRig("observe", { browserHosts: ["cdn.example.net"] });
+    assert.equal(await send("GET", url, { type: "image", via: "hosts" }).done, want, url);
+  }
+  const lines = formatExplanation("https://tracker.example.com/pixel", off, settings);
+  assert.ok(
+    lines.some((l) => l.includes("browserHosts (1, the SceneScout config)")),
+    lines.join("\n"),
+  );
+  // From the environment alone, as a server started with the variable reads it.
+  const envOnly = policySettingsFrom({ [BROWSER_HOSTS_ENV]: "cdn.example.net" });
+  assert.deepEqual(envOnly.browserHosts, ["cdn.example.net"]);
+  assert.throws(() => policySettingsFrom({ [BROWSER_HOSTS_ENV]: "https://x/y" }), /not hosts/);
+});
+
+test("config explain: browserHosts is a row naming the app's host and the list, and where it came from", () => {
+  const none = explainConfig({ loaded: NO_POLICY, env: {} });
+  assert.deepEqual(rowOf(none, "browserHosts"), { key: "browserHosts", value: "any host", source: "default" });
+  const operator = layer("operator file", "/op/config.json", '{"preset":"strict"}');
+  const strict = explainConfig({ operator, loaded: { policy: operator.policy, sources: ["/op/config.json"] }, env: {} });
+  assert.deepEqual(rowOf(strict, "browserHosts"), { key: "browserHosts", value: "the app's host only", source: 'operator file\'s preset "strict"' });
+  const listed = layer("operator file", "/op/config.json", '{"browserHosts":["cdn.example.net","fonts.example.net"]}');
+  const narrowed = explainConfig({
+    operator: listed,
+    loaded: { policy: listed.policy, sources: ["/op/config.json"] },
+    env: { [BROWSER_HOSTS_ENV]: "fonts.example.net" },
+  });
+  assert.deepEqual(rowOf(narrowed, "browserHosts"), {
+    key: "browserHosts",
+    value: "the app's host and fonts.example.net",
+    source: `operator file, narrowed by ${BROWSER_HOSTS_ENV}`,
+  });
+  const envAlone = explainConfig({ loaded: NO_POLICY, env: { [BROWSER_HOSTS_ENV]: "cdn.example.net" } });
+  assert.deepEqual(rowOf(envAlone, "browserHosts"), {
+    key: "browserHosts",
+    value: "the app's host and cdn.example.net",
+    source: `environment ${BROWSER_HOSTS_ENV}`,
+  });
 });
