@@ -733,6 +733,60 @@ test("a navigation answered with a page is on its way until its frame commits it
   t.answered("empty", false);
   t.ended("empty", false, 20_040);
   assert.equal(t.committing("main", 20_041), false, "a 204 has nothing to commit");
+  t.started("never-committed", "main", true);
+  t.answered("never-committed", true);
+  t.ended("never-committed", false, 30_000);
+  assert.equal(t.committing("main", 30_000 + PAGE_COMMIT_CAP_MS - 1), true);
+  assert.equal(t.committing("main", 30_000 + PAGE_COMMIT_CAP_MS), false, "a commit that never arrives holds no longer than the cap");
+});
+
+test("the attach's sign-in verdict sees a guard that redirects during the watch when the commit lags past the grace (#726)", async () => {
+  // The smoke page that redirects 600 ms after load: the sign-in request starts 400 ms into the watch and finishes 50 ms
+  // later, and Firefox under load reported the commit 650 ms after that, after the grace and after the quiet window.
+  const stand = standInPage("http://app.test/private");
+  const t = tracker();
+  const begun = stand.clock;
+  let phase = 0;
+  stand.onTick = () => {
+    const at = stand.clock - begun;
+    if (phase === 0 && at >= 400) {
+      phase = 1;
+      t.started("to-login", "main", true, stand.clock);
+    } else if (phase === 1 && at >= 450) {
+      phase = 2;
+      t.answered("to-login", true);
+      t.ended("to-login", false, stand.clock);
+    } else if (phase === 2 && at >= 1100) {
+      phase = 3;
+      stand.href = "http://app.test/login";
+      t.navigated("main");
+    }
+  };
+  const url = await stableUrlOf(() => stand, stand.now, { navigating: () => t.navigating("main", stand.clock), quietMs: ATTACH_URL_QUIET_MS });
+  assert.equal(url, "http://app.test/login");
+});
+
+test("a navigation answered with a page stops being on its way when it fails, its frame goes or another replaces it (#726)", () => {
+  // Each of these means the commit is never coming: none may hold a wait to PAGE_COMMIT_CAP_MS.
+  const t = tracker();
+  t.started("stopped", "main", true);
+  t.answered("stopped", true);
+  t.ended("stopped", true, 1000);
+  assert.equal(t.navigating("main", 1001), false, "aborted mid-body");
+  assert.equal(t.committing("main", 1001), false);
+  t.started("detached", "child", true);
+  t.answered("detached", true);
+  t.ended("detached", false, 2000);
+  t.gone((f) => f === "child");
+  assert.equal(t.navigating("child", 2001), false, "its frame was removed");
+  assert.equal(t.committing("child", 2001), false);
+  t.started("replaced", "main", true);
+  t.answered("replaced", true);
+  t.ended("replaced", false, 3000);
+  t.started("newer", "main", true);
+  t.answered("newer", false);
+  t.ended("newer", false, 3010);
+  assert.equal(t.navigating("main", 3010 + NAVIGATION_COMMIT_GRACE_MS), false, "the newer navigation's answer is what counts");
 });
 
 test("the attach's sign-in verdict waits for a redirect to sign-in whose commit is reported late (#726)", async () => {
