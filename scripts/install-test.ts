@@ -15,7 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { asLf } from "./checkout.ts";
 import {
   CLAUDE_CODE_NOT_NEEDED,
@@ -2384,6 +2384,69 @@ test("`scenescout --help` read through a pipe arrives whole, as it does into a f
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("exitWhenDrained exits with its code only after a long stdout and stderr have reached a pipe whole (#740)", () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-drain-"));
+  try {
+    const child = path.join(dir, "child.mjs");
+    const commands = pathToFileURL(path.join(repo, "src", "commands.ts")).href;
+    fs.writeFileSync(
+      child,
+      `import { exitWhenDrained } from ${JSON.stringify(commands)};\n` +
+        `process.stdout.write("o".repeat(1 << 20));\nprocess.stderr.write("e".repeat(1 << 20));\nawait exitWhenDrained(3);\n`,
+    );
+    const piped = spawnSync(process.execPath, ["--import", "tsx", child], { encoding: "utf8", cwd: repo, maxBuffer: 1 << 24 });
+    assert.equal(piped.status, 3);
+    assert.equal(piped.stdout.length, 1 << 20);
+    assert.equal(piped.stderr.length, 1 << 20);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a command that ends with an exit code, read through a pipe, arrives whole as it does into a file (#740)", () => {
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const cli = path.join(repo, "src", "cli.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-exit-"));
+  try {
+    // `policy explain` sends nothing and prints the address it was given, so a long address is a long output.
+    const argv = ["--import", "tsx", cli, "policy", "explain", "POST", `https://app.example/api/things?q=${"a".repeat(300_000)}`];
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: dir, USERPROFILE: dir };
+    delete env.SCENESCOUT_CONFIG;
+    const target = path.join(dir, "out.txt");
+    const fd = fs.openSync(target, "w");
+    const toFile = spawnSync(process.execPath, argv, { stdio: ["ignore", fd, "pipe"], cwd: repo, env });
+    fs.closeSync(fd);
+    assert.equal(toFile.status, 0, String(toFile.stderr));
+    const whole = fs.readFileSync(target, "utf8");
+    assert.ok(whole.length > 300_000);
+    const piped = spawnSync(process.execPath, argv, { encoding: "utf8", cwd: repo, env, maxBuffer: 1 << 24 });
+    assert.equal(piped.status, 0);
+    assert.equal(piped.stdout, whole);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("src/ ends a process only through exitWhenDrained, apart from the MCP server's shutdown, which prints nothing (#740)", () => {
+  const src = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
+  const found: string[] = [];
+  for (const file of fs.readdirSync(src, { recursive: true, encoding: "utf8" })) {
+    if (!file.endsWith(".ts")) continue;
+    fs.readFileSync(path.join(src, file), "utf8")
+      .split("\n")
+      .forEach((line) => {
+        if (line.includes("process.exit(")) found.push(`${file.replaceAll("\\", "/")}: ${line.trim()}`);
+      });
+  }
+  assert.deepEqual(found.sort(), [
+    "commands.ts: process.exit(code);",
+    "mcp-server.ts: void shutdown().finally(() => process.exit(0));",
+    "mcp-server.ts: void shutdown().finally(() => process.exit(0));",
+    "mcp-server.ts: void shutdown().finally(() => process.exit(0));",
+  ]);
 });
 
 test("`--help` and `-h` print the usage and exit 0 for EVERY subcommand, and the command itself never runs", async () => {

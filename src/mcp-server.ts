@@ -50,6 +50,7 @@ import { registerStatusTools } from "./tools/status.js";
 import { registerResultTools } from "./tools/results.js";
 import { registerTicketTools } from "./tools/tickets.js";
 import { installFetchProxy } from "./engine/proxy.js";
+import { exitWhenDrained } from "./commands.js";
 
 registerGuideTools();
 registerLaneTools();
@@ -60,12 +61,17 @@ registerResultTools();
 registerTicketTools();
 registerCloseTool();
 
+/** Only stderr is drained: stdout is the MCP transport, and a client that has gone would fail the write. */
+function refuseToStart(): Promise<never> {
+  return exitWhenDrained(1, [process.stderr]);
+}
+
 async function main(): Promise<void> {
   // Configuration that can only be wrong is reported now, by the person who set it, not to an agent mid-run.
   const ticketDirs = ticketDirsFrom(process.env);
   if ("error" in ticketDirs) {
     console.error(`SceneScout MCP server not started: ${ticketDirs.error}. Fix it where the server is configured and start it again.`);
-    process.exit(1);
+    return refuseToStart();
   }
   // The dedup judge's and the ticket tools' requests go through the proxy the environment names (proxy.ts).
   try {
@@ -74,21 +80,21 @@ async function main(): Promise<void> {
     console.error(
       `SceneScout MCP server not started: ${err instanceof Error ? err.message : String(err)} Fix it where the server is configured and start it again.`,
     );
-    process.exit(1);
+    return refuseToStart();
   }
   for (const warning of ticketDirWarnings(ticketDirs.dirs)) console.error(`[scenescout] ${warning}.`);
   for (const name of ALLOW_PATH_SETTINGS) {
     const allowed = allowedPathsFrom(process.env, name);
     if ("error" in allowed) {
       console.error(`SceneScout MCP server not started: ${allowed.error}. Fix it where the server is configured and start it again.`);
-      process.exit(1);
+      return refuseToStart();
     }
   }
   // The operator's config is read from where the server was started (or SCENESCOUT_CONFIG), never from a folder an agent names.
   const config = readLaunchPolicy(process.env, process.cwd(), fsPolicyReader);
   if (!config.ok) {
     console.error(`SceneScout MCP server not started: ${config.error}. Fix it and start the server again.`);
-    process.exit(1);
+    return refuseToStart();
   }
   setOperatorPolicy(config.loaded);
   if (config.loaded.policy.requireGuidedPlan) guidedPlans.require();
@@ -138,7 +144,7 @@ process.on("SIGTERM", () => {
   void shutdown().finally(() => process.exit(0));
 });
 
-main().catch((err) => {
+main().catch(async (err: unknown) => {
   console.error("SceneScout MCP server failed:", err);
-  process.exit(1);
+  await refuseToStart();
 });
