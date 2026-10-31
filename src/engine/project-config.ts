@@ -622,14 +622,27 @@ function inside(root: string, dir: string): boolean {
  * is allowed, as without a config.
  */
 export function projectFolderRefusal(loaded: LoadedPolicy, dir: string, fsx: PolicyReader): string | null {
+  return outsideRootRefusal(loaded, dir, fsx, "projectPath", "the project folder", "a project folder");
+}
+
+/**
+ * Why an earlier run's record (scout_lane_brief's fromRun, `ci --from-run`)
+ * may not be read, or null: under projectsRoot it must lie inside it by its
+ * real path, as a project folder must.
+ */
+export function runRecordRefusal(loaded: LoadedPolicy, file: string, fsx: PolicyReader): string | null {
+  return outsideRootRefusal(loaded, file, fsx, "fromRun", "the earlier run's record", "one");
+}
+
+function outsideRootRefusal(loaded: LoadedPolicy, at: string, fsx: PolicyReader, key: Refusal["key"], what: string, instead: string): string | null {
   const root = loaded.policy.projectsRoot;
   if (!root) return null;
-  const real = realFolder(dir, fsx);
+  const real = realFolder(at, fsx);
   if (inside(realFolder(root, fsx), real)) return null;
   return refusalText(loaded, [
     {
-      key: "projectPath",
-      why: `the project folder ${path.resolve(dir)}${real === path.resolve(dir) ? "" : ` (really ${real})`} is outside the config's projectsRoot ${root}: name a project folder inside it`,
+      key,
+      why: `${what} ${path.resolve(at)}${real === path.resolve(at) ? "" : ` (really ${real})`} is outside the config's projectsRoot ${root}: name ${instead} inside it`,
     },
   ]);
 }
@@ -908,7 +921,7 @@ export interface EffectiveSettings {
 
 /** One argument the config refused, and why. */
 export interface Refusal {
-  key: keyof AskedSettings | "projectPath" | "filePath" | "egress" | "url";
+  key: keyof AskedSettings | "projectPath" | "filePath" | "egress" | "url" | "fromRun";
   why: string;
 }
 
@@ -1120,6 +1133,8 @@ export interface CommandOptions {
   dedup?: DedupMode;
   sends?: { via: EgressPath; what: string };
   agentDriven?: boolean;
+  /** `ci --from-run`: the earlier run's record it reads, held to projectsRoot. */
+  fromRun?: { path: string };
 }
 
 /**
@@ -1157,6 +1172,8 @@ export function configureCommand(
 ): { ok: true; mode: WriteMode; dedup?: DedupMode; note: string; readPostsEnv?: string; writeRules?: SessionWriteRules } | { ok: false; error: string } {
   const loaded = readCommandPolicy(env, launchDir, projectDir, fsx);
   if (!loaded.ok) return loaded;
+  const record = options.fromRun ? runRecordRefusal(loaded.loaded, options.fromRun.path, fsx) : null;
+  if (record) return { ok: false, error: forCommand(record) };
   const applied = applyToCommand(loaded.loaded, env, args, options);
   if (!applied.ok) return applied;
   const { readPosts, ...rest } = applied;
@@ -1164,10 +1181,10 @@ export function configureCommand(
 }
 
 /**
- * Why `scenescout login` may not open its window on `url`, or null: the
- * config's hosts list, read as the other commands read the config (the launch
- * file joined with the project's own). The projectsRoot fence is not applied
- * here; a config that is not valid is the error.
+ * Why `scenescout login` may not open its window on `url`, or null: its
+ * project folder outside the config's projectsRoot, or the config's hosts
+ * list, read as the other commands read the config (readCommandPolicy); a
+ * config that is not valid is the error.
  */
 export function loginHostRefusal(
   env: Record<string, string | undefined>,
@@ -1176,9 +1193,7 @@ export function loginHostRefusal(
   url: string,
   fsx: PolicyReader,
 ): string | null {
-  const launch = readLaunchPolicy(env, launchDir, fsx);
-  if (!launch.ok) return launch.error;
-  const joined = withProjectPolicy(launch.loaded, projectDir, fsx);
+  const joined = readCommandPolicy(env, launchDir, projectDir, fsx);
   if (!joined.ok) return joined.error;
   const off = hostRefusal(joined.loaded, env, url, "the sign-in URL");
   return off === null ? null : forCommand(off);

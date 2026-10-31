@@ -47,6 +47,7 @@ import {
   withProjectPolicy,
   hostRefusal,
   loginHostRefusal,
+  runRecordRefusal,
   hostsNote,
   hostsSetting,
   type LoadedPolicy,
@@ -2807,6 +2808,33 @@ test("RouteGuard: a POST carrying a method override is judged as the method it n
     const { send } = guardRig("destructive");
     assert.equal(await send("POST", "/api/things/3", { body: "{}", headers: { "x-http-method-override": "DELETE" } }).done, "fallback");
   }
+});
+
+test("RouteGuard: a write the route handler let through excuses at the browser level only a copy judged as the same method", async () => {
+  const unseen = async (rig: ReturnType<typeof guardRig>, headers: Record<string, string>) => {
+    const sent: string[] = [];
+    await (rig.guard as unknown as { judgeUnseenRequest(s: unknown, e: unknown): Promise<void> }).judgeUnseenRequest(
+      { send: async (cmd: string) => void sent.push(cmd) },
+      {
+        requestId: "1",
+        resourceType: "XHR",
+        request: { url: "https://app.example.com/api/things/3", method: "POST", headers: { Origin: "https://app.example.com", ...headers }, postData: "id=3" },
+      },
+    );
+    return sent[0];
+  };
+  // The plain POST went out through the route handler; an unrouted copy naming DELETE by an override is judged, and refused.
+  const plain = guardRig("read-only");
+  assert.equal(await plain.send("POST", "/api/things/3", { body: "id=3" }).done, "fallback");
+  assert.equal(await unseen(plain, { "X-HTTP-Method-Override": "DELETE" }), "Fetch.failRequest");
+  // The contrast: the very same request, no override, is the one the route handler let out.
+  const same = guardRig("read-only");
+  assert.equal(await same.send("POST", "/api/things/3", { body: "id=3" }).done, "fallback");
+  assert.equal(await unseen(same, {}), "Fetch.continueRequest");
+  // And a routed write carrying an override (an owned record in safe-write) excuses its own copy, judged the same way.
+  const owned = guardRig("safe-write", { owned: (p) => p === "/api/things/3" });
+  assert.equal(await owned.send("POST", "/api/things/3", { body: "id=3", headers: { "x-http-method-override": "DELETE" } }).done, "fallback");
+  assert.equal(await unseen(owned, { "X-HTTP-Method-Override": "DELETE" }), "Fetch.continueRequest");
 });
 
 test("writeMethod: a `_method` key is read as the servers that honour it normalise names", () => {
@@ -5901,7 +5929,7 @@ test("hosts: the config key is parsed into one spelling, a bad entry or too long
   assert.ok(ok.ok);
   assert.deepEqual(ok.policy.hosts, ["app.example.com", "localhost:3000"]);
   const bad = parsePolicy(JSON.stringify({ hosts: ["https://app.example.com"] }), "/c.json");
-  assert.ok(!bad.ok && bad.error.includes('"hosts"') && bad.error.includes("https://app.example.com"), JSON.stringify(bad));
+  assert.deepEqual(bad, { ok: false, error: '/c.json: "hosts" has entries that are not valid: "https://app.example.com"' });
   const long = parsePolicy(JSON.stringify({ hosts: Array.from({ length: MAX_HOSTS + 1 }, (_, i) => `h${i}.example.com`) }), "/c.json");
   assert.ok(!long.ok && long.error.includes(`at most ${MAX_HOSTS}`));
   assert.ok((CONFIG_KEYS as readonly string[]).includes("hosts"));
@@ -5936,9 +5964,13 @@ test("hosts: the environment narrows the file's list and sets one alone; an entr
   assert.ok(!bad.ok && bad.error.includes(HOSTS_ENV));
   // A pasted address with a password is refused without repeating the password, from the environment and from a file.
   const pasted = hostsSetting({}, { [HOSTS_ENV]: "https://user:hunter2pw@app.example.com" });
-  assert.ok(!pasted.ok && pasted.error.includes("https://app.example.com") && !pasted.error.includes("hunter2pw"), JSON.stringify(pasted));
+  assert.deepEqual(pasted, { ok: false, error: `${HOSTS_ENV} has entries that are not hosts: "https://app.example.com"` }, "the password is not repeated");
   const inFile = parsePolicy(JSON.stringify({ hosts: ["https://user:hunter2pw@app.example.com/x"] }), "/c.json");
-  assert.ok(!inFile.ok && inFile.error.includes("https://app.example.com/x") && !inFile.error.includes("hunter2pw"), JSON.stringify(inFile));
+  assert.deepEqual(
+    inFile,
+    { ok: false, error: '/c.json: "hosts" has entries that are not valid: "https://app.example.com/x"' },
+    "the password is not repeated",
+  );
   assert.deepEqual(hostsNote(null), []);
   assert.deepEqual(hostsNote({ entries: [], from: "x", notes: [] }), ["hosts: no host may be attached to"]);
 });
@@ -5949,7 +5981,10 @@ test("hosts: an attach URL off the list is refused with the reason and the host 
   assert.equal(hostRefusal(loaded, {}, "http://localhost:3000/", "the attach URL"), null);
   const off = hostRefusal(loaded, {}, "https://other.example.org/x?token=abc123secret", "the attach URL");
   assert.ok(off && off.startsWith("refused by the SceneScout config (/srv/.scenescout/config.json)"), off ?? "");
-  assert.ok(off.includes("other.example.org") && off.includes('"app.example.com"'), off);
+  assert.equal(
+    off,
+    'refused by the SceneScout config (/srv/.scenescout/config.json): the attach URL is on other.example.org, and the hosts list (the SceneScout config) names only "app.example.com", "localhost:3000": point it at a listed host. Whoever runs SceneScout set this in that file; only they can change it. Do not retry with a looser setting.',
+  );
   assert.ok(!off.includes("abc123secret"), off);
   // The environment narrows the file's list: a host the file lists but the environment leaves out is refused.
   assert.ok(hostRefusal(loaded, { [HOSTS_ENV]: "localhost:3000" }, "https://app.example.com/", "the attach URL"));
@@ -6016,4 +6051,60 @@ test("hosts: scenescout login reads the launch file joined with the project's ow
   assert.equal(loginHostRefusal({}, "/none", "/none", "https://anything.example.org/", disk), null, "no file: any host");
   files.set("/bad/.scenescout/config.json", JSON.stringify({ hosts: ["https://x"] }));
   assert.ok(loginHostRefusal({}, "/bad", "/none", "https://x.example.com/", disk)?.includes('"hosts"'));
+});
+
+test("projectsRoot: scenescout login's project folder and an earlier run's record are held inside it, as an attach's folder is", () => {
+  const files = new Map([["/srv/.scenescout/config.json", JSON.stringify({ projectsRoot: "/work" })]]);
+  const disk = { exists: (f: string) => files.has(f) || f === "/work", read: (f: string) => files.get(f)!, realpath: (f: string) => f };
+  const outside = loginHostRefusal({}, "/srv", "/elsewhere", "https://app.example.com/login", disk);
+  assert.ok(outside !== null && outside.includes("the project folder /elsewhere is outside the config's projectsRoot /work"), outside ?? "");
+  assert.equal(loginHostRefusal({}, "/srv", "/work/app", "https://app.example.com/login", disk), null, "the contrast: a folder inside it");
+  const { loaded } = readCommandPolicy({}, "/srv", "/work/app", disk) as { ok: true; loaded: LoadedPolicy };
+  const record = runRecordRefusal(loaded, "/tmp/other/ci.json", disk);
+  assert.ok(record !== null && record.includes("the earlier run's record /tmp/other/ci.json is outside the config's projectsRoot /work"), record ?? "");
+  assert.equal(runRecordRefusal(loaded, "/work/app/.scenescout/ci.json", disk), null);
+  assert.equal(runRecordRefusal(NO_POLICY, "/tmp/other/ci.json", disk), null, "no projectsRoot: any record");
+  // ci --from-run goes through configureCommand, before any key or browser is needed.
+  const ci = configureCommand({}, "/srv", "/work/app", [], { mode: "observe", fromRun: { path: "/tmp/other/ci.json" } }, disk);
+  assert.ok(!ci.ok && ci.error.includes("the earlier run's record /tmp/other/ci.json is outside"), JSON.stringify(ci));
+  assert.ok(configureCommand({}, "/srv", "/work/app", [], { mode: "observe", fromRun: { path: "/work/app/ci.json" } }, disk).ok);
+});
+
+test("hosts and projectsRoot: the CLI's login, first look and check stop before any browser, naming only the host", () => {
+  const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "cli.ts");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ss-cli-hosts-"));
+  try {
+    const env: Record<string, string> = { HOME: dir, USERPROFILE: dir };
+    for (const [k, v] of Object.entries(process.env))
+      if (v !== undefined && !/^(SCENESCOUT_|ANTHROPIC_|OPENAI_|GH_|GITHUB_|JIRA_|HOME$|USERPROFILE$)/.test(k)) env[k] = v;
+    env[HOSTS_ENV] = "app.example.com";
+    const run = (args: string[], extra: Record<string, string> = {}) =>
+      spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), cli, ...args], {
+        cwd: dir,
+        env: { ...env, ...extra },
+        encoding: "utf8",
+        timeout: 60_000,
+      });
+    const off = "http://127.0.0.1:9/?token=abc";
+    const login = run(["login", off, "--role", "admin", "--project", dir]);
+    assert.equal(login.status, 1, login.stderr);
+    assert.match(login.stderr, /scenescout login: refused by SCENESCOUT_HOSTS: the sign-in URL is on 127\.0\.0\.1:9/);
+    const look = run([off]);
+    assert.notEqual(look.status, 0, look.stderr);
+    assert.match(look.stderr, /refused by SCENESCOUT_HOSTS: the address is on 127\.0\.0\.1:9/);
+    const check = run(["check", off]);
+    assert.notEqual(check.status, 0, check.stderr);
+    assert.match(check.stderr, /scenescout check: refused by SCENESCOUT_HOSTS: the address is on 127\.0\.0\.1:9/);
+    for (const r of [login, look, check]) assert.doesNotMatch(r.stderr, /token=abc/, "the address's query is never repeated");
+    // login --project outside the operator's projectsRoot is refused as an attach's folder is.
+    const root = path.join(dir, "root");
+    fs.mkdirSync(path.join(dir, ".scenescout"), { recursive: true });
+    fs.mkdirSync(root);
+    fs.writeFileSync(path.join(dir, ".scenescout", "config.json"), JSON.stringify({ projectsRoot: root }));
+    const fenced = run(["login", "https://app.example.com/login", "--role", "admin", "--project", path.join(dir, "elsewhere")]);
+    assert.equal(fenced.status, 1, fenced.stderr);
+    assert.match(fenced.stderr, /is outside the config's projectsRoot/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

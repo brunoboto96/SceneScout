@@ -139,7 +139,8 @@ export function bodyDigest(body: Buffer | null | undefined): string {
 /**
  * The writes the route handler has already judged and let through, so the
  * browser-level interception, which sees them again, lets them pass without
- * judging them twice. The key is the mode, the method, the URL and the body's
+ * judging them twice. The key is the mode, the method as judged (an override
+ * counted), the URL and the body's
  * digest (`bodyDigest`), so a write let through can only excuse the very same
  * request: never one with another body to the same URL, such as a delete
  * command sent where a harmless save was allowed a moment before, and never

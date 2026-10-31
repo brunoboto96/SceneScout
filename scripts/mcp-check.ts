@@ -1863,6 +1863,43 @@ async function configCheck(): Promise<void> {
       if (!scan.isError || !/is outside the config's projectsRoot/.test(scan.text)) fail(`scout_scan outside projectsRoot was not refused:\n${scan.text}`);
       const inside = await attach({ mode: "observe", session: "inside", projectPath: path.join(root, "app") });
       if (inside.isError) fail(`an attach whose projectPath is inside projectsRoot was refused:\n${inside.text}`);
+      // An earlier run's record is read only from inside it too; one inside it gets as far as being read.
+      const lanes = (fromRun: string) => call("scout_lane_brief", { session: "inside", lanes: 2, routes: ["/a", "/b"], fromRun });
+      const away = await lanes(path.join(dir, "ci.json"));
+      if (!away.isError || !/the earlier run's record .* is outside the config's projectsRoot/.test(away.text))
+        fail(`scout_lane_brief read an earlier run's record outside projectsRoot:\n${away.text}`);
+      const near = await lanes("missing-ci.json");
+      if (/projectsRoot/.test(near.text)) fail(`scout_lane_brief refused a record inside projectsRoot:\n${near.text}`);
+    });
+    // hosts: an attach and a sign-in window off the operator's list are refused before anything starts, naming only the host.
+    const fixtureHost = new URL(fixture.baseUrl).host;
+    await withServer({ SCENESCOUT_HOSTS: "app.example.com" }, async (attach, call) => {
+      const off = await attach({ mode: "observe", session: "off-host" });
+      if (!off.isError || !off.text.includes(`the attach URL is on ${fixtureHost}, and the hosts list (SCENESCOUT_HOSTS)`))
+        fail(`an attach off the hosts list was not refused, naming its host:\n${off.text}`);
+      const login = await call("scout_login", { url: `${fixture.baseUrl}/login`, role: "member", projectPath: projectDir });
+      if (!login.isError || !login.text.includes(`the sign-in URL is on ${fixtureHost}`))
+        fail(`scout_login off the hosts list was not refused:\n${login.text}`);
+    });
+    await withServer({ SCENESCOUT_HOSTS: new URL(fixture.baseUrl).hostname }, async (attach) => {
+      const on = await attach({ mode: "observe", session: "on-host" });
+      if (on.isError) fail(`an attach on a listed host was refused:\n${on.text}`);
+    });
+    // The guided offer reads the site's own project file, which may cap it lower than the server's config.
+    const sites = path.join(dir, "sites");
+    const siteDir = path.join(sites, siteFolderName(fixture.baseUrl));
+    fs.mkdirSync(path.join(siteDir, ".scenescout"), { recursive: true });
+    fs.writeFileSync(path.join(siteDir, ".scenescout", "config.json"), JSON.stringify({ maxMode: "observe" }));
+    await withServer({ SCENESCOUT_PROJECTS_DIR: sites }, async (_attach, call, client) => {
+      const above = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms"], care: "may-submit-forms" } });
+      if (!above.isError || !/maxMode|Look only/.test(above.text)) fail(`scout_guided_plan built a plan above the project file's maxMode:\n${above.text}`);
+      const look = await call("scout_guided_plan", { choices: { address: fixture.baseUrl, areas: ["forms"], care: "look-only" } });
+      if (look.isError) fail(`scout_guided_plan refused Look only under the project file's maxMode observe:\n${look.text}`);
+      const capped = promptTextOf(await client.getPrompt({ name: "check-my-site", arguments: { url: fixture.baseUrl } }));
+      if (!capped.includes('allows no care level above "Look only"'))
+        fail(`the Check my site prompt for the site ignored its project file's maxMode:\n${capped}`);
+      const other = promptTextOf(await client.getPrompt({ name: "check-my-site", arguments: { url: "https://other.example.com" } }));
+      if (other.includes('allows no care level above "Look only"')) fail(`another site's prompt was capped by this site's project file:\n${other}`);
     });
     // requireGuidedPlan alone: the gate holds from the start, before any plan is built.
     await withServer({ SCENESCOUT_CONFIG: configFile("guided.json", { requireGuidedPlan: true }) }, async (attach) => {
@@ -1940,7 +1977,7 @@ async function configCheck(): Promise<void> {
     if (bad.status === 0 || !bad.stderr.includes('unknown key "egres"'))
       fail(`a config with an unknown key did not stop the server at startup naming it (exit ${bad.status}):\n${bad.stderr}`);
     console.log(
-      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach and a scan outside it; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; redactPageText \"pii\" masks a page's email, phone and card in scout_snapshot and scout_request, and \"off\" does not, and a masking project masks a call naming another project's session; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
+      "✓ a server's config refuses an attach above maxMode and the strict preset's readPosts, naming the file; lowers an attach that names no mode; requireGuidedPlan holds the gate from the start; uploads \"fixtures\" refuses a file from disk in scout_upload and a plan step; projectsRoot refuses an attach, a scan and a lane brief's earlier run outside it; hosts refuses an attach and a sign-in window off the list; a site's project file caps the guided plan and prompt; egress none refuses inline evidence, scout_screenshot and inline card pictures, and model-only does not; redactPageText \"pii\" masks a page's email, phone and card in scout_snapshot and scout_request, and \"off\" does not, and a masking project masks a call naming another project's session; a session's config is its new project's once the old session closed, and its old one's when the attach was refused before that; a project's file tightens and cannot loosen the launch directory's; a guided plan above maxMode is refused and the guided prompts offer no care level above it; a bad config stops the server",
     );
   } finally {
     await fixture.close();

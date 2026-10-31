@@ -24,7 +24,19 @@ import { logAddress } from "../engine/authloss.js";
 import { loadRunRecord } from "../engine/memory.js";
 import { formatCriteriaForLanes } from "../engine/tickets.js";
 
-import { engines, engineFor, server, text, errorText, serializedPerSession, sessionParam, laneLedger, guidedSessions } from "../server-context.js";
+import {
+  engines,
+  engineFor,
+  server,
+  text,
+  errorText,
+  serializedPerSession,
+  sessionParam,
+  laneLedger,
+  guidedSessions,
+  operatorPolicy,
+} from "../server-context.js";
+import { fsPolicyReader, runRecordRefusal } from "../engine/project-config.js";
 
 // The lane report: how a parallel agent hands its results back to the planner
 // as typed decisions. One tool for both halves, so the instruction a lane is
@@ -118,6 +130,8 @@ export function registerLaneTools(): void {
           if (asked.fromRun) {
             const projectDir = eng.memory ? path.dirname(eng.memory.dir) : process.cwd();
             const source = path.resolve(projectDir, asked.fromRun.path);
+            const outside = runRecordRefusal(operatorPolicy, source, fsPolicyReader);
+            if (outside) return errorText(new Error(`scout_lane_brief ${outside}`));
             const record = loadRunRecord(source);
             // Named as it was given, so the brief and the report carry no local directory.
             const note = { at: new Date().toISOString(), mode: asked.fromRun.mode, source: asked.fromRun.path, runId: record.runId, recordAt: record.at };
