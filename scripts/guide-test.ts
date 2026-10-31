@@ -347,6 +347,33 @@ test("every link resolves: pages, repository files and anchors", () => {
   assert.deepEqual(broken, []);
 });
 
+test("every link into the guide from the README and docs/ resolves to a page and its anchor", () => {
+  const sources = [
+    "README.md",
+    ...fs
+      .readdirSync(path.join(REPO, "docs"))
+      .filter((f) => f.endsWith(".md"))
+      .map((f) => `docs/${f}`),
+  ];
+  const broken: string[] = [];
+  let checked = 0;
+  for (const source of sources) {
+    for (const { target, n } of links(read(source))) {
+      if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("//")) continue;
+      const [file, anchor] = target.split("#");
+      if (!file) continue;
+      const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(source), file));
+      if (!resolved.startsWith(`${GUIDE_DIR}/`)) continue;
+      checked++;
+      const where = `${source}:${n} → ${target}`;
+      if (!fs.existsSync(path.join(REPO, resolved))) broken.push(`${where}: no such file`);
+      else if (anchor !== undefined && resolved.endsWith(".md") && !anchors(read(resolved)).has(anchor)) broken.push(`${where}: no heading with that anchor`);
+    }
+  }
+  assert.ok(checked > 0, "no link into the guide was found");
+  assert.deepEqual(broken, []);
+});
+
 // ── Hygiene ──────────────────────────────────────────────────────────────────
 
 const LOCAL_PATH_RE =
