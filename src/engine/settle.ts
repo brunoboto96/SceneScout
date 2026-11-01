@@ -470,11 +470,12 @@ export const URL_LEAVING_GRACE_MS = 1000;
 /**
  * The script that measures the quiet window on the page's own clock: it answers once a timer of `ms` set now has run,
  * which is after every timer the page set earlier with a delay no longer than that (setTimeout runs them in that
- * order; for a shorter wait than an overdue timer's delay, the browsers' deadline order), and says whether the page began to leave (beforeunload) meanwhile. A page that leaves before it answers
- * rejects it: its document is gone.
+ * order; for a shorter wait than an overdue timer's delay, the browsers' deadline order), and says whether the page
+ * began to leave (beforeunload) meanwhile. A page that leaves before it answers rejects it: its document is gone. The
+ * wait is at least 1 ms: Chromium runs a 0 ms timer ahead of earlier timers that are already overdue.
  */
 export function pageClockScript(ms: number): string {
-  const wait = Math.max(0, Math.round(ms));
+  const wait = Math.max(1, Math.round(ms));
   return (
     "new Promise((resolve) => { let leaving = false; const mark = () => { leaving = true; };" +
     ' addEventListener("beforeunload", mark, true);' +

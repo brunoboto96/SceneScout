@@ -681,6 +681,7 @@ test("stableUrlOf, given the page's clock, costs a page that keeps time nothing 
   // A crawl's route already up for part of the window is asked for the rest; a page whose document is gone answers by rejecting.
   const asked: number[] = [];
   const route = standInPage("http://app.test/private");
+  const routeStarted = route.clock;
   await stableUrlOf(() => route, route.now, {
     quietMs: CRAWL_URL_HELD_MS,
     heldMs: 300,
@@ -690,10 +691,25 @@ test("stableUrlOf, given the page's clock, costs a page that keeps time nothing 
     },
   });
   assert.deepEqual(asked, [CRAWL_URL_HELD_MS - 300]);
+  assert.ok(
+    route.clock - routeStarted <= CRAWL_URL_HELD_MS - 300 + SETTLE_TICK_MS,
+    "a rejected probe leaves the wall window to decide, not the page-clock cap",
+  );
   const old = standInPage("http://app.test/private");
   await stableUrlOf(() => old, old.now, { quietMs: CRAWL_URL_HELD_MS, heldMs: 5000, pageClock: (ms) => (asked.push(ms), Promise.resolve({ leaving: false })) });
   assert.equal(asked.at(-1), 0);
   assert.ok(old.ticks <= 1, "a route up longer than the window is read on the first look after the page answers");
+});
+
+test("stableUrlOf, once the address changes after the page began to leave, holds the quiet window and not the leaving grace", async () => {
+  const page = standInPage("http://app.test/private");
+  const started = page.clock;
+  page.onTick = () => {
+    if (page.clock - started === 100) page.href = "http://app.test/login";
+  };
+  const got = await stableUrlOf(() => page, page.now, { pageClock: () => Promise.resolve({ leaving: true }) });
+  assert.equal(got, "http://app.test/login");
+  assert.ok(page.clock - started <= 100 + URL_QUIET_MS + SETTLE_TICK_MS, `read once the new address held still, at ${page.clock - started} ms`);
 });
 
 test("pageClockScript answers after its timer, saying whether the page began to leave meanwhile", async () => {
@@ -721,7 +737,9 @@ test("pageClockScript answers after its timer, saying whether the page began to 
   };
   assert.deepEqual(await run(true), { got: { leaving: true }, delays: [700] });
   assert.deepEqual(await run(false), { got: { leaving: false }, delays: [700] });
-  assert.equal(pageClockScript(-5).includes("}, 0);"), true, "a window already passed asks for no delay");
+  // Chromium runs a 0 ms timer ahead of earlier timers already overdue; from 1 ms on, all three engines run them by deadline.
+  assert.equal(pageClockScript(-5).includes("}, 1);"), true, "a window already passed still waits behind the page's overdue timers");
+  assert.equal(pageClockScript(0).includes("}, 1);"), true);
 });
 
 test("a crawl's watch counts from when the route's document arrived, not from when the watch began", async () => {
