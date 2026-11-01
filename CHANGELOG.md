@@ -1,5 +1,13 @@
 # scenescout
 
+## 3.34.1
+
+### Patch Changes
+
+- 5004ed8: The check and ci actions' "Install the browser's system libraries" step no longer waits on a stalled package mirror until the job's own time limit. Each attempt of `playwright install-deps` is stopped after five minutes and tried once more, and when both fail the step ends with an error that names it and says how to skip it (`install-deps: "false"` on a runner that already has the libraries).
+- 74d2654: A forced click (used when something painted over a control, such as a switch's own thumb, keeps the strict click waiting) now scrolls the control to the middle of the viewport first, instantly even on a page that scrolls smoothly. On WebKit with overlay scrollbars (as on macOS), a page wider than the window could leave the control at the bottom edge under the horizontal scrollbar the strict click's scrolling had just shown, and the press went to the scrollbar: the click was reported as landed when the page never received it. A forced click the page releases but never receives as a click (a control in the last row of a box that scrolls sideways, where centring cannot lift it clear of the box's scrollbar) now fails and says so, instead of being reported as landed.
+- 0dce11d: With a saved login, the sign-in verdict of an attach, a crawled route and a navigation now also counts its watch on the page's own clock. A page whose scripts run late, because it is busy with its own work or the machine is loaded, is waited on until its timers due within the window have run, and until the navigation shows when one of them started to leave the page, for at most 5 seconds (10 while a navigation is on its way). A stale login on an app that sends a signed-out visitor to sign-in from a short timer is reported as `⚠ AUTH FAILED` even when the page runs that timer late; a page that keeps time is read within a few milliseconds of when it was before.
+
 ## 3.34.0
 
 ### Minor Changes
