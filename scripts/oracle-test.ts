@@ -46,6 +46,10 @@ import {
   mainState,
   mainRegionTag,
   describeCover,
+  forcedClickDropped,
+  FORCED_CLICK_SCROLL,
+  readForcedClickWatch,
+  watchForcedClick,
 } from "../src/engine/collector.ts";
 import { EventEmitter } from "node:events";
 import vm from "node:vm";
@@ -1319,6 +1323,65 @@ test("a forced click names what covers its target, and says when a write-policy 
   assert.equal(describeCover({ role: null, tag: "div", text: "", testid: null }, false), "covered by <div>", "an unnamed layer is named by its tag");
   const long = describeCover({ role: null, tag: "aside", text: "x".repeat(200), testid: null }, false);
   assert.ok(long.length < 90 && long.endsWith('…"'), long);
+});
+
+test("a forced click's target is scrolled to the middle on both axes, instantly", () => {
+  // Either axis: the strict click's retries scroll with block and inline at end, centre and start in turn.
+  assert.equal(FORCED_CLICK_SCROLL.block, "center", "clear of a horizontal scrollbar at the bottom edge");
+  assert.equal(FORCED_CLICK_SCROLL.inline, "center", "clear of a vertical scrollbar at the right edge");
+  assert.equal(FORCED_CLICK_SCROLL.behavior, "instant", "a page with scroll-behavior: smooth would still be scrolling at the press");
+});
+
+test("a forced click counts as not landed only when a box holding it took the press and no click came", () => {
+  const drop = { mouseups: 1, clicks: 0, pressedHolder: true };
+  assert.equal(forcedClickDropped(drop), true, "pressed on a scroller's scrollbar: mouseup, no click");
+  assert.equal(forcedClickDropped({ ...drop, clicks: 1 }), false, "the same press with its click is a landed click");
+  assert.equal(forcedClickDropped({ ...drop, pressedHolder: false }), false, "a press on the target that a mousedown handler replaced reached the app");
+  assert.equal(forcedClickDropped({ mouseups: 2, clicks: 1, pressedHolder: true }), false, "a double click whose second click the page folds is still landed");
+  assert.equal(forcedClickDropped({ ...drop, mouseups: 0 }), false, "no release seen in the target's window (a cover in another frame took it) is not a drop");
+  assert.equal(forcedClickDropped(null), false, "an unread watch (the page navigated away on the click) is unknown, not a drop");
+});
+
+test("the forced click's watch counts trusted events on the target's window, and reading it ends the count", () => {
+  type Listener = (e: Event) => void;
+  let listeners: Array<{ type: string; fn: Listener }> = [];
+  const win = {
+    addEventListener: (type: string, fn: Listener, capture: boolean) => {
+      assert.equal(capture, true, `${type} is counted in the capture phase`);
+      listeners.push({ type, fn });
+    },
+    removeEventListener: (type: string, fn: Listener) => {
+      listeners = listeners.filter((l) => l.type !== type || l.fn !== fn);
+    },
+  } as unknown as Record<string, unknown>;
+  const scrolled: unknown[] = [];
+  // A node contains itself, so a press on the target must not read as a press on a box holding it.
+  const target: Record<string, unknown> = { ownerDocument: { defaultView: win }, scrollIntoView: (o: unknown) => scrolled.push(o) };
+  target.contains = (n: unknown) => n === target;
+  const scroller = { contains: (n: unknown) => n === target };
+  const node = target as unknown as Element;
+  const fire = (type: string, isTrusted: boolean, on: unknown = target) => {
+    for (const l of listeners.filter((x) => x.type === type)) l.fn({ type, isTrusted, target: on } as unknown as Event);
+  };
+  watchForcedClick(node, FORCED_CLICK_SCROLL);
+  assert.deepEqual(scrolled, [FORCED_CLICK_SCROLL], "the target is scrolled as FORCED_CLICK_SCROLL says");
+  fire("mousedown", true, target);
+  fire("mousedown", false, scroller);
+  fire("mouseup", true);
+  fire("mouseup", false);
+  fire("click", false);
+  assert.deepEqual(readForcedClickWatch(node), { mouseups: 1, clicks: 0, pressedHolder: false }, "a press on the target, and no untrusted event, counts");
+  assert.equal(listeners.length, 0, "reading the watch removes its listeners");
+  assert.equal(readForcedClickWatch(node), null, "...and a second read finds nothing counting");
+  watchForcedClick(node, FORCED_CLICK_SCROLL);
+  fire("mousedown", true, scroller);
+  fire("mouseup", true, scroller);
+  watchForcedClick(node, FORCED_CLICK_SCROLL);
+  assert.equal(listeners.length, 3, "a second watch ends the first rather than stacking listeners");
+  fire("mousedown", true, scroller);
+  fire("mouseup", true, scroller);
+  fire("click", true, scroller);
+  assert.deepEqual(readForcedClickWatch(node), { mouseups: 1, clicks: 1, pressedHolder: true }, "a press on a box holding the target is marked");
 });
 
 test("OracleMonitor: a violation on another site's page names that page by its origin and path, as the engine's addresses do", () => {

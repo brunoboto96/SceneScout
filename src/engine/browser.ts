@@ -90,6 +90,10 @@ import {
   mainState,
   type MainRegion,
   describeCover,
+  forcedClickDropped,
+  FORCED_CLICK_SCROLL,
+  readForcedClickWatch,
+  watchForcedClick,
   type CoverFacts,
 } from "./collector.js";
 import { OracleMonitor, formatViolations, planStopsAt, requestKey, withoutFragment, type PlanViolationRule } from "./oracles.js";
@@ -3876,7 +3880,8 @@ export class BrowserEngine {
    * target) and "is not stable" (still animating) describe a control a real
    * click resolves fine; "is not visible"/"is not enabled"/"is outside of
    * the viewport" describe a control that is actually unreachable, and those
-   * timeouts are left to fail as real failures.
+   * timeouts are left to fail as real failures. A forced click the page
+   * released but never got as a click fails too, rather than reading as landed.
    */
   private async resilientClick(
     locator: import("playwright").Locator,
@@ -3892,6 +3897,9 @@ export class BrowserEngine {
       if (!/Timeout/i.test(msg)) throw err;
       const diagnostic = actionabilityDiagnostic(msg);
       if (!diagnostic || !/intercepts pointer events|is not stable/i.test(diagnostic)) throw err;
+      // A handle, not the locator, reads the watch after the click: a click that removes its target leaves no node to locate.
+      const handle = await bestEffort(locator.elementHandle({ timeout: FORCED_CLICK_TIMEOUT_MS }), null);
+      await readWithin(handle ? handle.evaluate(watchForcedClick, FORCED_CLICK_SCROLL) : Promise.resolve(), FORCED_CLICK_TIMEOUT_MS);
       // What is on top at the click point, read before the forced click can
       // change it (a toast the click dismisses). Only a name for the note: a
       // read that fails leaves the note unnamed, never the click undone.
@@ -3900,7 +3908,23 @@ export class BrowserEngine {
       const coverReadAt = Date.now();
       // A shorter budget here: the forced click skips the wait that
       // consumed the first `timeout`, so it needs very little of its own.
-      await locator.click({ timeout: Math.min(timeout, FORCED_CLICK_TIMEOUT_MS), force: true, clickCount });
+      let read = false;
+      try {
+        await locator.click({ timeout: Math.min(timeout, FORCED_CLICK_TIMEOUT_MS), force: true, clickCount });
+        const watch = handle ? ((await readWithin(handle.evaluate(readForcedClickWatch), FORCED_CLICK_TIMEOUT_MS)) ?? null) : null;
+        read = true;
+        if (forcedClickDropped(watch))
+          throw new Error(
+            "the forced click was pressed and released, but the page received no click event, so it did not land " +
+              "(on WebKit with overlay scrollbars, a press at a scrolling box's edge goes to its scrollbar); this alone is not evidence of an app bug.",
+          );
+      } finally {
+        // A click that failed leaves the count running: end it, then free the handle. A page that is gone has nothing to free.
+        if (handle) {
+          const ending: Promise<unknown> = read ? Promise.resolve() : handle.evaluate(readForcedClickWatch);
+          void bestEffort(ending.finally(() => handle.dispose()));
+        }
+      }
       return { forced: true, cover, coverReadAt };
     }
   }
@@ -4441,7 +4465,9 @@ export class BrowserEngine {
     // after it, for apps that fetch an upload URL before opening the picker. A
     // wait shorter than the click reported such controls as "uploads nothing".
     // Null when no chooser opened within the budget: the control opens none, which the caller reports.
-    const opened = page.waitForEvent("filechooser", { timeout: this.limits.actionMs + FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
+    // The forced retry's steps up to its click (the handle, the centring scroll, the cover read, the click) are each
+    // bounded by FORCED_CLICK_TIMEOUT_MS.
+    const opened = page.waitForEvent("filechooser", { timeout: this.limits.actionMs + 4 * FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
     await this.resilientClick(locator, this.limits.actionMs);
     const chooser = await Promise.race([opened, page.waitForTimeout(CHOOSER_GRACE_MS).then(() => null)]);
     if (chooser) return { input: null, chooser, how: "via the file chooser the click opened" };

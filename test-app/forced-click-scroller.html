@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Forced click at a scroller's edge</title>
+</head>
+<body>
+  <!-- A covered switch in the last row of a box that scrolls sideways, with
+       nothing below it inside the box. The strict click scrolls the box
+       sideways, which on WebKit with overlay scrollbars (macOS) shows the
+       box's horizontal scrollbar over its bottom strip. Centring cannot move
+       the switch clear of it, since the box does not scroll vertically, so a
+       forced click there is pressed on the scrollbar and the page gets no
+       click. The read-only suite checks the engine says so rather than
+       reporting the click as landed. -->
+  <div style="height:1500px">Above the box</div>
+  <div data-testid="sideways-box" style="width:320px;overflow-x:auto;border:1px solid #999">
+    <div style="width:1400px;white-space:nowrap">A row wider than its box<br>
+      <span style="display:inline-block;width:700px"></span>
+      <label for="edge-switch" style="position:relative;display:inline-block;width:44px;height:24px;vertical-align:bottom">
+        <input type="checkbox" id="edge-switch" aria-label="Edge switch">
+        <span style="position:absolute;inset:0;background:#ccc;border-radius:12px"></span>
+      </label>
+    </div>
+  </div>
+  <div style="height:1500px">Below the box</div>
+</body>
+</html>

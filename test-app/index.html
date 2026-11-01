@@ -189,7 +189,11 @@
          "unclickable" report the forced-click fallback exists to fix:
          Playwright's own hit-test sees the span intercepting the input's
          click point and times out, even though a physical click resolves
-         fine via native label-forwarding. -->
+         fine via native label-forwarding. The page is wider than the
+         viewport (the over-wide paragraph above), so the strict click's
+         retries also scroll it sideways, which the read-only suite's check
+         that a forced click lands clear of WebKit's horizontal scrollbar
+         needs. -->
     <label for="fake-switch" style="position:relative;display:inline-block;width:44px;height:24px">
       <input type="checkbox" id="fake-switch" data-testid="fake-switch-input" aria-label="Fake switch">
       <span data-testid="fake-switch-thumb" style="position:absolute;inset:0;background:#ccc;border-radius:12px;pointer-events:auto"></span>
