@@ -2,7 +2,7 @@
   "name": "scenescout-mod",
   "displayName": "SceneScout guided panel",
   "description": "Optional Claude Code mod for SceneScout: a guided panel (/scenescout-guided) that starts a check in plain words, follows it and shows what it found; a question before Claude starts a check that may send things to your site; and an opt-in model for lane agents. Needs the scenescout plugin or server.",
-  "version": "3.34.1",
+  "version": "3.34.2",
   "author": {
     "name": "brunoboto96",
     "url": "https://github.com/brunoboto96"
