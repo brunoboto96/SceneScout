@@ -30,6 +30,7 @@ import {
   navigationAnswersPage,
   normalizePace,
   ownNavigationLanded,
+  pageClockScript,
   PACE_MAX_MS,
   PAGE_COMMIT_CAP_MS,
   QUIET_MS,
@@ -47,7 +48,9 @@ import {
   shouldKeepWaiting,
   stableUrlOf,
   URL_CAP_MS,
+  URL_LEAVING_GRACE_MS,
   URL_NAVIGATING_CAP_MS,
+  URL_PAGE_CLOCK_CAP_MS,
   URL_QUIET_MS,
   type DocumentProbe,
 } from "../src/engine/settle.ts";
@@ -193,6 +196,31 @@ test("the attach's sign-in verdict watches the address for a longer quiet window
   assert.equal(keepWatchingUrl({ sinceChangeMs: 600, elapsedMs: 600, quietMs: ATTACH_URL_QUIET_MS }), true);
   assert.equal(keepWatchingUrl({ sinceChangeMs: ATTACH_URL_QUIET_MS, elapsedMs: ATTACH_URL_QUIET_MS, quietMs: ATTACH_URL_QUIET_MS }), false);
   assert.ok(URL_QUIET_MS < ATTACH_URL_QUIET_MS && ATTACH_URL_QUIET_MS < URL_CAP_MS, "longer than the run's window, and within the cap");
+});
+
+test("a sign-in verdict waits while the page's own clock is behind the quiet window", () => {
+  // A 40 ms guard on a page whose timers run late (its own long task, a loaded runner): by the wall clock the address has
+  // held still for the attach's window, while the guard has not run yet. Contrastive pair at the same moment: the page
+  // behind, or caught up.
+  const held = { sinceChangeMs: ATTACH_URL_QUIET_MS + 200, elapsedMs: ATTACH_URL_QUIET_MS + 200, quietMs: ATTACH_URL_QUIET_MS };
+  assert.equal(keepWatchingUrl({ ...held, pageBehind: true }), true);
+  assert.equal(keepWatchingUrl({ ...held, pageBehind: false }), false);
+  assert.equal(keepWatchingUrl(held), false, "no page clock asked for: the wall clock alone, as before");
+  // Bounded: a page whose main thread never comes back still returns, later than an address that keeps moving.
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_PAGE_CLOCK_CAP_MS - 1, pageBehind: true }), true);
+  assert.equal(keepWatchingUrl({ sinceChangeMs: 0, elapsedMs: URL_PAGE_CLOCK_CAP_MS, pageBehind: true }), false);
+  assert.ok(URL_CAP_MS < URL_PAGE_CLOCK_CAP_MS && URL_PAGE_CLOCK_CAP_MS < URL_NAVIGATING_CAP_MS);
+});
+
+test("a sign-in verdict waits for a page that has begun to leave until its navigation is seen", () => {
+  // The guard ran and the page fired beforeunload, but the navigation's request has not been reported yet: the address
+  // is unchanged and nothing is on its way. Contrastive pair: left or not, at the same moment.
+  const held = { sinceChangeMs: URL_QUIET_MS * 2, elapsedMs: URL_QUIET_MS * 2 };
+  assert.equal(keepWatchingUrl({ ...held, leftForMs: 20 }), true);
+  assert.equal(keepWatchingUrl(held), false);
+  // A navigation that never shows (a 204, a download) holds the watch no longer than the grace.
+  assert.equal(keepWatchingUrl({ ...held, leftForMs: URL_LEAVING_GRACE_MS - 1 }), true);
+  assert.equal(keepWatchingUrl({ ...held, leftForMs: URL_LEAVING_GRACE_MS }), false);
 });
 
 // ── which requests are in flight ─────────────────────────────────────────────
@@ -608,6 +636,116 @@ test("stableUrlOf takes the quiet window it is given", async () => {
     if (late.clock - 1_000_000 === 600) late.href = "http://app.test/login";
   };
   assert.equal(await stableUrlOf(() => late, late.now), "http://app.test/private", "the run's window ends before a 600 ms guard");
+});
+
+test("stableUrlOf, given the page's clock, waits for a guard the page runs late and returns the sign-in page", async () => {
+  // The page answers its clock 2 s late (its timers held back); its guard ran in that time, so it reports it began to
+  // leave, and the address changes 100 ms after. Contrastive pair: the same page and timing, its guard finding a sign-in.
+  const lateClock = (page: ReturnType<typeof standInPage>, leaves: boolean) => {
+    const asked: number[] = [];
+    let answer: (r: { leaving: boolean }) => void = () => {};
+    const started = page.clock;
+    page.onTick = () => {
+      if (page.clock - started === 2000) answer({ leaving: leaves });
+      if (leaves && page.clock - started === 2100) page.href = "http://app.test/login";
+    };
+    const clock = (ms: number) => {
+      asked.push(ms);
+      return new Promise<{ leaving: boolean }>((resolve) => {
+        answer = resolve;
+      });
+    };
+    return { clock, asked };
+  };
+  const stale = standInPage("http://app.test/private");
+  const s = lateClock(stale, true);
+  assert.equal(await stableUrlOf(() => stale, stale.now, { quietMs: ATTACH_URL_QUIET_MS, pageClock: s.clock }), "http://app.test/login");
+  assert.deepEqual(s.asked, [ATTACH_URL_QUIET_MS], "the page is asked for the whole window on its own clock");
+  const fresh = standInPage("http://app.test/private");
+  const f = lateClock(fresh, false);
+  const started = fresh.clock;
+  assert.equal(await stableUrlOf(() => fresh, fresh.now, { quietMs: ATTACH_URL_QUIET_MS, pageClock: f.clock }), "http://app.test/private");
+  assert.ok(fresh.clock - started >= 2000 && fresh.clock - started <= 2000 + 2 * SETTLE_TICK_MS, "read once the page caught up, no later");
+  // The old rule: the wall clock alone reads the page before its guard runs.
+  const wall = standInPage("http://app.test/private");
+  lateClock(wall, true);
+  assert.equal(await stableUrlOf(() => wall, wall.now, { quietMs: ATTACH_URL_QUIET_MS }), "http://app.test/private");
+});
+
+test("stableUrlOf, given the page's clock, costs a page that keeps time nothing more, and asks only for what is left", async () => {
+  const page = standInPage("http://app.test/private");
+  const started = page.clock;
+  // A page that keeps time answers as the window ends.
+  const clock = (ms: number) =>
+    new Promise<{ leaving: boolean }>((resolve) => {
+      page.onTick = () => {
+        if (page.clock - started >= ms) resolve({ leaving: false });
+      };
+    });
+  assert.equal(await stableUrlOf(() => page, page.now, { quietMs: ATTACH_URL_QUIET_MS, pageClock: clock }), "http://app.test/private");
+  assert.ok(page.clock - started <= ATTACH_URL_QUIET_MS + SETTLE_TICK_MS);
+  // A crawl's route already up for part of the window is asked for the rest; a page whose document is gone answers by rejecting.
+  const asked: number[] = [];
+  const route = standInPage("http://app.test/private");
+  const routeStarted = route.clock;
+  await stableUrlOf(() => route, route.now, {
+    quietMs: CRAWL_URL_HELD_MS,
+    heldMs: 300,
+    pageClock: (ms) => {
+      asked.push(ms);
+      return Promise.reject(new Error("Execution context was destroyed"));
+    },
+  });
+  assert.deepEqual(asked, [CRAWL_URL_HELD_MS - 300]);
+  assert.ok(
+    route.clock - routeStarted <= CRAWL_URL_HELD_MS - 300 + SETTLE_TICK_MS,
+    "a rejected probe leaves the wall window to decide, not the page-clock cap",
+  );
+  const old = standInPage("http://app.test/private");
+  await stableUrlOf(() => old, old.now, { quietMs: CRAWL_URL_HELD_MS, heldMs: 5000, pageClock: (ms) => (asked.push(ms), Promise.resolve({ leaving: false })) });
+  assert.equal(asked.at(-1), 0);
+  assert.ok(old.ticks <= 1, "a route up longer than the window is read on the first look after the page answers");
+});
+
+test("stableUrlOf, once the address changes after the page began to leave, holds the quiet window and not the leaving grace", async () => {
+  const page = standInPage("http://app.test/private");
+  const started = page.clock;
+  page.onTick = () => {
+    if (page.clock - started === 100) page.href = "http://app.test/login";
+  };
+  const got = await stableUrlOf(() => page, page.now, { pageClock: () => Promise.resolve({ leaving: true }) });
+  assert.equal(got, "http://app.test/login");
+  assert.ok(page.clock - started <= 100 + URL_QUIET_MS + SETTLE_TICK_MS, `read once the new address held still, at ${page.clock - started} ms`);
+});
+
+test("pageClockScript answers after its timer, saying whether the page began to leave meanwhile", async () => {
+  const run = async (leave: boolean) => {
+    const target = new EventTarget();
+    const timers: (() => void)[] = [];
+    const delays: number[] = [];
+    const context = vm.createContext({
+      addEventListener: target.addEventListener.bind(target),
+      removeEventListener: target.removeEventListener.bind(target),
+      setTimeout: (fn: () => void, ms: number) => {
+        delays.push(ms);
+        timers.push(fn);
+      },
+      Promise,
+    });
+    const answer = vm.runInContext(pageClockScript(700.4), context) as Promise<{ leaving: boolean }>;
+    if (leave) target.dispatchEvent(new Event("beforeunload"));
+    timers.shift()!();
+    const got = await answer;
+    // Once answered it listens no more.
+    target.dispatchEvent(new Event("beforeunload"));
+    // The answer was made in the page's realm: compared by its fields.
+    return { got: { leaving: got.leaving }, delays: [...delays] };
+  };
+  assert.deepEqual(await run(true), { got: { leaving: true }, delays: [700] });
+  assert.deepEqual(await run(false), { got: { leaving: false }, delays: [700] });
+  // Chromium runs a 0 ms timer ahead of earlier timers already overdue; from 1 ms on, all three engines run them by deadline.
+  assert.equal(pageClockScript(-5).includes("}, 1);"), true, "a window already passed still waits behind the page's overdue timers");
+  assert.equal(pageClockScript(0).includes("}, 1);"), true);
 });
 
 test("a crawl's watch counts from when the route's document arrived, not from when the watch began", async () => {
