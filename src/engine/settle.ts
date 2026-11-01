@@ -453,6 +453,36 @@ export const ATTACH_URL_QUIET_MS = 1000;
  */
 export const CRAWL_URL_HELD_MS = 1000;
 
+/**
+ * Longest to wait for the page's own clock to pass the quiet window (UrlWatch.pageBehind). A page whose scripts are
+ * held back, by its own long task or a loaded machine, runs its timers late: by the wall clock its address has held
+ * still for the window while a guard due inside it has not yet run. Waited for only while the page is behind, so a page
+ * that keeps time pays only the probe's round trip, and one whose main thread never comes back still returns.
+ */
+export const URL_PAGE_CLOCK_CAP_MS = 5000;
+/**
+ * How long a page that has begun to leave (UrlWatch.leftForMs: it fired beforeunload during the watch) is waited on
+ * for its navigation to be seen. The page starts leaving before the browser reports the navigation's request; a page
+ * whose navigation is then cancelled (a 204, a download) holds the watch no longer than this.
+ */
+export const URL_LEAVING_GRACE_MS = 1000;
+
+/**
+ * The script that measures the quiet window on the page's own clock: it answers once a timer of `ms` set now has run,
+ * which is after every timer the page set earlier with a delay no longer than that (setTimeout runs them in that
+ * order; for a shorter wait than an overdue timer's delay, the browsers' deadline order), and says whether the page
+ * began to leave (beforeunload) meanwhile. A page that leaves before it answers rejects it: its document is gone. The
+ * wait is at least 1 ms: Chromium runs a 0 ms timer ahead of earlier timers that are already overdue.
+ */
+export function pageClockScript(ms: number): string {
+  const wait = Math.max(1, Math.round(ms));
+  return (
+    "new Promise((resolve) => { let leaving = false; const mark = () => { leaving = true; };" +
+    ' addEventListener("beforeunload", mark, true);' +
+    ` setTimeout(() => { removeEventListener("beforeunload", mark, true); resolve({ leaving }); }, ${wait}); })`
+  );
+}
+
 export interface UrlWatch {
   /** Since the URL last changed. */
   sinceChangeMs: number;
@@ -462,14 +492,22 @@ export interface UrlWatch {
   navigating?: boolean;
   /** How long the URL must hold still; URL_QUIET_MS unless given. */
   quietMs?: number;
+  /** Whether the page's own clock has not yet passed the quiet window (pageClockScript): a timer due in it may not have run. */
+  pageBehind?: boolean;
+  /** Since the page began to leave (beforeunload) with its address unchanged since; absent when it has not. */
+  leftForMs?: number;
 }
 
 /**
  * Whether to keep watching the URL before judging where the page landed. A navigation on its way is waited for until it
- * commits or fails, to URL_NAVIGATING_CAP_MS; otherwise the address must hold still, to URL_CAP_MS.
+ * commits or fails, to URL_NAVIGATING_CAP_MS, as is a page that has begun to leave, for URL_LEAVING_GRACE_MS; a page
+ * whose own clock is behind the window is waited for to URL_PAGE_CLOCK_CAP_MS; otherwise the address must hold still,
+ * to URL_CAP_MS.
  */
 export function keepWatchingUrl(w: UrlWatch): boolean {
   if (w.navigating) return w.elapsedMs < URL_NAVIGATING_CAP_MS;
+  if (w.leftForMs !== undefined && w.leftForMs < URL_LEAVING_GRACE_MS) return w.elapsedMs < URL_NAVIGATING_CAP_MS;
+  if (w.pageBehind) return w.elapsedMs < URL_PAGE_CLOCK_CAP_MS;
   if (w.elapsedMs >= URL_CAP_MS) return false;
   return w.sinceChangeMs < (w.quietMs ?? URL_QUIET_MS);
 }
@@ -541,27 +579,50 @@ export async function settlePage(page: SettlingPage, src: SettleSource, now: () 
  * URL_NAVIGATING_CAP_MS, whether it started before the watch or during it. `quietMs` replaces URL_QUIET_MS (the
  * attach's verdict uses ATTACH_URL_QUIET_MS). `heldMs` is how long the
  * address had already held still when the watch began (a crawl passes its document's age, CRAWL_URL_HELD_MS); by
- * default none, so the window runs from the watch's start.
+ * default none, so the window runs from the watch's start. `pageClock`, where a sign-in verdict is made, runs
+ * pageClockScript for what is left of the window: until it answers the page is behind (UrlWatch.pageBehind), and an
+ * answer that the page began to leave holds the watch until the address changes, for at most URL_LEAVING_GRACE_MS
+ * (UrlWatch.leftForMs).
  */
 export async function stableUrlOf(
   current: () => SettlingPage | null,
   now: () => number = Date.now,
-  opts: { navigating?: () => boolean; quietMs?: number; heldMs?: number } = {},
+  opts: { navigating?: () => boolean; quietMs?: number; heldMs?: number; pageClock?: (ms: number) => Promise<{ leaving: boolean }> } = {},
 ): Promise<string> {
   const page = current();
   if (!page || page.isClosed()) return page ? page.url() : "";
   const started = now();
   let url = page.url();
   let changedAt = started - Math.max(0, opts.heldMs ?? 0);
+  let behind = false;
+  let leftAt: number | null = null;
+  if (opts.pageClock) {
+    behind = true;
+    const left = Math.max(0, (opts.quietMs ?? URL_QUIET_MS) - Math.max(0, opts.heldMs ?? 0));
+    void opts.pageClock(left).then(
+      (r) => {
+        behind = false;
+        if (r.leaving && page.url() === url) leftAt = now();
+      },
+      // Its document is gone (the page left or closed) or could not be read: the address, and the navigation on its way, decide.
+      () => {
+        behind = false;
+      },
+    );
+  }
   for (;;) {
-    const watch = { sinceChangeMs: now() - changedAt, elapsedMs: now() - started, navigating: opts.navigating?.() ?? false };
-    if (!keepWatchingUrl(opts.quietMs !== undefined ? { ...watch, quietMs: opts.quietMs } : watch)) return url;
+    const watch: UrlWatch = { sinceChangeMs: now() - changedAt, elapsedMs: now() - started, navigating: opts.navigating?.() ?? false };
+    if (opts.quietMs !== undefined) watch.quietMs = opts.quietMs;
+    if (behind) watch.pageBehind = true;
+    if (leftAt !== null) watch.leftForMs = now() - leftAt;
+    if (!keepWatchingUrl(watch)) return url;
     await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
     if (current() !== page || page.isClosed()) return url;
     const at = page.url();
     if (at !== url) {
       url = at;
       changedAt = now();
+      leftAt = null;
     }
   }
 }

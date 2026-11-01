@@ -131,6 +131,7 @@ import {
   seenWithin,
   settlePage,
   stableUrlOf,
+  pageClockScript,
 } from "./settle.js";
 import {
   FRAME_READ_MS,
@@ -2324,7 +2325,7 @@ export class BrowserEngine {
     this.watchesForBounce = Boolean(storageStatePath);
     // With a saved sign-in, the address is watched for longer: an app that sends a signed-out visitor to sign-in from its
     // scripts some time after load would otherwise pass a stale profile as signed in (settle.ts ATTACH_URL_QUIET_MS).
-    const landed = await this.stableUrl(storageStatePath ? ATTACH_URL_QUIET_MS : undefined);
+    const landed = await this.stableUrl(storageStatePath ? { quietMs: ATTACH_URL_QUIET_MS, signIn: true } : {});
     this.seenUrl = landed;
     const authFailed = Boolean(storageStatePath) && this.authLoss.isLoginRedirect(normalizePath(opts.url), landed, this.baseUrl);
     this.attachSignInFailed = authFailed;
@@ -2526,17 +2527,28 @@ export class BrowserEngine {
 
   /**
    * The URL once it has stopped changing (settle.ts stableUrlOf), waiting too while the page's own navigation is on its
-   * way, and holding still for `quietMs` when given, counting `heldMs` it had already held (stableUrlOf).
+   * way, and holding still for `quietMs` when given, counting `heldMs` it had already held (stableUrlOf). For a sign-in
+   * verdict (`signIn`), the window is also measured on the page's own clock (settle.ts pageClockScript), so a guard
+   * whose timer the page runs late is still seen.
    */
-  private async stableUrl(quietMs?: number, heldMs?: number): Promise<string> {
+  private async stableUrl(opts: { quietMs?: number; heldMs?: number; signIn?: boolean } = {}): Promise<string> {
     const navigating = (): boolean => {
       const page = this.page;
       return page !== null && !page.isClosed() && this.requests.navigating(page.mainFrame());
     };
+    const page = this.page;
+    const pageClock = (ms: number): Promise<{ leaving: boolean }> =>
+      page === null || page.isClosed()
+        ? Promise.reject(new Error("no page"))
+        : page
+            .mainFrame()
+            .evaluate(pageClockScript(ms))
+            .then((r) => ({ leaving: (r as { leaving?: unknown } | null)?.leaving === true }));
     return stableUrlOf(() => this.page, Date.now, {
       navigating,
-      ...(quietMs !== undefined ? { quietMs } : {}),
-      ...(heldMs !== undefined ? { heldMs } : {}),
+      ...(opts.quietMs !== undefined ? { quietMs: opts.quietMs } : {}),
+      ...(opts.heldMs !== undefined ? { heldMs: opts.heldMs } : {}),
+      ...(opts.signIn ? { pageClock } : {}),
     });
   }
 
@@ -2551,7 +2563,7 @@ export class BrowserEngine {
     if (!this.watchesForBounce) return page.url();
     const age = await this.readHeld(page, bestEffort(page.evaluate(PAGE_AGE_SCRIPT), 0), this.limits.crawlNavMs, false);
     const doc = age.stalled ? 0 : Number(age.value);
-    return this.stableUrl(CRAWL_URL_HELD_MS, Math.min(Number.isFinite(doc) ? doc : 0, Date.now() - this.actionStartedAt));
+    return this.stableUrl({ quietMs: CRAWL_URL_HELD_MS, heldMs: Math.min(Number.isFinite(doc) ? doc : 0, Date.now() - this.actionStartedAt), signIn: true });
   }
 
   /**
@@ -2649,7 +2661,7 @@ export class BrowserEngine {
    * the last URL it was on, which is what the outcome is recorded against.
    */
   private async landedUrl(page: Page): Promise<string> {
-    return this.watchesForBounce ? await this.stableUrl() : page.url();
+    return this.watchesForBounce ? await this.stableUrl({ signIn: true }) : page.url();
   }
 
   /** Where the page went off the app's origin before the origin fence took it back (afterAction), during this navigation. */
@@ -4911,7 +4923,7 @@ export class BrowserEngine {
     try {
       // With a sign-in held, a guard's redirect to another origin may land after the load settled; the origin fence
       // (afterAction) must see the page where it ended up, or it stays off the app until the next call.
-      if (this.watchesForBounce) await this.stableUrl();
+      if (this.watchesForBounce) await this.stableUrl({ signIn: true });
       settled = await this.afterAction("navigate", url);
     } catch (err) {
       this.recordNavigationOutcome(url, await this.navigationLanding(page));
