@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Gated area (guard held back by a busy page)</title>
+  </head>
+  <body>
+    <main>
+      <h1 data-testid="gated-busy-heading">Gated area</h1>
+    </main>
+    <script>
+      // A client-side auth guard on a 40 ms timer, as gated.html's, on a page whose own work then holds its main thread
+      // for two seconds: the timer fires about two seconds late, as a page's timers do on a loaded machine. By the
+      // wall clock the page has gone quiet and its address has held still for longer than any watch of it; by the
+      // page's own clock the guard has not had its turn yet. Signed in (the "smoke-auth" flag a storage state sets),
+      // the same page stays put: that is the one fact the sign-in verdict must turn on.
+      addEventListener("DOMContentLoaded", function () {
+        setTimeout(function () {
+          try {
+            if (localStorage.getItem("smoke-auth") === "yes") return;
+          } catch (e) {
+            /* storage unavailable — treat as signed out */
+          }
+          location.replace("/login?redirectTo=" + encodeURIComponent(location.pathname));
+        }, 40);
+        setTimeout(function () {
+          var until = Date.now() + 2000;
+          while (Date.now() < until) {
+            /* the page's own long task */
+          }
+        }, 0);
+      });
+    </script>
+  </body>
+</html>

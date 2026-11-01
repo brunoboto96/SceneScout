@@ -71,6 +71,10 @@ export async function run({ baseUrl, foreignBaseUrl, projectDir, stats }: SmokeC
     const slow = await engDead.navigate(`${baseUrl}/gated-slow.html`);
     check("a guard that redirects long after the page goes quiet is still a bounce", slow.includes("REDIRECTED"), slow);
     check("...and the route it asked for is not counted as covered", slow.includes("NOT counted as covered"), slow);
+    // The same guard on a 40 ms timer, held back by the page's own long task: late on the page's clock, not the wall's.
+    engDead.knownRoutes = ["/gated-busy.html"];
+    const busy = await engDead.navigate(`${baseUrl}/gated-busy.html`);
+    check("a guard the page's own work holds back past the watch is still a bounce", busy.includes("REDIRECTED"), busy);
   } finally {
     await engDead.close().catch(() => {});
   }
@@ -234,6 +238,12 @@ async function attachVerdictWaitsForLateSignIn(baseUrl: string, authProject: str
   );
   const slowSignedIn = await attachAt("gated-slow-login.html", liveState);
   check("...and the same page signed in attaches cleanly", !slowSignedIn.out.includes("AUTH FAILED"), slowSignedIn.out);
+  // A 40 ms guard held back two seconds by the page's own long task, as a loaded runner holds a page's timers: the
+  // address holds still past the attach's watch by the wall clock, while the guard has not yet run by the page's.
+  const busy = await attachAt("gated-busy.html", deadState);
+  check("a stale profile on a page whose guard runs late on the page's own clock is AUTH FAILED", busy.out.includes("AUTH FAILED"), busy.out);
+  const busySignedIn = await attachAt("gated-busy.html", liveState);
+  check("...and the same page signed in attaches cleanly", !busySignedIn.out.includes("AUTH FAILED"), busySignedIn.out);
   await crawlWaitsForLateSignIn(baseUrl, authProject, deadState, liveState);
 }
 
@@ -251,7 +261,7 @@ async function crawlWaitsForLateSignIn(baseUrl: string, authProject: string, dea
     const engine = new BrowserEngine();
     try {
       await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: state });
-      return await engine.crawl(["/gated-soon.html", "/covered.html"]);
+      return await engine.crawl(["/gated-soon.html", "/gated-busy.html", "/covered.html"]);
     } finally {
       await engine.close().catch(() => {});
     }
@@ -263,6 +273,11 @@ async function crawlWaitsForLateSignIn(baseUrl: string, authProject: string, dea
     /AUTH-REDIRECT/.test(line(stale, "gated-soon.html")),
     stale,
   );
+  check(
+    "a crawled route whose guard runs late on the page's own clock is AUTH-REDIRECT with a stale sign-in",
+    /AUTH-REDIRECT/.test(line(stale, "gated-busy.html")),
+    stale,
+  );
   check("...while a route that stays put is not", line(stale, "covered.html") !== "" && !/AUTH-REDIRECT/.test(line(stale, "covered.html")), stale);
   const fresh = await crawlWith(liveState);
   check(
@@ -270,6 +285,7 @@ async function crawlWaitsForLateSignIn(baseUrl: string, authProject: string, dea
     line(fresh, "gated-soon.html") !== "" && !/AUTH-REDIRECT|REDIRECTED/.test(line(fresh, "gated-soon.html")),
     fresh,
   );
+  check("...and so is the busy route", line(fresh, "gated-busy.html") !== "" && !/AUTH-REDIRECT|REDIRECTED/.test(line(fresh, "gated-busy.html")), fresh);
   await laterCallsSeeLateSignIn(baseUrl, authProject, deadState, liveState);
 }
 
