@@ -17,24 +17,21 @@ export type InstallDepsRun = { status: number | null; output: string; calls: str
 export function runInstallDepsStep(script: string, opts: { root: boolean; attempts: Array<"ok" | "stall"> }): InstallDepsRun {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scenescout-install-deps-"));
   try {
-    const bin = path.join(dir, "bin");
-    fs.mkdirSync(bin);
     const log = path.join(dir, "calls.log");
-    const stub = (name: string, body: string) => fs.writeFileSync(path.join(bin, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
-    stub("id", `echo ${opts.root ? 0 : 1001}`);
-    // sudo resets PATH to a fixed list; the stand-in records that, so a call that depends on the caller's PATH shows.
-    stub("sudo", `echo "sudo $*" >> "$CALLS"; exec "$@"`);
-    stub(
-      "timeout",
-      // The attempt number comes from the call log the suite reads back; a separate counter file did not advance on the Windows runner.
-      `echo "timeout $*" >> "$CALLS"; n=$(grep -c '^timeout ' "$CALLS"); set -- $OUTCOMES\n` +
-        `case "\${!n}" in ok) exit 0 ;; stall) exit 124 ;; *) echo "stand-in timeout: no outcome for attempt $n" >&2; exit 99 ;; esac`,
-    );
-    stub("dpkg", `echo "dpkg $*" >> "$CALLS"`);
-    const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], {
+    // Stand-ins are shell functions, which bash runs before any command on PATH: Git for Windows' bash puts its
+    // own id.exe and timeout.exe ahead of the PATH it is given, so stand-in files on PATH were passed over there.
+    // sudo resets PATH to a fixed list; the stand-in records each call, so one that depends on the caller's PATH shows.
+    const standIns = [
+      `id() { echo ${opts.root ? 0 : 1001}; }`,
+      `sudo() { echo "sudo $*" >> "$CALLS"; "$@"; }`,
+      `timeout() { echo "timeout $*" >> "$CALLS"; local n; n=$(grep -c '^timeout ' "$CALLS"); local outcomes=($OUTCOMES)`,
+      `  case "\${outcomes[n - 1]}" in ok) return 0 ;; stall) return 124 ;; *) echo "stand-in timeout: no outcome for attempt $n" >&2; return 99 ;; esac; }`,
+      `dpkg() { echo "dpkg $*" >> "$CALLS"; }`,
+    ].join("\n");
+    const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", `${standIns}\n${script}`], {
       encoding: "utf8",
       env: {
-        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        PATH: process.env.PATH ?? "",
         CALLS: log,
         OUTCOMES: opts.attempts.join(" "),
         PLAYWRIGHT_CLI: "/opt/playwright/cli.js",
