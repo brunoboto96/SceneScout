@@ -134,6 +134,75 @@ export function describeCover(cover: CoverFacts, afterBlock: boolean): string {
   );
 }
 
+/**
+ * How a forced click's target is scrolled before the press: to the middle on both axes, since the strict click's
+ * retries leave it at a viewport edge on either axis, where an overlay scrollbar takes the press; and instantly, since
+ * a smooth scroll (CSS scroll-behavior) is still moving it when the press lands.
+ */
+export const FORCED_CLICK_SCROLL = { block: "center", inline: "center", behavior: "instant" } as const satisfies ScrollIntoViewOptions;
+
+/** What a forced click's target's window got while the click was pressed (watchForcedClick): trusted events only. */
+export interface ForcedClickWatch {
+  mouseups: number;
+  clicks: number;
+  /** A mousedown landed on an element that holds the target, not on the target or a sibling layer: a scroller's scrollbar. */
+  pressedHolder: boolean;
+}
+
+/**
+ * Whether a forced click was pressed on a box holding its target and released
+ * there, but never became a click, as when WebKit's overlay scrollbar takes the
+ * press. A press on the target itself that gets no click (a mousedown handler
+ * that replaced the node) reached the app, so it is not a drop. A watch that
+ * could not be read (null: the page navigated on the click) is unknown, never a drop.
+ */
+export function forcedClickDropped(watch: ForcedClickWatch | null): boolean {
+  return watch !== null && watch.pressedHolder && watch.mouseups > 0 && watch.clicks === 0;
+}
+
+type WatchedWindow = Window & { __scenescoutForcedClick?: () => ForcedClickWatch };
+
+/**
+ * Runs in the page against a forced click's target, just before the click:
+ * scrolls it as `scroll` (FORCED_CLICK_SCROLL) says, and counts what its
+ * window gets until readForcedClickWatch ends the count. A count left from
+ * an earlier forced click is ended first.
+ */
+export function watchForcedClick(node: Element, scroll: ScrollIntoViewOptions): void {
+  const win = node.ownerDocument.defaultView as WatchedWindow | null;
+  if (win) {
+    win.__scenescoutForcedClick?.();
+    const seen: ForcedClickWatch = { mouseups: 0, clicks: 0, pressedHolder: false };
+    const onDown = (e: Event) => {
+      const t = e.target as Node | null;
+      if (e.isTrusted && t && t !== node && typeof t.contains === "function" && t.contains(node)) seen.pressedHolder = true;
+    };
+    const onUp = (e: Event) => {
+      if (e.isTrusted) seen.mouseups += 1;
+    };
+    const onClick = (e: Event) => {
+      if (e.isTrusted) seen.clicks += 1;
+    };
+    win.addEventListener("mousedown", onDown, true);
+    win.addEventListener("mouseup", onUp, true);
+    win.addEventListener("click", onClick, true);
+    win.__scenescoutForcedClick = () => {
+      win.removeEventListener("mousedown", onDown, true);
+      win.removeEventListener("mouseup", onUp, true);
+      win.removeEventListener("click", onClick, true);
+      delete win.__scenescoutForcedClick;
+      return seen;
+    };
+  }
+  node.scrollIntoView(scroll);
+}
+
+/** Runs in the page after a forced click: what watchForcedClick counted, ending the count. Null when nothing was counting. */
+export function readForcedClickWatch(node: Element): ForcedClickWatch | null {
+  const win = node.ownerDocument.defaultView as WatchedWindow | null;
+  return win?.__scenescoutForcedClick?.() ?? null;
+}
+
 /** A placeholder-only field's evidence: the control, then its placeholder, capped so a paragraph of hint text stays one line. */
 export function placeholderEvidence(el: { role: string; testid: string | null; xpath: string; name: string }): string {
   const text = el.name.length > 80 ? `${el.name.slice(0, 79)}…` : el.name;

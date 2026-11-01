@@ -1137,7 +1137,9 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     await engine.close().catch(() => {});
   }
   await failuresAtTheActionLimit({ baseUrl, projectDir, stats } as SmokeContext);
-  await forcedClickOnASidewaysPage({ baseUrl, projectDir, stats } as SmokeContext);
+  await forcedClickOnASidewaysPage({ baseUrl, projectDir, stats } as SmokeContext, false);
+  await forcedClickOnASidewaysPage({ baseUrl, projectDir, stats } as SmokeContext, true);
+  await forcedClickAtAScrollersEdge({ baseUrl, projectDir, stats } as SmokeContext);
   await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
   await controlFacts({ baseUrl, projectDir, stats } as SmokeContext);
   await readPosts({ baseUrl, projectDir, stats } as SmokeContext);
@@ -1210,28 +1212,93 @@ async function failuresAtTheActionLimit({ baseUrl, projectDir }: SmokeContext): 
  * scrollbar those scrolls show takes a press: the page gets mousedown and
  * mouseup but no click. At this limit the strict click usually gives up right
  * after such a scroll, so a forced click aimed where the switch lies is lost.
+ * With `smooth`, the page scrolls smoothly (CSS scroll-behavior), so a centring
+ * scroll that is not instant is still moving the switch when the press lands.
  */
-async function forcedClickOnASidewaysPage({ baseUrl, projectDir }: SmokeContext): Promise<void> {
+async function forcedClickOnASidewaysPage({ baseUrl, projectDir }: SmokeContext, smooth: boolean): Promise<void> {
+  const how = smooth ? " (smooth scrolling)" : "";
   const engine = new BrowserEngine();
   try {
     await engine.attach({ url: baseUrl, projectDir, mode: "read-only", actionTimeoutMs: LIMIT_BOUNDS.action.min });
     const page = (engine as unknown as { page: import("playwright").Page }).page;
+    if (smooth) await page.addStyleTag({ content: "html { scroll-behavior: smooth }" });
     const sideways = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
-    check("the index page is wider than the viewport, so the strict click's retries scroll it sideways", sideways);
+    check(`the index page is wider than the viewport, so the strict click's retries scroll it sideways${how}`, sideways);
+    // Where the press lands, and how far the page is scrolled then.
+    await page.evaluate(() => {
+      document.addEventListener(
+        "pointerdown",
+        (e) => {
+          (window as unknown as { __press: number[] }).__press = [e.clientX, e.clientY, scrollX, scrollY];
+        },
+        { capture: true },
+      );
+    });
     const snap = await engine.snapshot(true);
     const ref = snap.match(/(e\d+) [a-z]+ "Fake switch"/)?.[1];
     if (!ref) throw new Error(`ref not found for Fake switch in:\n${snap}`);
-    console.log("resilient click: a forced click after the strict one scrolled the page sideways");
+    console.log(`resilient click: a forced click after the strict one scrolled the page sideways${how}`);
     const out = await engine.click(ref);
-    check("the strict click on the covered switch gave way to a forced one", out.includes("forced click was used instead"), out);
-    // Where the forced click was aimed: the strict click's retries leave the switch at a viewport edge in every browser.
-    const clear = await page.locator("#fake-switch").evaluate((node) => {
-      const r = node.getBoundingClientRect();
-      const [x, y] = [r.left + r.width / 2, r.top + r.height / 2];
-      return Math.min(x, y, document.documentElement.clientWidth - x, document.documentElement.clientHeight - y);
+    check(`the strict click on the covered switch gave way to a forced one${how}`, out.includes("forced click was used instead"), out);
+    // Long enough for a smooth scroll still under way at the press to have moved the page on.
+    await page.waitForTimeout(1000);
+    const press = await page.evaluate(() => {
+      const p = (window as unknown as { __press?: number[] }).__press;
+      if (!p) return null;
+      const [x, y, sx, sy] = p;
+      const { clientWidth, clientHeight } = document.documentElement;
+      return { clear: Math.min(x, y, clientWidth - x, clientHeight - y), moved: Math.abs(scrollX - sx) + Math.abs(scrollY - sy) };
     });
-    check("the forced click was aimed at least 20px inside every edge of the viewport, clear of its scrollbars", clear >= 20, `${clear}px`);
-    check("...and the forced click toggled the switch, not a scrollbar at the viewport's edge", await page.locator("#fake-switch").isChecked());
+    check(`the page got the forced click's press${how}`, press !== null);
+    // The strict click's retries leave the switch at a viewport edge in every browser.
+    check(
+      `the forced click was pressed at least 20px inside every edge of the viewport, clear of its scrollbars${how}`,
+      (press?.clear ?? -1) >= 20,
+      `${press?.clear}px`,
+    );
+    check(
+      `...on a page that had stopped scrolling, so the switch was where the press aimed${how}`,
+      press?.moved === 0,
+      `moved ${press?.moved}px after the press`,
+    );
+    check(`...and the forced click toggled the switch, not a scrollbar at the viewport's edge${how}`, await page.locator("#fake-switch").isChecked());
+  } finally {
+    await engine.close().catch(() => {});
+  }
+}
+
+/**
+ * A covered switch in the last row of a box that scrolls sideways
+ * (forced-click-scroller.html). Centring cannot lift it clear of the box's
+ * bottom strip, where on WebKit with overlay scrollbars a press goes to the
+ * box's scrollbar and the page gets mouseup but no click. Whatever the
+ * browser does, the engine's answer must match the page: a click it reports
+ * as landed toggled the switch, and one that did not toggle it is reported as
+ * not landed.
+ */
+async function forcedClickAtAScrollersEdge({ baseUrl, projectDir }: SmokeContext): Promise<void> {
+  const engine = new BrowserEngine();
+  try {
+    await engine.attach({ url: `${baseUrl}/forced-click-scroller.html`, projectDir, mode: "read-only", actionTimeoutMs: LIMIT_BOUNDS.action.min });
+    const page = (engine as unknown as { page: import("playwright").Page }).page;
+    const snap = await engine.snapshot(true);
+    const ref = snap.match(/(e\d+) [a-z]+ "Edge switch"/)?.[1];
+    if (!ref) throw new Error(`ref not found for Edge switch in:\n${snap}`);
+    const out = await engine.click(ref).then(
+      (text) => ({ text, failed: false }),
+      (err: unknown) => ({ text: err instanceof Error ? err.message : String(err), failed: true }),
+    );
+    const toggled = await page.locator("#edge-switch").isChecked();
+    const scrolled = await page.getByTestId("sideways-box").evaluate((box) => box.scrollLeft > 0);
+    check("the strict click's retries scrolled the box sideways", scrolled);
+    check(
+      "a forced click at a sideways box's bottom edge is reported as landed only when the page got it",
+      toggled ? !out.failed && out.text.includes("forced click was used instead") : out.failed && /received no click/.test(out.text),
+      `${BROWSER}: toggled=${toggled}: ${out.text.split("\n")[0]}`,
+    );
+    // Only WebKit on macOS draws overlay scrollbars here, so only there is the not-landed branch taken; no CI cell runs it.
+    if (BROWSER === "webkit" && process.platform === "darwin")
+      check("...and on macOS WebKit the scrollbar took the press, which the engine reports as not landed", !toggled && out.failed, out.text.split("\n")[0]);
   } finally {
     await engine.close().catch(() => {});
   }
