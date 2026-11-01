@@ -123,7 +123,12 @@ import {
   ATTACH_URL_QUIET_MS,
   CRAWL_URL_HELD_MS,
   describePace,
+  DOCUMENT_PROBE_SCRIPT,
+  documentRead,
   InFlightRequests,
+  LEAVING_INIT_SCRIPT,
+  leavingUnsent,
+  MOVED_READ_ROUNDS,
   navigationAnswersPage,
   normalizePace,
   ownNavigationLanded,
@@ -131,6 +136,8 @@ import {
   seenWithin,
   settlePage,
   stableUrlOf,
+  type DocumentProbe,
+  type DocumentRead,
 } from "./settle.js";
 import {
   FRAME_READ_MS,
@@ -2020,6 +2027,8 @@ export class BrowserEngine {
       // The postMessage-token oracle: every frame's postMessage is wrapped, and a "*" call hands its longer strings here.
       await this.context.exposeBinding(POSTMESSAGE_BINDING, (source, entries: unknown) => this.noteTokenPosts(source.frame, entries));
       await this.context.addInitScript(postMessageCaptureScript());
+      // A navigation the page starts while it is read, before the browser sends its request (settle.ts documentRead).
+      await this.context.addInitScript(LEAVING_INIT_SCRIPT);
       this.page = await this.context.newPage();
       this.applyPageTimeouts(this.page);
     } catch (err) {
@@ -2052,7 +2061,15 @@ export class BrowserEngine {
     const requests = (this.requests = new InFlightRequests<Request, Frame>());
     const answered = (this.answered = new AnsweredEnds<Request>());
     const watchFrames = (p: Page): void => {
-      p.on("framenavigated", (frame) => requests.navigated(frame));
+      p.on("framenavigated", (frame) => {
+        requests.navigated(frame);
+        if (frame === p.mainFrame()) {
+          const commits = this.mainCommits.get(p) ?? [];
+          commits.push({ url: frame.url(), at: Date.now() });
+          if (commits.length > 20) commits.shift();
+          this.mainCommits.set(p, commits);
+        }
+      });
       p.on("framedetached", (detached) => requests.gone((frame) => frame === detached));
       p.on("close", () => requests.gone((frame) => frame.page() === p));
       // A navigation answered with a file never commits (settle.ts InFlightRequests.downloaded).
@@ -2621,13 +2638,84 @@ export class BrowserEngine {
   /**
    * Wait for a navigation the page started on its own to land, within `limitMs` of `startedAt` (settle.ts
    * ownNavigationLanded). Null once nothing is on its way; otherwise the address it was still loading, redacted.
+   * `leaving`, one a probe saw the page start (settle.ts DocumentProbe), counts as on its way before its request is seen.
    */
-  private async ownNavigationPending(page: Page, limitMs: number, startedAt: number): Promise<string | null> {
+  private async ownNavigationPending(page: Page, limitMs: number, startedAt: number, leaving: DocumentProbe["leaving"] = null): Promise<string | null> {
     const frame = page.mainFrame();
     // A navigation the page started after the load or action is given its own limit, from when it started.
-    const since = Math.max(startedAt, this.requests.navigationOf(frame)?.at ?? 0);
-    const landed = await ownNavigationLanded(page, () => !page.isClosed() && this.requests.navigating(frame), limitMs, since);
-    return landed ? null : redactSecrets(this.requests.navigationOf(frame)?.request.url() ?? page.url());
+    const since = Math.max(startedAt, this.requests.navigationOf(frame)?.at ?? 0, leaving?.at ?? 0);
+    const landed = await ownNavigationLanded(page, () => !page.isClosed() && this.leavingOnItsWay(page, leaving), limitMs, since);
+    return landed ? null : redactSecrets(this.requests.navigationOf(frame)?.request.url() ?? leaving?.url ?? page.url());
+  }
+
+  /** Whether `page`'s main frame has a navigation on its way: its request's, or `leaving`'s before that request is seen. */
+  private leavingOnItsWay(page: Page, leaving: DocumentProbe["leaving"]): boolean {
+    if (this.requests.navigating(page.mainFrame())) return true;
+    const starts = page === this.page ? this.mainNavigationStarts : [];
+    return leavingUnsent(leaving, { starts, commits: this.mainCommits.get(page) ?? [] });
+  }
+
+  /** Why the engine left `page` for about:blank, when it did (leftForBlank). */
+  private leftBlankFrom(page: Page): LeftForBlank | null {
+    return this.leftForBlank?.page === page ? this.leftForBlank.left : null;
+  }
+
+  /**
+   * `read` of the page bracketed by its own account of itself (settle.ts documentRead), within readHeld: what it read,
+   * the address it read it at, and whether that was one document that is staying.
+   */
+  private async readOneDocument<T>(
+    page: Page,
+    read: () => Promise<T>,
+    limitMs: number,
+    release = true,
+  ): Promise<{ stalled: false; value: T; url: string; verdict: DocumentRead; leaving: DocumentProbe["leaving"] } | { stalled: true; leavingFor: string }> {
+    const probe = async (): Promise<DocumentProbe | null> => (await bestEffort(page.evaluate(DOCUMENT_PROBE_SCRIPT), null)) as DocumentProbe | null;
+    const got = await this.readHeld(
+      page,
+      (async () => {
+        const before = await probe();
+        const value = await read();
+        return { value, before, after: await probe() };
+      })(),
+      limitMs,
+      release,
+    );
+    if (got.stalled) return got;
+    const { value, before, after } = got.value;
+    const verdict = documentRead(before, after, (mark) => this.leavingOnItsWay(page, mark));
+    return { stalled: false, value, url: page.url(), verdict, leaving: after?.leaving ?? null };
+  }
+
+  /**
+   * A read of the page where it stays: one that crossed a document change, or ended on a page that had started to
+   * leave, is taken again once that navigation lands, up to MOVED_READ_ROUNDS reads and within the page-load limit of
+   * the first. A navigation still on its way at the limit (from `startedAt`, or from when it started), or a page still
+   * moving at the last read, is ended, the page left for about:blank, and the read answered as stalled with where the
+   * page was going, as a held read is (readHeld).
+   */
+  private async readWhereItStays<T>(
+    page: Page,
+    read: () => Promise<T>,
+    limitMs: number,
+    startedAt: number,
+  ): Promise<{ stalled: false; value: T; url: string } | { stalled: true; leavingFor: string }> {
+    const begun = Date.now();
+    for (let round = 1; ; round++) {
+      const got = await this.readOneDocument(page, read, limitMs);
+      if (got.stalled || got.verdict === "one") return got;
+      this.traceStep(
+        page.url(),
+        got.verdict === "crossed" ? "read crossed a document change" : `read ended on a page leaving for ${redactSecrets(got.leaving?.url ?? "")}`,
+      );
+      const last = round >= MOVED_READ_ROUNDS || Date.now() - begun >= limitMs;
+      const pending = last ? redactSecrets(got.leaving?.url ?? page.url()) : await this.ownNavigationPending(page, limitMs, startedAt, got.leaving);
+      if (pending !== null) {
+        this.leftForBlank = { page, left: { why: "leaving", from: redactSecrets(page.url()) } };
+        await bestEffort(page.goto("about:blank", { timeout: this.limits.backNavMs }));
+        return { stalled: true, leavingFor: pending };
+      }
+    }
   }
 
   /**
@@ -2857,6 +2945,8 @@ export class BrowserEngine {
   private lastRequestStart = 0;
   /** The driven page's latest navigations, by their first request (limits.ts interruptedByOwnNavigation). */
   private mainNavigationStarts: NavigationStart[] = [];
+  /** Each page's main frame's latest commits, where and when on Date.now's clock (settle.ts leavingUnsent). */
+  private mainCommits = new WeakMap<Page, Array<{ url: string; at: number }>>();
   /** Each of those navigations by its first request, so an answer to it or to a redirect it followed is dated on it. */
   private mainNavigationOf = new WeakMap<Request, NavigationStart>();
 
@@ -2919,8 +3009,11 @@ export class BrowserEngine {
    */
   private async captureCoverageState(): Promise<{ fp: string; elements: SnapshotElement[]; url: string }> {
     const page = this.requirePage();
-    const { elements, forms, aliases } = await this.snapshots.collect();
-    const url = page.url();
+    const read = await this.readOneDocument(page, () => this.snapshots.collect(), this.limits.navMs, false);
+    // A read of a page that moved on under it, or is leaving, names no state the next action starts from.
+    if (read.stalled || read.verdict !== "one") throw new Error("The page moved on while it was read; no state was captured.");
+    const { elements, forms, aliases } = read.value;
+    const url = read.url;
     const fp = fingerprintState(url, trackedElements(elements));
     // Not registered on a page that is not the app's: none of its keys can then be marked exercised.
     if (!isAppPage(url)) return { fp, elements, url };
@@ -3040,10 +3133,16 @@ export class BrowserEngine {
       const left = this.leftForBlank?.page === page ? this.leftForBlank.left : null;
       return navigationPendingSnapshot(leavingFor, this.limits.navMs, left);
     };
-    const collected = await this.readHeld(page, this.snapshots.collect(), this.limits.navMs);
+    const collected = await this.readWhereItStays(page, () => this.snapshots.collect(), this.limits.navMs, this.actionStartedAt);
     if (collected.stalled) return movedOn(collected.leavingFor);
     const { elements, truncated, forms, cut, prev: prevSnap, matched, aliases } = collected.value;
-    const url = page.url();
+    const url = collected.url;
+    // Read again where the page went, which may be no page of the app.
+    if (!isAppPage(url)) {
+      this.snapshots.dropRefs("the session is not on a page of the app");
+      this.snapshotUrl = "";
+      return notAppPageSnapshot(url, this.leftBlankFrom(page));
+    }
     this.snapshotUrl = url;
     this.snapshotAt = Date.now();
     const route = normalizePath(url);
@@ -6137,18 +6236,19 @@ export class BrowserEngine {
     await this.crawlLandedUrl(page);
     this.traceStep(path, "crawl: collect");
     this.harvestPaused = opts.measureOnly === true;
-    const collected = await this.readHeld(
+    const collected = await this.readWhereItStays(
       page,
       // The main area is read with the controls: "41 el" alone cannot tell a page of text from one that drew nothing.
-      this.snapshots.collect().then(async (c) => ({ ...c, main: await this.readMainRegion(page) })),
+      () => this.snapshots.collect().then(async (c) => ({ ...c, main: await this.readMainRegion(page) })),
       this.limits.crawlNavMs,
+      this.actionStartedAt,
     ).finally(() => (this.harvestPaused = false));
     if (collected.stalled) {
       return this.crawlRouteUnloaded(run, path, url, stillNavigating(collected.leavingFor, "nav", this.limits.crawlNavMs), "NAVIGATION PENDING");
     }
     this.traceStep(path, "crawl: record");
     const { elements, forms, aliases, main } = collected.value;
-    const finalUrl = page.url();
+    const finalUrl = collected.url;
     // A page that sent itself to about:blank (or the browser to its own page) left the app: nothing of it is a state
     // of the app, and the route is not covered by having been left.
     if (!isAppPage(finalUrl)) {
@@ -6584,14 +6684,15 @@ export class BrowserEngine {
       // Record the state the action LANDED on (it may be a new screen
       // this plan just reached, and it deserves coverage of its own)…
       // A page the step sent on its way elsewhere holds the read: its coverage is left unrecorded rather than waited on.
-      const landed = await this.readHeld(page, this.snapshots.collect(), this.limits.navMs, false);
+      const landed = await this.readOneDocument(page, () => this.snapshots.collect(), this.limits.navMs, false);
       if (landed.stalled) return;
       const { elements, forms, aliases } = landed.value;
-      const url = page.url();
+      const url = landed.url;
       const fp = fingerprintState(url, trackedElements(elements));
-      // A step that left the session off the app (the origin fence's about:blank) reached no state of it; the element
-      // it acted on is still marked in the state it came from.
-      const onApp = isAppPage(url);
+      // A step that left the session off the app (the origin fence's about:blank), or whose page moved on under the read
+      // or is leaving (settle.ts documentRead), reached no state to record; the element it acted on is still marked in the
+      // state it came from.
+      const onApp = isAppPage(url) && landed.verdict === "one";
       if (onApp) {
         this.memory!.visitState(
           fp,

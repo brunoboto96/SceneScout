@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Moving in place once its controls are read</title>
+  </head>
+  <body>
+    <main>
+      <h1>Moving in place after read</h1>
+      <form action="/echo"><button type="submit">Send</button></form>
+    </main>
+    <script>
+      // Moves only its address on, in place (pushState), the first time its forms are listed: the twin of
+      // leaves-after-read.html with the same trigger, where the document stays. Read as the page it is, not as one leaving.
+      const forms = Object.getOwnPropertyDescriptor(Document.prototype, "forms").get;
+      let moved = false;
+      Object.defineProperty(document, "forms", {
+        get() {
+          if (!moved) {
+            moved = true;
+            history.pushState({}, "", "?tab=2");
+          }
+          return forms.call(document);
+        },
+      });
+    </script>
+  </body>
+</html>

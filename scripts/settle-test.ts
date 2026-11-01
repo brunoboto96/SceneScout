@@ -11,15 +11,21 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import vm from "node:vm";
 import {
   AnsweredEnds,
   answerMayMovePage,
   ATTACH_URL_QUIET_MS,
   CRAWL_URL_HELD_MS,
   describePace,
+  DOCUMENT_PROBE_SCRIPT,
+  documentRead,
   InFlightRequests,
   keepWaitingForNavigation,
   keepWatchingUrl,
+  LEAVING_INIT_SCRIPT,
+  LEAVING_REQUEST_GRACE_MS,
+  leavingUnsent,
   NAVIGATION_COMMIT_GRACE_MS,
   navigationAnswersPage,
   normalizePace,
@@ -43,6 +49,7 @@ import {
   URL_CAP_MS,
   URL_NAVIGATING_CAP_MS,
   URL_QUIET_MS,
+  type DocumentProbe,
 } from "../src/engine/settle.ts";
 
 const state = (over: Partial<Parameters<typeof shouldKeepWaiting>[0]> = {}) => ({
@@ -1045,4 +1052,133 @@ test("an empty page is not taken as a dead end until it has been up as long as t
   // ...and once it draws, the drawn page's age applies.
   assert.equal(recheck({ counts: [0, 0, 5, 5], elapsedMs: 750, ageMs: 900 }), null);
   assert.ok(RECHECK_EMPTY_AGE_MS <= RECHECK_BUSY_CAP_MS, "the empty page's wait fits within the re-reads' own cap");
+});
+
+/**
+ * A stand-in window for the page-side leaving scripts: a Navigation API that dispatches the events a test fires, its
+ * own clock, document and address. `navigation: false` is an engine without the API.
+ */
+function leavingWindow(opts: { navigation?: boolean; now?: number; timeOrigin?: number } = {}) {
+  const listeners = new Map<string, Array<(e: unknown) => void>>();
+  const clock = { now: opts.now ?? 1_000 };
+  const window: Record<string | symbol, unknown> = {};
+  const sandbox = vm.createContext({
+    window,
+    Object,
+    Symbol,
+    String,
+    Date: { now: () => clock.now },
+    performance: { timeOrigin: opts.timeOrigin ?? 1234.5 },
+  });
+  const navigation: Record<string, unknown> = {
+    currentEntry: { url: "http://localhost:3000/a" },
+    addEventListener: (type: string, fn: (e: unknown) => void) => listeners.set(type, [...(listeners.get(type) ?? []), fn]),
+  };
+  if (opts.navigation !== false) window.navigation = navigation;
+  vm.runInContext(LEAVING_INIT_SCRIPT, sandbox);
+  const fire = (type: string, e: Record<string, unknown> = {}) => {
+    for (const fn of listeners.get(type) ?? []) fn(e);
+  };
+  const navigate = (url: string, extra: Record<string, unknown> = {}) => {
+    const e = { destination: { url, sameDocument: false }, hashChange: false, downloadRequest: null, defaultPrevented: false, ...extra };
+    fire("navigate", e);
+    return e;
+  };
+  return {
+    clock,
+    sandbox,
+    navigate,
+    fire,
+    // Copied out of the sandbox, so its objects compare as this realm's.
+    probe: () => JSON.parse(JSON.stringify(vm.runInContext(DOCUMENT_PROBE_SCRIPT, sandbox))) as DocumentProbe,
+    runAgain: () => vm.runInContext(LEAVING_INIT_SCRIPT, sandbox),
+    setEntry: (url: string) => (navigation.currentEntry = { url }),
+  };
+}
+
+test("the page-side probe names the document and a cross-document navigation the page started", () => {
+  const w = leavingWindow({ now: 5_000, timeOrigin: 42.25 });
+  assert.deepEqual(w.probe(), { doc: 42.25, leaving: null }, "nothing started: not leaving");
+  w.navigate("http://localhost:3000/b");
+  assert.deepEqual(w.probe().leaving, { url: "http://localhost:3000/b", at: 5_000 });
+  // The page replacing Date.now or performance after it loaded changes neither the record's time nor the document's name.
+  w.sandbox.Date = { now: () => 1 };
+  w.sandbox.performance = { timeOrigin: 99 };
+  assert.equal(w.probe().doc, 42.25);
+  w.clock.now = 6_000;
+  w.navigate("http://localhost:3000/c");
+  assert.deepEqual(w.probe().leaving, { url: "http://localhost:3000/c", at: 6_000 }, "the latest navigation, on the clock the page found");
+  // Installed twice (a frame re-running init scripts), the first record stands.
+  w.runAgain();
+  assert.equal(w.probe().leaving?.url, "http://localhost:3000/c");
+});
+
+test("the page-side probe does not take a same-document move, a download or a cancelled navigation for leaving", () => {
+  for (const [what, extra] of [
+    ["a fragment or pushState", { destination: { url: "http://localhost:3000/a#x", sameDocument: true } }],
+    ["a hash change", { hashChange: true }],
+    ["a download", { downloadRequest: "report.csv" }],
+  ] as const) {
+    const w = leavingWindow();
+    w.navigate("http://localhost:3000/b", extra as Record<string, unknown>);
+    assert.equal(w.probe().leaving, null, what);
+  }
+  // Cancelled by the page's own handler after ours ran: read when probed, so it is not leaving.
+  const cancelled = leavingWindow();
+  const e = cancelled.navigate("http://localhost:3000/b");
+  assert.notEqual(cancelled.probe().leaving, null);
+  (e as { defaultPrevented: boolean }).defaultPrevented = true;
+  assert.equal(cancelled.probe().leaving, null, "a navigation the page cancelled");
+  // Intercepted by the page, it commits in place at its own address: the record is cleared.
+  const intercepted = leavingWindow();
+  intercepted.navigate("http://localhost:3000/b");
+  intercepted.setEntry("http://localhost:3000/b");
+  intercepted.fire("currententrychange");
+  assert.equal(intercepted.probe().leaving, null, "a navigation the page took over and committed in place");
+  // The contrast: a pushState elsewhere while the navigation is on its way leaves the record standing.
+  const pushed = leavingWindow();
+  pushed.navigate("http://localhost:3000/b");
+  pushed.setEntry("http://localhost:3000/a?tab=2");
+  pushed.fire("currententrychange");
+  assert.equal(pushed.probe().leaving?.url, "http://localhost:3000/b", "a same-document move elsewhere is not the navigation landing");
+  // An engine without the Navigation API still names its document; it never reports leaving.
+  const without = leavingWindow({ navigation: false });
+  assert.deepEqual(without.probe(), { doc: 1234.5, leaving: null });
+});
+
+test("a navigation the page started counts as on its way until its request or a commit is seen, within the grace", () => {
+  const mark = { url: "http://localhost:3000/b", at: 10_000 };
+  const none = { starts: [], commits: [] };
+  assert.equal(leavingUnsent(null, none, 10_100), false, "nothing started");
+  assert.equal(leavingUnsent(mark, none, 10_100), true, "started, no request yet: on its way");
+  assert.equal(leavingUnsent(mark, none, 10_000 + LEAVING_REQUEST_GRACE_MS - 1), true);
+  assert.equal(leavingUnsent(mark, none, 10_000 + LEAVING_REQUEST_GRACE_MS), false, "no request by the grace: one that sends none");
+  // Once its request is seen, the request decides (InFlightRequests.navigating): this no longer counts it.
+  assert.equal(leavingUnsent(mark, { starts: [{ at: 10_005 }], commits: [] }, 10_100), false);
+  // A page clock a little ahead of the engine's still matches the request that followed.
+  assert.equal(leavingUnsent(mark, { starts: [{ at: 9_990 }], commits: [] }, 10_100), false);
+  // A navigation that sends no request (about:blank) is seen by its commit at its address...
+  const blank = { url: "about:blank", at: 10_000 };
+  assert.equal(leavingUnsent(blank, { starts: [], commits: [{ url: "about:blank", at: 10_020 }] }, 10_100), false);
+  // ...and a commit elsewhere since (the page's own pushState) is not it.
+  assert.equal(leavingUnsent(mark, { starts: [], commits: [{ url: "http://localhost:3000/a?tab=2", at: 10_020 }] }, 10_100), true);
+  // The route's own load, long before the page asked to leave, is not this navigation's request, nor is its commit.
+  assert.equal(leavingUnsent(mark, { starts: [{ at: 8_000 }], commits: [{ url: "http://localhost:3000/b", at: 8_200 }] }, 10_100), true);
+});
+
+test("a read is of one document that stays only when the page names the same document before and after, and is not leaving", () => {
+  const at = (doc: number, leaving: DocumentProbe["leaving"] = null): DocumentProbe => ({ doc, leaving });
+  const onItsWay = () => true;
+  assert.equal(documentRead(at(1), at(1), onItsWay), "one");
+  // The contrast for each: one fact apart.
+  assert.equal(documentRead(at(1), at(2), onItsWay), "crossed", "another document by the end of the read");
+  assert.equal(documentRead(at(1), null, onItsWay), "crossed", "a navigation ended the probe after the read");
+  assert.equal(documentRead(null, at(1), onItsWay), "crossed", "a navigation ended the probe before it");
+  const leaving = { url: "http://localhost:3000/b", at: 5 };
+  assert.equal(documentRead(at(1), at(1, leaving), onItsWay), "leaving", "started to leave during the read, still on its way");
+  // A navigation the page started that is no longer on its way (answered 204, failed, never sent) leaves the read standing.
+  assert.equal(
+    documentRead(at(1), at(1, leaving), () => false),
+    "one",
+  );
 });

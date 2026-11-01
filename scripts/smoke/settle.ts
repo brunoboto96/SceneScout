@@ -59,6 +59,7 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
   await downloadIsNotWaitedFor(baseUrl, stats);
   await crawlOfAPageThatMovesOnToNowhere(baseUrl);
   await crawlOfAPageThatMovesOnWhileRead(baseUrl);
+  await pageThatMovesOnOnceReadIsReadWhereItLanded(baseUrl);
   await pageThatLeavesForBlank(baseUrl);
   await actionOnAPageThatMovesOnWhileScanned(baseUrl);
   await scanGivenUpOnAddsNothingLate(baseUrl, "finds-while-leaving.html", "dom_injection");
@@ -235,9 +236,12 @@ async function crawlOfAPageThatMovesOnToNowhere(baseUrl: string): Promise<void> 
 /**
  * A page that starts a navigation of its own, to an address that never answers, while it is being read: one as its
  * controls are read, the other once they have been, each after the engine's check for a navigation on its way, so the
- * race a loaded machine loses at random is lost here every time. Chromium holds every later read of such a page until
- * the navigation lands, so each read is released at the page-load limit and the route or snapshot is reported as a
- * navigation pending to where the page was going. Without that release the crawl and both snapshots never end.
+ * race a loaded machine loses at random is lost here every time. Chromium holds every later read of such a page once
+ * the browser has sent the navigation's request, and the reads are released at the page-load limit; but the browser
+ * sends that request a moment after the page asked for it, so a fast read can end before it is held. Either way, and
+ * on every engine, the read ended on a page leaving (settle.ts documentRead): the route or snapshot is reported as a
+ * navigation pending to where the page was going, never as the page that was leaving. Without the release the crawl
+ * and both snapshots never end.
  */
 async function crawlOfAPageThatMovesOnWhileRead(baseUrl: string): Promise<void> {
   console.log("settle: a page that moves itself on while it is read ends at the page-load limit");
@@ -259,32 +263,28 @@ async function crawlOfAPageThatMovesOnWhileRead(baseUrl: string): Promise<void> 
     for (const route of ["leaves-while-read", "leaves-after-read"]) {
       const pending = new RegExp(`/${route}\\.html — NAVIGATION PENDING`).test(out);
       const named = new RegExp(`/${route}\\.html: the page moved itself on to http[^\\s]*/page2\\.html\\?held=1, which had not loaded`).test(out);
-      // Chromium holds the read; the other engines read the page that is still showing, which is a route read where it stood.
       check(
         `...the route whose page moved on ${route === "leaves-while-read" ? "while its controls were read" : "once its controls were read"} is a navigation pending to where it was going`,
-        BROWSER === "chromium" ? pending && named : pending ? named : new RegExp(`/${route}\\.html — 200`).test(out),
+        pending && named,
         out,
       );
     }
     check("...and never as one to the blank page the read was released with", !/about:blank/.test(out), out);
-    // On Chromium the crawl ended on a route whose read was released: the navigation was ended with it, so the page
-    // left is not one a later read would wait on. The other engines read that route, and its navigation is still on its way.
-    if (BROWSER === "chromium") {
-      const t1 = Date.now();
-      const after = await bounded(engine, "snapshot", engine.snapshot());
-      check(
-        "...and a snapshot after the crawl finds no navigation of that route's page still on its way",
-        !/NAVIGATION PENDING/.test(after),
-        `${Date.now() - t1} ms\n${after.slice(0, 300)}`,
-      );
-      check(
-        "...and says the session is on the blank page the crawl left that route for, and to navigate to the route again, recording no state and no dead end",
-        /^NOT A PAGE OF THE APP: the session is on about:blank, where SceneScout left http[^\s]*\/leaves-after-read\.html /.test(after) &&
-          /scout_navigate to http[^\s]*\/leaves-after-read\.html to load it again/.test(after) &&
-          !/DEAD END|^State: /m.test(after),
-        after.slice(0, 400),
-      );
-    }
+    // The crawl ended on a route whose navigation was ended at the limit, so the page left is not one a later read would wait on.
+    const t1 = Date.now();
+    const after = await bounded(engine, "snapshot", engine.snapshot());
+    check(
+      "...and a snapshot after the crawl finds no navigation of that route's page still on its way",
+      !/NAVIGATION PENDING/.test(after),
+      `${Date.now() - t1} ms\n${after.slice(0, 300)}`,
+    );
+    check(
+      "...and says the session is on the blank page the crawl left that route for, and to navigate to the route again, recording no state and no dead end",
+      /^NOT A PAGE OF THE APP: the session is on about:blank, where SceneScout left http[^\s]*\/leaves-after-read\.html /.test(after) &&
+        /scout_navigate to http[^\s]*\/leaves-after-read\.html to load it again/.test(after) &&
+        !/DEAD END|^State: /m.test(after),
+      after.slice(0, 400),
+    );
     // The same pages reached by a navigation and then read by a snapshot.
     for (const route of ["leaves-while-read", "leaves-after-read"]) {
       const went = await bounded(engine, "navigate", engine.navigate(`${baseUrl}/${route}.html`));
@@ -296,24 +296,22 @@ async function crawlOfAPageThatMovesOnWhileRead(baseUrl: string): Promise<void> 
         /^OK: navigate /.test(went) &&
           snapMs < limitMs + 4000 &&
           !/about:blank/.test(snap.split("\n")[0]) &&
-          (BROWSER !== "chromium" || /^NAVIGATION PENDING: the page moved itself on to http[^\s]*\/page2\.html\?held=1/.test(snap)),
+          /^NAVIGATION PENDING: the page moved itself on to http[^\s]*\/page2\.html\?held=1/.test(snap),
         `${snapMs} ms\n${went.slice(0, 200)}\n${snap.slice(0, 300)}`,
       );
-      if (BROWSER === "chromium") {
-        check(
-          "...and says the page was left, to navigate to it again rather than snapshot again later",
-          new RegExp(
-            `\\nThe page was left for about:blank to end that navigation, and nothing of it was recorded: scout_navigate to http[^\\s]*/${route}\\.html to load it again`,
-          ).test(snap) && !/again later/.test(snap),
-          snap.slice(0, 500),
-        );
-        const next = await bounded(engine, "snapshot", engine.snapshot());
-        check(
-          "...and the snapshot after it records nothing of the blank page and reports no dead end",
-          /^NOT A PAGE OF THE APP: /.test(next) && !/DEAD END|^State: /m.test(next),
-          next.slice(0, 400),
-        );
-      }
+      check(
+        "...and says the page was left, to navigate to it again rather than snapshot again later",
+        new RegExp(
+          `\\nThe page was left for about:blank to end that navigation, and nothing of it was recorded: scout_navigate to http[^\\s]*/${route}\\.html to load it again`,
+        ).test(snap) && !/again later/.test(snap),
+        snap.slice(0, 500),
+      );
+      const next = await bounded(engine, "snapshot", engine.snapshot());
+      check(
+        "...and the snapshot after it records nothing of the blank page and reports no dead end",
+        /^NOT A PAGE OF THE APP: /.test(next) && !/DEAD END|^State: /m.test(next),
+        next.slice(0, 400),
+      );
     }
     await engine.close();
     check(
@@ -323,6 +321,53 @@ async function crawlOfAPageThatMovesOnWhileRead(baseUrl: string): Promise<void> 
     );
   } finally {
     releaseHeldPages();
+    await engine.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The twins of leaves-after-read.html, with the same trigger: one moves on to a page that answers, the other changes
+ * only its address in place (pushState). The first is read again where it landed, so neither the crawl nor a snapshot
+ * keeps the controls of the page it left; the second is one document that stays, read as itself, not as a page leaving.
+ */
+async function pageThatMovesOnOnceReadIsReadWhereItLanded(baseUrl: string): Promise<void> {
+  console.log("settle: a page that moves on once its controls are read is read where it landed");
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-settle-landed-"));
+  const engine = new BrowserEngine();
+  engine.sessionKey = "settle-landed";
+  try {
+    await engine.attach({ url: `${baseUrl}/covered.html`, projectDir, mode: "read-only", navTimeoutMs: 3000 });
+    const out = await bounded(engine, "crawl", engine.crawl(["/leaves-after-read-for-page.html", "/moves-in-place-after-read.html"]));
+    check(
+      "a crawled route whose page moved on to a page that answered, once its controls were read, is read, not pending",
+      /\/leaves-after-read-for-page\.html — 200/.test(out) && !/NAVIGATION PENDING/.test(out),
+      out,
+    );
+    check("...and so is the twin that only changed its address in place", /\/moves-in-place-after-read\.html — 200/.test(out), out);
+    await bounded(engine, "navigate", engine.navigate(`${baseUrl}/leaves-after-read-for-page.html`));
+    const landed = await bounded(engine, "snapshot", engine.snapshot());
+    check(
+      "a snapshot of that page is of where it landed, with none of the controls of the page it left",
+      /^URL: http[^\s]*\/page2\.html/.test(landed) && !/button "Send"/.test(landed),
+      landed.slice(0, 500),
+    );
+    await bounded(engine, "navigate", engine.navigate(`${baseUrl}/moves-in-place-after-read.html`));
+    const inPlace = await bounded(engine, "snapshot", engine.snapshot());
+    check(
+      "...while a snapshot of the twin that moved in place is of that page, as a state, with its controls (the contrast)",
+      /^URL: http[^\s]*\/moves-in-place-after-read\.html/.test(inPlace) && /^State: /m.test(inPlace) && /button "Send"/.test(inPlace),
+      inPlace.slice(0, 500),
+    );
+    // Written when the session closes.
+    await engine.close();
+    const kept = keptStateUrls(projectDir);
+    check(
+      "the project's memory keeps the page the moving page landed on, and no state under the address it left",
+      kept.some((u) => /\/page2\.html/.test(u)) && !kept.some((u) => /leaves-after-read-for-page/.test(u)),
+      kept.join("\n"),
+    );
+  } finally {
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
   }
@@ -505,7 +550,10 @@ async function actionOnAPageThatMovedOnBeforeIt(baseUrl: string): Promise<void> 
       const snap = await bounded(engine, "snapshot", engine.snapshot());
       const ref = /\[(e\d+)\] button "Go on"/.exec(snap)?.[1] ?? /(e\d+)\s+button "Go on"/.exec(snap)?.[1];
       check(`the page's button is listed (before ${what})`, ref !== undefined, snap.slice(0, 600));
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      // The page starts its own navigation after the snapshot, and it is on its way once the server holds its request,
+      // which the engine saw before the server did.
+      await (engine as unknown as { page: Page }).page.evaluate("window.goOn()");
+      await until("the page's own navigation to reach the server", () => heldPageCount() === 1, 10_000);
       const t0 = Date.now();
       const said = await bounded(engine, what, act(engine, ref ?? "e1"));
       const ms = Date.now() - t0;

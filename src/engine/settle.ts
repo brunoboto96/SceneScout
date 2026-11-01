@@ -632,3 +632,123 @@ export async function seenWithin(page: SettlingPage, seen: () => boolean, ms: nu
     await bestEffort(page.waitForTimeout(SETTLE_TICK_MS));
   }
 }
+
+/**
+ * A navigation the page starts on its own while it is read.
+ *
+ * The check for a navigation on its way (ownNavigationLanded) sees one only once the browser has sent its request,
+ * and the browser sends it a moment after the page's script asked for it: on a loaded machine, after the reads that
+ * followed. Read then, the page that was leaving was recorded as the route's state, and on Chromium the next read of
+ * it was held until that navigation landed. So each read is bracketed by the page's own account of itself
+ * (DOCUMENT_PROBE_SCRIPT): which document it is, and a navigation it has started, seen by the Navigation
+ * API's `navigate` event, which every engine fires as the script asks (LEAVING_INIT_SCRIPT). A read that spans two
+ * documents, or ends on a page that has started to leave, is not a read of a page that stays. A page that only changes
+ * its address in place (pushState, a fragment) is still one document: one that does so on a timer is read as before.
+ */
+export interface DocumentProbe {
+  /** The document's time origin: each document a page loads has its own. */
+  doc: number;
+  /** The cross-document navigation the document has started and not cancelled, and when (its clock is the machine's). */
+  leaving: { url: string; at: number } | null;
+}
+
+/** Where the probe finds its record: a symbol on the window, so no page name can collide with it. */
+const LEAVING_KEY = "scenescout.leaving";
+
+/**
+ * Page-side, run before any of the page's scripts: names the document by its time origin and records the
+ * cross-document navigation it starts. A same-document one (a fragment, pushState) and a download, which leaves the
+ * page where it is, are not recorded; a navigation the page intercepts is cleared once it commits in place at its own
+ * address. `Date.now` and the time origin are kept as the page found them, so a page that replaces them later cannot
+ * change what is read.
+ */
+export const LEAVING_INIT_SCRIPT = `(() => {
+  const KEY = Symbol.for(${JSON.stringify(LEAVING_KEY)});
+  if (Object.prototype.hasOwnProperty.call(window, KEY)) return;
+  const clock = Date.now;
+  const doc = performance.timeOrigin;
+  let mark = null;
+  const nav = window.navigation;
+  if (nav && typeof nav.addEventListener === "function") {
+    nav.addEventListener("navigate", (e) => {
+      try {
+        if (e.destination.sameDocument || e.hashChange || (e.downloadRequest !== null && e.downloadRequest !== undefined)) return;
+        mark = { url: String(e.destination.url), at: clock(), event: e };
+      } catch (err) {
+        mark = null;
+      }
+    });
+    nav.addEventListener("currententrychange", () => {
+      try {
+        if (mark && nav.currentEntry && nav.currentEntry.url === mark.url) mark = null;
+      } catch (err) {
+        mark = null;
+      }
+    });
+  }
+  Object.defineProperty(window, KEY, {
+    value: { doc, leaving: () => (mark && !mark.event.defaultPrevented ? { url: mark.url, at: mark.at } : null) },
+  });
+})()`;
+
+/**
+ * Page-side: the page's account of itself (DocumentProbe), read before and after a read of it. A document the init
+ * script did not run in is named by its time origin as it reads now, and never reports leaving.
+ */
+export const DOCUMENT_PROBE_SCRIPT = `(() => {
+  const own = window[Symbol.for(${JSON.stringify(LEAVING_KEY)})];
+  if (own && typeof own.leaving === "function") return { doc: own.doc, leaving: own.leaving() };
+  let doc = 0;
+  try {
+    doc = Number(performance.timeOrigin) || 0;
+  } catch (err) {
+    doc = 0;
+  }
+  return { doc, leaving: null };
+})()`;
+
+/**
+ * How long a navigation the page started may go without a request before it is taken as one that sends none (an
+ * external protocol's link, one a dialog cancelled). With the renderer slowed six-fold, the request was out within 1.5 s.
+ */
+export const LEAVING_REQUEST_GRACE_MS = 2000;
+
+/** How far the page's clock may read ahead of the engine's: the same machine's, rounded by some engines. */
+const LEAVING_CLOCK_SLOP_MS = 50;
+
+/**
+ * Whether the navigation the page started (`mark`) is on its way with no request seen yet: no navigation of the main
+ * frame has started since, nothing has committed at its address since (one that sends no request, such as
+ * about:blank), and it was started less than LEAVING_REQUEST_GRACE_MS ago. A commit elsewhere (the page's pushState)
+ * is not it. Once its request is seen, whether it is on its way is the request's to say (InFlightRequests.navigating).
+ */
+export function leavingUnsent(
+  mark: DocumentProbe["leaving"],
+  seen: { starts: readonly { at: number }[]; commits: readonly { url: string; at: number }[] },
+  now: number = Date.now(),
+): boolean {
+  if (mark === null) return false;
+  const since = mark.at - LEAVING_CLOCK_SLOP_MS;
+  const bare = (u: string): string => u.split("#")[0];
+  if (seen.starts.some((s) => s.at >= since) || seen.commits.some((c) => c.at >= since && bare(c.url) === bare(mark.url))) return false;
+  return now - mark.at < LEAVING_REQUEST_GRACE_MS;
+}
+
+/**
+ * What a read bracketed by probes read: "one" document that is staying; a read that "crossed" from one document to
+ * another (or whose probe a navigation ended), so what it read may be of either; or one of a page "leaving", which had
+ * started a navigation of its own that is still on its way (`onItsWay`) as the read ended.
+ */
+export type DocumentRead = "one" | "crossed" | "leaving";
+
+export function documentRead(
+  before: DocumentProbe | null,
+  after: DocumentProbe | null,
+  onItsWay: (mark: NonNullable<DocumentProbe["leaving"]>) => boolean,
+): DocumentRead {
+  if (before === null || after === null || before.doc !== after.doc) return "crossed";
+  return after.leaving !== null && onItsWay(after.leaving) ? "leaving" : "one";
+}
+
+/** How many times a read that crossed a document change or ended on a page leaving is taken again where the page landed. */
+export const MOVED_READ_ROUNDS = 3;
