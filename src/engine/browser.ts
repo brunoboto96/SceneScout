@@ -6697,15 +6697,16 @@ export class BrowserEngine {
       // this plan just reached, and it deserves coverage of its own)…
       // A page the step sent on its way elsewhere holds the read: its coverage is left unrecorded rather than waited on.
       const landed = await this.readOneDocument(page, () => this.snapshots.collect(), this.limits.navMs, false);
-      if (landed.stalled) return;
-      const { elements, forms, aliases } = landed.value;
-      const url = landed.url;
+      // A step that left the session off the app (the origin fence's about:blank), whose read was held, or whose page
+      // moved on under the read or is leaving (settle.ts documentRead), reached no state to record; the element it acted
+      // on is still marked in the state it came from.
+      const read = landed.stalled || !isAppPage(landed.url) || landed.verdict !== "one" ? null : landed;
+      const elements = read?.value.elements ?? [];
+      const url = read?.url ?? page.url();
       const fp = fingerprintState(url, trackedElements(elements));
-      // A step that left the session off the app (the origin fence's about:blank), or whose page moved on under the read
-      // or is leaving (settle.ts documentRead), reached no state to record; the element it acted on is still marked in the
-      // state it came from.
-      const onApp = isAppPage(url) && landed.verdict === "one";
-      if (onApp) {
+      const onApp = read !== null;
+      if (read) {
+        const { forms, aliases } = read.value;
         this.memory!.visitState(
           fp,
           url,

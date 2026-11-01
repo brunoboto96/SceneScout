@@ -22,7 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Page } from "playwright";
 import { BrowserEngine } from "../../dist/engine/browser.js";
-import { SETTLE_CAP_MS } from "../../dist/engine/settle.js";
+import { MOVED_READ_ROUNDS, SETTLE_CAP_MS } from "../../dist/engine/settle.js";
 import { serviceWorkerPolicy } from "../../dist/browsers.js";
 import { BROWSER, check, eventually, heldPageCount, releaseHeldPages, settle, until, type ServerStats, type SmokeContext } from "./harness.ts";
 
@@ -60,6 +60,8 @@ export async function run({ baseUrl, stats }: SmokeContext): Promise<void> {
   await crawlOfAPageThatMovesOnToNowhere(baseUrl);
   await crawlOfAPageThatMovesOnWhileRead(baseUrl);
   await pageThatMovesOnOnceReadIsReadWhereItLanded(baseUrl);
+  await planStepOnAPageLeavingRecordsNoStateOfIt(baseUrl);
+  await pageThatNeverStaysIsReadAgainOnlySoOften(baseUrl);
   await pageThatLeavesForBlank(baseUrl);
   await actionOnAPageThatMovesOnWhileScanned(baseUrl);
   await scanGivenUpOnAddsNothingLate(baseUrl, "finds-while-leaving.html", "dom_injection");
@@ -366,6 +368,93 @@ async function pageThatMovesOnOnceReadIsReadWhereItLanded(baseUrl: string): Prom
       "the project's memory keeps the page the moving page landed on, and no state under the address it left",
       kept.some((u) => /\/page2\.html/.test(u)) && !kept.some((u) => /leaves-after-read-for-page/.test(u)),
       kept.join("\n"),
+    );
+  } finally {
+    await engine.close();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A plan step's two reads of the page, the state before it acts and the state it landed on, each of a page that starts
+ * a navigation of its own to an address that never answers as its controls are read. Neither is a state the plan reached:
+ * memory keeps no state of the leaving page, and the element the step acted on is still marked in the state it came from.
+ * The contrast is the first step's own state, read before the page was armed, which is kept.
+ */
+async function planStepOnAPageLeavingRecordsNoStateOfIt(baseUrl: string): Promise<void> {
+  console.log("settle: a plan step's read of a page leaving records no state of it");
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-settle-plan-"));
+  const engine = new BrowserEngine();
+  engine.sessionKey = "settle-plan";
+  try {
+    await engine.attach({ url: `${baseUrl}/covered.html`, projectDir, mode: "read-only", navTimeoutMs: 3000 });
+    // The state before the step: its read is the first listing of the page's forms, which sends the page on its way.
+    const before = await bounded(
+      engine,
+      "plan",
+      engine.runPlan([
+        { action: "navigate", target: "/leaves-after-read.html" },
+        { action: "click", target: "text=Leaving after read" },
+      ]),
+    );
+    // The state the step landed on (the held navigation above is left on its way, and this plan's own load replaces it): the click armed the page, and the read after it sends the page on its way.
+    const landed = await bounded(
+      engine,
+      "plan",
+      engine.runPlan([
+        { action: "navigate", target: "/leaves-once-armed.html" },
+        { action: "click", target: "testid=arm" },
+      ]),
+    );
+    await engine.close();
+    const memory = JSON.parse(fs.readFileSync(path.join(projectDir, ".scenescout", "memory.json"), "utf8")) as {
+      states?: Record<string, { url: string; elements: Record<string, { exercised: boolean }> }>;
+    };
+    const states = Object.values(memory.states ?? {});
+    check(
+      "a plan step whose state before it was read as the page left records no state under the address it left",
+      !states.some((s) => /leaves-after-read\.html/.test(s.url)),
+      `${before.slice(0, 400)}\n${states.map((s) => s.url).join("\n")}`,
+    );
+    const armed = states.filter((s) => /leaves-once-armed\.html/.test(s.url));
+    check(
+      "a plan step whose landed state was read as the page left records no state holding the control the step added",
+      armed.length > 0 && !armed.some((s) => Object.keys(s.elements).some((k) => /added-once-armed/.test(k))),
+      `${landed.slice(0, 400)}\n${JSON.stringify(armed.map((s) => Object.keys(s.elements)))}`,
+    );
+    check(
+      "...while the control it acted on is marked exercised in the state it came from, read before the page was armed (the contrast)",
+      armed.some((s) => Object.entries(s.elements).some(([k, e]) => /arm/.test(k) && !/added/.test(k) && e.exercised)),
+      JSON.stringify(armed.map((s) => s.elements)),
+    );
+  } finally {
+    await engine.close();
+    releaseHeldPages();
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A page that moves itself on to a fresh copy of itself every time it is read, each copy answering at once. Each read
+ * crossed a document change and is taken again, but only MOVED_READ_ROUNDS times, well within a long page-load limit:
+ * the snapshot then says the page was still moving and leaves it, rather than reading it again until the limit, or forever.
+ */
+async function pageThatNeverStaysIsReadAgainOnlySoOften(baseUrl: string): Promise<void> {
+  console.log("settle: a page that moves on at every read is read again only so often");
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "ft-settle-every-"));
+  const engine = new BrowserEngine();
+  engine.sessionKey = "settle-every";
+  try {
+    await engine.attach({ url: `${baseUrl}/covered.html`, projectDir, mode: "read-only", navTimeoutMs: 20_000 });
+    await bounded(engine, "navigate", engine.navigate(`${baseUrl}/leaves-on-every-read.html`));
+    const t0 = Date.now();
+    const snap = await bounded(engine, "snapshot", engine.snapshot());
+    const ms = Date.now() - t0;
+    const rounds = engine.stepTraceLines().filter((l) => /read crossed a document change|read ended on a page leaving/.test(l)).length;
+    check(
+      `the snapshot reads it again ${MOVED_READ_ROUNDS} times, no more, and then reports it still moving, short of the page-load limit`,
+      /^NAVIGATION PENDING: /.test(snap) && rounds === MOVED_READ_ROUNDS && ms < 20_000,
+      `${ms} ms, ${rounds} re-reads\n${snap.slice(0, 300)}\n${engine.stepTraceLines().slice(-12).join("\n")}`,
     );
   } finally {
     await engine.close();

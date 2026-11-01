@@ -1218,7 +1218,7 @@ function leavingWindow(opts: { navigation?: boolean; now?: number; timeOrigin?: 
     for (const fn of listeners.get(type) ?? []) fn(e);
   };
   const navigate = (url: string, extra: Record<string, unknown> = {}) => {
-    const e = { destination: { url, sameDocument: false }, hashChange: false, downloadRequest: null, defaultPrevented: false, ...extra };
+    const e = { isTrusted: true, destination: { url, sameDocument: false }, hashChange: false, downloadRequest: null, defaultPrevented: false, ...extra };
     fire("navigate", e);
     return e;
   };
@@ -1271,14 +1271,26 @@ test("the page-side probe does not take a same-document move, a download or a ca
   const intercepted = leavingWindow();
   intercepted.navigate("http://localhost:3000/b");
   intercepted.setEntry("http://localhost:3000/b");
-  intercepted.fire("currententrychange");
+  intercepted.fire("currententrychange", { isTrusted: true });
   assert.equal(intercepted.probe().leaving, null, "a navigation the page took over and committed in place");
   // The contrast: a pushState elsewhere while the navigation is on its way leaves the record standing.
   const pushed = leavingWindow();
   pushed.navigate("http://localhost:3000/b");
   pushed.setEntry("http://localhost:3000/a?tab=2");
-  pushed.fire("currententrychange");
+  pushed.fire("currententrychange", { isTrusted: true });
   assert.equal(pushed.probe().leaving?.url, "http://localhost:3000/b", "a same-document move elsewhere is not the navigation landing");
+  // An event the page dispatched itself neither starts a record nor clears one the browser's own navigation started.
+  const forged = leavingWindow();
+  forged.navigate("http://localhost:3000/b", { isTrusted: false });
+  assert.equal(forged.probe().leaving, null, "a navigate event the page made up is not a navigation");
+  forged.navigate("http://localhost:3000/c");
+  forged.fire("navigate", { isTrusted: false });
+  assert.equal(forged.probe().leaving?.url, "http://localhost:3000/c", "a made-up event without a destination leaves the real record standing");
+  // The page leaving for its own address, then dispatching an entry change of its own, still reads as leaving.
+  const self = leavingWindow();
+  self.navigate("http://localhost:3000/a");
+  self.fire("currententrychange", { isTrusted: false });
+  assert.equal(self.probe().leaving?.url, "http://localhost:3000/a", "a made-up entry change is not the navigation landing");
   // An engine without the Navigation API still names its document; it never reports leaving.
   const without = leavingWindow({ navigation: false });
   assert.deepEqual(without.probe(), { doc: 1234.5, leaving: null });

@@ -721,7 +721,7 @@ const LEAVING_KEY = "scenescout.leaving";
  * cross-document navigation it starts. A same-document one (a fragment, pushState) and a download, which leaves the
  * page where it is, are not recorded; a navigation the page intercepts is cleared once it commits in place at its own
  * address. `Date.now` and the time origin are kept as the page found them, so a page that replaces them later cannot
- * change what is read.
+ * change what is read, and an event the page dispatches itself is ignored.
  */
 export const LEAVING_INIT_SCRIPT = `(() => {
   const KEY = Symbol.for(${JSON.stringify(LEAVING_KEY)});
@@ -732,6 +732,8 @@ export const LEAVING_INIT_SCRIPT = `(() => {
   const nav = window.navigation;
   if (nav && typeof nav.addEventListener === "function") {
     nav.addEventListener("navigate", (e) => {
+      // One the page dispatched itself is no navigation, and must not clear the record of one that is.
+      if (!e.isTrusted) return;
       try {
         if (e.destination.sameDocument || e.hashChange || (e.downloadRequest !== null && e.downloadRequest !== undefined)) return;
         mark = { url: String(e.destination.url), at: clock(), event: e };
@@ -739,7 +741,8 @@ export const LEAVING_INIT_SCRIPT = `(() => {
         mark = null;
       }
     });
-    nav.addEventListener("currententrychange", () => {
+    nav.addEventListener("currententrychange", (e) => {
+      if (!e.isTrusted) return;
       try {
         if (mark && nav.currentEntry && nav.currentEntry.url === mark.url) mark = null;
       } catch (err) {
