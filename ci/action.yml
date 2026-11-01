@@ -288,9 +288,19 @@ runs:
         AZURE_OPENAI_API_KEY: ""
         PLAYWRIGHT_CLI: ${{ steps.resolve.outputs.playwright-cli }}
         ENGINE: ${{ steps.resolve.outputs.engine }}
+      # A composite step takes no timeout-minutes, so each attempt is bounded here: a mirror
+      # that stalls ends it after five minutes, and a failed or stopped attempt is tried once
+      # more. timeout runs as root to stop the apt it starts; sudo resets PATH, so node is named by path.
       run: |
-        if [ "$(id -u)" = "0" ]; then node "$PLAYWRIGHT_CLI" install-deps "$ENGINE"
-        else sudo "$(command -v node)" "$PLAYWRIGHT_CLI" install-deps "$ENGINE"; fi
+        as_root() { if [ "$(id -u)" = "0" ]; then "$@"; else sudo "$@"; fi; }
+        NODE="$(command -v node)"
+        for attempt in 1 2; do
+          if as_root timeout --kill-after=15 300 "$NODE" "$PLAYWRIGHT_CLI" install-deps "$ENGINE"; then exit 0; fi
+          echo "::warning title=Install the browser's system libraries::attempt $attempt failed or ran out of time"
+          as_root dpkg --configure -a || echo "::warning title=Install the browser's system libraries::dpkg could not finish an interrupted install"
+        done
+        echo "::error title=Install the browser's system libraries::Playwright's install-deps failed or ran out of time on both attempts; the package mirror may be slow or unreachable. Re-run the job, or install the libraries yourself and set install-deps to false."
+        exit 1
 
     - name: Install the browser
       id: install
