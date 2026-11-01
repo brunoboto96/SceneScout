@@ -122,12 +122,12 @@ Registering through each command above has been run against Codex CLI, Gemini CL
 
 ### A client that `install` does not know
 
-Add a stdio server to the client's configuration whose command is `npx -y scenescout@3.34.1 serve`. Most clients accept this shape (the first test downloads the browser it drives, once; `npx -y scenescout install --browser-only` does it beforehand):
+Add a stdio server to the client's configuration whose command is `npx -y scenescout@3.34.2 serve`. Most clients accept this shape (the first test downloads the browser it drives, once; `npx -y scenescout install --browser-only` does it beforehand):
 
 ```json
 {
   "mcpServers": {
-    "scenescout": { "command": "npx", "args": ["-y", "scenescout@3.34.1", "serve"] }
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout@3.34.2", "serve"] }
   }
 }
 ```
@@ -140,7 +140,7 @@ That is the entry for Cursor (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a p
 ```json
 {
   "servers": {
-    "scenescout": { "type": "stdio", "command": "npx", "args": ["-y", "scenescout@3.34.1", "serve"] }
+    "scenescout": { "type": "stdio", "command": "npx", "args": ["-y", "scenescout@3.34.2", "serve"] }
   }
 }
 ```
@@ -153,7 +153,7 @@ That is the entry for Cursor (`~/.cursor/mcp.json`, or `.cursor/mcp.json` in a p
 ```toml
 [mcp_servers.scenescout]
 command = "npx"
-args = ["-y", "scenescout@3.34.1", "serve"]
+args = ["-y", "scenescout@3.34.2", "serve"]
 ```
 
 </details>
@@ -164,7 +164,7 @@ args = ["-y", "scenescout@3.34.1", "serve"]
 ```json
 {
   "context_servers": {
-    "scenescout": { "command": "npx", "args": ["-y", "scenescout@3.34.1", "serve"], "env": {} }
+    "scenescout": { "command": "npx", "args": ["-y", "scenescout@3.34.2", "serve"], "env": {} }
   }
 }
 ```
