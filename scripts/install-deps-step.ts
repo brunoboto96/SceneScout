@@ -11,7 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export type InstallDepsRun = { status: number | null; stdout: string; calls: string[]; node: string };
+export type InstallDepsRun = { status: number | null; output: string; calls: string[]; node: string };
 
 /** `attempts` is how each `timeout` call ends, in order: "ok" exits 0, "stall" exits 124 as GNU timeout does. */
 export function runInstallDepsStep(script: string, opts: { root: boolean; attempts: Array<"ok" | "stall"> }): InstallDepsRun {
@@ -26,8 +26,9 @@ export function runInstallDepsStep(script: string, opts: { root: boolean; attemp
     stub("sudo", `echo "sudo $*" >> "$CALLS"; exec "$@"`);
     stub(
       "timeout",
-      `echo "timeout $*" >> "$CALLS"; n=$(($(cat "$COUNT" 2>/dev/null || echo 0) + 1)); echo $n > "$COUNT"\n` +
-        `outcome=$(echo "$OUTCOMES" | cut -d' ' -f$n); [ "$outcome" = ok ] && exit 0; exit 124`,
+      // The attempt number comes from the call log the suite reads back; a separate counter file did not advance on the Windows runner.
+      `echo "timeout $*" >> "$CALLS"; n=$(grep -c '^timeout ' "$CALLS"); set -- $OUTCOMES\n` +
+        `case "\${!n}" in ok) exit 0 ;; stall) exit 124 ;; *) echo "stand-in timeout: no outcome for attempt $n" >&2; exit 99 ;; esac`,
     );
     stub("dpkg", `echo "dpkg $*" >> "$CALLS"`);
     const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", script], {
@@ -35,7 +36,6 @@ export function runInstallDepsStep(script: string, opts: { root: boolean; attemp
       env: {
         PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
         CALLS: log,
-        COUNT: path.join(dir, "count"),
         OUTCOMES: opts.attempts.join(" "),
         PLAYWRIGHT_CLI: "/opt/playwright/cli.js",
         ENGINE: "chromium",
@@ -43,18 +43,20 @@ export function runInstallDepsStep(script: string, opts: { root: boolean; attemp
     });
     const calls = fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n") : [];
     const node = spawnSync("bash", ["-c", "command -v node"], { encoding: "utf8", env: { PATH: process.env.PATH ?? "" } }).stdout.trim();
-    return { status: r.status, stdout: r.stdout, calls, node };
+    return { status: r.status, output: `${r.stdout}${r.stderr}`, calls, node };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
 /**
- * The step's contract: every attempt runs under root's `timeout`, a stalled or failed attempt is
+ * The step's contract: on Linux only, every attempt runs under root's `timeout`, a stalled or failed attempt is
  * tried once more after dpkg finishes what it cut off, and two failures end the step with an error
  * naming it, both attempts inside `jobMinutes` with time to spare for the error to be seen.
  */
-export function assertBoundedInstallDeps(script: string, label: string, jobMinutes: number): void {
+export function assertBoundedInstallDeps(step: { if?: string; run?: string }, label: string, jobMinutes: number): void {
+  assert.match(step.if ?? "", /^runner\.os == 'Linux' && /, `${label}: the step runs on Linux only`);
+  const script = step.run ?? "";
   const stalled = runInstallDepsStep(script, { root: false, attempts: ["stall", "stall"] });
   const attempts = stalled.calls.filter((c) => c.startsWith("sudo timeout "));
   assert.equal(attempts.length, 2, `${label}: a stalled attempt is tried once more, under sudo: ${stalled.calls.join(" | ")}`);
@@ -64,15 +66,15 @@ export function assertBoundedInstallDeps(script: string, label: string, jobMinut
   assert.equal(attempts[1], attempts[0], `${label}: the retry runs the same command`);
   assert.equal(stalled.calls.filter((c) => c === "sudo dpkg --configure -a").length, 2, `${label}: an install cut off part-way is finished`);
   assert.equal(stalled.status, 1, `${label}: two failed attempts fail the step`);
-  assert.match(stalled.stdout, /^::error title=Install the browser's system libraries::.*install-deps/m, `${label}: the error names the step`);
+  assert.match(stalled.output, /^::error title=Install the browser's system libraries::.*install-deps/m, `${label}: the error names the step`);
   const [kill, limit] = [Number(bound[1]), Number(bound[2])];
   assert.ok(limit >= 120 && kill > 0, `${label}: an attempt gets at least two minutes and is killed if it ignores the signal`);
   assert.ok(2 * (kill + limit) <= (jobMinutes - 4) * 60, `${label}: both attempts end inside a ${jobMinutes}-minute job with minutes to spare`);
 
   const second = runInstallDepsStep(script, { root: false, attempts: ["stall", "ok"] });
-  assert.equal(second.status, 0, `${label}: a second attempt that succeeds passes the step`);
-  assert.doesNotMatch(second.stdout, /::error/, label);
-  assert.equal(second.stdout.match(/::warning/g)?.length, 1, `${label}: the stalled attempt is named in a warning`);
+  assert.equal(second.status, 0, `${label}: a second attempt that succeeds passes the step: ${second.calls.join(" | ")} ${second.output}`);
+  assert.doesNotMatch(second.output, /::error/, label);
+  assert.equal(second.output.match(/::warning/g)?.length, 1, `${label}: the stalled attempt is named in a warning`);
 
   const first = runInstallDepsStep(script, { root: false, attempts: ["ok"] });
   assert.deepEqual(
@@ -80,7 +82,7 @@ export function assertBoundedInstallDeps(script: string, label: string, jobMinut
     [attempts[0]],
     `${label}: a first success runs once`,
   );
-  assert.equal(first.status, 0, label);
+  assert.equal(first.status, 0, `${label}: ${first.calls.join(" | ")} ${first.output}`);
 
   const root = runInstallDepsStep(script, { root: true, attempts: ["stall", "stall"] });
   assert.ok(!root.calls.some((c) => c.startsWith("sudo")), `${label}: as root, sudo is not used`);

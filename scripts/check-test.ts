@@ -5132,14 +5132,14 @@ test("action: the preflight input runs `scenescout preflight` on the url and the
 
 test("action: the browser's system libraries install with each attempt bounded and retried once, and two failures name the step", () => {
   // On 2026-11-01 apt stalled on the Ubuntu mirror for 14 minutes, until the job's limit, with nothing saying which step hung.
-  const steps = action.runs.steps as Array<{ name: string; run?: string }>;
+  const steps = action.runs.steps as Array<{ name: string; if?: string; run?: string }>;
   const deps = steps.filter((s) => /install-deps/.test(s.run ?? ""));
   assert.deepEqual(
     deps.map((s) => s.name),
     ["Install the browser's system libraries"],
   );
   const workflow = parseYaml(fs.readFileSync(path.join(REPO, ".github", "workflows", "test.yml"), "utf8")) as Record<string, any>;
-  assertBoundedInstallDeps(deps[0].run ?? "", "action.yml", Number(workflow.jobs["check-action"]["timeout-minutes"]));
+  assertBoundedInstallDeps(deps[0], "action.yml", Number(workflow.jobs["check-action"]["timeout-minutes"]));
 });
 
 // ── network failures, told from the app's (#554) ────────────────────────────
