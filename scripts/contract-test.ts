@@ -2149,6 +2149,10 @@ test("snapshot: a page that is not the app's records nothing and says how to com
     notAppPageSnapshot("about:blank", { why: "pending", from: "http://localhost:3000/a" }),
     /the crawl found a navigation of its own still on its way.*scout_navigate to http:\/\/localhost:3000\/a to load it again/,
   );
+  assert.match(
+    notAppPageSnapshot("about:blank", { why: "leaving", from: "http://localhost:3000/a" }),
+    /because it started a navigation of its own while it was read, and that navigation was still on its way at the page-load limit\. .*scout_navigate to http:\/\/localhost:3000\/a to load it again/,
+  );
   // An address that reads as a destructive command is never offered as the way back.
   const destructive = notAppPageSnapshot("about:blank", { why: "destructive", from: "http://localhost:3000/things/9/delete" });
   assert.match(destructive, /loading its address again could act on the server/);

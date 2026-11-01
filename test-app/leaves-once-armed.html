@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving once armed and read</title>
+  </head>
+  <body>
+    <main>
+      <h1>Leaving once armed</h1>
+      <button type="button" data-testid="arm">Arm</button>
+    </main>
+    <script>
+      // A click on Arm adds a control and arms the page: the next time its forms are listed, it moves itself on to a page
+      // the fixture server holds back (held=1). A plan step's read of the state the click landed on is of a page leaving.
+      const forms = Object.getOwnPropertyDescriptor(Document.prototype, "forms").get;
+      let armed = false;
+      document.querySelector("[data-testid=arm]").addEventListener("click", () => {
+        const added = document.createElement("button");
+        added.type = "button";
+        added.dataset.testid = "added-once-armed";
+        added.textContent = "Added once armed";
+        document.querySelector("main").append(added);
+        armed = true;
+      });
+      Object.defineProperty(document, "forms", {
+        get() {
+          if (armed) {
+            armed = false;
+            location.href = "/page2.html?held=1";
+          }
+          return forms.call(document);
+        },
+      });
+    </script>
+  </body>
+</html>

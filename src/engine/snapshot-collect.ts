@@ -479,16 +479,18 @@ export function isAppPage(url: string): boolean {
 /**
  * Why the engine itself left a page of the app for about:blank, and the address it left (redacted): a read the page's
  * own navigation held was released ("released"), a crawled route's navigation was still on its way at the page-load
- * limit ("pending"), or the page to go back to has an address that reads as a destructive command ("destructive").
+ * limit ("pending"), a navigation the page started while it was read was still on its way at that limit ("leaving"),
+ * or the page to go back to has an address that reads as a destructive command ("destructive").
  */
 export interface LeftForBlank {
-  why: "released" | "pending" | "destructive";
+  why: "released" | "pending" | "leaving" | "destructive";
   from: string;
 }
 
 const LEFT_WHEN: Record<LeftForBlank["why"], string> = {
   released: "a read of it was held by a navigation of its own that never landed",
   pending: "the crawl found a navigation of its own still on its way at the page-load limit",
+  leaving: "it started a navigation of its own while it was read, and that navigation was still on its way at the page-load limit",
   destructive: "loading its address again could act on the server",
 };
 

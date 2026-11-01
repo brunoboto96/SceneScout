@@ -10,11 +10,13 @@
       <button type="button" data-testid="between-go">Go on</button>
     </main>
     <script>
-      // Starts a navigation of its own a moment after load, to a page the fixture server holds back (held=1): one that
-      // is on its way, and never lands, when the next action looks for its target.
-      setTimeout(function () {
-        location.href = "/page2.html?held=1";
-      }, 1500);
+      // Starts a navigation of its own when the suite says (goOn), to a page the fixture server holds back (held=1): one
+      // that is on its way, and never lands, when the next action looks for its target. Started after the call returns.
+      window.goOn = function () {
+        setTimeout(function () {
+          location.href = "/page2.html?held=1";
+        }, 0);
+      };
     </script>
   </body>
 </html>

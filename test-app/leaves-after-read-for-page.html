@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Leaving for a page that answers once its controls are read</title>
+  </head>
+  <body>
+    <main>
+      <h1>Leaving for a page after read</h1>
+      <form action="/echo"><button type="submit">Send</button></form>
+    </main>
+    <script>
+      // Moves itself on, to a page that answers at once, the first time its forms are listed: the twin of
+      // leaves-after-read.html, whose page never answers. Read again where it landed, the route is that page.
+      const forms = Object.getOwnPropertyDescriptor(Document.prototype, "forms").get;
+      let left = false;
+      Object.defineProperty(document, "forms", {
+        get() {
+          if (!left) {
+            left = true;
+            location.href = "/page2.html";
+          }
+          return forms.call(document);
+        },
+      });
+    </script>
+  </body>
+</html>
