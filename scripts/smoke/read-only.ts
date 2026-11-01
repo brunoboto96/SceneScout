@@ -10,7 +10,7 @@ import { computeGaps, generateReport } from "../../dist/engine/report.js";
 import { FORMS_INVENTORY_SCRIPT } from "../../dist/engine/forms.js";
 import type { StyleRecord } from "../../dist/engine/design.js";
 import { droppedNavigationErrorPage, focusAdvanceKey, serviceWorkerPolicy } from "../../dist/browsers.js";
-import { DEFAULT_ACTION_TIMEOUT_MS } from "../../dist/engine/limits.js";
+import { DEFAULT_ACTION_TIMEOUT_MS, LIMIT_BOUNDS } from "../../dist/engine/limits.js";
 import { writeRulesSettings } from "../../dist/engine/project-config.js";
 import { BROWSER, check, eventually, settle, WAIT_MS, type SmokeContext } from "./harness.ts";
 
@@ -1137,6 +1137,7 @@ export async function run({ baseUrl, projectDir, stats }: SmokeContext): Promise
     await engine.close().catch(() => {});
   }
   await failuresAtTheActionLimit({ baseUrl, projectDir, stats } as SmokeContext);
+  await forcedClickOnASidewaysPage({ baseUrl, projectDir, stats } as SmokeContext);
   await labelsAndLeaving({ baseUrl, projectDir, stats } as SmokeContext);
   await controlFacts({ baseUrl, projectDir, stats } as SmokeContext);
   await readPosts({ baseUrl, projectDir, stats } as SmokeContext);
@@ -1197,6 +1198,40 @@ async function failuresAtTheActionLimit({ baseUrl, projectDir }: SmokeContext): 
     console.log("scroll: a target the page does not have");
     const missing = await engine.scroll("bottom", undefined, "testid=does-not-exist");
     check("a missing scroll target is refused, not silently ignored", missing.includes("Scroll target not found"), missing);
+  } finally {
+    await engine.close().catch(() => {});
+  }
+}
+
+/**
+ * The covered switch again, at the shortest action limit. The index page is
+ * wider than the viewport, so the strict click's retries scroll it sideways
+ * and leave the switch at the bottom edge, where on WebKit the horizontal
+ * scrollbar those scrolls show takes a press: the page gets mousedown and
+ * mouseup but no click. At this limit the strict click usually gives up right
+ * after such a scroll, so a forced click aimed where the switch lies is lost.
+ */
+async function forcedClickOnASidewaysPage({ baseUrl, projectDir }: SmokeContext): Promise<void> {
+  const engine = new BrowserEngine();
+  try {
+    await engine.attach({ url: baseUrl, projectDir, mode: "read-only", actionTimeoutMs: LIMIT_BOUNDS.action.min });
+    const page = (engine as unknown as { page: import("playwright").Page }).page;
+    const sideways = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+    check("the index page is wider than the viewport, so the strict click's retries scroll it sideways", sideways);
+    const snap = await engine.snapshot(true);
+    const ref = snap.match(/(e\d+) [a-z]+ "Fake switch"/)?.[1];
+    if (!ref) throw new Error(`ref not found for Fake switch in:\n${snap}`);
+    console.log("resilient click: a forced click after the strict one scrolled the page sideways");
+    const out = await engine.click(ref);
+    check("the strict click on the covered switch gave way to a forced one", out.includes("forced click was used instead"), out);
+    // Where the forced click was aimed: the strict click's retries leave the switch at a viewport edge in every browser.
+    const clear = await page.locator("#fake-switch").evaluate((node) => {
+      const r = node.getBoundingClientRect();
+      const [x, y] = [r.left + r.width / 2, r.top + r.height / 2];
+      return Math.min(x, y, document.documentElement.clientWidth - x, document.documentElement.clientHeight - y);
+    });
+    check("the forced click was aimed at least 20px inside every edge of the viewport, clear of its scrollbars", clear >= 20, `${clear}px`);
+    check("...and the forced click toggled the switch, not a scrollbar at the viewport's edge", await page.locator("#fake-switch").isChecked());
   } finally {
     await engine.close().catch(() => {});
   }

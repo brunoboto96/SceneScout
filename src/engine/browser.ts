@@ -3880,6 +3880,10 @@ export class BrowserEngine {
       if (!/Timeout/i.test(msg)) throw err;
       const diagnostic = actionabilityDiagnostic(msg);
       if (!diagnostic || !/intercepts pointer events|is not stable/i.test(diagnostic)) throw err;
+      // The strict click's retries leave the target at a viewport edge after scrolling the page, sideways too. A press
+      // there, on WebKit with overlay scrollbars (macOS), goes to the scrollbar those scrolls showed: the page gets
+      // mousedown and mouseup but no click. So the forced click is aimed mid-viewport.
+      await bestEffort(locator.evaluate((node) => node.scrollIntoView({ block: "center", inline: "center" }), undefined, { timeout: FORCED_CLICK_TIMEOUT_MS }));
       // What is on top at the click point, read before the forced click can
       // change it (a toast the click dismisses). Only a name for the note: a
       // read that fails leaves the note unnamed, never the click undone.
@@ -4429,7 +4433,8 @@ export class BrowserEngine {
     // after it, for apps that fetch an upload URL before opening the picker. A
     // wait shorter than the click reported such controls as "uploads nothing".
     // Null when no chooser opened within the budget: the control opens none, which the caller reports.
-    const opened = page.waitForEvent("filechooser", { timeout: this.limits.actionMs + FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
+    // The forced retry's scroll, cover read and click are each bounded by FORCED_CLICK_TIMEOUT_MS.
+    const opened = page.waitForEvent("filechooser", { timeout: this.limits.actionMs + 3 * FORCED_CLICK_TIMEOUT_MS + CHOOSER_GRACE_MS }).catch(() => null);
     await this.resilientClick(locator, this.limits.actionMs);
     const chooser = await Promise.race([opened, page.waitForTimeout(CHOOSER_GRACE_MS).then(() => null)]);
     if (chooser) return { input: null, chooser, how: "via the file chooser the click opened" };
