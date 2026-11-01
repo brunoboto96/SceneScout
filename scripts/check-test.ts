@@ -16,6 +16,7 @@ import test from "node:test";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { assertBoundedInstallDeps } from "./install-deps-step.ts";
 import {
   ACTION_ONLY_INPUTS,
   browsersPath,
@@ -5127,6 +5128,18 @@ test("action: the preflight input runs `scenescout preflight` on the url and the
   for (const later of ["Restore the browser cache", "Install the browser's system libraries", "Install the browser", "Run the check"])
     assert.ok(names.indexOf("Preflight") < names.indexOf(later), `before ${later}`);
   assert.equal(action.inputs.preflight.default, "false");
+});
+
+test("action: the browser's system libraries install with each attempt bounded and retried once, and two failures name the step", () => {
+  // On 2026-11-01 apt stalled on the Ubuntu mirror for 14 minutes, until the job's limit, with nothing saying which step hung.
+  const steps = action.runs.steps as Array<{ name: string; run?: string }>;
+  const deps = steps.filter((s) => /install-deps/.test(s.run ?? ""));
+  assert.deepEqual(
+    deps.map((s) => s.name),
+    ["Install the browser's system libraries"],
+  );
+  const workflow = parseYaml(fs.readFileSync(path.join(REPO, ".github", "workflows", "test.yml"), "utf8")) as Record<string, any>;
+  assertBoundedInstallDeps(deps[0].run ?? "", "action.yml", Number(workflow.jobs["check-action"]["timeout-minutes"]));
 });
 
 // ── network failures, told from the app's (#554) ────────────────────────────

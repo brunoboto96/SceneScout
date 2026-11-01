@@ -17,6 +17,7 @@ import zlib from "node:zlib";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { asCrlf, asLf, joinPath, readText, samePlace } from "./checkout.ts";
+import { assertBoundedInstallDeps } from "./install-deps-step.ts";
 import { z } from "zod";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -2490,6 +2491,18 @@ test("test.yml: a browser build is restored only from a cache of the same image,
     assert.equal(steps[save].with?.path, steps[restore].with?.path, `${name}: saved from where it is restored to`);
   }
   assert.equal(cached, 3, "the docs, suite and cross-browser jobs each install a browser");
+});
+
+test("action: the browser's system libraries install with each attempt bounded and retried once, and two failures name the step", () => {
+  // On 2026-11-01 apt stalled on the Ubuntu mirror for 14 minutes, until the job's limit, with nothing saying which step hung.
+  const steps = action.runs.steps as Array<{ name: string; run?: string }>;
+  const deps = steps.filter((s) => /install-deps/.test(s.run ?? ""));
+  assert.deepEqual(
+    deps.map((s) => s.name),
+    ["Install the browser's system libraries"],
+  );
+  const workflow = parseYaml(fs.readFileSync(path.join(REPO, ".github", "workflows", "test.yml"), "utf8")) as Record<string, any>;
+  assertBoundedInstallDeps(deps[0].run ?? "", "ci/action.yml", Number(workflow.jobs["ci-action"]["timeout-minutes"]));
 });
 
 test("test.yml: a browser's system libraries install from cached packages, each attempt bounded, and the packages are saved only after an install", () => {
