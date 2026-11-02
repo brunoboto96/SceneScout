@@ -1,0 +1,57 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-34-2-12",
+  "date": "2026-11-02",
+  "note": "Unattended scenescout ci run (scheduled) of v3.34.2; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Home dashboard notices request fails with HTTP 500",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Account export link is clipped and unreachable",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "account-export link unreachable in overflow-hidden ancestor"
+    },
+    {
+      "title": "Fines page presents an empty list when fines request is forbidden",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403; fines-rows empty without load-error"
+    },
+    {
+      "title": "Available-only catalogue filter retains an on-loan book",
+      "severity": "medium",
+      "category": "data-inconsistency",
+      "evidence": "catalogue available-only filter includes A Field Guide to Moss marked all on loan"
+    },
+    {
+      "title": "Sign-in role choices lack a visually prominent next step",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "signin.html role choice buttons visually equal; no dominant action"
+    },
+    {
+      "title": "Events page spacing uses ad-hoc padding values",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "events page padding off-grid 57%; 9px×26, 7px×2, 6px×2, 14px×2"
+    },
+    {
+      "title": "Hold drop control has no accessible name",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "button holds-drop-32 has empty accessible name"
+    },
+    {
+      "title": "Checkout reports success after the loan request is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/loans 403; checkout-msg claims checked out"
+    }
+  ],
+  "decisions": []
+}
