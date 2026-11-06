@@ -520,7 +520,7 @@ npx --yes scenescout@3 check http://127.0.0.1:3000 --fail-on high --out scenesco
 
 ```yaml
 ui-check:
-  image: mcr.microsoft.com/playwright:v1.63.0-noble
+  image: mcr.microsoft.com/playwright:v1.65.0-noble
   script:
     - npm ci && npm run build
     - npm start &
@@ -539,7 +539,7 @@ The Playwright image already has the browsers' system libraries. If its Playwrig
 jobs:
   ui-check:
     docker:
-      - image: mcr.microsoft.com/playwright:v1.63.0-noble
+      - image: mcr.microsoft.com/playwright:v1.65.0-noble
     steps:
       - checkout
       - run: npm ci && npm run build
