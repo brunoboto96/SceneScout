@@ -67,7 +67,8 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
     let snap = await engine.snapshot();
     const moved = await engine.click(refFor(snap, "Save"));
     check("a Save whose router moves the page late is not called a silent submit", !SILENT_NOTE.test(moved), moved.slice(0, 500));
-    check("...and the result says where the page went", /moved client-side to .*step=next/.test(moved), moved.slice(0, 500));
+    // On a slow run the router has moved by the time the action reads the address, so the result's own URL line says it.
+    check("...and the result says where the page went", /(moved client-side to|URL now:) .*step=next/.test(moved), moved.slice(0, 500));
 
     await engine.navigate("/late-route-idle.html");
     snap = await engine.snapshot();

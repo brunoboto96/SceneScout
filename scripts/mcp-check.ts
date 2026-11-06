@@ -630,14 +630,14 @@ async function laneOffSiteCheck(client: Client): Promise<void> {
   const call = async (name: string, args: Record<string, unknown>): Promise<string> => textOf(await client.callTool({ name, arguments: args }));
   try {
     await call("scout_attach", { url: fixture.baseUrl, projectPath: projectDir, session: "away", mode: "read-only", objective: "away lane" });
-    // 1.5 s after load (later than the navigation watches), the page sends a signed-out visitor to an ordinary page of
+    // 4 s after load (later than the navigation watches), the page sends a signed-out visitor to an ordinary page of
     // the other origin, adding a state of its own to the query.
     await call("scout_navigate", {
       session: "away",
       task: "Opening the gated area",
       target: `/sso-gated.html?secret=1&idp=${encodeURIComponent(fixture.foreignBaseUrl)}&to=${encodeURIComponent("/covered.html")}`,
     });
-    await settle(2500);
+    await settle(5000);
     const reply = JSON.stringify({ lane: "away", status: "complete", decisions: [], routes: ["/sso-gated.html"], blocked_by: null });
     const folded = await call("scout_lane_report", { lane: "away", reply });
     if (!/Lane report accepted/.test(folded)) fail(`the off-site lane's report was not accepted:\n${folded}`);
