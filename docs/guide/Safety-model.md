@@ -465,6 +465,8 @@ When you know an endpoint only reads, name it: `scout_attach {mode: "observe", r
 
 ## Leaving a page with unsent input
 
+An app's `unload` handler does not run in Chromium 158 and later unless the page asks for it with `Permissions-Policy: unload=*`, so a beacon an app sends only there is not sent during a run, as it is not for its users. `pagehide` and `visibilitychange` run as before, and what a page sends on them is judged as this page describes.
+
 A page holding unsent input can ask the browser to confirm leaving (`beforeunload`). The result says so by name, with what the engine answered. In `observe` and `read-only` it answers "stay" unless told otherwise, so the navigation is cancelled and nothing is lost; pass `leave: true` to `scout_navigate`, `scout_click` or `scout_back` to leave and discard the input. Other modes leave unless given `leave: false`. Leaving sends no write of its own, and any request the page sends as it goes is judged by the policy like any other. Other native dialogs (alert, confirm, prompt) are dismissed in `observe` and `read-only`, accepted otherwise, and named in the result too.
 
 ## How `safe-write` knows what the run created

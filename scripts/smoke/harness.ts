@@ -1234,6 +1234,8 @@ export async function startFixtureServer(): Promise<{ baseUrl: string; foreignBa
       else answer();
       return;
     }
+    // Chromium fires unload from 158 only on a page that asks for it.
+    if (urlPath === "/check-flow-writes.html" && req.url?.includes("on=unload")) res.setHeader("Permissions-Policy", "unload=*");
     // The path comes from the request, so keep it inside the fixture directory:
     // resolve it, then require the result to still be under appDir. Without
     // this, "/../../<anything>" served any file the test runner could read.

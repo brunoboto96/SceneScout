@@ -179,8 +179,81 @@ export async function run({ baseUrl }: SmokeContext): Promise<void> {
       crashed.startsWith("PLAN (1/2 steps ran)") && crashed.includes("PLAN ABORTED at step 1") && /page_error/.test(crashed),
       crashed,
     );
+    await inertControls(baseUrl, projectDir);
   } finally {
     await engine.close();
     fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+}
+
+/** An inert control: named in the snapshot, refused saying so, and its text kept out of the field that holds the focus. */
+async function inertControls(baseUrl: string, projectDir: string): Promise<void> {
+  const open = async (query: string) => {
+    const engine = new BrowserEngine();
+    await engine.attach({ url: `${baseUrl}/inert-controls.html${query}`, projectDir, mode: "read-only", actionTimeoutMs: 1000 });
+    const snap = await engine.snapshot(true);
+    const ref = (name: string): string => new RegExp(`(e\\d+) \\w+ "${name}`).exec(snap)?.[1] ?? `no ${name} in:\n${snap}`;
+    const page = (engine as unknown as { page: Page }).page;
+    const value = (testid: string) => page.locator(`[data-testid="${testid}"]`).inputValue();
+    return { engine, snap, ref, value };
+  };
+  const failure = (work: Promise<string>): Promise<string> => work.catch((err: unknown) => (err instanceof Error ? err.message : String(err)));
+
+  const inert = await open("");
+  try {
+    check(
+      "the snapshot names an inert control as inert",
+      /"Save" \[[^\]]*[ [,]inert[,\]]/.test(inert.snap) && !/"Other field" \[[^\]]*[ [,]inert[,\]]/.test(inert.snap),
+      inert.snap,
+    );
+    const clicked = await failure(inert.engine.click(inert.ref("Save")));
+    check(
+      "a click on an inert control fails saying it is inert, not that the limit was short",
+      /still inert/.test(clicked) && !/raise it/.test(clicked),
+      clicked,
+    );
+    const typed = await failure(inert.engine.type(inert.ref("Name"), "more"));
+    check("text appended to an inert field is refused", /^Not typed: /.test(typed), typed);
+    check(
+      "...and reaches neither that field nor the one holding the focus",
+      (await inert.value("inert-name")) === "old" && (await inert.value("inert-other")) === "",
+      typed,
+    );
+    const replaced = await failure(inert.engine.type(inert.ref("Name"), "new", false, true));
+    check("a replacing type into an inert field fails saying so", /still inert/.test(replaced), replaced);
+    const picked = await failure(inert.engine.select(inert.ref("Pick"), "Two"));
+    check("a select on an inert dropdown fails saying so", /still inert/.test(picked), picked);
+    const uploaded = await failure(inert.engine.upload({ ref: inert.ref("Attachment") }));
+    check("an upload to an inert file input is refused", /is inert/.test(uploaded), uploaded);
+    const plan = await inert.engine.runPlan([{ action: "click", target: "testid=inert-save" }]);
+    check("a plan step names the reason", /FAILED[^\n]*still inert/.test(plan) && !/raise it/.test(plan), plan);
+    const flow = await inert.engine.replayFlow([{ action: "click", target: "testid=inert-save" }], "observe");
+    check(
+      "a flow step names the state",
+      flow.outcome.status === "failed" && /testid=inert-save is visible but inert after/.test(flow.outcome.reason ?? ""),
+      JSON.stringify(flow.outcome),
+    );
+  } finally {
+    await inert.engine.close();
+  }
+
+  const modal = await open("?lifted=1&modal=1");
+  try {
+    const typed = await failure(modal.engine.type(modal.ref("Name"), "more"));
+    check("text appended to a field behind a modal dialog is refused", /^Not typed: /.test(typed), typed);
+    check("...and does not land in the dialog's field", (await modal.value("inert-dialog-field")) === "" && (await modal.value("inert-name")) === "old", typed);
+  } finally {
+    await modal.engine.close();
+  }
+
+  const lifted = await open("?lifted=1");
+  try {
+    check("the same controls with the attribute gone are not named inert", !/[ [,]inert[,\]]/.test(lifted.snap), lifted.snap);
+    const clicked = await lifted.engine.click(lifted.ref("Save"));
+    check("...a click lands", /^OK/.test(clicked), clicked);
+    const typed = await lifted.engine.type(lifted.ref("Name"), "more");
+    check("...and text is appended to that field", /^OK/.test(typed) && /^old ?more$/.test(await lifted.value("inert-name")), typed);
+  } finally {
+    await lifted.engine.close();
   }
 }

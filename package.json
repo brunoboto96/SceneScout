@@ -119,7 +119,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "playwright": "~1.63.0",
+    "playwright": "~1.65.0",
     "re2js": "^2.9.0",
     "undici": "^8.12.3",
     "zod": "^4.6.7"

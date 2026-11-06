@@ -168,8 +168,9 @@ export function parseTarget(target: string): FlowTarget | null {
  * report leads with this, then the action limit's hint, which still applies
  * when the app enables the control later than the limit allows.
  */
-export function notActionable(action: "click" | "type" | "select", facts: { enabled: boolean; editable: boolean | null }): string | null {
+export function notActionable(action: "click" | "type" | "select", facts: { enabled: boolean; editable: boolean | null; inert: boolean }): string | null {
   if (!facts.enabled) return "is visible but disabled";
+  if (facts.inert) return "is visible but inert";
   if (action === "type" && facts.editable === false) return "is visible but read-only";
   return null;
 }

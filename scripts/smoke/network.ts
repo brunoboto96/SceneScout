@@ -78,7 +78,7 @@ async function server(handle: (req: http.IncomingMessage, res: http.ServerRespon
 }
 
 /** A forward proxy (absolute-form requests and CONNECT) that sends APP_HOST to the app's port on 127.0.0.1 and refuses every other host. */
-async function proxy(appPort: number) {
+async function proxy(appPort: number, credential?: string) {
   const hosts: string[] = [];
   const sockets = new Set<net.Socket>();
   const keep = (sock: net.Socket) => {
@@ -86,6 +86,11 @@ async function proxy(appPort: number) {
     sock.on("close", () => sockets.delete(sock));
   };
   const s = http.createServer((req, res) => {
+    if (credential && req.headers["proxy-authorization"] !== `Basic ${Buffer.from(credential).toString("base64")}`) {
+      res.writeHead(407, { "proxy-authenticate": 'Basic realm="relay"', connection: "close" }).end();
+      return;
+    }
+    const { "proxy-authorization": _spent, ...forwarded } = req.headers;
     let target: URL;
     try {
       target = new URL(req.url ?? "");
@@ -98,7 +103,7 @@ async function proxy(appPort: number) {
       res.writeHead(502).end();
       return;
     }
-    const up = http.request({ host: "127.0.0.1", port: appPort, path: target.pathname + target.search, method: req.method, headers: req.headers }, (answer) => {
+    const up = http.request({ host: "127.0.0.1", port: appPort, path: target.pathname + target.search, method: req.method, headers: forwarded }, (answer) => {
       res.writeHead(answer.statusCode ?? 502, answer.headers);
       answer.pipe(res);
     });
@@ -180,6 +185,39 @@ async function errorOf(work: () => Promise<unknown>): Promise<string> {
     return "";
   } catch (err) {
     return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/** A proxy that asks for credentials gets them, and a site behind it that asks for its own does not. */
+async function proxyCredentials(projectDir: string): Promise<void> {
+  const asked: (string | null)[] = [];
+  const site = await server((req, res) => {
+    if (req.url === "/") {
+      res.writeHead(200, { "content-type": "text/html", connection: "close" }).end("<!doctype html><title>Open</title><p>open</p>");
+      return;
+    }
+    asked.push(req.headers.authorization ?? null);
+    res
+      .writeHead(401, { "www-authenticate": 'Basic realm="site"', "content-type": "text/html", connection: "close" })
+      .end("<!doctype html><title>No</title><p>sign in</p>");
+  });
+  const relay = await proxy(site.port, "relay-user:relay-word");
+  const engine = new BrowserEngine();
+  try {
+    const url = `http://${APP_HOST}:${site.port}`;
+    const via = relay.url.replace("http://", "http://relay-user:relay-word@");
+    const refused = await withEnv({ HTTP_PROXY: via }, () => errorOf(() => engine.attach({ url: `${url}/`, projectDir })));
+    check("the credentials in the proxy's address answer its challenge", refused === "" && relay.hosts.includes(APP_HOST), refused);
+    await engine.navigate(`${url}/members`).catch(() => "");
+    check(
+      "...and are not offered to a site behind it that asks for its own",
+      asked.length >= 1 && asked.every((a) => a === null),
+      JSON.stringify(asked.map((a) => a !== null)),
+    );
+  } finally {
+    await engine.close();
+    await relay.close();
+    await site.close();
   }
 }
 
@@ -321,6 +359,7 @@ export async function run(_ctx: SmokeContext): Promise<void> {
   const appViaProxy = `http://${APP_HOST}:${app.port}`;
   try {
     // ── the proxy ──
+    await proxyCredentials(projectDir);
     const through = await preflight(`${appViaProxy}/`, { HTTP_PROXY: relay.url }, projectDir);
     check(
       "preflight reaches an app only the proxy can resolve, through HTTP_PROXY, and names the proxy it used",

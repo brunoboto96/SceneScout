@@ -61,6 +61,7 @@ import {
   NAME_SRC,
   POLICY_TEXT_SRC,
   CONTROL_FACTS_SRC,
+  INERT_SRC,
   ENTER_SUBMIT_SRC,
   VISIBLE_SRC,
   XPATH_OF_SRC,
@@ -257,6 +258,8 @@ import {
   explainTimeout,
   firstLineOf,
   isTimeoutMessage,
+  actionabilityDiagnostic,
+  inertHint,
   limitHint,
   INTERRUPTION_GRACE_MS,
   interruptedBy,
@@ -284,6 +287,7 @@ import { boundedTeardown } from "./teardown.js";
 import { allowedWriteEntries, MAX_ALLOWED_WRITES, type AllowedWrite } from "./write-allowlist.js";
 import { readMachineSockets } from "./tcp-table.js";
 import { BROWSER_MARKER, reapOrphanBrowsers } from "./reaper.js";
+import { lastLeaveEvent } from "./unload.js";
 import { planUploadOptions, resolveDiskUpload, type ResolvedUpload } from "./uploads.js";
 import {
   AUTH_FLOW_RE,
@@ -660,6 +664,9 @@ const enterSubmitAt = new Function(
     `return node ? (${ENTER_SUBMIT_SRC})(node) : null;`,
 ) as (xpath: string) => EnterSubmit | null;
 
+/** Page-side: whether a control is inert (page-sources.ts INERT_SRC). */
+const inertTarget = new Function("node", `return (${INERT_SRC})(node);`) as (node: Element) => boolean;
+
 /** Page-side: the focused element's label and facts, and what an Enter in it submits when it is a field of a form. */
 const focusedActivationOf = new Function(
   "enter",
@@ -897,22 +904,6 @@ function fileInputLabel(d: FileInputListing): string {
 function generatedPayload(meta: FileInputMeta, opts: Omit<UploadOptions, "ref">): ResolvedUpload {
   const { file, source } = generatedUpload(meta.probed ? meta.accept : undefined, opts.fixture, opts.name);
   return { payload: file, name: file.name, mime: file.mimeType, bytes: file.buffer.length, source };
-}
-
-/**
- * Extract the specific actionability reason from a Playwright locator-action
- * timeout's multi-line error, if present — the useful diagnostic ("intercepts
- * pointer events") lives in the "Call log:" body, not line 1 ("Timeout 5000ms
- * exceeded"). Shared by the forced-click fallback (to decide WHETHER to
- * force) and plan-step failure reporting (to show the reader why).
- */
-function actionabilityDiagnostic(message: string): string | null {
-  return (
-    message
-      .split("\n")
-      .map((l) => l.trim())
-      .find((l) => /intercepts pointer events|is not visible|is not stable|is not enabled|is outside of the viewport/i.test(l)) ?? null
-  );
 }
 
 /**
@@ -3208,6 +3199,7 @@ export class BrowserEngine {
         el.testid ? `testid=${el.testid}` : null,
         dup ? `copy#${Number(dup[1]) + 1}` : null,
         el.disabled ? "disabled" : null,
+        el.inert ? "inert" : null,
         el.destructive ? "DESTRUCTIVE" : null,
         ...affordanceFlags(el),
         labelFlag(el),
@@ -3790,6 +3782,7 @@ export class BrowserEngine {
                 title: (node.getAttribute("title") || node.getAttribute("name") || "").trim(),
                 width: Math.round(r.width),
                 height: Math.round(r.height),
+                hidden: getComputedStyle(node).visibility !== "visible",
               };
             }),
           ),
@@ -3978,7 +3971,7 @@ export class BrowserEngine {
    * catch. Only "intercepts pointer events" (something else is the hit-test
    * target) and "is not stable" (still animating) describe a control a real
    * click resolves fine; "is not visible"/"is not enabled"/"is outside of
-   * the viewport" describe a control that is actually unreachable, and those
+   * the viewport" and "element is inert" describe a control that is actually unreachable, and those
    * timeouts are left to fail as real failures. A forced click the page
    * released but never got as a click fails too, rather than reading as landed.
    */
@@ -4337,10 +4330,12 @@ export class BrowserEngine {
     // keyboard — preserves rich composer content that fill() would clear.
     // Note: insertText fires input events but not keydown/keyup, so
     // keydown-driven triggers (slash commands, mention menus) will not react.
-    await locator.evaluate(
+    const focused = await locator.evaluate(
       (node) => {
         const n = node as HTMLInputElement & HTMLElement;
         n.focus();
+        const active = (n.getRootNode() as Document | ShadowRoot).activeElement;
+        if (!active || !n.contains(active)) return false;
         if (typeof n.selectionStart === "number" && typeof n.value === "string") {
           n.setSelectionRange(n.value.length, n.value.length);
         } else if (n.isContentEditable) {
@@ -4351,10 +4346,17 @@ export class BrowserEngine {
           sel?.removeAllRanges();
           sel?.addRange(range);
         }
+        return true;
       },
       undefined,
       { timeout: this.limits.actionMs },
     );
+    // The keyboard writes wherever the focus is: a field that refused it (inert, or behind a modal dialog) would send the text to another.
+    if (!focused) {
+      throw new Error(
+        "Not typed: the field did not take the focus, so a user cannot reach it either (it is inert, or behind a modal dialog). If it should be reachable in this state, that is a finding.",
+      );
+    }
     // Space only at a word-to-word boundary: "@mention " + "hi" needs none,
     // "user@" + "x" must not become "user@ x".
     const separator = /\w$/.test(existing) && /^\w/.test(text) ? " " : "";
@@ -4503,6 +4505,17 @@ export class BrowserEngine {
     if (meta.disabled) {
       return refuse(
         `The file input${meta.label ? ` "${meta.label}"` : ""} is disabled — a user cannot choose a file here. If it should be enabled in this state, that is a finding.`,
+      );
+    }
+
+    // setInputFiles never checks inert either.
+    const inert = await bestEffort(
+      input ? input.evaluate(inertTarget, undefined, { timeout: this.limits.actionMs }) : chooser!.element().evaluate(inertTarget),
+      false,
+    );
+    if (inert) {
+      return refuse(
+        `The file input${meta.label ? ` "${meta.label}"` : ""} is inert — a user cannot choose a file here. If it should be reachable in this state, that is a finding.`,
       );
     }
 
@@ -6691,7 +6704,9 @@ export class BrowserEngine {
       // "wrong element is covering this" gets misread as a dead control.
       const diagnosticLine = actionabilityDiagnostic(fullMsg);
       let hint = "";
-      if (/Timeout/i.test(firstLine)) {
+      if (/Timeout/i.test(firstLine) && /element is inert/.test(diagnosticLine ?? "")) {
+        hint = ` (timeout — ${inertHint(this.limits.actionMs)})`;
+      } else if (/Timeout/i.test(firstLine)) {
         hint = ` (timeout${diagnosticLine ? ` — ${diagnosticLine}` : ""} — the target may no longer match: element relabeled, removed, or genuinely covered by an overlay; re-snapshot to see current state. Or ${limitHint("action", this.limits.actionMs)})`;
       } else if (/Input of type "file" cannot be filled/i.test(firstLine)) {
         hint = ` (this is a file input — use an {action:"upload"} step, or scout_upload)`;
@@ -6800,6 +6815,7 @@ export class BrowserEngine {
       notActionable(action, {
         enabled: await bestEffort(loc.isEnabled({ timeout: TARGET_READ_MS }), true),
         editable: action === "type" ? await bestEffort(loc.isEditable({ timeout: TARGET_READ_MS }), null) : null,
+        inert: await bestEffort(loc.evaluate(inertTarget, undefined, { timeout: TARGET_READ_MS }), false),
       });
     const until = Date.now() + this.limits.actionMs;
     let reason = await read();
@@ -7780,23 +7796,29 @@ export class BrowserEngine {
     if (unloadWriteInterception(this.engineName) !== "browser-fetch" || page.isClosed()) return none;
     const marker = this.guard.leaveMarker(page.url());
     if (!marker) return none;
-    // Registered now, after every listener the app has added, so it runs after them on the way out. On the last event
-    // the page will fire as it is left: pagehide, then visibilitychange (when the page is visible), then unload (unless a
-    // permissions policy turns unload off), so a beacon the app sends on any of them goes before the marker.
+    // Registered now, after every listener the app has added, so it runs after them on the way out, and on the last
+    // event the page will fire as it is left (lastLeaveEvent), so a beacon the app sends on any of them goes before the marker.
     let armed = false;
     await settleWithin(
       page
-        .evaluate((url) => {
-          const unload = (document as { featurePolicy?: { allowsFeature?(name: string): boolean } }).featurePolicy?.allowsFeature?.("unload") ?? true;
-          const last = unload ? "unload" : document.visibilityState === "visible" ? "visibilitychange" : "pagehide";
-          addEventListener(last, () => {
-            try {
-              navigator.sendBeacon(url, "");
-            } catch {
-              /* nothing to wait for: the bound ends the wait */
-            }
-          });
-        }, marker.url)
+        .evaluate(() => ({
+          unload: (document as { featurePolicy?: { allowsFeature?(name: string): boolean } }).featurePolicy?.allowsFeature?.("unload") ?? true,
+          visible: document.visibilityState === "visible",
+        }))
+        .then((facts) =>
+          page.evaluate(
+            ({ url, last }) => {
+              addEventListener(last, () => {
+                try {
+                  navigator.sendBeacon(url, "");
+                } catch {
+                  /* nothing to wait for: the bound ends the wait */
+                }
+              });
+            },
+            { url: marker.url, last: lastLeaveEvent(facts) },
+          ),
+        )
         .then(() => {
           armed = true;
         }),

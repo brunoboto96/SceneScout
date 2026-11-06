@@ -2154,16 +2154,19 @@ test("flows: every mistake names the file and the field", () => {
 });
 
 test("flows: a visible target that cannot be acted on says why, and one that can says nothing", () => {
-  assert.equal(notActionable("click", { enabled: false, editable: null }), "is visible but disabled");
-  assert.equal(notActionable("select", { enabled: false, editable: null }), "is visible but disabled");
-  assert.equal(notActionable("type", { enabled: false, editable: false }), "is visible but disabled");
-  assert.equal(notActionable("type", { enabled: true, editable: false }), "is visible but read-only");
-  assert.equal(notActionable("click", { enabled: true, editable: null }), null);
-  assert.equal(notActionable("type", { enabled: true, editable: true }), null);
+  assert.equal(notActionable("click", { enabled: false, editable: null, inert: false }), "is visible but disabled");
+  assert.equal(notActionable("click", { enabled: true, editable: null, inert: true }), "is visible but inert");
+  assert.equal(notActionable("type", { enabled: true, editable: true, inert: true }), "is visible but inert");
+  assert.equal(notActionable("select", { enabled: true, editable: null, inert: true }), "is visible but inert");
+  assert.equal(notActionable("select", { enabled: false, editable: null, inert: false }), "is visible but disabled");
+  assert.equal(notActionable("type", { enabled: false, editable: false, inert: false }), "is visible but disabled");
+  assert.equal(notActionable("type", { enabled: true, editable: false, inert: false }), "is visible but read-only");
+  assert.equal(notActionable("click", { enabled: true, editable: null, inert: false }), null);
+  assert.equal(notActionable("type", { enabled: true, editable: true, inert: false }), null);
   // Read-only only matters to typing: a read-only field can still be clicked.
-  assert.equal(notActionable("click", { enabled: true, editable: false }), null);
+  assert.equal(notActionable("click", { enabled: true, editable: false, inert: false }), null);
   // Not an editable element at all (a click target typed into): left to the action itself.
-  assert.equal(notActionable("type", { enabled: true, editable: null }), null);
+  assert.equal(notActionable("type", { enabled: true, editable: null, inert: false }), null);
 });
 
 test("flows: expect-element parses with each state, and the report names it", () => {

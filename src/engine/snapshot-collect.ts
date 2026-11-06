@@ -48,6 +48,8 @@ export interface SnapshotElement extends InteractableInfo {
   tag: string;
   xpath: string;
   disabled: boolean;
+  /** Inside an inert subtree (page-sources.ts INERT_SRC): no user can reach it, and an action on it waits out the limit. */
+  inert?: boolean;
   href: string | null;
   destructive: boolean;
   clipped?: boolean;
@@ -242,6 +244,7 @@ export class SnapshotCollector {
       testid: string | null;
       xpath: string;
       disabled: boolean;
+      inert?: boolean;
       href: string | null;
       rect: Rect;
       clipped?: boolean;
@@ -427,7 +430,9 @@ export class SnapshotCollector {
       return Promise.race([work, limit]).finally(() => clearTimeout(timer));
     };
     // Visible frames first: a page's hidden plumbing frames must not use up the budget.
-    const boxes = await Promise.all(frames.map((f) => withinFrameLimit(f.frameElement().then((el) => el.boundingBox()))));
+    const boxes = await Promise.all(
+      frames.map((f) => withinFrameLimit(f.frameElement().then(async (el) => ((await el.isVisible()) ? el.boundingBox() : null)))),
+    );
     const visible = frames.filter((_, i) => {
       const b = boxes[i];
       return !!b && b.width >= 2 && b.height >= 2;

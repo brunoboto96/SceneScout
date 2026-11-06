@@ -14,6 +14,7 @@ import { parseCiArgs } from "../src/engine/ci.ts";
 import {
   ACTION_TIMEOUT_ENV,
   DEFAULT_TIME_LIMITS,
+  actionabilityDiagnostic,
   explainTimeout,
   explicitLimits,
   formatLoadRetries,
@@ -412,4 +413,34 @@ test("an interruption is the page moving on only when the navigation that took t
   assert.equal(interruptedByOwnNavigation(login, [load, { url: "http://127.0.0.1:1/other", at: 2000 }], 1000), false);
   // A fragment is never sent, so it is not compared.
   assert.equal(interruptedByOwnNavigation("http://127.0.0.1:1/b#top", [load, { url: "http://127.0.0.1:1/b", at: 2000 }], 1000), true);
+});
+
+test("a timeout on an inert control says so, where a raised limit would not help", () => {
+  const log = (state: string): Error =>
+    new Error(
+      `locator.click: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('xpath=//button')\n    - attempting click action\n      - waiting for element to be visible, enabled and stable\n      - ${state}\n      - retrying click action`,
+    );
+  const inert = explainTimeout(log("element is inert"), "action", 5000) as Error;
+  assert.match(inert.message.split("\n")[0], /still inert when the action limit \(5000 ms\) ran out/);
+  assert.doesNotMatch(inert.message, /raise it/);
+  assert.match(inert.message, /Call log/, "the call log is kept");
+  assert.equal((explainTimeout(inert, "action", 5000) as Error).message, inert.message, "said once");
+  // Lifted before the end: what stopped the last attempt is something else, so the limit is named.
+  assert.match((explainTimeout(log("element is inert\n      - element is not stable"), "action", 5000) as Error).message.split("\n")[0], /raise it/);
+  // Contrastive: the same timeout with the control merely not ready names the limit.
+  assert.match((explainTimeout(log("element is not stable"), "action", 5000) as Error).message.split("\n")[0], /raise it/);
+});
+
+test("the actionability reason is read from the call log, an inert control's included", () => {
+  const log = (line: string): string => `locator.fill: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator\n    - ${line}`;
+  assert.equal(actionabilityDiagnostic(log("element is inert")), "- element is inert");
+  assert.equal(actionabilityDiagnostic(log("<div>…</div> intercepts pointer events")), "- <div>…</div> intercepts pointer events");
+  assert.equal(actionabilityDiagnostic(log("element is not enabled")), "- element is not enabled");
+  assert.equal(actionabilityDiagnostic(log("locator resolved to <button>")), null);
+  // The last attempt is how it ended: a control that settled and stayed inert is inert, not unstable.
+  assert.equal(actionabilityDiagnostic(log("element is not stable\n    - retrying\n    - element is inert")), "- element is inert");
+  assert.equal(
+    actionabilityDiagnostic(log("element is inert\n    - retrying\n    - <div>…</div> intercepts pointer events")),
+    "- <div>…</div> intercepts pointer events",
+  );
 });

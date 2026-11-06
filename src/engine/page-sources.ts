@@ -6,6 +6,17 @@
  */
 
 /**
+ * Whether an element is inert: it, or an ancestor across shadow roots, has the
+ * inert attribute. Playwright's click, fill and selectOption wait on the same rule.
+ */
+export const INERT_SRC = `(el) => {
+    for (let e = el; e; e = e.parentElement || (e.getRootNode() instanceof ShadowRoot ? e.getRootNode().host : null)) {
+      if (e.hasAttribute("inert")) return true;
+    }
+    return false;
+  }`;
+
+/**
  * The collector's visibility rule, as page-side source. Exported so the
  * file-input probe (browser.ts) can ask "would the collector have listed
  * this?" with the SAME rule — two copies of it would drift.

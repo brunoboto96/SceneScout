@@ -2479,6 +2479,7 @@ test("a frame's controls are listed in the page's coordinates, masked when anoth
     parentFrame: () => top,
     frameElement: async () => ({
       boundingBox: async () => ({ x: 100, y: 200, width: 300, height: 150 }),
+      isVisible: async () => true,
       getAttribute: async (name: string) => (name === "title" ? "Chat" : null),
     }),
     evaluate: async () => ({ els: [raw("Hi Alex, about the invoice", { tag: "div", role: "listitem" })], sx: 0, sy: 10 }),

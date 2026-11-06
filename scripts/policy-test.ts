@@ -156,6 +156,7 @@ import {
   LEAVE_MARKER_PATH,
   LEFT_PAGE_RULE_CAP_MS,
   LeftPageRules,
+  lastLeaveEvent,
   leaveMarkerToken,
   leaveMarkerUrl,
   pausedRequestBody,
@@ -2019,6 +2020,14 @@ test("a paused request's body is read from its base64 entries, else its postData
   assert.equal(headerOf({ Origin: "http://app.test" }, "origin"), "http://app.test");
   assert.equal(headerOf({ referer: "http://app.test/a" }, "Referer"), "http://app.test/a");
   assert.equal(headerOf(undefined, "origin"), undefined);
+});
+
+test("a leave marker goes on the last event the page will fire as it is left", () => {
+  // Chromium 158 fires unload only for a page whose Permissions-Policy asks for it.
+  assert.equal(lastLeaveEvent({ unload: true, visible: true }), "unload");
+  assert.equal(lastLeaveEvent({ unload: true, visible: false }), "unload");
+  assert.equal(lastLeaveEvent({ unload: false, visible: true }), "visibilitychange");
+  assert.equal(lastLeaveEvent({ unload: false, visible: false }), "pagehide", "a page already hidden fires no visibilitychange as it goes");
 });
 
 test("a leave marker is sent to the page's own origin, only from a web page, and known again by its path alone", () => {

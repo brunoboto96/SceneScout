@@ -258,10 +258,31 @@ export function firstLineOf(err: unknown): string {
     .trim();
 }
 
+/**
+ * The specific reason in a Playwright action timeout's call log, if it has one: the useful line ("intercepts pointer
+ * events") comes after line 1 ("Timeout 5000ms exceeded"), and the last one is how the action ended. The forced-click fallback reads it to decide whether to
+ * force, and a plan step's failure shows it.
+ */
+export function actionabilityDiagnostic(message: string): string | null {
+  const reasons = message
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => /intercepts pointer events|is not visible|is not stable|is not enabled|is outside of the viewport|element is inert/i.test(l));
+  return reasons.at(-1) ?? null;
+}
+
+const INERT_MARK = "still inert when";
+
+/** A control the page keeps inert is the page's state: a longer limit is not the answer, so the hint does not offer one. */
+export function inertHint(ms: number): string {
+  return `the target was ${INERT_MARK} the action limit (${ms} ms) ran out: it or an ancestor has the inert attribute, so a user cannot reach it either. If it should be reachable in this state, that is a finding`;
+}
+
 export function explainTimeout(err: unknown, kind: LimitKind, ms: number): unknown {
-  if (!(err instanceof Error) || !isTimeoutMessage(err.message) || err.message.includes(HINT_MARK)) return err;
+  if (!(err instanceof Error) || !isTimeoutMessage(err.message) || err.message.includes(HINT_MARK) || err.message.includes(INERT_MARK)) return err;
   const [first, ...rest] = err.message.split("\n");
-  const out = new Error([`${first} — ${limitHint(kind, ms)}.`, ...rest].join("\n"));
+  const hint = kind === "action" && /element is inert/.test(actionabilityDiagnostic(err.message) ?? "") ? inertHint(ms) : limitHint(kind, ms);
+  const out = new Error([`${first} — ${hint}.`, ...rest].join("\n"));
   out.name = err.name;
   return out;
 }
