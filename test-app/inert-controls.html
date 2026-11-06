@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Inert controls</title></head>
+<body>
+  <!-- Controls in an inert subtree, the state a page puts its content in behind a drawer. ?lifted=1 is the same page
+       with the attribute gone: the contrast. ?modal=1 opens a modal dialog, which makes the rest of the page inert with no attribute. "Other field" holds the focus, so text sent to the keyboard lands there. -->
+  <section id="behind" inert>
+    <button data-testid="inert-save" onclick="document.title = 'Saved'">Save</button>
+    <input data-testid="inert-name" aria-label="Name" value="old">
+    <select data-testid="inert-pick" aria-label="Pick"><option>One</option><option>Two</option></select>
+    <input data-testid="inert-file" aria-label="Attachment" type="file">
+  </section>
+  <input data-testid="inert-other" aria-label="Other field" autofocus>
+  <dialog id="modal"><input data-testid="inert-dialog-field" aria-label="Dialog field"></dialog>
+  <script>
+    const query = new URLSearchParams(location.search);
+    if (query.has("lifted")) document.getElementById("behind").removeAttribute("inert");
+    if (query.has("modal")) document.getElementById("modal").showModal();
+  </script>
+</body>
+</html>

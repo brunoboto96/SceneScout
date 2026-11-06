@@ -13,7 +13,7 @@
  * a browser (see scripts/oracle-test.ts).
  */
 
-import { NAME_SRC, POLICY_TEXT_SRC, VISIBLE_SRC, XPATH_OF_SRC } from "./page-sources.js";
+import { INERT_SRC, NAME_SRC, POLICY_TEXT_SRC, VISIBLE_SRC, XPATH_OF_SRC } from "./page-sources.js";
 
 export * from "./page-sources.js";
 export * from "./collector-elements.js";
@@ -492,6 +492,7 @@ export const COLLECT_INTERACTABLES_SCRIPT = `(() => {
       scrolledOutIn: elStyle.position === "fixed" || clippedByAncestor || !interactive ? null : scrolledOutIn(el, rect),
       xpath: xpathOf(el),
       disabled: el.disabled === true || el.getAttribute("aria-disabled") === "true",
+      ...((${INERT_SRC})(el) ? { inert: true } : {}),
       href: tag === "a" ? el.getAttribute("href") : null,
       clipped: clippedByAncestor,
       ...layerAndChrome(el),

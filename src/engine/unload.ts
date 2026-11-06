@@ -261,6 +261,16 @@ export function headerOf(headers: Record<string, string> | undefined, name: stri
  */
 export const LEAVE_MARKER_PATH = "/__scenescout_left__/";
 
+/**
+ * The last event a page fires as it is left, which a leave marker goes on: `pagehide`, then `visibilitychange` when the
+ * page is visible, then `unload` where it fires. Chromium fires `unload` from 158 only for a page whose Permissions-Policy
+ * asks for it, and any browser's policy can turn it off.
+ */
+export function lastLeaveEvent(page: { unload: boolean; visible: boolean }): "unload" | "visibilitychange" | "pagehide" {
+  if (page.unload) return "unload";
+  return page.visible ? "visibilitychange" : "pagehide";
+}
+
 /** A leave marker's URL on `origin`, or null where a page has no origin a beacon can be sent to. */
 export function leaveMarkerUrl(pageUrl: string, token: string): string | null {
   let origin: string;

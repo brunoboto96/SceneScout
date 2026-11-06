@@ -3342,11 +3342,17 @@ test("a valued option takes the next argument or its =value, and refuses a missi
   assert.deepEqual(readFlagValue(["--limit=--other"], 0), { ok: true, name: "limit", value: "--other", last: 0 });
 });
 
-// The Playwright hold (#487) is a published range, not only this repository's lockfile: a caret
-// range lets `npx scenescout` and every global install resolve the release the hold is about.
-// The hold is recorded in AGENTS.md's "Pinned dependencies", and this test holds the two equal,
-// so lifting it means editing both.
-const HELD_PLAYWRIGHT_MINOR = "1.63";
+// A Playwright hold is a published range, not only this repository's lockfile: a caret range lets
+// `npx scenescout` and every global install resolve the release a hold is about. A hold is recorded
+// in AGENTS.md's "Pinned dependencies" as a line starting `- **playwright stays on X.Y.**`; these
+// tests read it from there and hold the range and the Dependabot ignore equal to it.
+function heldPlaywrightMinor(): string | null {
+  const agents = fs.readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8");
+  return /^- \*\*playwright stays on (\d+\.\d+)\.\*\*/m.exec(agents)?.[1] ?? null;
+}
+
+/** A click on a link answered with 204 No Content never returns on Chromium in these (#487). */
+const BROKEN_PLAYWRIGHT = ["1.64.0", "1.64.1"];
 
 /** Whether a range this package might publish (`~X.Y.Z`, `^X.Y.Z`, `>=X.Y.Z <A.B.C` or `X.Y.Z`) admits `version`. */
 function rangeAdmits(range: string, version: string): boolean {
@@ -3378,7 +3384,7 @@ test("rangeAdmits reads the range shapes package.json may publish", () => {
   assert.equal(rangeAdmits("^0.0.3", "0.0.4"), false);
 });
 
-test("while AGENTS.md records the Playwright hold, the published range admits no 1.64", () => {
+test("the published Playwright range admits no release the engine hangs on, and nothing past a hold AGENTS.md records", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")) as { dependencies: Record<string, string> };
   const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, "package-lock.json"), "utf8")) as {
     packages: Record<string, { version?: string; dependencies?: Record<string, string> }>;
@@ -3388,45 +3394,47 @@ test("while AGENTS.md records the Playwright hold, the published range admits no
   assert.equal(lock.packages[""]?.dependencies?.playwright, range, "the lockfile records the range package.json publishes");
   const locked = lock.packages["node_modules/playwright"]?.version;
   assert.ok(locked && rangeAdmits(range, locked), `the locked playwright ${locked} is inside ${range}`);
+  for (const broken of BROKEN_PLAYWRIGHT) assert.equal(rangeAdmits(range, broken), false, `${range} must not admit ${broken} (#487)`);
 
-  const agents = fs.readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8");
-  const hold = agents.split("\n").find((line) => line.startsWith(`- **playwright stays on ${HELD_PLAYWRIGHT_MINOR}.**`));
-  const next = `${HELD_PLAYWRIGHT_MINOR.split(".")[0]}.${Number(HELD_PLAYWRIGHT_MINOR.split(".")[1]) + 1}.0`;
-  if (hold) {
+  const held = heldPlaywrightMinor();
+  if (held) {
+    const [major, minor] = held.split(".").map(Number);
     assert.equal(
-      rangeAdmits(range, next),
+      rangeAdmits(range, `${major}.${minor + 1}.0`),
       false,
-      `AGENTS.md holds Playwright on ${HELD_PLAYWRIGHT_MINOR}, so the published range ${range} must not admit ${next}`,
+      `AGENTS.md holds Playwright on ${held}, so the published range ${range} must not admit the next minor`,
     );
-    assert.ok(hold.includes(`\`${range}\``), `AGENTS.md's hold names the published range ${range}`);
+    const hold = fs
+      .readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8")
+      .split("\n")
+      .find((line) => line.startsWith(`- **playwright stays on ${held}.**`));
+    assert.ok(hold?.includes(`\`${range}\``), `AGENTS.md's hold names the published range ${range}`);
   } else {
-    // Lifted: the range moved past the held minor, whether it still admits it (^1.63.0) or starts later (~1.65.0).
-    const floor = /(\d+)\.(\d+)\.\d+/.exec(range);
-    const startsLater =
-      floor !== null && (Number(floor[1]) > Number(next.split(".")[0]) || (floor[1] === next.split(".")[0] && Number(floor[2]) >= Number(next.split(".")[1])));
-    assert.ok(rangeAdmits(range, next) || startsLater, `AGENTS.md no longer records the Playwright hold, so widen the range ${range} (or restore the line)`);
+    assert.ok(
+      !rangeAdmits(range, "1.63.0"),
+      `AGENTS.md records no Playwright hold, so ${range} should have moved past the releases before #487's fix (or restore the line)`,
+    );
   }
 });
 
-test("while AGENTS.md records the Playwright hold, Dependabot ignores the whole next minor and nothing after it", () => {
+test("Dependabot ignores the whole minor after a Playwright hold, nothing after it, and nothing once no hold is recorded", () => {
   const cfg = parseYaml(fs.readFileSync(path.join(repoRoot, ".github", "dependabot.yml"), "utf8")) as {
     updates: Array<{ "package-ecosystem": string; ignore?: Array<{ "dependency-name": string; versions?: string[] }> }>;
   };
   const ignored = (cfg.updates.find((u) => u["package-ecosystem"] === "npm")?.ignore ?? [])
     .filter((i) => i["dependency-name"] === "playwright")
     .flatMap((i) => i.versions ?? []);
-  const agents = fs.readFileSync(path.join(repoRoot, "AGENTS.md"), "utf8");
-  const held = agents.split("\n").some((line) => line.startsWith(`- **playwright stays on ${HELD_PLAYWRIGHT_MINOR}.**`));
+  const held = heldPlaywrightMinor();
   if (!held) {
-    assert.deepEqual(ignored, [], "AGENTS.md no longer records the Playwright hold, so drop its Dependabot ignore too");
+    assert.deepEqual(ignored, [], "AGENTS.md records no Playwright hold, so drop its Dependabot ignore too");
     return;
   }
-  const [major, minor] = HELD_PLAYWRIGHT_MINOR.split(".").map(Number);
+  const [major, minor] = held.split(".").map(Number);
   const isIgnored = (v: string) => ignored.some((r) => rangeAdmits(r, v));
   for (const v of [`${major}.${minor + 1}.0`, `${major}.${minor + 1}.1`, `${major}.${minor + 1}.99`]) {
     assert.ok(isIgnored(v), `AGENTS.md says Dependabot ignores ${major}.${minor + 1}.x, but it would propose ${v}`);
   }
-  assert.equal(isIgnored(`${major}.${minor + 2}.0`), false, `the release expected to fix #487 (${major}.${minor + 2}.0) must still be proposed`);
+  assert.equal(isIgnored(`${major}.${minor + 2}.0`), false, `the release expected to end the hold (${major}.${minor + 2}.0) must still be proposed`);
 });
 
 /** engines.node read as a lower bound `>=x[.y[.z]]`, or null when it is written another way. */

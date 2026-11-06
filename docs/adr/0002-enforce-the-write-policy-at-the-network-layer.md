@@ -159,7 +159,9 @@ WebKit hand it to the context's route handler like any other request. Chromium
 never does: the request arrives with no network id, or after the page's own
 DevTools session has gone, and the driver sends it on unseen. So in Chromium it
 reached the server in every mode, observe included, on every navigation the
-engine made.
+engine made. From Chromium 158 a page's `unload` handler runs only if the page
+opts in with `Permissions-Policy: unload=*`, so one that does not sends nothing
+on that event; `pagehide` and `visibilitychange` still fire.
 
 Three ways to close it were weighed:
 
@@ -267,8 +269,10 @@ it. The write was still refused, under the flow's rule that `WriteRule` holds
 for a moment, but a refusal heard after a flow had handed back was missing from
 the flow's list. Before a flow leaves a page, the engine therefore has the page
 beacon a marker of its own as the last thing it does as it is left
-(`LEAVE_MARKER_PATH` in `unload.ts`): on `unload`, or where a permissions policy
-turns `unload` off, on `visibilitychange` or `pagehide`, whichever fires last.
+(`LEAVE_MARKER_PATH` in `unload.ts`): on `unload`, or where it does not fire, on
+`visibilitychange` or `pagehide`, whichever fires last (`lastLeaveEvent`). Chromium
+fires `unload` from 158 only for a page whose `Permissions-Policy` asks for it, so
+most pages there take the second path.
 It then waits, up to a second, until the interception hears it. What one
 document sends as it is left is heard in the order it was sent (240 of 240
 under load), so every write before the marker is then being judged. The marker

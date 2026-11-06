@@ -102,10 +102,14 @@ export interface FrameInfo {
   height: number;
   /** Of another origin than the app, by the write policy's own test (policy.ts foreignFrameOrigin). */
   foreign: boolean;
+  /** Styled visibility:hidden: it keeps its size, but no user sees it and no action reaches what is in it. */
+  hidden?: boolean;
 }
 
 /** A frame smaller than this in both directions is plumbing (a tracking pixel, a messaging bridge), not something a user sees. */
 const VISIBLE_FRAME_PX = 2;
+
+const shownFrame = (f: FrameInfo): boolean => !f.hidden && f.width >= VISIBLE_FRAME_PX && f.height >= VISIBLE_FRAME_PX;
 
 /**
  * The snapshot's account of the page's frames: what is embedded, where it
@@ -120,7 +124,7 @@ export function frameLines(
   frames: readonly FrameInfo[],
   opts: { nested?: number; writesRefused?: boolean; read?: ReadonlySet<string>; trustedWrites?: ReadonlySet<string> } = {},
 ): string[] {
-  const visible = frames.filter((f) => f.width >= VISIBLE_FRAME_PX && f.height >= VISIBLE_FRAME_PX);
+  const visible = frames.filter(shownFrame);
   const hidden = frames.length - visible.length;
   const nested = opts.nested ?? 0;
   if (frames.length === 0 && nested === 0) return [];
@@ -171,5 +175,5 @@ export function frameLines(
 
 /** Whether any frame on the page is one a user can see. */
 export function hasVisibleFrame(frames: readonly FrameInfo[]): boolean {
-  return frames.some((f) => f.width >= VISIBLE_FRAME_PX && f.height >= VISIBLE_FRAME_PX);
+  return frames.some(shownFrame);
 }

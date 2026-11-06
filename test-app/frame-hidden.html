@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Hidden frame</title></head>
+<body>
+  <!-- A frame with a size that a user cannot see. ?shown=1 is the same frame shown: the contrast. -->
+  <h1>Hidden frame</h1>
+  <iframe id="kept" srcdoc="<!doctype html><button data-testid='in-frame'>In the frame</button>" style="visibility: hidden" width="300" height="150" title="Kept"></iframe>
+  <script>
+    if (new URLSearchParams(location.search).has("shown")) document.getElementById("kept").style.visibility = "visible";
+  </script>
+</body>
+</html>

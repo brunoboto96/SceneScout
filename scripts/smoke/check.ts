@@ -1346,6 +1346,7 @@ async function flowWriteEdges({
     const slowLeavesBefore = writes("POST /api/leave");
     const slowEngine = new BrowserEngine();
     let slowReplay: Awaited<ReturnType<BrowserEngine["replayFlow"]>> | null = null;
+    let markersHeard = 0;
     try {
       const project = path.join(work, `flow-leave-beacon-late-${event}`);
       fs.mkdirSync(project, { recursive: true });
@@ -1360,6 +1361,8 @@ async function flowWriteEdges({
       };
       holdBack("judge", (args) => (args[0] as unknown as { request(): { url(): string } }).request().url());
       holdBack("judgeUnseenRequest", (args) => (args[1] as unknown as { request: { url: string } }).request.url);
+      const heard = guard["markerHeard"]!.bind(guard);
+      guard["markerHeard"] = (async (...args: never[]) => (markersHeard++, heard(...args))) as (typeof guard)[string];
       slowReplay = await slowEngine.replayFlow(
         [
           { action: "navigate", target: `/check-flow-writes.html${event === "pagehide" ? "" : `?on=${event}`}` },
@@ -1378,6 +1381,10 @@ async function flowWriteEdges({
         writes("POST /api/leave") === slowLeavesBefore,
       `${JSON.stringify(slowReplay?.outcome)} refusedBackground=${JSON.stringify(slowReplay?.refusedBackground)} writes=${JSON.stringify(stats.writes)}`,
     );
+    // A marker that never fires still passes the check above, on its wait running out: only its being heard shows it went last.
+    if (unloadWriteInterception(BROWSER) === "browser-fetch") {
+      check(`${BROWSER}: ...and the page's leave marker is heard, on the last event it fires`, markersHeard >= 1, `markers heard: ${markersHeard}`);
+    }
   }
 
   // The same beacon heard later than any fixed wait covers (#687): the browser level hears it 8 s after the page was

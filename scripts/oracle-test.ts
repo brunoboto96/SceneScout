@@ -832,6 +832,15 @@ test("a placeholder-only field's evidence caps the placeholder, and names the co
   assert.equal(placeholderEvidence({ ...el, name: "y".repeat(80) }), `textbox at /html/body/form[1]/input[3] "${"y".repeat(80)}"`, "80 exactly is kept whole");
 });
 
+test("frameLines: a frame styled visibility:hidden is not one a user sees, whatever its size", () => {
+  const app = "http://localhost:3000/";
+  const shown = { url: "http://localhost:3000/embed", title: "", width: 300, height: 150, foreign: false };
+  assert.equal(hasVisibleFrame([shown]), true);
+  assert.equal(hasVisibleFrame([{ ...shown, hidden: true }]), false);
+  assert.match(frameLines(app, [shown]).join("\n"), /300×150/);
+  assert.doesNotMatch(frameLines(app, [{ ...shown, hidden: true }]).join("\n"), /300×150/);
+});
+
 test("frameLines: says what is embedded, where from, and that it was not explored", () => {
   const app = "http://app.test:3000/";
   assert.deepEqual(frameLines(app, []), [], "no frames, nothing to say");

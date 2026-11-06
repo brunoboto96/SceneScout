@@ -582,4 +582,24 @@ async function trustedEmbeds({ baseUrl, foreignBaseUrl, projectDir, stats }: Smo
       await eng.close().catch(() => {});
     }
   }
+
+  const readFrame = async (query: string): Promise<string> => {
+    const eng = new BrowserEngine();
+    try {
+      await eng.attach({ url: `${baseUrl}/frame-hidden.html${query}`, projectDir, mode: "read-only" });
+      const page = (eng as unknown as { page: Page }).page;
+      await until("the frame to load", async () => page.frames().length === 2 && (await page.frames()[1]!.locator("button").count()) === 1);
+      return await eng.snapshot(true);
+    } finally {
+      await eng.close().catch(() => {});
+    }
+  };
+  const hiddenFrame = await readFrame("");
+  check(
+    "a frame styled visibility:hidden has its controls left out: no user can see them, and no action reaches them",
+    !hiddenFrame.includes("In the frame"),
+    hiddenFrame,
+  );
+  const shownFrame = await readFrame("?shown=1");
+  check("...and the same frame shown has them listed", /"In the frame"[^\n]*⟨in same-origin frame/.test(shownFrame), shownFrame);
 }
