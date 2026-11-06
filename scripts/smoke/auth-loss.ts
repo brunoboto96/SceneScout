@@ -290,7 +290,7 @@ async function crawlWaitsForLateSignIn(baseUrl: string, authProject: string, dea
 }
 
 /**
- * A redirect to sign-in that the app's scripts make 1.5 s after load: later than a navigation watches its address, so
+ * A redirect to sign-in that the app's scripts make 4 s after load: later than a navigation watches its address, so
  * the navigation reports the route as reached, and only a later call can see the page has gone. With a saved sign-in,
  * each call compares the address with the one the last call ended on (authloss.ts lateSignInBounce).
  * Contrastive pair: the same page visited with a stale saved sign-in (each later call reports the bounce, the route is
@@ -307,7 +307,7 @@ async function laterCallsSeeLateSignIn(baseUrl: string, authProject: string, dea
       const laters: string[] = [];
       for (let i = 0; i < rounds; i++) {
         navs.push(await engine.navigate(`${baseUrl}/gated-later.html`));
-        await new Promise((resolve) => setTimeout(resolve, 2500));
+        await new Promise((resolve) => setTimeout(resolve, 5000));
         // An action and a snapshot both look: the second round scrolls, the others read the page.
         laters.push(i === 1 ? await engine.scroll("bottom") : await engine.snapshot(true));
       }
@@ -494,7 +494,7 @@ async function hashRoutedSignIn(baseUrl: string, authProject: string, deadState:
   const later = async (state: string): Promise<{ nav: string; snap: string }> =>
     withEngine(state, async (engine) => {
       const nav = await engine.navigate(`${baseUrl}/hash-app.html?late=1#/reports`);
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await new Promise((resolve) => setTimeout(resolve, 5000));
       return { nav, snap: await engine.snapshot(true) };
     });
   const lateStale = await later(deadState);
@@ -510,7 +510,7 @@ async function hashRoutedSignIn(baseUrl: string, authProject: string, deadState:
 
 /**
  * An app that signs in through a single sign-on provider on another origin (sso-gated.html, the provider being the
- * harness's second origin) sends a signed-out visitor to the provider's authorize endpoint 1.5 s after load. The next
+ * harness's second origin) sends a signed-out visitor to the provider's authorize endpoint 4 s after load. The next
  * call sees the page has gone to a sign-in page on another origin. Contrastive pairs: the same page sending the visitor
  * to an ordinary page of that other site is not a sign-in, and the same page signed in stays put.
  */
@@ -523,7 +523,7 @@ async function signInOnAnotherOrigin(baseUrl: string, foreignBaseUrl: string, au
       await engine.attach({ url: `${baseUrl}/covered.html`, projectDir: authProject, mode: "read-only", storageStatePath: state });
       engine.knownRoutes = ["/sso-gated.html"];
       const nav = await engine.navigate(`${baseUrl}/sso-gated.html?idp=${encodeURIComponent(foreignBaseUrl)}&to=${encodeURIComponent(to)}`);
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await new Promise((resolve) => setTimeout(resolve, 5000));
       const snap = await engine.snapshot(true);
       return { nav, snap, unvisited: engine.unvisitedKnownRoutes() };
     } finally {

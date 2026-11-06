@@ -10,7 +10,7 @@
       <p>Reports for signed-in members.</p>
     </main>
     <script>
-      // An app that signs in through a single sign-on provider on another origin: 1.5 s after load, its token check
+      // An app that signs in through a single sign-on provider on another origin: 4 s after load, its token check
       // sends a signed-out visitor to the provider (later than a navigation watches the address, so only a later call
       // can see it). Signed in (the "smoke-auth" flag a storage state sets), the page stays put.
       //   ?idp=<origin>  the provider's origin (the harness's second origin)
@@ -31,7 +31,7 @@
           var to = params.get("to");
           if (params.get("secret") === "1") to += (to.indexOf("?") === -1 ? "?" : "&") + "state=" + ["idp", "only", "state", "4c1e"].join("-");
           location.replace(params.get("idp") + to);
-        }, { 1: 40, 2: 300, 3: 650 }[new URLSearchParams(location.search).get("soon")] || 1500);
+        }, { 1: 40, 2: 300, 3: 650 }[new URLSearchParams(location.search).get("soon")] || 4000);
       });
     </script>
   </body>

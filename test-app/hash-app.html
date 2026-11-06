@@ -15,10 +15,11 @@
       // says this is a sign-in page. Signed in (the "smoke-auth" flag a storage state sets), the page stays put.
       //   ?to=<route>  where the guard sends a signed-out visitor (default "login"; "loginhelp" is the near miss: a route
       //                that only starts like a sign-in route)
-      //   ?late=1      the guard fires 1.5 s after the route renders rather than at once, later than a navigation watches
+      //   ?late=1      the guard fires 4 s after the route renders rather than at once: after a navigation has returned,
+      //                with room for a slow runner
       var params = new URLSearchParams(location.search);
       var to = params.get("to") || "login";
-      var delay = params.get("late") === "1" ? 1500 : 40;
+      var delay = params.get("late") === "1" ? 4000 : 40;
       var timer = null;
       function render() {
         var route = location.hash.replace(/^#/, "") || "/";
