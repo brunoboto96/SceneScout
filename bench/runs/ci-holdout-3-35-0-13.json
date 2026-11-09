@@ -1,0 +1,51 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-35-0-13",
+  "date": "2026-11-09",
+  "note": "Unattended scenescout ci run (scheduled) of v3.35.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Home notices request fails with HTTP 500",
+      "severity": "high",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Overdue status text fails WCAG contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "loans.html overdue contrast 1.84:1"
+    },
+    {
+      "title": "Loans list lacks a visually prominent next action",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "loans.html no visually dominant action"
+    },
+    {
+      "title": "Account data export link is clipped and unreachable",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "account.html account-export fully clipped by overflow-hidden ancestor"
+    },
+    {
+      "title": "Fines page presents an empty list after access is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403 rendered as empty fines-rows"
+    },
+    {
+      "title": "Hold action button has no accessible name",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "holds-drop-32 button accessible name empty"
+    },
+    {
+      "title": "Account data export link is clipped and unreachable",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "account.html account-export fully clipped by overflow-hidden ancestor"
+    }
+  ],
+  "decisions": []
+}

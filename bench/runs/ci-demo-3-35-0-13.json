@@ -1,0 +1,39 @@
+{
+  "app": "demo",
+  "run": "ci-demo-3-35-0-13",
+  "date": "2026-11-09",
+  "note": "Unattended scenescout ci run (scheduled) of v3.35.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Scheduled reports page is a dead end",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "route /reports-scheduled.html has 0 interactable elements"
+    },
+    {
+      "title": "Sticky bar covers Save notes button",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "order.html order-stickybar covers order-save"
+    },
+    {
+      "title": "Export CSV crashes when report rows are unavailable",
+      "severity": "high",
+      "category": "page-error",
+      "evidence": "reports-export-csv TypeError reading undefined rows"
+    },
+    {
+      "title": "Dashboard chart image fails to load",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /img/weekly-chart.png 404"
+    },
+    {
+      "title": "Dashboard order link overlaps the bulk-import badge",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "dashboard All orders overlaps New: bulk import 85%"
+    }
+  ],
+  "decisions": []
+}
