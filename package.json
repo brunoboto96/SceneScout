@@ -120,8 +120,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "playwright": "~1.65.0",
-    "re2js": "^2.9.0",
-    "undici": "^8.12.3",
+    "re2js": "^2.9.1",
+    "undici": "^8.12.4",
     "zod": "^4.6.7"
   },
   "devDependencies": {
