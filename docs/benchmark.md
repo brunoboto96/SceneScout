@@ -1239,6 +1239,8 @@ request's. The change was reverted and no second run was spent.
 | 2026-10-24 | holdout | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 1/10 | 1/3 (25%–50%) | — | done | 52 | 1,494,553 (1,479,290) / 2,900 | 1m 07s | $0.018 |
 | 2026-10-24 | demo | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 6daa97e78d | 8/13 | 8/9 (89%) | — | done | 76 | 2,271,595 (2,251,567) / 4,007 | 1m 25s | $0.027 |
 | 2026-10-24 | holdout | 3.29.0 | dispatched | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 4/10 | 4/6 (67%) | — | done | 57 | 1,673,966 (1,655,671) / 4,483 | 1m 15s | $0.021 |
+| 2026-11-16 | demo | 3.35.0 | scheduled | openai · gpt-6-luna · low · 2 lanes | judge | 6daa97e78d | 5/13 | 5/7 (63%–75%) | — | done | 61 | 1,789,257 (1,744,793) / 3,218 | 1m 34s | $0.024 |
+| 2026-11-16 | holdout | 3.35.0 | scheduled | openai · gpt-6-luna · low · 2 lanes | judge | 87b7b2ccd5 | 4/10 | 4/4 (80%–100%) | — | done | 59 | 1,756,147 (1,710,673) / 3,435 | 1m 14s | $0.023 |
 
 <!-- ci-results:end -->
 

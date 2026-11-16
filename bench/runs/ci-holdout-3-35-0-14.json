@@ -1,0 +1,39 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-35-0-14",
+  "date": "2026-11-16",
+  "note": "Unattended scenescout ci run (scheduled) of v3.35.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Notices API failure is rendered as an empty list",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/notices 500; empty list shown without error"
+    },
+    {
+      "title": "Events join reports success when one of its writes is refused",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/events/1/join refused; UI announces Your seat is saved"
+    },
+    {
+      "title": "Successful event join lands on a page with no way to continue",
+      "severity": "high",
+      "category": "dead-end",
+      "evidence": "GET /events-joined.html renders zero interactable elements"
+    },
+    {
+      "title": "Overdue loan badge has insufficient text contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "loans overdue badge contrast 1.84:1"
+    },
+    {
+      "title": "Account data export link is clipped and unreachable",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "GET /account.html geometry: account-export UNREACHABLE in overflow-hidden ancestor"
+    }
+  ],
+  "decisions": []
+}
