@@ -1,0 +1,59 @@
+{
+  "app": "holdout",
+  "run": "ci-holdout-3-35-0-15",
+  "date": "2026-11-23",
+  "note": "Unattended scenescout ci run (scheduled) of v3.35.0; see Unattended runs.",
+  "findings": [
+    {
+      "title": "Home notices request fails with HTTP 500 and stays loading",
+      "severity": "medium",
+      "category": "http-error",
+      "evidence": "GET /api/notices 500"
+    },
+    {
+      "title": "Members list reports a staff-only access restriction",
+      "severity": "low",
+      "category": "other",
+      "evidence": "GET /api/members 403; members-error announces staff-only restriction"
+    },
+    {
+      "title": "Book detail spacing uses irregular padding values",
+      "severity": "low",
+      "category": "ux-polish",
+      "evidence": "book-detail padding grid alignment 0 percent",
+      "tier": "worth_a_look",
+      "convention": "a 4px spacing scale"
+    },
+    {
+      "title": "Account data export link is clipped and unreachable",
+      "severity": "medium",
+      "category": "visual",
+      "evidence": "account.html account-export UNREACHABLE fully clipped inside overflow-hidden ancestor"
+    },
+    {
+      "title": "Fines endpoint is forbidden but empty list is shown as no fines",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "GET /api/fines 403 rendered as empty fines list"
+    },
+    {
+      "title": "Overdue status text has insufficient contrast",
+      "severity": "medium",
+      "category": "a11y",
+      "evidence": "loans overdue contrast 1.84:1"
+    },
+    {
+      "title": "Event join reports success despite a refused write",
+      "severity": "high",
+      "category": "data-inconsistency",
+      "evidence": "POST /api/events/1/join refused; events-joined.html displays Your seat is saved"
+    },
+    {
+      "title": "Hold drop button has no accessible name",
+      "severity": "low",
+      "category": "a11y",
+      "evidence": "holds.html button holds-drop-32 has empty accessible name"
+    }
+  ],
+  "decisions": []
+}
